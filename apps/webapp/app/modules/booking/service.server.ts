@@ -1403,10 +1403,11 @@ export async function createBooking({
           );
         }
 
-        const created = await tx.booking.create({
+        const queryOptions: Prisma.BookingCreateArgs = {
           data: dataToCreate,
           include: { ...BOOKING_COMMON_INCLUDE, organization: true },
-        });
+        };
+        const created = await tx.booking.create(queryOptions);
 
         // Activity event for booking creation - must be inside transaction
         await recordEvent(
