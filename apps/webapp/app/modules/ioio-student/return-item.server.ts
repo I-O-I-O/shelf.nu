@@ -282,18 +282,15 @@ async function loadReturnTarget({
         bookingStatus: candidateBooking?.status ?? null,
         bookingIsActive: Boolean(
           candidateBooking &&
-            [BookingStatus.ONGOING, BookingStatus.OVERDUE].includes(
-              candidateBooking.status
-            )
+            (candidateBooking.status === BookingStatus.ONGOING ||
+              candidateBooking.status === BookingStatus.OVERDUE)
         ),
-        custodianIsCurrentUser:
-          candidateBooking?.custodianUserId === userId,
+        custodianIsCurrentUser: candidateBooking?.custodianUserId === userId,
         custodianIsCurrentTeamMember: Boolean(
           custodianTeamMemberId && teamMemberIds.includes(custodianTeamMemberId)
         ),
         bookingAssetFoundOnBooking: Boolean(candidateBookingAsset),
-        assetMatchesSubmittedAsset:
-          candidateBookingAsset?.assetId === assetId,
+        assetMatchesSubmittedAsset: candidateBookingAsset?.assetId === assetId,
         checkedOut: Boolean(candidateBookingAsset?.checkedOutAt),
         alreadyCheckedIn: Boolean(candidateBookingAsset?.checkedInAt),
       });

@@ -544,10 +544,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
         });
       } catch (cause) {
         const reason = makeShelfError(cause, { userId });
-        if (reason.status >= 400 && reason.status < 500) {
+        const status = reason.status;
+        if (status !== undefined && status >= 400 && status < 500) {
           return data(
             { ok: false as const, error: reason.message },
-            { status: reason.status }
+            { status }
           );
         }
         throw cause;
@@ -1820,6 +1821,7 @@ function PastLoansSection({
     title: string;
     cancelledAt: Date;
     status: string;
+    statusLabel: string;
     pickupLocation: string | null;
     asset: AssetForThumbnail | null;
   }>;
