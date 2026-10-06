@@ -200,7 +200,8 @@ type FilterCookieConfig = {
 export async function getFiltersFromRequest(
   request: Request,
   organizationId: string,
-  cookie: FilterCookieConfig
+  cookie: FilterCookieConfig,
+  options?: { ignoreStoredFilters?: boolean }
 ) {
   // Get filters from URL query parameters (e.g., "status=AVAILABLE&search=laptop")
   let filters = getCurrentSearchParams(request).toString();
@@ -220,6 +221,8 @@ export async function getFiltersFromRequest(
     // Serialize to Set-Cookie header if we have filters after cleaning
     const serializedCookie = cleanedFilters
       ? await filterCookie.serialize(cleanedFilters)
+      : options?.ignoreStoredFilters
+      ? await destroyCookie(filterCookie)
       : null;
 
     // Return original filters for current request, cleaned version for cookie
@@ -227,7 +230,7 @@ export async function getFiltersFromRequest(
   }
   // CASE 2: No URL filters, but cookie exists
   // Parse cookie and redirect to apply filters to URL
-  else if (cookieHeader) {
+  else if (cookieHeader && !options?.ignoreStoredFilters) {
     // Parse cookie to get saved filters
     filters = (await filterCookie.parse(cookieHeader)) || {};
     // Remove sensitive params before applying
@@ -237,6 +240,16 @@ export async function getFiltersFromRequest(
     return {
       filters: cleanedFilters,
       redirectNeeded: !!cleanedFilters,
+    };
+  }
+
+  // Some views intentionally have a clean entry URL. Clear the persisted
+  // index-filter cookie as well so a previous deep link cannot reappear on
+  // the next visit.
+  if (options?.ignoreStoredFilters) {
+    return {
+      filters: "",
+      serializedCookie: await destroyCookie(filterCookie),
     };
   }
 

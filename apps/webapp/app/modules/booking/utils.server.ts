@@ -831,12 +831,20 @@ export function createBookingConflictConditions({
   fromDate,
   toDate,
   includeCurrentBooking = false,
+  ignoreBookingIds = [],
 }: {
   currentBookingId: string;
   fromDate?: Date | string | null;
   toDate?: Date | string | null;
   includeCurrentBooking?: boolean;
+  ignoreBookingIds?: string[];
 }): Prisma.Asset$bookingAssetsArgs {
+  const excludedBookingIds = includeCurrentBooking
+    ? ignoreBookingIds
+    : [...new Set([currentBookingId, ...ignoreBookingIds])];
+  const bookingIdFilter = excludedBookingIds.length
+    ? { id: { notIn: excludedBookingIds } }
+    : {};
   /** Booking-level where clause for date-overlap & status filtering */
   const bookingWhere: Prisma.BookingWhereInput =
     fromDate && toDate
@@ -845,9 +853,7 @@ export function createBookingConflictConditions({
             // Rule 1: RESERVED bookings always conflict
             {
               status: BookingStatus.RESERVED,
-              ...(includeCurrentBooking
-                ? {}
-                : { id: { not: currentBookingId } }),
+              ...bookingIdFilter,
               OR: [
                 {
                   from: { lte: toDate },
@@ -862,9 +868,7 @@ export function createBookingConflictConditions({
             // Rule 2: ONGOING/OVERDUE bookings (filtered by asset status in helpers)
             {
               status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-              ...(includeCurrentBooking
-                ? {}
-                : { id: { not: currentBookingId } }),
+              ...bookingIdFilter,
               OR: [
                 {
                   from: { lte: toDate },

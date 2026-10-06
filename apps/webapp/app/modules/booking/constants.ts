@@ -299,6 +299,7 @@ export const BOOKING_WITH_ASSETS_INCLUDE = {
           consumptionType: true,
           unitOfMeasure: true,
           availableToBook: true,
+          requiresReturnPhoto: true,
           status: true,
           valuation: true,
           // `Asset.quantity` is the workspace stock pool — surfaced for QT
@@ -432,9 +433,11 @@ export type BookingAsset = BookingWithAssets["bookingAssets"][number];
 export enum BOOKING_SCHEDULER_EVENTS_ENUM {
   checkoutReminder = `booking-checkout-reminder`,
   checkinReminder = `booking-checkin-reminder`,
+  returnReminder = `booking-return-reminder`,
   overdueHandler = `booking-overdue-handler`,
   autoArchiveHandler = `booking-auto-archive-handler`,
   autoArchiveExpiredHandler = `booking-auto-archive-expired-handler`,
+  preparationPickupExpiryHandler = `ioio-preparation-pickup-expiry-handler`,
 }
 
 /**

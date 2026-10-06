@@ -280,6 +280,8 @@ type GetAssetAvailabilityArgs = {
   window?: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the computed sums. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the computed sums. */
+  excludeBookingIds?: string[];
   /** Prisma client or active transaction; defaults to the global `db`. */
   db?: PrismaClientOrTx;
 };
@@ -331,6 +333,7 @@ export async function getAssetAvailability({
   organizationId,
   window = null,
   excludeBookingId,
+  excludeBookingIds = [],
   db: dbOrTx,
 }: GetAssetAvailabilityArgs): Promise<AssetAvailability> {
   // Cast through `unknown`: the real extended Prisma client's delegate
@@ -377,8 +380,17 @@ export async function getAssetAvailability({
       assetKitId: null,
       booking: buildActiveBookingWhere(organizationId, window),
     };
-    if (excludeBookingId) {
-      bookingAssetWhere.bookingId = { not: excludeBookingId };
+    const excludedBookingIds = [
+      ...new Set(
+        [excludeBookingId, ...excludeBookingIds].filter((id): id is string =>
+          Boolean(id)
+        )
+      ),
+    ];
+    if (excludedBookingIds.length === 1) {
+      bookingAssetWhere.bookingId = { not: excludedBookingIds[0] };
+    } else if (excludedBookingIds.length > 1) {
+      bookingAssetWhere.bookingId = { notIn: excludedBookingIds };
     }
 
     const reservedRows = await client.bookingAsset.findMany({
@@ -650,6 +662,8 @@ type GetAssetAvailabilityBatchCommonArgs = {
   window: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the computed `reserved` sums. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the computed sums. */
+  excludeBookingIds?: string[];
   /** Prisma client or active transaction; defaults to the global `db`. */
   db?: AvailabilityBatchClient;
 };
@@ -700,6 +714,7 @@ export async function getAssetAvailabilityBatch(
     organizationId,
     window,
     excludeBookingId,
+    excludeBookingIds = [],
     db: dbOrTx,
   }: GetAssetAvailabilityBatchCommonArgs
 ): Promise<Map<string, AssetAvailability>> {
@@ -761,8 +776,17 @@ export async function getAssetAvailabilityBatch(
       assetKitId: null,
       booking: buildActiveBookingWhere(organizationId, window),
     };
-    if (excludeBookingId) {
-      bookingAssetWhere.bookingId = { not: excludeBookingId };
+    const excludedBookingIds = [
+      ...new Set(
+        [excludeBookingId, ...excludeBookingIds].filter((id): id is string =>
+          Boolean(id)
+        )
+      ),
+    ];
+    if (excludedBookingIds.length === 1) {
+      bookingAssetWhere.bookingId = { not: excludedBookingIds[0] };
+    } else if (excludedBookingIds.length > 1) {
+      bookingAssetWhere.bookingId = { notIn: excludedBookingIds };
     }
 
     const reservedRows = await client.bookingAsset.findMany({
@@ -918,6 +942,7 @@ export async function getAssetAvailabilityBatch(
         assetIds: uniqueAssetIds,
         organizationId,
         excludeBookingId,
+        excludeBookingIds,
       },
       label,
     });
@@ -1303,6 +1328,8 @@ type AssertAssetQuantitiesAvailableCommonArgs = {
   window: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the availability read. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the availability read. */
+  excludeBookingIds?: string[];
 };
 
 /** One asset's shortfall detail, collected for the aggregated error's `additionalData`. */
@@ -1355,6 +1382,7 @@ export async function assertAssetQuantitiesAvailable(
     tx,
     window,
     excludeBookingId,
+    excludeBookingIds = [],
   }: AssertAssetQuantitiesAvailableCommonArgs
 ): Promise<void> {
   // Nothing to check → nothing to read. Mirrors `getAssetAvailabilityBatch`'s
@@ -1366,7 +1394,7 @@ export async function assertAssetQuantitiesAvailable(
   // the exact N+1 fan-out this sibling exists to avoid).
   const availabilityByAsset = await getAssetAvailabilityBatch(
     items.map((item) => item.assetId),
-    { organizationId, window, excludeBookingId, db: tx }
+    { organizationId, window, excludeBookingId, excludeBookingIds, db: tx }
   );
 
   const shortfalls: AssetQuantityShortfall[] = [];
