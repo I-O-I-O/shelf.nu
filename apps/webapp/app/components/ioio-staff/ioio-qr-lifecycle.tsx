@@ -124,10 +124,6 @@ export function IoioQrLifecycle({
           itemName={itemName}
           currentQrId={qrId ?? undefined}
           itemLabel={itemType}
-          showCodeIds={false}
-          action={`/${
-            itemType === "kit" ? "kits" : "assets"
-          }/${encodeURIComponent(itemId)}`}
         />
       ) : null}
     </section>

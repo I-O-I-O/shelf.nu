@@ -13,7 +13,6 @@ export function SettingHelpLabel({
     <span className="inline-flex items-center gap-1">
       <span>{label}</span>
       <InfoTooltip
-        ariaLabel={`Help for ${label}`}
         icon={<CircleHelp className="size-4" aria-hidden="true" />}
         content={help}
       />

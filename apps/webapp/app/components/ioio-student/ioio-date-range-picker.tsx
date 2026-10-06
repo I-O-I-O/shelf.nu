@@ -56,7 +56,6 @@ export function IoioDateRangePicker({
         value={startDate}
         min={minStartDate}
         max={maxDate}
-        openOnFieldClick
         onChange={onStartDateChange}
         className="text-sm"
       />
@@ -67,7 +66,6 @@ export function IoioDateRangePicker({
         value={returnDate}
         min={start}
         max={maxDate}
-        openOnFieldClick
         onChange={onReturnDateChange}
         error={error}
         className="text-sm"

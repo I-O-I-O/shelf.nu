@@ -102,7 +102,6 @@ function LocationActions({ location }: { location: IoioLocation }) {
         childCount: location._count.children,
       }}
       className="shrink-0"
-      hideScan
     />
   );
 }
