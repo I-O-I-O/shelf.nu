@@ -80,6 +80,11 @@ declare global {
       COMPANION_SERVERS: string;
       INSTANCE_NAME: string;
       MIN_COMPANION_VERSION: string;
+      ANTHROPIC_API_KEY: string;
+      ANTHROPIC_MODEL: string;
+      ANTHROPIC_BASE_URL: string;
+      OPENROUTER_API_KEY: string;
+      IOIO_AI_PROVIDER: string;
     }
   }
 }
@@ -284,6 +289,37 @@ export const INSTANCE_NAME = getEnv("INSTANCE_NAME", {
  * @see {@link file://./../routes/api+/mobile+/config.ts}
  */
 export const MIN_COMPANION_VERSION = getEnv("MIN_COMPANION_VERSION", {
+  isSecret: false,
+  isRequired: false,
+});
+
+/**
+ * Optional server-only provider settings for the IOIO assistant.
+ * These are intentionally not exposed through getBrowserEnv().
+ */
+export const ANTHROPIC_API_KEY = getEnv("ANTHROPIC_API_KEY", {
+  isSecret: true,
+  isRequired: false,
+});
+
+export const ANTHROPIC_MODEL =
+  getEnv("ANTHROPIC_MODEL", {
+    isSecret: false,
+    isRequired: false,
+  }) || "claude-sonnet-5";
+
+export const ANTHROPIC_BASE_URL =
+  getEnv("ANTHROPIC_BASE_URL", {
+    isSecret: false,
+    isRequired: false,
+  }) || "https://api.anthropic.com/v1/messages";
+
+export const OPENROUTER_API_KEY = getEnv("OPENROUTER_API_KEY", {
+  isSecret: true,
+  isRequired: false,
+});
+
+export const IOIO_AI_PROVIDER = getEnv("IOIO_AI_PROVIDER", {
   isSecret: false,
   isRequired: false,
 });
