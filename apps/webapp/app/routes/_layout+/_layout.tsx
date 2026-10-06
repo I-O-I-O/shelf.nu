@@ -1,7 +1,6 @@
 import type { Prisma } from "@prisma/client";
-import { Roles } from "@prisma/client";
+import { OrganizationRoles, Roles } from "@prisma/client";
 import { useAtom } from "jotai";
-import { ScanBarcodeIcon } from "lucide-react";
 import type {
   LinksFunction,
   LoaderFunctionArgs,
@@ -10,9 +9,8 @@ import type {
 import {
   data,
   redirect,
-  Link,
-  NavLink,
   Outlet,
+  useLocation,
   useLoaderData,
 } from "react-router";
 import { useHydrated } from "remix-utils/use-hydrated";
@@ -21,19 +19,14 @@ import { feedbackModalOpenAtom } from "~/atoms/feedback";
 import { ErrorContent } from "~/components/errors";
 
 import FeedbackModal from "~/components/feedback/feedback-modal";
-import {
-  CommandPaletteButton,
-  CommandPaletteRoot,
-} from "~/components/layout/command-palette";
-import AppSidebar from "~/components/layout/sidebar/app-sidebar";
+import StaffShell from "~/components/ioio-staff/staff-shell";
+import { CommandPaletteRoot } from "~/components/layout/command-palette";
 import {
   SidebarInset,
   SidebarProvider,
-  SidebarTrigger,
 } from "~/components/layout/sidebar/sidebar";
 import { SkipLinks } from "~/components/layout/skip-links";
 import { useCrisp } from "~/components/marketing/crisp";
-import { ShelfMobileLogo } from "~/components/marketing/logos";
 import { SequentialIdMigrationModal } from "~/components/sequential-id-migration-modal";
 import { Spinner } from "~/components/shared/spinner";
 import { Toaster } from "~/components/shared/toast";
@@ -41,9 +34,20 @@ import { MissingPaymentMethodBanner } from "~/components/subscription/missing-pa
 import { NoSubscription } from "~/components/subscription/no-subscription";
 import { UnpaidInvoiceBanner } from "~/components/subscription/unpaid-invoice-banner";
 import { config } from "~/config/shelf.config";
+import { db } from "~/database/db.server";
 import { revokeAllSessions } from "~/modules/auth/service.server";
 import { getLegacyLoginDecisionForUser } from "~/modules/auth/sso-enforcement.server";
 import { getBookingSettingsForOrganization } from "~/modules/booking-settings/service.server";
+import { getLabStatus } from "~/modules/ioio-staff/lab-status.server";
+import { getAssignedOpenLabTaskCount } from "~/modules/ioio-staff/lab-tasks.server";
+import { getStudentAnnualAccessApproval } from "~/modules/ioio-student/annual-access.server";
+import { isStudentLabIntroductionRequired } from "~/modules/ioio-student/lab-introduction.shared";
+import {
+  logIoioStudentLoadFailure,
+  logIoioStudentLoadStage,
+  withIoioStudentLoadStage,
+} from "~/modules/ioio-student/load-diagnostics.server";
+import { getStudentIoioNotifications } from "~/modules/ioio-student/notifications.server";
 import {
   getSelectedOrganization,
   setSelectedOrganizationIdCookie,
@@ -51,6 +55,7 @@ import {
 import { getUnreadCountForUser } from "~/modules/update/service.server";
 import { getUserByID } from "~/modules/user/service.server";
 import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
+import ioioStaffStyles from "~/styles/ioio-staff.css?url";
 import styles from "~/styles/layout/index.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
@@ -62,6 +67,10 @@ import {
 import { isLikeShelfError, makeShelfError, ShelfError } from "~/utils/error";
 import { isRouteError } from "~/utils/http";
 import { payload, error } from "~/utils/http.server";
+import {
+  isIoioStaffRoute,
+  resolveIoioAccountSurface,
+} from "~/utils/ioio-role-routing";
 import { skipRevalidationOnClientViewChange } from "~/utils/list-view-params";
 import type { CustomerWithSubscriptions } from "~/utils/stripe.server";
 
@@ -73,9 +82,11 @@ import {
   validateSubscriptionIsActive,
 } from "~/utils/stripe.server";
 import { canUseAudits, canUseBookings } from "~/utils/subscription.server";
-import { tw } from "~/utils/tw";
 
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
+export const links: LinksFunction = () => [
+  { rel: "stylesheet", href: styles },
+  { rel: "stylesheet", href: ioioStaffStyles },
+];
 
 export type LayoutLoaderResponse = typeof loader;
 
@@ -116,6 +127,14 @@ export const shouldRevalidate = skipRevalidationOnClientViewChange;
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
+  const pathname = new URL(request.url).pathname;
+  const isStudentIoioRequestPath =
+    pathname === "/ioio" || pathname.startsWith("/ioio/");
+  logIoioStudentLoadStage(
+    "0 shared authenticated-layout loader entered",
+    "STARTED",
+    isStudentIoioRequestPath
+  );
 
   try {
     // Run user fetch and cookie parsing in parallel — these are independent
@@ -125,35 +144,42 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     // guard (user.onboarded check) must run first to redirect non-onboarded
     // users before org resolution is attempted.
     const [user, userPrefsCookie] = await Promise.all([
-      getUserByID(userId, {
-        select: {
-          id: true,
-          email: true,
-          username: true,
-          firstName: true,
-          lastName: true,
-          displayName: true,
-          profilePicture: true,
-          onboarded: true,
-          customerId: true,
-          skipSubscriptionCheck: true,
-          sso: true,
-          tierId: true,
-          hasUnpaidInvoice: true,
-          warnForNoPaymentMethod: true,
-          roles: { select: { id: true, name: true } },
-          userOrganizations: {
-            where: {
-              userId: authSession.userId,
-            },
+      withIoioStudentLoadStage(
+        "1 authenticated user/profile query",
+        isStudentIoioRequestPath,
+        () =>
+          getUserByID(userId, {
             select: {
               id: true,
-              roles: true,
-              organization: { select: { id: true } },
-            },
-          },
-        } satisfies Prisma.UserSelect,
-      }),
+              email: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+              displayName: true,
+              profilePicture: true,
+              onboarded: true,
+              customerId: true,
+              skipSubscriptionCheck: true,
+              sso: true,
+              tierId: true,
+              hasUnpaidInvoice: true,
+              warnForNoPaymentMethod: true,
+              roles: { select: { id: true, name: true } },
+              userOrganizations: {
+                where: {
+                  userId: authSession.userId,
+                },
+                select: {
+                  id: true,
+                  roles: true,
+                  labIntroductionCompleted: true,
+                  organization: { select: { id: true } },
+                  user: { select: { id: true } },
+                },
+              },
+            } satisfies Prisma.UserSelect,
+          })
+      ),
       initializePerPageCookieOnLayout(request),
     ]);
 
@@ -202,10 +228,15 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       currentOrganization,
       cookieRefreshNeeded,
       noVisibleOrganizations,
-    } = await getSelectedOrganization({
-      userId: authSession.userId,
-      request,
-    });
+    } = await withIoioStudentLoadStage(
+      "1 organization membership lookup",
+      isStudentIoioRequestPath,
+      () =>
+        getSelectedOrganization({
+          userId: authSession.userId,
+          request,
+        })
+    );
 
     // SSO user with no team orgs — redirect to a friendly pending page
     if (noVisibleOrganizations) {
@@ -215,13 +246,104 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const isAdmin = user?.roles.some((role) => role.name === Roles["ADMIN"]);
 
     // Get current user's organization role for updates filtering
-    const currentOrganizationUserRoles = user?.userOrganizations.find(
+    const currentOrganizationMembership = user?.userOrganizations.find(
       (userOrg) => userOrg.organization.id === organizationId
-    )?.roles;
+    );
+    const currentOrganizationUserRoles = currentOrganizationMembership?.roles;
+
+    if (
+      !currentOrganizationMembership ||
+      !currentOrganizationUserRoles?.length
+    ) {
+      throw new ShelfError({
+        cause: null,
+        title: "Organization access required",
+        message:
+          "Your account is not assigned to this organization. Please contact Staff.",
+        status: 403,
+        label: "Permission",
+        shouldBeCaptured: false,
+        additionalData: { userId: authSession.userId, organizationId },
+      });
+    }
 
     // Check if current user has OWNER or ADMIN role in the organization
     const isOwner = currentOrganizationUserRoles?.includes("OWNER");
     const isOrgAdmin = currentOrganizationUserRoles?.includes("ADMIN");
+    const isIoioStaff = Boolean(isOwner || isOrgAdmin);
+    const isStudentIoioRequest =
+      isStudentIoioRequestPath &&
+      !isIoioStaff &&
+      currentOrganizationUserRoles.includes(OrganizationRoles.SELF_SERVICE);
+    logIoioStudentLoadStage("1 auth/membership", "OK", isStudentIoioRequest);
+    const accountSurface = resolveIoioAccountSurface(
+      currentOrganizationUserRoles
+    );
+    if (!accountSurface) {
+      throw new ShelfError({
+        cause: null,
+        title: "Account role could not be resolved",
+        message:
+          "Your IOIO account role could not be verified. Please contact Staff.",
+        status: 403,
+        label: "Permission",
+        shouldBeCaptured: false,
+      });
+    }
+    if (
+      accountSurface === "staff" &&
+      (pathname === "/ioio" || pathname.startsWith("/ioio/"))
+    ) {
+      return redirect("/home");
+    }
+    const isLabToolsRoute =
+      pathname === "/operations/tasks" ||
+      pathname === "/purchasing" ||
+      pathname === "/ta-hours";
+    // Keep TA membership stable across client-side navigation. The shared
+    // layout uses this value to decide whether a SELF_SERVICE user may render
+    // Lab Tools routes, so it must not depend on which route loaded first.
+    const isIoioTA = Boolean(
+      await withIoioStudentLoadStage(
+        "5 TA membership query (ioioLabTA.findUnique)",
+        isStudentIoioRequest,
+        () =>
+          db.ioioLabTA.findUnique({
+            where: {
+              organizationId_userId: {
+                organizationId: currentOrganization.id,
+                userId: authSession.userId,
+              },
+            },
+            select: { id: true },
+          })
+      )
+    );
+
+    const isStudentOnly =
+      currentOrganizationUserRoles.includes(OrganizationRoles.SELF_SERVICE) &&
+      !isIoioStaff;
+    const isLabIntroductionRoute = pathname === "/ioio/introduction";
+    const needsLabIntroduction = isStudentLabIntroductionRequired({
+      roles: currentOrganizationUserRoles,
+      completed: currentOrganizationMembership.labIntroductionCompleted,
+    });
+    if (needsLabIntroduction && !isLabIntroductionRoute) {
+      return redirect("/ioio/introduction");
+    }
+    if (
+      isLabIntroductionRoute &&
+      currentOrganizationMembership.labIntroductionCompleted
+    ) {
+      return redirect("/ioio");
+    }
+    if (
+      isStudentOnly &&
+      isIoioStaffRoute(pathname) &&
+      !(isLabToolsRoute && isIoioTA)
+    ) {
+      return redirect("/ioio");
+    }
 
     // Check if sequential ID migration is needed
     const needsSequentialIdMigration =
@@ -240,17 +362,81 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     // Run booking settings, working hours, and unread count in parallel —
     // all only depend on organizationId/userId which are available now.
-    const [bookingSettings, workingHours, unreadUpdatesCount] =
-      await Promise.all([
-        getBookingSettingsForOrganization(currentOrganization.id),
-        getWorkingHoursForOrganization(currentOrganization.id),
-        currentOrganizationUserRoles?.[0]
-          ? getUnreadCountForUser({
-              userId: authSession.userId,
-              userRole: currentOrganizationUserRoles[0],
-            })
-          : Promise.resolve(0),
-      ]);
+    const [
+      bookingSettings,
+      workingHours,
+      unreadUpdatesCount,
+      labStatus,
+      assignedLabTaskCount,
+      annualAccessApproval,
+    ] = await Promise.all([
+      withIoioStudentLoadStage(
+        "5 shared shell query (booking settings)",
+        isStudentIoioRequest,
+        () => getBookingSettingsForOrganization(currentOrganization.id)
+      ),
+      withIoioStudentLoadStage(
+        "5 shared shell query (working hours)",
+        isStudentIoioRequest,
+        () => getWorkingHoursForOrganization(currentOrganization.id)
+      ),
+      currentOrganizationUserRoles?.[0]
+        ? withIoioStudentLoadStage(
+            "5 shared shell query (unread update count)",
+            isStudentIoioRequest,
+            () =>
+              getUnreadCountForUser({
+                userId: authSession.userId,
+                userRole: currentOrganizationUserRoles[0],
+              })
+          )
+        : Promise.resolve(0),
+      isIoioStaff
+        ? getLabStatus({ organizationId: currentOrganization.id })
+        : Promise.resolve(null),
+      isIoioStaff || isIoioTA
+        ? getAssignedOpenLabTaskCount({
+            organizationId: currentOrganization.id,
+            userId: authSession.userId,
+          })
+        : Promise.resolve(0),
+      !isIoioStaff &&
+      !isIoioTA &&
+      currentOrganizationUserRoles.includes(OrganizationRoles.SELF_SERVICE)
+        ? withIoioStudentLoadStage(
+            "2 annual borrowing access lookup",
+            isStudentIoioRequest,
+            () =>
+              getStudentAnnualAccessApproval({
+                organizationId: currentOrganization.id,
+                userId: authSession.userId,
+                diagnostics: isStudentIoioRequest,
+              })
+          )
+        : Promise.resolve(null),
+    ]);
+
+    const studentIoioNotifications =
+      !isIoioStaff && !isIoioTA && annualAccessApproval
+        ? await withIoioStudentLoadStage(
+            "3 Student notifications (approval-notification query included)",
+            isStudentIoioRequest,
+            () =>
+              getStudentIoioNotifications({
+                organizationId: currentOrganization.id,
+                userId: authSession.userId,
+                annualApproval: annualAccessApproval,
+                diagnostics: isStudentIoioRequest,
+              })
+          )
+        : null;
+    if (isStudentIoioRequest && !annualAccessApproval) {
+      logIoioStudentLoadStage(
+        "3 Student notifications",
+        "SKIPPED",
+        isStudentIoioRequest
+      );
+    }
 
     return data(
       payload({
@@ -261,6 +447,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         workingHours,
         currentOrganization,
         currentOrganizationUserRoles,
+        isIoioStaff,
+        isIoioTA,
         subscription,
         enablePremium: config.enablePremiumFeatures,
         hideNoticeCard: userPrefsCookie.hideNoticeCard,
@@ -273,15 +461,24 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         hasUnpaidInvoice: user.hasUnpaidInvoice,
         warnForNoPaymentMethod: user.warnForNoPaymentMethod,
         needsSequentialIdMigration,
+        labStatus,
+        assignedLabTaskCount,
+        annualAccessApproval,
+        studentIoioNotifications,
         /** THis is used to disable team organizations when the currentOrg is Team and no subscription is present  */
-        disabledTeamOrg: isAdmin
-          ? false
-          : currentOrganization.workspaceDisabled ||
-            (await disabledTeamOrg({
-              currentOrganization,
-              organizations,
-              url: request.url,
-            })),
+        disabledTeamOrg: await withIoioStudentLoadStage(
+          "5 organization workspace state",
+          isStudentIoioRequest,
+          () =>
+            isAdmin
+              ? false
+              : currentOrganization.workspaceDisabled ||
+                disabledTeamOrg({
+                  currentOrganization,
+                  organizations,
+                  url: request.url,
+                })
+        ),
       }),
       {
         headers: [
@@ -294,6 +491,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       }
     );
   } catch (cause) {
+    logIoioStudentLoadFailure(
+      "1 shared authenticated-layout loader boundary (unclassified)",
+      cause,
+      isStudentIoioRequestPath
+    );
     const reason = makeShelfError(cause, { userId: authSession.userId });
     throw data(error(reason), { status: reason.status });
   }
@@ -329,8 +531,17 @@ export default function App() {
     minimizedSidebar,
     needsSequentialIdMigration,
     currentOrganizationId,
+    currentOrganizationUserRoles,
+    isIoioStaff,
+    isIoioTA,
   } = useLoaderData<typeof loader>();
   const isHydrated = useHydrated();
+  const location = useLocation();
+  const isIoioStudentSurface =
+    location.pathname === "/ioio" ||
+    location.pathname.startsWith("/ioio/") ||
+    location.pathname === "/handbook" ||
+    location.pathname.startsWith("/handbook/");
   // Several authenticated routes (assets._index, kits._index, locations.*, …)
   // call `userHasPermission` from `permission.validator.client` during their
   // component render. That module is `.client.ts`, so RR7's vite plugin
@@ -347,6 +558,20 @@ export default function App() {
   // this spinner while it hydrates.
   // TODO: lift `userHasPermission` checks into route loaders so SSR works.
   const workspaceSwitching = !isHydrated;
+  const roleResolved =
+    resolveIoioAccountSurface(currentOrganizationUserRoles) !== null;
+  const isStudentOnly =
+    currentOrganizationUserRoles?.includes(OrganizationRoles.SELF_SERVICE) &&
+    !isIoioStaff;
+  const isLabToolsRoute =
+    location.pathname === "/operations/tasks" ||
+    location.pathname === "/purchasing" ||
+    location.pathname === "/ta-hours";
+  const isBlockedStudentStaffRoute =
+    isStudentOnly &&
+    isIoioStaffRoute(location.pathname) &&
+    !(isLabToolsRoute && isIoioTA);
+  const toolsOnlyTAView = isStudentOnly && isIoioTA && isLabToolsRoute;
   const [feedbackModalOpen, setFeedbackModalOpen] = useAtom(
     feedbackModalOpenAtom
   );
@@ -356,42 +581,22 @@ export default function App() {
       <SidebarProvider defaultOpen={!minimizedSidebar}>
         <SkipLinks />
         <AtomsResetHandler />
-        <AppSidebar id="navigation" />
         <SidebarInset id="main-content" tabIndex={-1}>
           {warnForNoPaymentMethod ? <MissingPaymentMethodBanner /> : null}
           {hasUnpaidInvoice ? <UnpaidInvoiceBanner /> : null}
           {disabledTeamOrg ? (
             <NoSubscription />
-          ) : workspaceSwitching ? (
+          ) : workspaceSwitching ||
+            !roleResolved ||
+            isBlockedStudentStaffRoute ? (
             <div className="flex size-full flex-col items-center justify-center text-center">
               <Spinner />
               <p className="mt-2">Activating workspace...</p>
             </div>
+          ) : isIoioStudentSurface && !isIoioStaff ? (
+            <Outlet />
           ) : (
-            <>
-              <header className="flex items-center justify-between border-b bg-white py-4 md:hidden">
-                <Link to="." title="Home" className="block h-8">
-                  <ShelfMobileLogo />
-                </Link>
-                <div className="flex items-center space-x-2">
-                  <CommandPaletteButton variant="icon" />
-                  <NavLink
-                    to="/scanner"
-                    title="Scan QR Code"
-                    className={({ isActive }) =>
-                      tw(
-                        "relative flex items-center justify-center px-2 transition",
-                        isActive ? "text-primary-600" : "text-gray-500"
-                      )
-                    }
-                  >
-                    <ScanBarcodeIcon />
-                  </NavLink>
-                  <SidebarTrigger />
-                </div>
-              </header>
-              <Outlet />
-            </>
+            <StaffShell toolsOnly={toolsOnlyTAView} />
           )}
           <Toaster />
 

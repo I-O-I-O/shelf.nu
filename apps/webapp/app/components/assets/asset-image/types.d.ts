@@ -13,18 +13,21 @@ import type { AssetWithResolvableImage } from "~/modules/asset/image-resolution"
  * @see {@link file://./../../../modules/asset/image-select.ts}
  */
 export type AssetModelImage = AssetWithResolvableImage["assetModel"];
+export type AssetKitImage = Partial<
+  Pick<AssetWithResolvableImage, "kitImage" | "kitThumbnailImage">
+>;
 
 // Helper type for when you only need thumbnail data
 export type AssetForThumbnail = Pick<Asset, "id" | "thumbnailImage"> & {
   mainImage?: Asset["mainImage"];
   assetModel: AssetModelImage;
-};
+} & AssetKitImage;
 
 // Helper type for when you need full image data (for preview)
 export type AssetForPreview = Pick<
   Asset,
   "id" | "mainImage" | "thumbnailImage" | "mainImageExpiration"
-> & { assetModel: AssetModelImage };
+> & { assetModel: AssetModelImage } & AssetKitImage;
 
 // Base props that are always required
 export type BaseAssetImageProps = {

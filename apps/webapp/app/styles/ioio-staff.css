@@ -1,0 +1,125 @@
+/*
+ * IOIO staff presentation layer.
+ *
+ * Shelf's backend and shared component variants keep their existing names and
+ * semantics. These scoped rules only translate the shared orange visual token
+ * to the IOIO red palette while the staff shell is mounted.
+ */
+.ioio-staff-surface {
+  --ioio-red-50: #fef2f2;
+  --ioio-red-100: #fee2e2;
+  --ioio-red-200: #fecaca;
+  --ioio-red-300: #fca5a5;
+  --ioio-red-400: #f87171;
+  --ioio-red-500: #ef4444;
+  --ioio-red-600: #dc2626;
+  --ioio-red-700: #b91c1c;
+  --ioio-red-800: #991b1b;
+  --ioio-red-900: #7f1d1d;
+}
+
+.ioio-staff-surface .bg-gray-25 {
+  background-color: #ffffff;
+}
+
+/* Breadcrumbs use a generated selector rather than a text-primary utility. */
+.ioio-staff-surface .breadcrumb:last-child {
+  color: var(--ioio-red-700);
+}
+
+/* The IOIO shell owns navigation for staff routes. */
+.ioio-staff-surface button[aria-label="Toggle Sidebar"] {
+  display: none;
+}
+
+.ioio-staff-surface .bg-primary-25,
+.ioio-staff-surface .bg-primary-50,
+.ioio-staff-surface .bg-primary-100,
+.ioio-staff-surface .bg-primary-200,
+.ioio-staff-surface .bg-primary-300,
+.ioio-staff-surface .bg-primary-400,
+.ioio-staff-surface .bg-primary-500,
+.ioio-staff-surface .bg-primary-600,
+.ioio-staff-surface .bg-primary-700,
+.ioio-staff-surface .bg-primary-800,
+.ioio-staff-surface .bg-primary-900 {
+  background-color: var(--ioio-red-700);
+}
+
+.ioio-staff-surface .text-primary,
+.ioio-staff-surface .text-primary-500,
+.ioio-staff-surface .text-primary-600,
+.ioio-staff-surface .text-primary-700,
+.ioio-staff-surface .text-primary-800,
+.ioio-staff-surface .text-primary-900 {
+  color: var(--ioio-red-700);
+}
+
+.ioio-staff-surface .border-primary-200,
+.ioio-staff-surface .border-primary-300,
+.ioio-staff-surface .border-primary-400,
+.ioio-staff-surface .border-primary-500,
+.ioio-staff-surface .border-primary-600,
+.ioio-staff-surface .border-primary-700 {
+  border-color: var(--ioio-red-700);
+}
+
+.ioio-staff-surface .ring-primary-300,
+.ioio-staff-surface .ring-primary-500,
+.ioio-staff-surface .ring-primary-600,
+.ioio-staff-surface .ring-primary-700 {
+  --tw-ring-color: var(--ioio-red-600);
+}
+
+.ioio-staff-surface .hover\:bg-primary-50:hover,
+.ioio-staff-surface .hover\:bg-primary-100:hover,
+.ioio-staff-surface .hover\:bg-primary-400:hover,
+.ioio-staff-surface .hover\:bg-primary-500:hover,
+.ioio-staff-surface .hover\:bg-primary-600:hover,
+.ioio-staff-surface .hover\:bg-primary-700:hover,
+.ioio-staff-surface .hover\:bg-primary-800:hover {
+  background-color: var(--ioio-red-800);
+}
+
+.ioio-staff-surface .hover\:text-primary-600:hover,
+.ioio-staff-surface .hover\:text-primary-700:hover,
+.ioio-staff-surface .hover\:text-primary-800:hover {
+  color: var(--ioio-red-800);
+}
+
+.ioio-staff-surface .focus\:border-primary-300:focus,
+.ioio-staff-surface .focus\:border-primary-500:focus,
+.ioio-staff-surface .focus-visible\:border-primary-300:focus-visible {
+  border-color: var(--ioio-red-600);
+}
+
+.ioio-staff-surface .focus\:ring-primary-500:focus,
+.ioio-staff-surface .focus-visible\:ring-primary-300:focus-visible,
+.ioio-staff-surface .focus-visible\:ring-primary-500:focus-visible {
+  --tw-ring-color: var(--ioio-red-600);
+}
+
+.ioio-staff-surface .disabled\:bg-primary-300:disabled,
+.ioio-staff-surface .disabled\:border-primary-300:disabled {
+  background-color: var(--ioio-red-300);
+  border-color: var(--ioio-red-300);
+}
+
+/* Keep the shared Staff route header compact so content starts near the shell. */
+@media (min-width: 768px) {
+  .ioio-staff-surface > div > main header.-mx-4.bg-white > div:first-child {
+    min-height: 0;
+    padding-bottom: 0.25rem;
+    padding-top: 0.25rem;
+  }
+
+  .ioio-staff-surface > div > main header.-mx-4.bg-white > div:nth-child(2) {
+    padding-bottom: 0.25rem;
+    padding-top: 0.25rem;
+  }
+
+  .ioio-staff-surface > div > main header.-mx-4.bg-white .breadcrumbs {
+    padding-bottom: 0.5rem;
+    padding-top: 0.5rem;
+  }
+}
