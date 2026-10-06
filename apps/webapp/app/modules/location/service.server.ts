@@ -270,19 +270,21 @@ export async function getLocation(
       ...assetsWhere,
     };
 
+    const locationQueryOptions: Prisma.LocationFindFirstOrThrowArgs = {
+      where: {
+        OR: [
+          { id, organizationId },
+          ...(userOrganizations?.length
+            ? [{ id, organizationId: { in: otherOrganizationIds } }]
+            : []),
+        ],
+      },
+      include: locationInclude,
+    };
+
     const [location, totalAssetsWithinLocation, assets] = await Promise.all([
       /** Get the items */
-      db.location.findFirstOrThrow({
-        where: {
-          OR: [
-            { id, organizationId },
-            ...(userOrganizations?.length
-              ? [{ id, organizationId: { in: otherOrganizationIds } }]
-              : []),
-          ],
-        },
-        include: locationInclude,
-      }),
+      db.location.findFirstOrThrow(locationQueryOptions),
 
       /** Count them */
       db.asset.count({
