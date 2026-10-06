@@ -176,6 +176,18 @@ export async function requirePermission({
     (o) => o.organization.id === organizationId
   )?.roles;
 
+  if (!organizationId || !currentOrganization || !roles?.length) {
+    throw new ShelfError({
+      cause: null,
+      title: "Organization access required",
+      message: "You do not have access to this organization.",
+      additionalData: { userId, organizationId },
+      status: 403,
+      label: "Permission",
+      shouldBeCaptured: false,
+    });
+  }
+
   await validatePermission({
     roles,
     action,
