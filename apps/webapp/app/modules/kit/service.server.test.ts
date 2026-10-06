@@ -269,6 +269,9 @@ const mockKitData = {
   categoryId: "category-1",
   image: null,
   imageExpiration: null,
+  imageStoragePath: null,
+  maxBorrowDays: 14,
+  extensionBorrowDays: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };

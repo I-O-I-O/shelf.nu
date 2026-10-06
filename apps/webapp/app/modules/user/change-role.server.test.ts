@@ -26,6 +26,7 @@ function mockUserOrg(roles: OrganizationRoles[]) {
     roles,
     createdAt: new Date(),
     updatedAt: new Date(),
+    labIntroductionCompleted: true,
     calendarTokenId: null,
   });
 }
@@ -38,6 +39,7 @@ function mockUpdateSuccess(newRole: OrganizationRoles) {
     roles: [newRole],
     createdAt: new Date(),
     updatedAt: new Date(),
+    labIntroductionCompleted: true,
     calendarTokenId: null,
   });
 }

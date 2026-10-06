@@ -87,7 +87,7 @@ describe("LabInfoContentSection", () => {
 
     fireEvent.click(magnifierButton!);
     expect(screen.getByRole("dialog")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Close$/ }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
