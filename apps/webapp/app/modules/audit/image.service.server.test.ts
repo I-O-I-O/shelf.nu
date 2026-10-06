@@ -4,6 +4,10 @@ vi.mock("~/utils/storage.server", () => ({
   // why: We need to mock storage operations to avoid actually uploading files during tests
   parseFileFormData: vi.fn(),
   removePublicFile: vi.fn(),
+  resolveStorageImageUrl: vi.fn(
+    ({ objectPath, legacyUrl }) => objectPath ?? legacyUrl ?? null
+  ),
+  removeStorageImageObject: vi.fn().mockResolvedValue(undefined),
   getFileUploadPath: vi.fn(
     (params) =>
       `${params.organizationId}/${params.type}/${params.typeId}/test.jpg`
@@ -24,7 +28,11 @@ vi.mock("~/database/db.server", () => ({
 }));
 
 import { db } from "~/database/db.server";
-import { parseFileFormData, removePublicFile } from "~/utils/storage.server";
+import {
+  parseFileFormData,
+  removePublicFile,
+  removeStorageImageObject,
+} from "~/utils/storage.server";
 
 import {
   deleteAuditImage,
@@ -49,7 +57,7 @@ describe("audit image service", () => {
       mockReturnFormData.append(
         "image",
         JSON.stringify({
-          path: "org-1/audits/audit-1/image-123.jpg",
+          originalPath: "org-1/audits/audit-1/image-123.jpg",
           thumbnailPath: "org-1/audits/audit-1/image-123-thumbnail.jpg",
         })
       );
@@ -61,8 +69,11 @@ describe("audit image service", () => {
         auditSessionId: "audit-1",
         auditAssetId: null,
         organizationId: "org-1",
-        imageUrl: "org-1/audits/audit-1/image-123.jpg",
-        thumbnailUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
+        imageUrl: null,
+        thumbnailUrl: null,
+        imageStoragePath: "org-1/audits/audit-1/image-123.jpg",
+        thumbnailImageStoragePath:
+          "org-1/audits/audit-1/image-123-thumbnail.jpg",
         description: null,
         uploadedById: "user-1",
         createdAt: new Date(),
@@ -89,6 +100,15 @@ describe("audit image service", () => {
       );
 
       expect(db.auditImage.create).toHaveBeenCalled();
+      expect(db.auditImage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          imageUrl: null,
+          thumbnailUrl: null,
+          imageStoragePath: "org-1/audits/audit-1/image-123.jpg",
+          thumbnailImageStoragePath:
+            "org-1/audits/audit-1/image-123-thumbnail.jpg",
+        }),
+      });
       expect(result).toEqual(
         expect.objectContaining({
           id: "img-1",
@@ -177,6 +197,8 @@ describe("audit image service", () => {
         organizationId: "org-1",
         imageUrl: "org-1/audits/audit-1/image-123.jpg",
         thumbnailUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
+        imageStoragePath: null,
+        thumbnailImageStoragePath: null,
         description: null,
         uploadedById: "user-1",
         createdAt: new Date(),
@@ -203,13 +225,17 @@ describe("audit image service", () => {
         },
       });
 
-      expect(removePublicFile).toHaveBeenCalledWith({
-        publicUrl: "org-1/audits/audit-1/image-123.jpg",
+      expect(removeStorageImageObject).toHaveBeenCalledWith({
+        bucketName: "files",
+        objectPath: "org-1/audits/audit-1/image-123.jpg",
       });
 
-      expect(removePublicFile).toHaveBeenCalledWith({
-        publicUrl: "org-1/audits/audit-1/image-123-thumbnail.jpg",
+      expect(removeStorageImageObject).toHaveBeenCalledWith({
+        bucketName: "files",
+        objectPath: "org-1/audits/audit-1/image-123-thumbnail.jpg",
       });
+
+      expect(removePublicFile).not.toHaveBeenCalled();
 
       expect(db.auditImage.delete).toHaveBeenCalledWith({
         where: { id: "img-1" },
@@ -429,8 +455,10 @@ describe("uploadAuditImage returnParsedFormData", () => {
       auditSessionId: "session-1",
       auditAssetId: "audit-asset-1",
       organizationId: "org-1",
-      imageUrl: "https://example.com/p",
-      thumbnailUrl: "https://example.com/t",
+      imageUrl: null,
+      thumbnailUrl: null,
+      imageStoragePath: "p",
+      thumbnailImageStoragePath: "t",
       description: null,
       uploadedById: "user-1",
       createdAt: new Date(),

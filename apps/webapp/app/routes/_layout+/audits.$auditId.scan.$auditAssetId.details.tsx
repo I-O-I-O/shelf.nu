@@ -38,6 +38,7 @@ import {
 import {
   uploadAuditImage,
   deleteAuditImage,
+  getAuditImages,
 } from "~/modules/audit/image.service.server";
 import { stripMarkdocDelimiters } from "~/modules/audit/note-content.server";
 import {
@@ -167,19 +168,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       },
     });
 
-    // Fetch images
-    const images = await db.auditImage.findMany({
-      where: {
-        auditAssetId: auditAssetId,
-      },
-      select: {
-        id: true,
-        imageUrl: true,
-        thumbnailUrl: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
+    // Fetch images through the presentation boundary so canonical storage
+    // paths and legacy URLs are both resolved before reaching the UI.
+    const images = await getAuditImages({
+      auditSessionId: auditId,
+      organizationId,
+      auditAssetId,
     });
 
     const header = {

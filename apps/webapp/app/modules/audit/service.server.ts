@@ -10,6 +10,7 @@ import type { UserOrganization } from "@prisma/client";
 import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import { z } from "zod";
 
+import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import type { SortingDirection } from "~/components/list/filters/sort-by";
 import type { ExtendedPrismaClient } from "~/database/db.server";
 import { db } from "~/database/db.server";
@@ -28,6 +29,7 @@ import {
 } from "~/modules/note/service.server";
 import { USER_NAME_SELECT } from "~/modules/user/fields";
 import type { ClientHint } from "~/utils/client-hints";
+import { PUBLIC_BUCKET } from "~/utils/constants";
 import type { RawFormatPrefs } from "~/utils/date-format";
 import type { ErrorLabel } from "~/utils/error";
 import { isLikeShelfError, ShelfError } from "~/utils/error";
@@ -37,7 +39,10 @@ import { Logger } from "~/utils/logger";
 import { wrapUserLinkForNote } from "~/utils/markdoc-wrappers";
 import { assertAssetsBelongToOrg } from "~/utils/org-validation.server";
 import { QueueNames, scheduler } from "~/utils/scheduler.server";
-import { removePublicFile } from "~/utils/storage.server";
+import {
+  removePublicFile,
+  removeStorageImageObject,
+} from "~/utils/storage.server";
 import type { UserNameFields } from "~/utils/user";
 import { resolveUserDisplayName } from "~/utils/user";
 
@@ -3869,11 +3874,22 @@ export async function bulkArchiveAudits({
  */
 async function safeRemoveAuditImageFiles(image: {
   id: string;
-  imageUrl: string;
+  imageUrl: string | null;
   thumbnailUrl: string | null;
+  imageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
 }): Promise<void> {
   try {
-    await removePublicFile({ publicUrl: image.imageUrl });
+    const objectPath =
+      image.imageStoragePath ??
+      (image.imageUrl
+        ? extractStoragePath(image.imageUrl, PUBLIC_BUCKET)
+        : null);
+    if (objectPath) {
+      await removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath });
+    } else if (image.imageUrl) {
+      await removePublicFile({ publicUrl: image.imageUrl });
+    }
   } catch (cause) {
     // Intentionally omit the raw URL from additionalData — public
     // Supabase URLs contain storage object keys and a trailing token;
@@ -3892,9 +3908,21 @@ async function safeRemoveAuditImageFiles(image: {
     );
   }
 
-  if (image.thumbnailUrl) {
+  if (image.thumbnailUrl || image.thumbnailImageStoragePath) {
     try {
-      await removePublicFile({ publicUrl: image.thumbnailUrl });
+      const objectPath =
+        image.thumbnailImageStoragePath ??
+        (image.thumbnailUrl
+          ? extractStoragePath(image.thumbnailUrl, PUBLIC_BUCKET)
+          : null);
+      if (objectPath) {
+        await removeStorageImageObject({
+          bucketName: PUBLIC_BUCKET,
+          objectPath,
+        });
+      } else if (image.thumbnailUrl) {
+        await removePublicFile({ publicUrl: image.thumbnailUrl });
+      }
     } catch (cause) {
       Logger.error(
         new ShelfError({
@@ -4014,7 +4042,13 @@ export async function deleteAuditSession({
     // change, we must leave both the DB row AND its files intact.
     const images = await db.auditImage.findMany({
       where: { auditSessionId, organizationId },
-      select: { id: true, imageUrl: true, thumbnailUrl: true },
+      select: {
+        id: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+        imageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
     });
 
     // Final guard on the write: re-check ARCHIVED status atomically so a
@@ -4200,7 +4234,13 @@ export async function bulkDeleteAudits({
         auditSessionId: { in: targetIds },
         organizationId,
       },
-      select: { id: true, imageUrl: true, thumbnailUrl: true },
+      select: {
+        id: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+        imageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
     });
 
     // All-or-nothing: either every pre-read audit deletes, or the whole

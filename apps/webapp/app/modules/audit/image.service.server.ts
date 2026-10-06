@@ -6,8 +6,8 @@ import type {
   User,
   Prisma,
 } from "@prisma/client";
+import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
   PUBLIC_BUCKET,
@@ -18,6 +18,8 @@ import {
   getFileUploadPath,
   parseFileFormData,
   removePublicFile,
+  removeStorageImageObject,
+  resolveStorageImageUrl,
 } from "~/utils/storage.server";
 
 const label: ErrorLabel = "Audit Image";
@@ -135,26 +137,13 @@ export async function uploadAuditImage({
       imagePath = image;
     }
 
-    // Get public URLs for the uploaded images
-    const {
-      data: { publicUrl: imagePublicUrl },
-    } = getSupabaseAdmin().storage.from(PUBLIC_BUCKET).getPublicUrl(imagePath);
-
-    let thumbnailPublicUrl: string | undefined;
-    if (thumbnailPath) {
-      const {
-        data: { publicUrl },
-      } = getSupabaseAdmin()
-        .storage.from(PUBLIC_BUCKET)
-        .getPublicUrl(thumbnailPath);
-      thumbnailPublicUrl = publicUrl;
-    }
-
     // Create the database record
     const auditImage = await db.auditImage.create({
       data: {
-        imageUrl: imagePublicUrl,
-        thumbnailUrl: thumbnailPublicUrl ?? null,
+        imageUrl: null,
+        thumbnailUrl: null,
+        imageStoragePath: imagePath,
+        thumbnailImageStoragePath: thumbnailPath,
         description: description ?? null,
         auditSessionId,
         auditAssetId: auditAssetId ?? null,
@@ -163,9 +152,10 @@ export async function uploadAuditImage({
       },
     });
 
+    const imageWithUrls = await resolveAuditImageForPresentation(auditImage);
     return returnParsedFormData
-      ? { image: auditImage, formData: fileData }
-      : auditImage;
+      ? { image: imageWithUrls, formData: fileData }
+      : imageWithUrls;
   } catch (cause) {
     const isShelfError = isLikeShelfError(cause);
     throw new ShelfError({
@@ -175,6 +165,43 @@ export async function uploadAuditImage({
       label,
     });
   }
+}
+
+/** Resolve canonical audit object paths for API/UI consumers. */
+export async function resolveAuditImageForPresentation<
+  T extends {
+    imageStoragePath?: string | null;
+    thumbnailImageStoragePath?: string | null;
+    imageUrl?: string | null;
+    thumbnailUrl?: string | null;
+  },
+>(image: T): Promise<T & { imageUrl: string; thumbnailUrl: string | null }> {
+  const [imageUrl, thumbnailUrl] = await Promise.all([
+    resolveStorageImageUrl({
+      bucketName: PUBLIC_BUCKET,
+      objectPath: image.imageStoragePath,
+      legacyUrl: image.imageUrl,
+      isPublic: true,
+    }),
+    resolveStorageImageUrl({
+      bucketName: PUBLIC_BUCKET,
+      objectPath: image.thumbnailImageStoragePath,
+      legacyUrl: image.thumbnailUrl,
+      isPublic: true,
+    }),
+  ]);
+  if (!imageUrl) {
+    throw new ShelfError({
+      cause: null,
+      message: "Audit image is missing its stored image reference.",
+      additionalData: {
+        imageStoragePath: image.imageStoragePath ?? null,
+      },
+      label,
+    });
+  }
+
+  return { ...image, imageUrl, thumbnailUrl };
 }
 
 /**
@@ -313,9 +340,29 @@ export async function deleteAuditImage({
       });
     }
 
-    // Delete from storage
-    await removePublicFile({ publicUrl: image.imageUrl });
-    if (image.thumbnailUrl) {
+    // Prefer deleting explicit object paths. Legacy URL-only records retain
+    // the existing cleanup utility for compatibility.
+    const imagePath =
+      image.imageStoragePath ??
+      (image.imageUrl
+        ? extractStoragePath(image.imageUrl, PUBLIC_BUCKET)
+        : null);
+    const thumbnailPath =
+      image.thumbnailImageStoragePath ??
+      (image.thumbnailUrl
+        ? extractStoragePath(image.thumbnailUrl, PUBLIC_BUCKET)
+        : null);
+    await Promise.all(
+      [imagePath, thumbnailPath]
+        .filter((path): path is string => !!path)
+        .map((objectPath) =>
+          removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+        )
+    );
+    if (!imagePath && image.imageUrl) {
+      await removePublicFile({ publicUrl: image.imageUrl });
+    }
+    if (!thumbnailPath && image.thumbnailUrl) {
       await removePublicFile({ publicUrl: image.thumbnailUrl });
     }
 
@@ -354,31 +401,7 @@ export async function getAuditImages({
   auditSessionId: AuditSession["id"];
   organizationId: Organization["id"];
   auditAssetId?: AuditAsset["id"] | null;
-}): Promise<
-  Prisma.AuditImageGetPayload<{
-    include: {
-      uploadedBy: {
-        select: {
-          id: true;
-          firstName: true;
-          lastName: true;
-          displayName: true;
-          profilePicture: true;
-        };
-      };
-      auditAsset: {
-        include: {
-          asset: {
-            select: {
-              id: true;
-              title: true;
-            };
-          };
-        };
-      };
-    };
-  }>[]
-> {
+}) {
   try {
     const where: Prisma.AuditImageWhereInput = {
       auditSessionId,
@@ -422,7 +445,9 @@ export async function getAuditImages({
       },
     });
 
-    return images;
+    return await Promise.all(
+      images.map((image) => resolveAuditImageForPresentation(image))
+    );
   } catch (cause) {
     throw new ShelfError({
       cause,

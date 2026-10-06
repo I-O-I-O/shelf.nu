@@ -459,7 +459,7 @@ export const AuditPDFContent = ({
                   {generalImages.map((img) => (
                     <div key={img.id} className="border border-gray-300 p-1">
                       <img
-                        src={img.thumbnailUrl || img.imageUrl}
+                        src={img.thumbnailUrl || img.imageUrl || undefined}
                         alt={img.description || "Audit image"}
                         className="h-24 w-full object-cover"
                       />
@@ -506,7 +506,7 @@ export const AuditPDFContent = ({
                   {images.map((img) => (
                     <div key={img.id} className="border border-gray-300 p-1">
                       <img
-                        src={img.thumbnailUrl || img.imageUrl}
+                        src={img.thumbnailUrl || img.imageUrl || undefined}
                         alt={img.description || `Photo of ${assetName}`}
                         className="h-24 w-full object-cover"
                       />
