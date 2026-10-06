@@ -1,4 +1,5 @@
 import type { Asset, Kit, Prisma, ReportFound, User } from "@prisma/client";
+import type { ExtendedPrismaClient } from "@shelf/database";
 import { db } from "~/database/db.server";
 import { sendEmail } from "~/emails/mail.server";
 import type { QR_SELECT_FOR_REPORT } from "~/routes/qr+/_public+/$qrId_.contact-owner";
@@ -10,12 +11,15 @@ export async function createReport({
   content,
   assetId,
   kitId,
+  client = db,
 }: Pick<ReportFound, "email" | "content"> & {
   assetId?: Asset["id"];
   kitId?: Kit["id"];
+  /** Allows a caller's transaction to atomically create the native report. */
+  client?: Pick<ExtendedPrismaClient, "reportFound">;
 }) {
   try {
-    return await db.reportFound.create({
+    return await client.reportFound.create({
       data: {
         email,
         content,

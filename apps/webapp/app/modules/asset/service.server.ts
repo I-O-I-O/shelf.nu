@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   Category,
   Location,
@@ -13,6 +14,7 @@ import type {
   AssetIndexSettings,
   UserOrganization,
   BarcodeType,
+  PrismaClient,
 } from "@prisma/client";
 import {
   AssetStatus,
@@ -67,6 +69,7 @@ import { normalizeBarcodeValue } from "~/modules/barcode/validation";
 import {
   createCategoriesIfNotExists,
   getCategory,
+  getActiveCategoriesForOrganization,
 } from "~/modules/category/service.server";
 import { assertNoKitDerivedCustody } from "~/modules/custody/service.server";
 import { getPrimaryCustody, hasCustody } from "~/modules/custody/utils";
@@ -77,12 +80,14 @@ import {
 } from "~/modules/custom-field/service.server";
 import type { CustomFieldDraftPayload } from "~/modules/custom-field/types";
 import { bulkAssignKitCustody } from "~/modules/kit/service.server";
+import { getLocationDescendantIds } from "~/modules/location/descendants.server";
 import {
   createLocationChangeNote,
   createLocationsIfNotExists,
 } from "~/modules/location/service.server";
 import { createLoadUserForNotes } from "~/modules/note/load-user-for-notes.server";
 import { getQr, parseQrCodesFromImportData } from "~/modules/qr/service.server";
+import { createReport } from "~/modules/report-found/service.server";
 import { createTagsIfNotExists } from "~/modules/tag/service.server";
 import {
   createTeamMemberIfNotExists,
@@ -125,7 +130,7 @@ import {
 } from "~/utils/error";
 import { getRedirectUrlFromRequest } from "~/utils/http";
 import { getCurrentSearchParams } from "~/utils/http.server";
-import { id } from "~/utils/id/id.server";
+import { id, id as createId } from "~/utils/id/id.server";
 import { detectImageFormat } from "~/utils/image-format.server";
 import * as importImageCacheServer from "~/utils/import.image-cache.server";
 import type { CachedImage } from "~/utils/import.image-cache.server";
@@ -154,6 +159,8 @@ import {
 import {
   createSignedUrl,
   parseFileFormData,
+  removeStorageImageObject,
+  resolveStorageImageUrl,
   uploadImageFromUrl,
 } from "~/utils/storage.server";
 import { resolveTeamMemberName, resolveUserDisplayName } from "~/utils/user";
@@ -231,6 +238,118 @@ import {
 import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Assets";
+
+type StorageImageFields = {
+  image: string | null;
+  thumbnailImage?: string | null;
+  imageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
+};
+
+type AssetImagePresentationFields = {
+  mainImage?: string | null;
+  thumbnailImage?: string | null;
+  mainImageExpiration?: Date | null;
+  mainImageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
+  assetModel?: StorageImageFields | null;
+  assetKits?: Array<{ kit?: StorageImageFields }>;
+  kitImage?: string | null;
+  kitImageStoragePath?: string | null;
+  kitThumbnailImage?: string | null;
+};
+
+/** Resolve canonical paths (or supported legacy URLs) for a read response only. */
+export async function resolveAssetImagesForPresentation<T extends object>(
+  assets: T[]
+): Promise<T[]> {
+  return Promise.all(
+    assets.map(async (asset) => {
+      const imageFields = asset as T & AssetImagePresentationFields;
+      const [mainImage, thumbnailImage] = await Promise.all([
+        resolveStorageImageUrl({
+          bucketName: "assets",
+          objectPath: imageFields.mainImageStoragePath,
+          legacyUrl: imageFields.mainImage,
+          isPublic: false,
+        }),
+        resolveStorageImageUrl({
+          bucketName: "assets",
+          objectPath: imageFields.thumbnailImageStoragePath,
+          legacyUrl: imageFields.thumbnailImage,
+          isPublic: false,
+        }),
+      ]);
+
+      const assetModel = imageFields.assetModel
+        ? {
+            ...imageFields.assetModel,
+            image: await resolveStorageImageUrl({
+              bucketName: "files",
+              objectPath: imageFields.assetModel.imageStoragePath,
+              legacyUrl: imageFields.assetModel.image,
+              isPublic: true,
+            }),
+            thumbnailImage: await resolveStorageImageUrl({
+              bucketName: "files",
+              objectPath: imageFields.assetModel.thumbnailImageStoragePath,
+              legacyUrl: imageFields.assetModel.thumbnailImage,
+              isPublic: true,
+            }),
+          }
+        : imageFields.assetModel;
+
+      const rawAssetKits = (asset as { assetKits?: unknown }).assetKits;
+      const assetKits = Array.isArray(rawAssetKits)
+        ? await Promise.all(
+            rawAssetKits.map(async (entry: unknown) => {
+              const relation = entry as { kit?: StorageImageFields };
+              if (!relation.kit) return relation;
+              return {
+                ...relation,
+                kit: {
+                  ...relation.kit,
+                  image: await resolveStorageImageUrl({
+                    bucketName: "kits",
+                    objectPath: relation.kit.imageStoragePath,
+                    legacyUrl: relation.kit.image,
+                    isPublic: false,
+                  }),
+                },
+              };
+            })
+          )
+        : imageFields.assetKits;
+
+      const kitImage = imageFields.kitImage
+        ? await resolveStorageImageUrl({
+            bucketName: "kits",
+            objectPath: imageFields.kitImageStoragePath,
+            legacyUrl: imageFields.kitImage,
+            isPublic: false,
+          })
+        : imageFields.kitImageStoragePath
+        ? await resolveStorageImageUrl({
+            bucketName: "kits",
+            objectPath: imageFields.kitImageStoragePath,
+            isPublic: false,
+          })
+        : imageFields.kitImage;
+
+      return {
+        ...asset,
+        mainImage,
+        thumbnailImage,
+        mainImageExpiration: mainImage
+          ? new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+          : null,
+        assetModel,
+        assetKits,
+        kitImage,
+      } as T;
+    })
+  );
+}
 
 const ASSET_BEFORE_UPDATE_SELECT = Prisma.validator<Prisma.AssetSelect>()({
   title: true,
@@ -574,7 +693,11 @@ export async function getAsset<T extends Prisma.AssetInclude | undefined>({
       });
     }
 
-    return asset as AssetWithInclude<T>;
+    return (
+      await resolveAssetImagesForPresentation([
+        asset as AssetWithInclude<T> & AssetImagePresentationFields,
+      ])
+    )[0] as AssetWithInclude<T>;
   } catch (cause) {
     const isShelfError = isLikeShelfError(cause);
     throw new ShelfError({
@@ -635,6 +758,8 @@ export async function getAssets(params: {
   hideUnavailableToAddToKit?: boolean;
   assetKitFilter?: string | null;
   availableToBookOnly?: boolean;
+  /** IOIO staff-only presentation filter for reversible archive markers. */
+  excludeAssetIds?: string[];
 }) {
   let {
     organizationId,
@@ -655,6 +780,7 @@ export async function getAssets(params: {
     extraInclude,
     assetKitFilter,
     availableToBookOnly,
+    excludeAssetIds,
   } = params;
 
   try {
@@ -662,6 +788,10 @@ export async function getAssets(params: {
     const take = perPage >= 1 && perPage <= 100 ? perPage : 20;
 
     const where: Prisma.AssetWhereInput = { organizationId };
+
+    if (excludeAssetIds?.length) {
+      where.id = { notIn: excludeAssetIds };
+    }
 
     if (availableToBookOnly) {
       where.availableToBook = true;
@@ -936,10 +1066,34 @@ export async function getAssets(params: {
       ];
     }
 
+    /**
+     * IOIO's Inventory category picker uses the native kit filter to group
+     * both Shelf kit members and individually tracked product units. The
+     * latter are the physical units behind products such as Makey Makey Kit,
+     * and their AssetModel is the Shelf-native product identity. Keep the
+     * classification in the query rather than changing Asset.categoryId.
+     */
     if (assetKitFilter === "NOT_IN_KIT") {
-      where.assetKits = { none: {} };
+      where.AND = [
+        ...(Array.isArray(where.AND)
+          ? where.AND
+          : where.AND
+          ? [where.AND]
+          : []),
+        { assetKits: { none: {} } },
+        { type: { not: AssetType.INDIVIDUAL } },
+      ];
     } else if (assetKitFilter === "IN_OTHER_KITS") {
-      where.assetKits = { some: {} };
+      where.AND = [
+        ...(Array.isArray(where.AND)
+          ? where.AND
+          : where.AND
+          ? [where.AND]
+          : []),
+        {
+          OR: [{ assetKits: { some: {} } }, { type: AssetType.INDIVIDUAL }],
+        },
+      ];
     }
 
     /**
@@ -951,9 +1105,10 @@ export async function getAssets(params: {
      * @param assetWhere - The Prisma where clause to fetch and count against
      * @returns A tuple of `[assets, totalAssets]`
      */
+    const baseDb = db as unknown as PrismaClient;
     const fetchAssetsForWhere = (assetWhere: Prisma.AssetWhereInput) =>
       Promise.all([
-        db.asset.findMany({
+        baseDb.asset.findMany({
           skip,
           take,
           where: assetWhere,
@@ -980,7 +1135,10 @@ export async function getAssets(params: {
 
     const [assets, totalAssets] = await fetchAssetsForWhere(where);
 
-    return { assets, totalAssets };
+    return {
+      assets: await resolveAssetImagesForPresentation(assets),
+      totalAssets,
+    };
   } catch (cause) {
     // A deliberate client error — e.g. the >65k bind-param ceiling 400 thrown by
     // resolveAssetSearchIds — must reach the caller with its own actionable
@@ -1203,6 +1361,8 @@ export async function createAsset({
   availableToBook = true,
   mainImage,
   mainImageExpiration,
+  mainImageStoragePath,
+  thumbnailImageStoragePath,
   barcodes,
   id: assetId, // Add support for passing an ID
   type,
@@ -1210,6 +1370,12 @@ export async function createAsset({
   minQuantity,
   consumptionType,
   unitOfMeasure,
+  requiresBorrowApproval = false,
+  requiresStaffPreparation = false,
+  requiresReturnPhoto = false,
+  maxBorrowDays,
+  extensionBorrowDays,
+  returnHandling,
   assetModelId,
 }: Pick<
   Asset,
@@ -1224,9 +1390,17 @@ export async function createAsset({
   barcodes?: { type: BarcodeType; value: string; existingId?: string }[];
   organizationId: Organization["id"];
   availableToBook?: Asset["availableToBook"];
+  requiresBorrowApproval?: Asset["requiresBorrowApproval"];
+  requiresStaffPreparation?: Asset["requiresStaffPreparation"];
+  requiresReturnPhoto?: Asset["requiresReturnPhoto"];
+  maxBorrowDays?: Asset["maxBorrowDays"];
+  extensionBorrowDays?: Asset["extensionBorrowDays"];
+  returnHandling?: Asset["returnHandling"];
   id?: Asset["id"]; // Make ID optional
   mainImage?: Asset["mainImage"];
   mainImageExpiration?: Asset["mainImageExpiration"];
+  mainImageStoragePath?: Asset["mainImageStoragePath"];
+  thumbnailImageStoragePath?: Asset["thumbnailImageStoragePath"];
   type?: Asset["type"];
   quantity?: Asset["quantity"];
   minQuantity?: Asset["minQuantity"];
@@ -1330,8 +1504,18 @@ export async function createAsset({
         valuation,
         organization,
         availableToBook,
+        requiresBorrowApproval,
+        requiresStaffPreparation,
+        requiresReturnPhoto,
+        maxBorrowDays,
+        extensionBorrowDays,
+        returnHandling:
+          returnHandling ??
+          (kitId ? "RETURN_TO_RETURN_ZONE" : "RETURN_TO_STORAGE"),
         mainImage,
         mainImageExpiration,
+        mainImageStoragePath,
+        thumbnailImageStoragePath,
         type,
         quantity,
         minQuantity,
@@ -1531,6 +1715,26 @@ export async function createAsset({
           await assertKitsBelongToOrg({ kitIds: [kitId!], organizationId }, tx);
         }
 
+        // Native Kit settings are the source of truth for every member unit.
+        // Copy the configured duration onto the Asset row so all borrowing
+        // paths can use one product-level field without a Kit-only branch.
+        if (hasKit) {
+          const kit = await tx.kit.findFirst({
+            where: { id: kitId!, organizationId },
+            select: { maxBorrowDays: true },
+          });
+          if (!kit) {
+            throw new ShelfError({
+              cause: null,
+              message: "The selected Kit is not in this workspace.",
+              label,
+              status: 403,
+              shouldBeCaptured: false,
+            });
+          }
+          data.maxBorrowDays = kit.maxBorrowDays;
+        }
+
         // SECURITY (cross-org IDOR): the categoryId comes from form/CSV input
         // and is connected by the nested create above with no org scoping of
         // its own. Prisma's foreign key only proves the row exists, not that
@@ -1657,6 +1861,850 @@ export async function createAsset({
 }
 
 /**
+ * Converts an entire quantity-tracked pool into individually tracked assets.
+ *
+ * This is intentionally a narrow Staff operation rather than a general
+ * tracking-mode update. The source is locked and all safety checks run before
+ * any writes. All new assets, their QR records, placements, notes, audit
+ * events, and the source quantity update share one transaction, so a failed
+ * conversion cannot leave a partial split behind.
+ */
+export async function convertQuantityTrackedAssetBulk({
+  id,
+  organizationId,
+  userId,
+}: {
+  id: Asset["id"];
+  organizationId: Organization["id"];
+  userId: User["id"];
+}) {
+  try {
+    return await db.$transaction(async (tx) => {
+      const source = await lockAssetForQuantityUpdate(tx, id, organizationId);
+
+      if (source.type !== AssetType.QUANTITY_TRACKED) {
+        throw new ShelfError({
+          cause: null,
+          title: "Conversion is not needed",
+          message: "Only quantity-tracked assets can be converted in bulk.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const sourceQuantity = source.quantity ?? 0;
+      if (sourceQuantity <= 1) {
+        throw new ShelfError({
+          cause: null,
+          title: "Quantity must be greater than one",
+          message:
+            "This asset has one unit. It can be switched to individual tracking in the edit form.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const [
+        sourceDetails,
+        activeArchive,
+        assetKitMemberships,
+        custodyCount,
+        bookingAssetCount,
+      ] = await Promise.all([
+        tx.asset.findUniqueOrThrow({
+          where: { id, organizationId },
+          include: {
+            tags: { select: { id: true } },
+            customFields: { select: { customFieldId: true, value: true } },
+            category: { select: { name: true } },
+            assetLocations: {
+              select: {
+                id: true,
+                locationId: true,
+                quantity: true,
+                assetKitId: true,
+                location: { select: { name: true } },
+              },
+            },
+          },
+        }),
+        tx.ioioArchivedItem.findFirst({
+          where: {
+            organizationId,
+            itemType: "ASSET",
+            itemId: id,
+            restoredAt: null,
+          },
+          select: { disposition: true },
+        }),
+        tx.assetKit.findMany({
+          where: { assetId: id, organizationId },
+          select: {
+            quantity: true,
+            kit: { select: { id: true, name: true } },
+          },
+        }),
+        tx.custody.count({ where: { assetId: id } }),
+        tx.bookingAsset.count({ where: { assetId: id } }),
+      ]);
+
+      if (activeArchive) {
+        throw new ShelfError({
+          cause: null,
+          title: "Archived asset cannot be converted",
+          message: "Restore this asset before converting it.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (assetKitMemberships.length > 0) {
+        const kitNames = assetKitMemberships
+          .map(({ kit, quantity }) => `${kit.name} (${quantity} units)`)
+          .join(", ");
+        throw new ShelfError({
+          cause: null,
+          title: "This product is in a Shelf Kit",
+          message:
+            `This product is part of ${kitNames}. ` +
+            "Remove it from that bundle before splitting these physical units.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (custodyCount > 0 || bookingAssetCount > 0) {
+        throw new ShelfError({
+          cause: null,
+          title: "Asset has loan history",
+          message:
+            "Conversion is blocked because this asset has custody or booking records.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (source.status !== AssetStatus.AVAILABLE) {
+        throw new ShelfError({
+          cause: null,
+          title: "Asset is currently in use",
+          message:
+            "Conversion is blocked while this asset is checked out or assigned to custody.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const sourceLocations = sourceDetails.assetLocations;
+      if (
+        sourceLocations.some(
+          (location) =>
+            !Number.isInteger(location.quantity) || location.quantity <= 0
+        )
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Invalid location quantities",
+          message:
+            "Conversion is blocked because one or more location quantities are invalid.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      const placedQuantity = sourceLocations.reduce(
+        (total, location) => total + location.quantity,
+        0
+      );
+      if (sourceLocations.length > 0 && placedQuantity !== sourceQuantity) {
+        throw new ShelfError({
+          cause: null,
+          title: "Location quantities do not match",
+          message:
+            "Conversion is blocked because the quantities assigned to locations do not match the total stock.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (sourceLocations.some((location) => location.assetKitId)) {
+        throw new ShelfError({
+          cause: null,
+          title: "Kit-managed placement cannot be converted",
+          message:
+            "Remove this asset from its kit before converting its locations.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const locationQueue = sourceLocations.flatMap((location) =>
+        Array.from({ length: location.quantity }, () => location.locationId)
+      );
+      const titleNumberWidth = Math.max(3, String(sourceQuantity).length);
+      const createdAssetIds: string[] = [];
+      // AssetModel is a native Shelf product identity. Use the source model
+      // when one exists; otherwise create one stable model for this conversion
+      // so the resulting physical assets can be grouped without grouping
+      // unrelated records by title.
+      const logicalAssetModelId =
+        sourceDetails.assetModelId ??
+        (
+          await tx.assetModel.create({
+            data: {
+              id: createId(),
+              name: sourceDetails.title,
+              organization: { connect: { id: organizationId } },
+              createdBy: { connect: { id: userId } },
+            },
+            select: { id: true },
+          })
+        ).id;
+
+      for (let index = 0; index < sourceQuantity; index++) {
+        const createdAssetId = createId();
+        const sequentialId = await getNextSequentialId(organizationId);
+        const created = await tx.asset.create({
+          data: {
+            id: createdAssetId,
+            title: `${sourceDetails.title} #${String(index + 1).padStart(
+              titleNumberWidth,
+              "0"
+            )}`,
+            description: sourceDetails.description,
+            sequentialId,
+            user: { connect: { id: userId } },
+            organization: { connect: { id: organizationId } },
+            category: sourceDetails.categoryId
+              ? { connect: { id: sourceDetails.categoryId } }
+              : undefined,
+            assetModel: { connect: { id: logicalAssetModelId } },
+            tags: sourceDetails.tags.length
+              ? {
+                  connect: sourceDetails.tags.map(({ id: tagId }) => ({
+                    id: tagId,
+                  })),
+                }
+              : undefined,
+            customFields: sourceDetails.customFields.length
+              ? {
+                  create: sourceDetails.customFields.map(
+                    ({ customFieldId, value }) => ({
+                      customField: { connect: { id: customFieldId } },
+                      value:
+                        value === null
+                          ? Prisma.JsonNull
+                          : (value as Prisma.InputJsonValue),
+                    })
+                  ),
+                }
+              : undefined,
+            qrCodes: {
+              create: [
+                {
+                  id: createId(),
+                  version: 0,
+                  errorCorrection: ErrorCorrection.L,
+                  user: { connect: { id: userId } },
+                  organization: { connect: { id: organizationId } },
+                },
+              ],
+            },
+            mainImage: sourceDetails.mainImage,
+            thumbnailImage: sourceDetails.thumbnailImage,
+            mainImageExpiration: sourceDetails.mainImageExpiration,
+            availableToBook: sourceDetails.availableToBook,
+            requiresBorrowApproval: sourceDetails.requiresBorrowApproval,
+            requiresReturnPhoto: sourceDetails.requiresReturnPhoto,
+            type: AssetType.INDIVIDUAL,
+            quantity: null,
+            minQuantity: null,
+            consumptionType: null,
+            unitOfMeasure: null,
+          },
+        });
+
+        const locationId = locationQueue[index];
+        if (locationId) {
+          await tx.assetLocation.create({
+            data: {
+              assetId: created.id,
+              locationId,
+              organizationId,
+              quantity: 1,
+            },
+          });
+        }
+
+        createdAssetIds.push(created.id);
+        await createNote(
+          {
+            content: `Created from quantity-tracked asset ${id} during bulk conversion.`,
+            type: "UPDATE",
+            userId,
+            assetId: created.id,
+            organizationId,
+          },
+          tx
+        );
+      }
+
+      const conversionMeta = {
+        conversion: "QUANTITY_TO_INDIVIDUAL_BULK",
+        sourceAssetId: id,
+        originalQuantity: sourceQuantity,
+        resultingQuantity: sourceQuantity,
+        resultingAssetIds: createdAssetIds,
+        locationDistribution: sourceLocations.map((location) => ({
+          locationId: location.locationId,
+          quantity: location.quantity,
+        })),
+      };
+
+      await createNote(
+        {
+          content: `Converted ${sourceQuantity} units from this quantity-tracked asset into ${sourceQuantity} individually tracked assets.`,
+          type: "UPDATE",
+          userId,
+          assetId: id,
+          organizationId,
+        },
+        tx
+      );
+      await createConsumptionLog({
+        assetId: id,
+        category: ConsumptionCategory.ADJUSTMENT,
+        quantity: sourceQuantity,
+        userId,
+        note: "Bulk conversion to individual tracking",
+        tx,
+      });
+
+      await tx.assetLocation.deleteMany({
+        where: { assetId: id, organizationId },
+      });
+      await tx.asset.update({
+        where: { id, organizationId },
+        data: { quantity: 0 },
+      });
+      // Retain the source asset and its audit trail, but remove it from active
+      // IOIO inventory through the existing reversible lifecycle marker. The
+      // source must not reappear as a zero-quantity logical product.
+      await tx.ioioArchivedItem.create({
+        data: {
+          organizationId,
+          itemType: "ASSET",
+          itemId: id,
+          disposition: "ARCHIVE",
+          archivedById: userId,
+          originalCategoryId: sourceDetails.categoryId,
+          originalCategoryName: sourceDetails.category?.name ?? null,
+          originalLocationId: sourceLocations[0]?.locationId ?? null,
+          originalLocationName: sourceLocations[0]?.location?.name ?? null,
+        },
+      });
+
+      for (const createdAssetId of createdAssetIds) {
+        await recordEvent(
+          {
+            organizationId,
+            actorUserId: userId,
+            action: "ASSET_CREATED",
+            entityType: "ASSET",
+            entityId: createdAssetId,
+            assetId: createdAssetId,
+            meta: conversionMeta,
+          },
+          tx
+        );
+      }
+      await recordEvent(
+        {
+          organizationId,
+          actorUserId: userId,
+          action: "ASSET_QUANTITY_CHANGED",
+          entityType: "ASSET",
+          entityId: id,
+          assetId: id,
+          field: "quantity",
+          fromValue: sourceQuantity,
+          toValue: 0,
+          meta: conversionMeta,
+        },
+        tx
+      );
+
+      return {
+        createdAssetIds,
+        convertedCount: createdAssetIds.length,
+        remainingQuantity: 0,
+      };
+    });
+  } catch (cause) {
+    if (isLikeShelfError(cause)) throw cause;
+    throw new ShelfError({
+      cause,
+      message: "Could not switch to individual QR tracking safely.",
+      additionalData: { id, organizationId, userId },
+      label,
+    });
+  }
+}
+
+/**
+ * Consolidates an active individually tracked product group into one
+ * quantity-tracked asset. The original physical-unit rows, QR identities,
+ * and timeline relations remain intact and are moved to Archive; the new
+ * quantity record receives a fresh QR identity.
+ */
+export async function convertIndividualProductToQuantityTracked({
+  id,
+  organizationId,
+  userId,
+}: {
+  id: Asset["id"];
+  organizationId: Organization["id"];
+  userId: User["id"];
+}) {
+  try {
+    return await db.$transaction(async (tx) => {
+      const representative = await lockAssetForQuantityUpdate(
+        tx,
+        id,
+        organizationId
+      );
+      if (
+        representative.type !== AssetType.INDIVIDUAL ||
+        !representative.assetModelId
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Product group is no longer available",
+          message:
+            "Only an active individually tracked product can be switched to Quantity.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const [model, activeMarkers] = await Promise.all([
+        tx.assetModel.findFirst({
+          where: {
+            id: representative.assetModelId,
+            organizationId,
+          },
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            image: true,
+            thumbnailImage: true,
+            defaultCategoryId: true,
+          },
+        }),
+        tx.ioioArchivedItem.findMany({
+          where: {
+            organizationId,
+            itemType: "ASSET",
+            restoredAt: null,
+          },
+          select: { itemId: true },
+        }),
+      ]);
+      if (!model) {
+        throw new ShelfError({
+          cause: null,
+          title: "Product group was not found",
+          message: "Refresh Inventory and try again.",
+          label,
+          status: 404,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const archivedIds = activeMarkers.map(({ itemId }) => itemId);
+      const activeUnits = await tx.asset.findMany({
+        where: {
+          organizationId,
+          assetModelId: model.id,
+          type: AssetType.INDIVIDUAL,
+          id: { notIn: archivedIds },
+        },
+        select: { id: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      });
+      const unitIds = activeUnits.map(({ id: unitId }) => unitId);
+      if (unitIds.length === 0 || !unitIds.includes(id)) {
+        throw new ShelfError({
+          cause: null,
+          title: "No active physical units",
+          message: "This product has no active physical units to convert.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      // Lock in stable ID order so two concurrent conversions cannot each
+      // partially claim the same product's physical units.
+      for (const unitId of [...unitIds].sort()) {
+        await lockAssetForQuantityUpdate(tx, unitId, organizationId);
+      }
+
+      const [units, newlyArchived] = await Promise.all([
+        tx.asset.findMany({
+          where: { organizationId, id: { in: unitIds } },
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            status: true,
+            categoryId: true,
+            category: { select: { name: true } },
+            valuation: true,
+            availableToBook: true,
+            requiresBorrowApproval: true,
+            requiresStaffPreparation: true,
+            requiresReturnPhoto: true,
+            mainImage: true,
+            thumbnailImage: true,
+            mainImageExpiration: true,
+            unitOfMeasure: true,
+            tags: { select: { id: true } },
+            customFields: {
+              select: { customFieldId: true, value: true },
+            },
+            assetLocations: {
+              select: {
+                locationId: true,
+                quantity: true,
+                assetKitId: true,
+                location: { select: { name: true } },
+              },
+            },
+          },
+        }),
+        tx.ioioArchivedItem.findMany({
+          where: {
+            organizationId,
+            itemType: "ASSET",
+            itemId: { in: unitIds },
+            restoredAt: null,
+          },
+          select: { itemId: true },
+        }),
+      ]);
+      if (newlyArchived.length > 0 || units.length !== unitIds.length) {
+        throw new ShelfError({
+          cause: null,
+          title: "Product changed during conversion",
+          message: "Refresh Inventory and try the tracking change again.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const [
+        custodyCount,
+        bookingCount,
+        kitMembershipCount,
+        modelBookingCount,
+      ] = await Promise.all([
+        tx.custody.count({ where: { assetId: { in: unitIds } } }),
+        tx.bookingAsset.count({ where: { assetId: { in: unitIds } } }),
+        tx.assetKit.count({
+          where: { organizationId, assetId: { in: unitIds } },
+        }),
+        tx.bookingModelRequest.count({
+          where: { assetModelId: model.id },
+        }),
+      ]);
+      if (
+        units.some((unit) => unit.status !== AssetStatus.AVAILABLE) ||
+        custodyCount > 0 ||
+        bookingCount > 0 ||
+        kitMembershipCount > 0 ||
+        modelBookingCount > 0
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Product has active operational records",
+          message:
+            "Remove the product from kits and resolve custody or booking records before switching it to Quantity.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (
+        units.some((unit) =>
+          unit.assetLocations.some(
+            (placement) =>
+              placement.quantity !== 1 || placement.assetKitId !== null
+          )
+        )
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Kit-managed location cannot be converted",
+          message:
+            "Remove the product from its Shelf Kit before switching tracking methods.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const firstUnit =
+        units.find(({ id: unitId }) => unitId === id) ?? units[0];
+      const categoryId = firstUnit.categoryId ?? model.defaultCategoryId;
+      if (categoryId) {
+        const category = await tx.category.findFirst({
+          where: { id: categoryId, organizationId },
+          select: { id: true },
+        });
+        if (!category) {
+          throw new ShelfError({
+            cause: null,
+            title: "Category is no longer available",
+            message: "Choose a current category before switching tracking.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      const locationCounts = new Map<string, number>();
+      for (const unit of units) {
+        const placement = unit.assetLocations[0];
+        if (placement) {
+          locationCounts.set(
+            placement.locationId,
+            (locationCounts.get(placement.locationId) ?? 0) + 1
+          );
+        }
+        if (unit.assetLocations.length > 1) {
+          throw new ShelfError({
+            cause: null,
+            title: "Invalid physical-unit locations",
+            message:
+              "One or more physical units have multiple locations. Resolve those locations before switching tracking.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      const quantityAssetId = createId();
+      const sequentialId = await getNextSequentialId(organizationId);
+      await tx.asset.create({
+        data: {
+          id: quantityAssetId,
+          title: model.name,
+          description: model.description ?? firstUnit.description,
+          sequentialId,
+          user: { connect: { id: userId } },
+          organization: { connect: { id: organizationId } },
+          ...(categoryId ? { category: { connect: { id: categoryId } } } : {}),
+          type: AssetType.QUANTITY_TRACKED,
+          quantity: units.length,
+          minQuantity: 1,
+          consumptionType: ConsumptionType.TWO_WAY,
+          unitOfMeasure: firstUnit.unitOfMeasure,
+          valuation: firstUnit.valuation,
+          availableToBook: units.every((unit) => unit.availableToBook),
+          requiresBorrowApproval: units.some(
+            (unit) => unit.requiresBorrowApproval
+          ),
+          requiresStaffPreparation: units.some(
+            (unit) => unit.requiresStaffPreparation
+          ),
+          requiresReturnPhoto: units.some((unit) => unit.requiresReturnPhoto),
+          mainImage: model.image ?? firstUnit.mainImage,
+          thumbnailImage: model.thumbnailImage ?? firstUnit.thumbnailImage,
+          mainImageExpiration: model.image
+            ? null
+            : firstUnit.mainImageExpiration,
+          tags: firstUnit.tags.length
+            ? {
+                connect: firstUnit.tags.map(({ id: tagId }) => ({ id: tagId })),
+              }
+            : undefined,
+          customFields: firstUnit.customFields.length
+            ? {
+                create: firstUnit.customFields.map(
+                  ({ customFieldId, value }) => ({
+                    customField: { connect: { id: customFieldId } },
+                    value:
+                      value === null
+                        ? Prisma.JsonNull
+                        : (value as Prisma.InputJsonValue),
+                  })
+                ),
+              }
+            : undefined,
+          qrCodes: {
+            create: [
+              {
+                id: createId(),
+                version: 0,
+                errorCorrection: ErrorCorrection.L,
+                user: { connect: { id: userId } },
+                organization: { connect: { id: organizationId } },
+              },
+            ],
+          },
+        },
+      });
+
+      if (locationCounts.size > 0) {
+        await tx.assetLocation.createMany({
+          data: [...locationCounts].map(([locationId, quantity]) => ({
+            assetId: quantityAssetId,
+            locationId,
+            organizationId,
+            quantity,
+          })),
+        });
+      }
+
+      await tx.ioioArchivedItem.createMany({
+        data: units.map((unit) => ({
+          organizationId,
+          itemType: "ASSET" as const,
+          itemId: unit.id,
+          disposition: "ARCHIVE" as const,
+          archivedById: userId,
+          originalCategoryId: unit.categoryId,
+          originalCategoryName: unit.category?.name ?? null,
+          originalLocationId: unit.assetLocations[0]?.locationId ?? null,
+          originalLocationName: unit.assetLocations[0]?.location.name ?? null,
+        })),
+      });
+
+      await createNote(
+        {
+          content: `Created by consolidating ${units.length} individually tracked physical units. Original unit records, QR identities, and history are retained in Archive.`,
+          type: "UPDATE",
+          userId,
+          assetId: quantityAssetId,
+          organizationId,
+        },
+        tx
+      );
+      await createConsumptionLog({
+        assetId: quantityAssetId,
+        category: ConsumptionCategory.ADJUSTMENT,
+        quantity: units.length,
+        userId,
+        note: "Consolidated individually tracked product into Quantity tracking",
+        tx,
+      });
+      await recordEvent(
+        {
+          organizationId,
+          actorUserId: userId,
+          action: "ASSET_CREATED",
+          entityType: "ASSET",
+          entityId: quantityAssetId,
+          assetId: quantityAssetId,
+          meta: {
+            conversion: "INDIVIDUAL_TO_QUANTITY",
+            sourceAssetModelId: model.id,
+            archivedPhysicalUnitIds: unitIds,
+            quantity: units.length,
+            locationDistribution: [...locationCounts].map(
+              ([locationId, quantity]) => ({ locationId, quantity })
+            ),
+          },
+        },
+        tx
+      );
+
+      return { quantityAssetId, quantity: units.length };
+    });
+  } catch (cause) {
+    if (isLikeShelfError(cause)) throw cause;
+    throw new ShelfError({
+      cause,
+      message: "Could not switch this product to Quantity safely.",
+      additionalData: { id, organizationId, userId },
+      label,
+    });
+  }
+}
+
+/**
+ * Ensures a legacy individually tracked asset has a native AssetModel so it
+ * can use the shared physical-unit editor and add-units flow. Existing model
+ * links are reused and concurrent callers serialize on the asset row.
+ */
+export async function ensureIndividualAssetModel({
+  id,
+  organizationId,
+  userId,
+}: {
+  id: Asset["id"];
+  organizationId: Organization["id"];
+  userId: User["id"];
+}) {
+  try {
+    return await db.$transaction(async (tx) => {
+      const asset = await lockAssetForQuantityUpdate(tx, id, organizationId);
+
+      if (asset.type !== AssetType.INDIVIDUAL) {
+        throw new ShelfError({
+          cause: null,
+          title: "Individual tracking is required",
+          message:
+            "Only individually tracked assets can have physical units added.",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (asset.assetModelId) return asset.assetModelId;
+
+      const model = await tx.assetModel.create({
+        data: {
+          id: createId(),
+          name: asset.title.replace(/\s+#\d+$/u, "").trim() || asset.title,
+          organization: { connect: { id: organizationId } },
+          createdBy: { connect: { id: userId } },
+        },
+        select: { id: true },
+      });
+
+      await tx.asset.update({
+        where: { id, organizationId },
+        data: { assetModel: { connect: { id: model.id } } },
+      });
+
+      return model.id;
+    });
+  } catch (cause) {
+    if (isLikeShelfError(cause)) throw cause;
+    throw maybeUniqueConstraintViolation(cause, "AssetModel", {
+      additionalData: { id, userId, organizationId },
+    });
+  }
+}
+
+/**
  * Hard cap on `bulkCreateAssetsFromModel` batch size. Tuned to keep a single
  * synchronous request comfortable (each underlying `createAsset` opens its
  * own tx); for higher counts users should reach for CSV import.
@@ -1685,12 +2733,49 @@ export function renderBulkAssetTitle(
   template: string,
   indexValue: number
 ): string {
+  // A hash-number token is used for physical units. Keep those identifiers
+  // aligned with the existing #001, #002, #003 format while preserving the
+  // original numbering behavior for generic bulk-created assets.
+  const renderedIndex = template.includes("#{i}")
+    ? String(indexValue).padStart(3, "0")
+    : String(indexValue);
   if (template.includes("{i}")) {
-    return template
-      .replace(BULK_NAME_TEMPLATE_TOKEN, String(indexValue))
-      .trim();
+    return template.replace(BULK_NAME_TEMPLATE_TOKEN, renderedIndex).trim();
   }
-  return `${template.trim()} ${indexValue}`.trim();
+  return `${template.trim()} ${renderedIndex}`.trim();
+}
+
+/**
+ * Returns the lowest unused physical-unit numbers for a product group.
+ * Existing titles may use either padded or unpadded suffixes, but both map to
+ * the same numeric identity, so a deleted #007 can be filled before #012.
+ */
+export function getPhysicalUnitNumbersToAdd(
+  existingTitles: string[],
+  count: number
+): number[] {
+  const usedNumbers = new Set<number>();
+  for (const title of existingTitles) {
+    const match = title.match(/#(\d+)$/u);
+    if (!match) continue;
+
+    const number = Number(match[1]);
+    if (Number.isInteger(number) && number > 0) {
+      usedNumbers.add(number);
+    }
+  }
+
+  const numbers: number[] = [];
+  let candidate = 1;
+  while (numbers.length < count) {
+    if (!usedNumbers.has(candidate)) {
+      numbers.push(candidate);
+      usedNumbers.add(candidate);
+    }
+    candidate += 1;
+  }
+
+  return numbers;
 }
 
 /**
@@ -1759,6 +2844,12 @@ export async function bulkCreateAssetsFromModel({
   mainImage,
   mainImageExpiration,
   availableToBook,
+  requiresBorrowApproval,
+  requiresStaffPreparation,
+  requiresReturnPhoto,
+  maxBorrowDays,
+  extensionBorrowDays,
+  returnHandling,
 }: {
   assetModelId: string;
   count: number;
@@ -1776,6 +2867,12 @@ export async function bulkCreateAssetsFromModel({
   mainImage?: Asset["mainImage"];
   mainImageExpiration?: Asset["mainImageExpiration"];
   availableToBook?: boolean;
+  requiresBorrowApproval?: Asset["requiresBorrowApproval"];
+  requiresStaffPreparation?: Asset["requiresStaffPreparation"];
+  requiresReturnPhoto?: Asset["requiresReturnPhoto"];
+  maxBorrowDays?: Asset["maxBorrowDays"];
+  extensionBorrowDays?: Asset["extensionBorrowDays"];
+  returnHandling?: Asset["returnHandling"];
 }): Promise<{
   createdAssetIds: Asset["id"][];
   failedAt?: number;
@@ -1918,6 +3015,12 @@ export async function bulkCreateAssetsFromModel({
         mainImage,
         mainImageExpiration,
         availableToBook: availableToBook ?? true,
+        requiresBorrowApproval,
+        requiresStaffPreparation,
+        requiresReturnPhoto,
+        maxBorrowDays,
+        extensionBorrowDays,
+        returnHandling,
         type: AssetType.INDIVIDUAL,
       });
       createdAssetIds.push(created.id);
@@ -1941,6 +3044,170 @@ export async function bulkCreateAssetsFromModel({
   }
 
   return { createdAssetIds };
+}
+
+/**
+ * Adds physical units to an existing individually tracked product group.
+ * Each unit is a native INDIVIDUAL Asset and receives a fresh QR code through
+ * the existing asset creation service. Existing unit identities are never
+ * edited or replaced.
+ */
+export async function addIndividualUnitsToAssetModel({
+  assetModelId,
+  count,
+  organizationId,
+  userId,
+}: {
+  assetModelId: string;
+  count: number;
+  organizationId: Organization["id"];
+  userId: User["id"];
+}) {
+  if (!Number.isInteger(count) || count < 1 || count > BULK_CREATE_MAX) {
+    throw new ShelfError({
+      cause: null,
+      title: "Invalid unit count",
+      message: `Add between 1 and ${BULK_CREATE_MAX} physical units.`,
+      label,
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+
+  await assertAssetModelBelongsToOrg({ assetModelId, organizationId });
+
+  const [model, assets, archivedItems] = await Promise.all([
+    db.assetModel.findFirstOrThrow({
+      where: { id: assetModelId, organizationId },
+      select: { name: true },
+    }),
+    db.asset.findMany({
+      where: { assetModelId, organizationId },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: {
+        id: true,
+        title: true,
+        type: true,
+        description: true,
+        valuation: true,
+        categoryId: true,
+        availableToBook: true,
+        requiresBorrowApproval: true,
+        requiresStaffPreparation: true,
+        requiresReturnPhoto: true,
+        maxBorrowDays: true,
+        returnHandling: true,
+        mainImage: true,
+        mainImageExpiration: true,
+        tags: { select: { id: true } },
+        assetLocations: {
+          take: 1,
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: { locationId: true },
+        },
+      },
+    }),
+    db.ioioArchivedItem.findMany({
+      where: {
+        organizationId,
+        itemType: "ASSET",
+        restoredAt: null,
+      },
+      select: { itemId: true },
+    }),
+  ]);
+
+  const archivedAssetIds = new Set(archivedItems.map(({ itemId }) => itemId));
+  const activeAssets = assets.filter(
+    (asset) => !archivedAssetIds.has(asset.id)
+  );
+  const individualAssets = activeAssets.filter(
+    (asset) => asset.type === AssetType.INDIVIDUAL
+  );
+  if (individualAssets.length === 0) {
+    throw new ShelfError({
+      cause: null,
+      title: "No physical units found",
+      message: "Add units is available for an existing individual product.",
+      label,
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+
+  if (individualAssets.length !== activeAssets.length) {
+    throw new ShelfError({
+      cause: null,
+      title: "Mixed tracking group",
+      message: "This product group contains more than one tracking method.",
+      label,
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+
+  const source = individualAssets[0];
+  const tags = source.tags.length
+    ? { set: source.tags.map(({ id }) => ({ id })) }
+    : undefined;
+  const numbersToAdd = getPhysicalUnitNumbersToAdd(
+    activeAssets.map((asset) => asset.title),
+    count
+  );
+  const createdAssetIds: Asset["id"][] = [];
+
+  for (const unitNumber of numbersToAdd) {
+    try {
+      const created = await createAsset({
+        title: renderBulkAssetTitle(`${model.name} #{i}`, unitNumber),
+        description: source.description,
+        userId,
+        organizationId,
+        assetModelId,
+        categoryId: source.categoryId,
+        valuation: source.valuation ?? null,
+        locationId: source.assetLocations[0]?.locationId,
+        tags,
+        mainImage: source.mainImage,
+        mainImageExpiration: source.mainImageExpiration,
+        availableToBook: source.availableToBook,
+        requiresBorrowApproval: source.requiresBorrowApproval,
+        requiresStaffPreparation: source.requiresStaffPreparation,
+        requiresReturnPhoto: source.requiresReturnPhoto,
+        maxBorrowDays: source.maxBorrowDays,
+        returnHandling: source.returnHandling,
+        type: AssetType.INDIVIDUAL,
+      });
+      createdAssetIds.push(created.id);
+    } catch (cause) {
+      const error = isLikeShelfError(cause)
+        ? (cause as ShelfError)
+        : new ShelfError({
+            cause,
+            title: "Physical unit creation failed",
+            message:
+              "Some physical units were added, but the remaining units could not be created.",
+            label,
+            additionalData: {
+              assetModelId,
+              organizationId,
+              failedUnitNumber: unitNumber,
+            },
+          });
+
+      return {
+        createdAssetIds,
+        failedAt: createdAssetIds.length,
+        error,
+        addedCount: createdAssetIds.length,
+      };
+    }
+  }
+
+  return {
+    createdAssetIds,
+    addedCount: createdAssetIds.length,
+  };
 }
 
 /**
@@ -1968,6 +3235,8 @@ export async function updateAsset({
   mainImage,
   mainImageExpiration,
   thumbnailImage,
+  mainImageStoragePath,
+  thumbnailImageStoragePath,
   categoryId,
   assetModelId,
   tags,
@@ -1986,9 +3255,80 @@ export async function updateAsset({
   minQuantity,
   consumptionType,
   unitOfMeasure,
+  type,
+  requiresBorrowApproval,
+  requiresStaffPreparation,
+  requiresReturnPhoto,
+  maxBorrowDays,
+  extensionBorrowDays,
+  returnHandling,
 }: UpdateAssetPayload) {
   try {
     const isChangingLocation = newLocationId !== currentLocationId;
+    let isChangingTrackingMethod = false;
+    let assetBeforeTrackingChange: {
+      type: AssetType;
+      quantity: number | null;
+      assetModelId: string | null;
+      title: string;
+    } | null = null;
+
+    if (typeof type !== "undefined") {
+      assetBeforeTrackingChange = await db.asset.findUnique({
+        where: { id, organizationId },
+        select: { type: true, quantity: true, assetModelId: true, title: true },
+      });
+
+      if (!assetBeforeTrackingChange) {
+        throw new ShelfError({
+          cause: null,
+          message: "Asset not found",
+          label: "Assets",
+          status: 404,
+          shouldBeCaptured: false,
+        });
+      }
+
+      isChangingTrackingMethod = assetBeforeTrackingChange.type !== type;
+
+      if (isChangingTrackingMethod && type === AssetType.QUANTITY_TRACKED) {
+        if (!quantity || quantity <= 0) {
+          throw new ShelfError({
+            cause: null,
+            title: "Quantity is required",
+            message:
+              "Enter a quantity greater than zero before changing this asset to quantity tracking.",
+            label: "Assets",
+            status: 400,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      if (
+        isChangingTrackingMethod &&
+        type === AssetType.INDIVIDUAL &&
+        (assetBeforeTrackingChange.quantity ?? 1) !== 1
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Quantity must be one",
+          message:
+            "Reduce this quantity-tracked asset to a single unit before changing it to individual tracking.",
+          label: "Assets",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+
+    const shouldCreateIndividualModel =
+      isChangingTrackingMethod &&
+      type === AssetType.INDIVIDUAL &&
+      !assetBeforeTrackingChange?.assetModelId &&
+      !assetModelId &&
+      (assetBeforeTrackingChange?.quantity ?? 1) === 1;
+
     /**
      * The asset-overview "Update location" dialog surfaces a per-asset
      * qty input for QUANTITY_TRACKED rows. Setting a new qty (with or
@@ -1998,7 +3338,8 @@ export async function updateAsset({
      * write time).
      */
     const isSettingNewQuantity = newLocationQuantity != null;
-    const shouldUpdatePlacement = isChangingLocation || isSettingNewQuantity;
+    const shouldUpdatePlacement =
+      isChangingLocation || isSettingNewQuantity || isChangingTrackingMethod;
 
     // Check if asset belongs to a kit and prevent location updates.
     // the parent kit (today: ≤1 pivot row per asset) through
@@ -2096,6 +3437,13 @@ export async function updateAsset({
         typeof minQuantity !== "undefined" ||
         typeof consumptionType !== "undefined" ||
         typeof unitOfMeasure !== "undefined" ||
+        typeof requiresBorrowApproval !== "undefined" ||
+        typeof requiresStaffPreparation !== "undefined" ||
+        typeof requiresReturnPhoto !== "undefined" ||
+        typeof maxBorrowDays !== "undefined" ||
+        typeof extensionBorrowDays !== "undefined" ||
+        typeof returnHandling !== "undefined" ||
+        typeof type !== "undefined" ||
         typeof preferredBarcodeId !== "undefined" ||
         typeof assetModelId !== "undefined"
     );
@@ -2115,6 +3463,19 @@ export async function updateAsset({
 
     const loadUserForNotes = createLoadUserForNotes(userId);
 
+    const trackingMethodUpdate: Prisma.AssetUpdateInput =
+      isChangingTrackingMethod && type === AssetType.INDIVIDUAL
+        ? {
+            type,
+            quantity: null,
+            minQuantity: null,
+            consumptionType: null,
+            unitOfMeasure: null,
+          }
+        : isChangingTrackingMethod && type === AssetType.QUANTITY_TRACKED
+        ? { type }
+        : {};
+
     const data: Prisma.AssetUpdateInput = {
       title,
       description,
@@ -2122,7 +3483,11 @@ export async function updateAsset({
       mainImage,
       mainImageExpiration,
       thumbnailImage,
-      // Quantity-tracked fields (type is immutable, never updated here).
+      mainImageStoragePath,
+      thumbnailImageStoragePath,
+      // Quantity-tracked fields. Tracking-method transitions are guarded
+      // above and below so existing custody, kit, and booking history is not
+      // reinterpreted by an edit.
       // The direct `quantity` write is audited below: the quantity/placement
       // transaction writes a `ConsumptionLog` ADJUSTMENT for the stock delta
       // and the `fieldChangeEvents` block emits `ASSET_QUANTITY_CHANGED` /
@@ -2132,6 +3497,13 @@ export async function updateAsset({
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      requiresBorrowApproval,
+      requiresStaffPreparation,
+      requiresReturnPhoto,
+      maxBorrowDays,
+      extensionBorrowDays,
+      returnHandling,
+      ...trackingMethodUpdate,
     };
 
     /** If uncategorized is passed, disconnect the category */
@@ -2158,8 +3530,14 @@ export async function updateAsset({
       });
     }
 
-    /** If assetModelId is null, disconnect the asset model */
-    if (assetModelId === null) {
+    /** Quantity-tracked assets cannot remain linked to an individual-unit model. */
+    if (isChangingTrackingMethod && type === AssetType.QUANTITY_TRACKED) {
+      Object.assign(data, {
+        assetModel: {
+          disconnect: true,
+        },
+      });
+    } else if (assetModelId === null) {
       Object.assign(data, {
         assetModel: {
           disconnect: true,
@@ -2505,6 +3883,61 @@ export async function updateAsset({
       // against the multi-asset lockers in the booking paths.
       if (quantity != null || shouldUpdatePlacement) {
         const locked = await lockAssetForQuantityUpdate(tx, id, organizationId);
+
+        if (typeof type !== "undefined" && locked.type !== type) {
+          const [assetKitCount, custodyCount, bookingAssetCount] =
+            await Promise.all([
+              tx.assetKit.count({ where: { assetId: id } }),
+              tx.custody.count({ where: { assetId: id } }),
+              tx.bookingAsset.count({ where: { assetId: id } }),
+            ]);
+
+          if (assetKitCount > 0 || custodyCount > 0 || bookingAssetCount > 0) {
+            throw new ShelfError({
+              cause: null,
+              title: "Tracking method cannot be changed",
+              message:
+                "Tracking method changes are only allowed before this asset has kit, custody, or booking records.",
+              additionalData: {
+                assetId: id,
+                assetKitCount,
+                custodyCount,
+                bookingAssetCount,
+              },
+              label: "Assets",
+              status: 400,
+              shouldBeCaptured: false,
+            });
+          }
+
+          if (
+            type === AssetType.QUANTITY_TRACKED &&
+            (quantity == null || quantity <= 0)
+          ) {
+            throw new ShelfError({
+              cause: null,
+              title: "Quantity is required",
+              message:
+                "Enter a quantity greater than zero before changing this asset to quantity tracking.",
+              label: "Assets",
+              status: 400,
+              shouldBeCaptured: false,
+            });
+          }
+
+          if (type === AssetType.INDIVIDUAL && (locked.quantity ?? 1) !== 1) {
+            throw new ShelfError({
+              cause: null,
+              title: "Quantity must be one",
+              message:
+                "Reduce this quantity-tracked asset to a single unit before changing it to individual tracking.",
+              label: "Assets",
+              status: 400,
+              shouldBeCaptured: false,
+            });
+          }
+        }
+
         if (quantity != null) {
           quantityBeforeUpdate = locked.quantity ?? 0;
           lockedAssetType = locked.type;
@@ -2592,6 +4025,31 @@ export async function updateAsset({
               unitOfMeasure: locked.unitOfMeasure,
             });
           }
+        }
+
+        if (shouldCreateIndividualModel && !locked.assetModelId) {
+          const model = await tx.assetModel.create({
+            data: {
+              id: createId(),
+              name:
+                (
+                  title ??
+                  assetBeforeTrackingChange?.title ??
+                  "Individual product"
+                )
+                  .replace(/\s+#\d+$/u, "")
+                  .trim() || "Individual product",
+              organization: { connect: { id: organizationId } },
+              createdBy: { connect: { id: userId } },
+            },
+            select: { id: true },
+          });
+
+          Object.assign(data, {
+            assetModel: {
+              connect: { id: model.id },
+            },
+          });
         }
       }
 
@@ -3301,6 +4759,14 @@ export async function deleteAsset({
   actorUserId?: string;
 }) {
   try {
+    const ownedImage = await db.asset.findFirst({
+      where: { id, organizationId },
+      select: {
+        mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
+    });
     // Use transaction to ensure delete and activity event are atomic
     const deletedAsset = await db.$transaction(async (tx) => {
       const deleted = await tx.asset.delete({
@@ -3330,6 +4796,23 @@ export async function deleteAsset({
 
     // Cancel reminders outside transaction (cleanup operation, not critical for atomicity)
     await Promise.all(deletedAsset.reminders.map(cancelAssetReminderScheduler));
+    const ownedPaths = [
+      ownedImage?.mainImageStoragePath ??
+        (ownedImage?.mainImage
+          ? extractStoragePath(ownedImage.mainImage, "assets")
+          : null),
+      ownedImage?.thumbnailImageStoragePath,
+    ].filter((path): path is string => !!path);
+    await Promise.all(
+      ownedPaths.map((objectPath) =>
+        removeStorageImageObject({ bucketName: "assets", objectPath })
+      )
+    ).catch((cleanupCause: unknown) => {
+      Logger.dev("[IOIO IMAGE] deleted asset image cleanup failed", {
+        assetId: id,
+        cleanupCause,
+      });
+    });
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -3846,9 +5329,9 @@ export async function updateAssetMainImage({
     const fileData = await parseFileFormData({
       request,
       bucketName: "assets",
-      newFileName: `${userId}/${assetId}/main-image-${dateTimeInUnix(
-        Date.now()
-      )}`,
+      // A per-upload id prevents replacements in the same second from
+      // colliding with the previous object in Supabase Storage.
+      newFileName: `${userId}/${assetId}/main-image-${id()}`,
       resizeOptions: {
         width: 1200,
         withoutEnlargement: true,
@@ -3889,21 +5372,44 @@ export async function updateAssetMainImage({
       mainImagePath = image;
     }
 
-    const signedUrl = await createSignedUrl({ filename: mainImagePath });
-    let thumbnailSignedUrl: string | null = null;
-
-    if (thumbnailPath) {
-      thumbnailSignedUrl = await createSignedUrl({ filename: thumbnailPath });
-    }
+    const previousImage = isNewAsset
+      ? null
+      : await db.asset.findFirst({
+          where: { id: assetId, organizationId },
+          select: {
+            mainImageStoragePath: true,
+            thumbnailImageStoragePath: true,
+          },
+        });
 
     await updateAsset({
       id: assetId,
-      mainImage: signedUrl,
-      thumbnailImage: thumbnailSignedUrl,
-      mainImageExpiration: threeDaysFromNow(),
+      mainImage: null,
+      thumbnailImage: null,
+      mainImageExpiration: null,
+      mainImageStoragePath: mainImagePath,
+      thumbnailImageStoragePath: thumbnailPath,
       userId,
       organizationId,
       request,
+    });
+
+    const previousPaths = [
+      previousImage?.mainImageStoragePath,
+      previousImage?.thumbnailImageStoragePath,
+    ].filter(
+      (path): path is string =>
+        !!path && path !== mainImagePath && path !== thumbnailPath
+    );
+    await Promise.all(
+      previousPaths.map((objectPath) =>
+        removeStorageImageObject({ bucketName: "assets", objectPath })
+      )
+    ).catch((cleanupCause: unknown) => {
+      Logger.dev("[IOIO IMAGE] replaced asset image cleanup failed", {
+        assetId,
+        cleanupCause,
+      });
     });
 
     /**
@@ -4431,6 +5937,7 @@ export async function getPaginatedAndFilterableAssets({
   isSelfService,
   canSeeAllCustody,
   userId,
+  excludeAssetIds,
 }: {
   request: LoaderFunctionArgs["request"];
   organizationId: Organization["id"];
@@ -4451,6 +5958,8 @@ export async function getPaginatedAndFilterableAssets({
    */
   canSeeAllCustody: boolean;
   userId?: string;
+  /** Optional presentation-only exclusion used by the IOIO archive view. */
+  excludeAssetIds?: string[];
 }) {
   const currentFilterParams = new URLSearchParams(filters || "");
   const searchParams = filters
@@ -4499,6 +6008,28 @@ export async function getPaginatedAndFilterableAssets({
   });
 
   try {
+    // The simple Inventory location filter represents the selected location
+    // and everything stored below it. Keep the URL and filter seed on the
+    // selected location, but expand the ids used by the asset query through
+    // Shelf's native recursive Location hierarchy.
+    const locationIdsForAssetQuery =
+      locationIds.length > 0 && !locationIds.includes("without-location")
+        ? [
+            ...new Set(
+              (
+                await Promise.all(
+                  locationIds.map((locationId) =>
+                    getLocationDescendantIds({
+                      organizationId,
+                      locationId,
+                    })
+                  )
+                )
+              ).flat()
+            ),
+          ]
+        : locationIds;
+
     /**
      * These three queries are independent (no data flows between them),
      * so we run them in parallel to reduce total loader latency.
@@ -4551,11 +6082,12 @@ export async function getPaginatedAndFilterableAssets({
         bookingTo: bookingTo ?? undefined,
         hideUnavailable,
         unhideAssetsBookigIds,
-        locationIds,
+        locationIds: locationIdsForAssetQuery,
         teamMemberIds: scopedTeamMemberIds,
         extraInclude,
         assetKitFilter,
         availableToBookOnly: isSelfService,
+        excludeAssetIds,
       }),
     ]);
 
@@ -5718,6 +7250,221 @@ export async function updateAssetBookingAvailability({
 }
 
 /**
+ * Change availability for one physical asset from the Staff product detail.
+ * Availability remains the existing `Asset.availableToBook` source of truth;
+ * issue reports use the existing IOIO report-operation queue.
+ */
+export async function setIndividualAssetAvailability({
+  id,
+  detailAssetId,
+  organizationId,
+  userId,
+  action,
+  note,
+}: {
+  id: Asset["id"];
+  detailAssetId: Asset["id"];
+  organizationId: Asset["organizationId"];
+  userId: User["id"];
+  action: "unavailable" | "available" | "broken";
+  note?: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const [asset, detailAsset] = await Promise.all([
+      tx.asset.findFirst({
+        where: { id, organizationId, type: AssetType.INDIVIDUAL },
+        select: {
+          id: true,
+          assetModelId: true,
+          title: true,
+          status: true,
+          availableToBook: true,
+        },
+      }),
+      tx.asset.findFirst({
+        where: { id: detailAssetId, organizationId },
+        select: { id: true, type: true, assetModelId: true },
+      }),
+    ]);
+    if (
+      !asset ||
+      !detailAsset ||
+      detailAsset.type !== AssetType.INDIVIDUAL ||
+      (asset.id !== detailAsset.id &&
+        (!detailAsset.assetModelId ||
+          asset.assetModelId !== detailAsset.assetModelId))
+    ) {
+      throw new ShelfError({
+        cause: null,
+        message: "This physical unit could not be found in this workspace.",
+        label: "Assets",
+        status: 404,
+        shouldBeCaptured: false,
+      });
+    }
+
+    if (asset.status !== AssetStatus.AVAILABLE) {
+      throw new ShelfError({
+        cause: null,
+        message:
+          "This unit is currently in use or custody and its availability cannot be changed.",
+        label: "Assets",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const [custody, bookingAsset, preparationHold, unresolvedIssue] =
+      await Promise.all([
+        tx.custody.findFirst({ where: { assetId: id }, select: { id: true } }),
+        tx.bookingAsset.findFirst({
+          where: {
+            assetId: id,
+            checkedInAt: null,
+            booking: {
+              organizationId,
+              status: {
+                in: [
+                  BookingStatus.RESERVED,
+                  BookingStatus.ONGOING,
+                  BookingStatus.OVERDUE,
+                ],
+              },
+            },
+          },
+          select: { id: true },
+        }),
+        tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId,
+            assetId: id,
+            operationType: "IOIO_PREPARATION",
+            status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
+          },
+          select: { id: true, status: true },
+        }),
+        tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId,
+            assetId: id,
+            operationType: "REPORT_PROBLEM",
+            status: "SUCCEEDED",
+          },
+          select: { id: true },
+        }),
+      ]);
+
+    if (custody || bookingAsset || preparationHold || unresolvedIssue) {
+      const reason = custody
+        ? "This unit is assigned to someone and must be released from custody first."
+        : preparationHold?.status === "CANCELLED_PICKUP"
+        ? "This unit is still waiting to be put back after a cancelled pickup."
+        : preparationHold
+        ? "This unit is staged for pickup and must be checked back in first."
+        : unresolvedIssue
+        ? "Resolve the existing issue report before changing this unit's availability."
+        : "This unit is reserved or part of an active loan.";
+      throw new ShelfError({
+        cause: null,
+        message: reason,
+        label: "Assets",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    if (action === "available" && asset.availableToBook) {
+      return { availableToBook: true, status: "AVAILABLE" as const };
+    }
+    if (action === "unavailable" && !asset.availableToBook) {
+      return { availableToBook: false, status: "UNAVAILABLE" as const };
+    }
+
+    const safeNote = note?.trim().slice(0, 500) ?? "";
+    const availableToBook = action === "available" ? true : false;
+    await tx.asset.update({
+      where: { id, organizationId },
+      data: { availableToBook },
+    });
+
+    if (action === "broken") {
+      const reporter = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { email: true },
+      });
+      const description = safeNote || "Marked broken by Staff from Inventory.";
+      const report = await createReport({
+        email: reporter.email,
+        content: `[IOIO staff report]\nIssue: ITEM_DAMAGED\nDescription: ${description}`,
+        assetId: id,
+        client: tx,
+      });
+      await tx.ioioWriteOperation.create({
+        data: {
+          operationType: "REPORT_PROBLEM",
+          source: "IOIO_STAFF_INVENTORY",
+          status: "SUCCEEDED",
+          idempotencyKey: randomUUID(),
+          userId,
+          organizationId,
+          reportType: "ITEM_DAMAGED",
+          description,
+          assetId: id,
+          resultReportId: report.id,
+          completedAt: new Date(),
+        },
+      });
+    }
+
+    const actionLabel =
+      action === "broken"
+        ? "Marked as broken"
+        : action === "unavailable"
+        ? "Temporarily disabled"
+        : "Made available";
+    await createNote(
+      {
+        content: `${actionLabel}.${safeNote ? ` ${safeNote}` : ""}`,
+        type: "UPDATE",
+        userId,
+        assetId: id,
+        organizationId,
+      },
+      tx
+    );
+    await recordEvent(
+      {
+        organizationId,
+        actorUserId: userId,
+        action: "ASSET_STATUS_CHANGED",
+        entityType: "ASSET",
+        entityId: id,
+        assetId: id,
+        field: "availableToBook",
+        fromValue: asset.availableToBook,
+        toValue: availableToBook,
+        meta: {
+          source: "STAFF_PHYSICAL_UNIT_AVAILABILITY",
+          action,
+          note: safeNote || null,
+        },
+      },
+      tx
+    );
+
+    return {
+      availableToBook,
+      status:
+        action === "broken"
+          ? ("BROKEN" as const)
+          : action === "unavailable"
+          ? ("UNAVAILABLE" as const)
+          : ("AVAILABLE" as const),
+    };
+  });
+}
+
+/**
  * Enriches CHECKED_OUT assets with booking custodian info as a synthetic `custody` property.
  *
  * Previously this made a separate DB query (N+1 pattern). Now the booking custodian
@@ -6262,7 +8009,13 @@ export async function bulkDeleteAssets({
         id: { in: resolvedIds },
         organizationId,
       },
-      select: { id: true, mainImage: true, title: true },
+      select: {
+        id: true,
+        mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
+        title: true,
+      },
     });
 
     try {
@@ -6302,15 +8055,30 @@ export async function bulkDeleteAssets({
       );
 
       /** Deleting images of the assets (if any) */
-      const assetsWithImages = assets.filter((asset) => !!asset.mainImage);
       await Promise.all(
-        assetsWithImages.map((asset) =>
-          deleteOtherImages({
-            userId,
-            assetId: asset.id,
-            data: { path: `main-image-${asset.id}.jpg` },
-          })
-        )
+        assets.map(async (asset) => {
+          const ownedPaths = [
+            asset.mainImageStoragePath ??
+              (asset.mainImage
+                ? extractStoragePath(asset.mainImage, "assets")
+                : null),
+            asset.thumbnailImageStoragePath,
+          ].filter((path): path is string => !!path);
+          await Promise.all(
+            ownedPaths.map((objectPath) =>
+              removeStorageImageObject({ bucketName: "assets", objectPath })
+            )
+          );
+          // Keep legacy folder cleanup for old references that cannot be
+          // parsed safely; only the deleted asset's own folder is touched.
+          if (asset.mainImage && ownedPaths.length === 0) {
+            await deleteOtherImages({
+              userId,
+              assetId: asset.id,
+              data: { path: `main-image-${asset.id}.jpg` },
+            });
+          }
+        })
       );
     } catch (cause) {
       throw new ShelfError({
@@ -6910,6 +8678,7 @@ export async function bulkUpdateAssetLocation({
   currentSearchParams,
   settings,
   timeZone = "UTC",
+  strict = false,
 }: {
   userId: User["id"];
   assetIds: Asset["id"][];
@@ -6923,6 +8692,8 @@ export async function bulkUpdateAssetLocation({
    * off-by-one for non-UTC users). Defaults to "UTC".
    */
   timeZone?: string;
+  /** Require every explicitly selected row to resolve inside this org. */
+  strict?: boolean;
 }) {
   try {
     // Resolve IDs (works for both simple and advanced mode)
@@ -6949,11 +8720,15 @@ export async function bulkUpdateAssetLocation({
           title: true,
           type: true,
           quantity: true,
+          unitOfMeasure: true,
           // We only care about the primary placement here (the bulk
-          // location update sets a single new location per asset).
+          // location update uses this snapshot for individually tracked
+          // assets. Quantity-tracked placement state is re-read under lock.
           assetLocations: {
             select: {
               locationId: true,
+              quantity: true,
+              assetKitId: true,
               location: { select: { id: true, name: true } },
             },
           },
@@ -6970,45 +8745,26 @@ export async function bulkUpdateAssetLocation({
       }),
     ]);
 
-    /**
-     * Filter out QUANTITY_TRACKED assets FIRST — they always skip the
-     * bulk path (no per-asset qty input here), so they shouldn't be
-     * counted against the kit-guard below. A qty-tracked asset that
-     * happens to be in a kit would otherwise trip the kit-guard error
-     * even though it would have been skipped anyway. Mirror of the
-     * bulk-custody pattern (`bulkCheckOutAssets` line ~4099-4113):
-     * silently skip qty-tracked rows, throw early when the whole
-     * selection is qty-tracked. The dialog shows a `WarningBox`
-     * summarising the skip so users know what happened.
-     */
-    const nonQtyTracked = assets.filter(
-      (a) => a.type !== AssetType.QUANTITY_TRACKED
-    );
-    const skippedQuantityTracked = assets.length - nonQtyTracked.length;
-    if (nonQtyTracked.length === 0 && skippedQuantityTracked > 0) {
+    if (strict && assets.length !== new Set(assetIds).size) {
       throw new ShelfError({
         cause: null,
         message:
-          "All selected assets are quantity-tracked. Quantity-tracked assets must have their placements managed individually with a per-location quantity.",
+          "Some selected inventory items could not be found in this workspace. No locations were changed.",
         additionalData: {
           userId,
           organizationId,
-          skippedQuantityTracked,
+          requestedAssetCount: new Set(assetIds).size,
+          resolvedAssetCount: assets.length,
         },
         label: "Assets",
-        status: 400,
+        status: 404,
         shouldBeCaptured: false,
       });
     }
 
-    // Kit-guard applies only to INDIVIDUAL assets that survive the
-    // qty-tracked filter above. INDIVIDUAL in a kit really IS a
-    // conflict — the kit owns its location and the BEFORE trigger
-    // caps an INDIVIDUAL at one AssetLocation row, so we can't
-    // additively place it elsewhere via this bulk path.
-    const assetsInKits = nonQtyTracked.filter(
-      (asset) => asset.assetKits?.[0]?.kit
-    );
+    // Both tracking types can be moved. Kit-managed placements remain owned
+    // by their parent kit and must be changed from the kit flow.
+    const assetsInKits = assets.filter((asset) => asset.assetKits?.[0]?.kit);
     if (assetsInKits.length > 0) {
       const kitNames = Array.from(
         new Set(assetsInKits.map((asset) => asset.assetKits?.[0]?.kit?.name))
@@ -7044,105 +8800,296 @@ export async function bulkUpdateAssetLocation({
       });
     }
 
-    // Filter out assets already at the target location (qty-tracked
-    // already filtered above; only INDIVIDUAL reach this point).
-    const assetsToUpdate = nonQtyTracked.filter(
-      (a) => getPrimaryLocation(a)?.id !== newLocation?.id
+    const individualAssetsToUpdate = assets
+      .filter((asset) => asset.type !== AssetType.QUANTITY_TRACKED)
+      .filter((a) => getPrimaryLocation(a)?.id !== newLocation?.id);
+
+    type BulkAsset = (typeof assets)[number];
+    type BulkPlacement = BulkAsset["assetLocations"][number];
+    type LocationChange = {
+      asset: BulkAsset;
+      previousPlacements: BulkPlacement[];
+    };
+    const changedLocations: LocationChange[] = individualAssetsToUpdate.map(
+      (asset) => ({
+        asset,
+        previousPlacements: asset.assetLocations.filter(
+          (placement) => placement.assetKitId == null
+        ),
+      })
     );
 
-    await db.$transaction(async (tx) => {
-      if (assetsToUpdate.length > 0) {
-        // Per-asset MANUAL pivot replace. Drop the asset's existing
-        // manual rows (kit-driven rows survive — they're owned by the
-        // kit's flow), then create the new one (skipped when
-        // clearing). The DEFERRED sum-within-total trigger re-checks
-        // at COMMIT. INDIVIDUAL-only at this point — qty-tracked were
-        // filtered out above.
+    await db.$transaction(
+      async (tx) => {
+        const quantityTrackedAssets = assets.filter(
+          (asset) => asset.type === AssetType.QUANTITY_TRACKED
+        );
+        const lockedAssets = new Map<string, Asset>();
+
+        // Lock in a stable order so concurrent multi-item moves cannot deadlock.
+        for (const asset of [...quantityTrackedAssets].sort((a, b) =>
+          a.id.localeCompare(b.id)
+        )) {
+          const locked = await lockAssetForQuantityUpdate(
+            tx,
+            asset.id,
+            organizationId
+          );
+          if (locked.type !== AssetType.QUANTITY_TRACKED) {
+            throw new ShelfError({
+              cause: null,
+              message:
+                "An item's tracking method changed while this move was being prepared. Refresh the inventory and try again.",
+              label: "Assets",
+              status: 409,
+              additionalData: { assetId: asset.id, organizationId },
+              shouldBeCaptured: false,
+            });
+          }
+          lockedAssets.set(asset.id, locked);
+        }
+
+        const currentQuantityPlacements = quantityTrackedAssets.length
+          ? await tx.assetLocation.findMany({
+              where: {
+                assetId: { in: quantityTrackedAssets.map((asset) => asset.id) },
+                organizationId,
+                assetKitId: null,
+              },
+              select: {
+                assetId: true,
+                locationId: true,
+                quantity: true,
+                assetKitId: true,
+                location: { select: { id: true, name: true } },
+              },
+            })
+          : [];
+        const placementsByAsset = new Map<string, BulkPlacement[]>();
+        for (const placement of currentQuantityPlacements) {
+          const placements = placementsByAsset.get(placement.assetId) ?? [];
+          placements.push(placement);
+          placementsByAsset.set(placement.assetId, placements);
+        }
+
+        for (const asset of quantityTrackedAssets) {
+          const locked = lockedAssets.get(asset.id);
+          if (!locked) continue;
+          const previousPlacements = placementsByAsset.get(asset.id) ?? [];
+          const totalQuantity = locked.quantity ?? 0;
+          if (!Number.isInteger(totalQuantity) || totalQuantity < 0) {
+            throw new ShelfError({
+              cause: null,
+              message:
+                "This quantity-tracked item has an invalid quantity and cannot be moved. Correct its quantity, then try again.",
+              label: "Assets",
+              status: 400,
+              additionalData: { assetId: asset.id, organizationId },
+              shouldBeCaptured: false,
+            });
+          }
+          if (newLocation && totalQuantity === 0) {
+            throw new ShelfError({
+              cause: null,
+              message:
+                "A quantity-tracked item needs a quantity greater than zero before it can be placed at a location.",
+              label: "Assets",
+              status: 400,
+              additionalData: { assetId: asset.id, organizationId },
+              shouldBeCaptured: false,
+            });
+          }
+
+          const alreadyAtTarget = newLocation
+            ? previousPlacements.length === 1 &&
+              previousPlacements[0].locationId === newLocation.id &&
+              previousPlacements[0].quantity === totalQuantity
+            : previousPlacements.length === 0;
+          if (alreadyAtTarget) continue;
+
+          changedLocations.push({
+            asset: { ...asset, quantity: locked.quantity },
+            previousPlacements,
+          });
+        }
+
+        if (changedLocations.length === 0) return;
+
         await tx.assetLocation.deleteMany({
           where: {
-            assetId: { in: assetsToUpdate.map((a) => a.id) },
+            assetId: { in: changedLocations.map(({ asset }) => asset.id) },
             assetKitId: null,
           },
         });
         if (newLocation) {
           await tx.assetLocation.createMany({
-            data: assetsToUpdate.map((asset) => ({
+            data: changedLocations.map(({ asset }) => ({
               assetId: asset.id,
               locationId: newLocation.id,
               organizationId,
               quantity:
-                asset.type === AssetType.QUANTITY_TRACKED && asset.quantity
-                  ? asset.quantity
+                asset.type === AssetType.QUANTITY_TRACKED
+                  ? asset.quantity ?? 0
                   : 1,
             })),
           });
         }
 
-        /**
-         * Creating notes for the assets.
-         *
-         * why: `assetsToUpdate` is derived from `nonQtyTracked` — this bulk
-         * path filters out QUANTITY_TRACKED assets entirely (see the
-         * `nonQtyTracked` filter above; they must manage placements per-row
-         * with a quantity). So these notes/events are INDIVIDUAL-only and
-         * intentionally carry no unit count.
-         */
-        await tx.note.createMany({
-          data: assetsToUpdate.map((asset) => {
-            const isRemoving = !newLocationId;
+        const noteWrites = changedLocations.flatMap(
+          ({ asset, previousPlacements }) => {
+            if (asset.type !== AssetType.QUANTITY_TRACKED) {
+              return [
+                {
+                  content: getLocationUpdateNoteContent({
+                    currentLocation: getPrimaryLocation(asset),
+                    newLocation,
+                    userId,
+                    firstName: user?.firstName ?? "",
+                    lastName: user?.lastName ?? "",
+                    displayName: user?.displayName,
+                    isRemoving: !newLocationId,
+                  }),
+                  type: "UPDATE" as const,
+                  userId,
+                  assetId: asset.id,
+                },
+              ];
+            }
 
-            const content = getLocationUpdateNoteContent({
-              currentLocation: getPrimaryLocation(asset),
-              newLocation,
-              userId,
-              firstName: user?.firstName ?? "",
-              lastName: user?.lastName ?? "",
-              displayName: user?.displayName,
-              isRemoving,
+            const notes = previousPlacements.flatMap((placement) => {
+              if (newLocation && placement.locationId === newLocation.id)
+                return [];
+              return [
+                {
+                  content: getLocationUpdateNoteContent({
+                    currentLocation: placement.location,
+                    newLocation,
+                    userId,
+                    firstName: user?.firstName ?? "",
+                    lastName: user?.lastName ?? "",
+                    displayName: user?.displayName,
+                    isRemoving: !newLocation,
+                    type: asset.type,
+                    unitOfMeasure: asset.unitOfMeasure,
+                    quantity: placement.quantity,
+                  }),
+                  type: "UPDATE" as const,
+                  userId,
+                  assetId: asset.id,
+                },
+              ];
             });
-
-            return {
-              content,
-              type: "UPDATE",
-              userId,
-              assetId: asset.id,
-            };
-          }),
-        });
-
-        // Activity events — one ASSET_LOCATION_CHANGED per asset, inside the
-        // tx. INDIVIDUAL-only (qty-tracked filtered out above), so no
-        // `meta.quantity`.
-        await recordEvents(
-          assetsToUpdate.map((asset) => ({
-            organizationId,
-            actorUserId: userId,
-            action: "ASSET_LOCATION_CHANGED",
-            entityType: "ASSET",
-            entityId: asset.id,
-            assetId: asset.id,
-            locationId: newLocation?.id ?? undefined,
-            field: "locationId",
-            fromValue: getPrimaryLocation(asset)?.id ?? null,
-            toValue: newLocation?.id ?? null,
-          })),
-          tx
+            const placedQuantity = previousPlacements.reduce(
+              (sum, placement) => sum + placement.quantity,
+              0
+            );
+            const previouslyUnplaced = (asset.quantity ?? 0) - placedQuantity;
+            if (newLocation && previouslyUnplaced > 0) {
+              notes.push({
+                content: getLocationUpdateNoteContent({
+                  currentLocation: null,
+                  newLocation,
+                  userId,
+                  firstName: user?.firstName ?? "",
+                  lastName: user?.lastName ?? "",
+                  displayName: user?.displayName,
+                  type: asset.type,
+                  unitOfMeasure: asset.unitOfMeasure,
+                  quantity: previouslyUnplaced,
+                }),
+                type: "UPDATE" as const,
+                userId,
+                assetId: asset.id,
+              });
+            }
+            return notes;
+          }
         );
-      }
-    });
+        if (noteWrites.length > 0) {
+          await tx.note.createMany({ data: noteWrites });
+        }
 
-    // Create location activity notes
+        const locationEvents = changedLocations.flatMap(
+          ({ asset, previousPlacements }) => {
+            if (asset.type !== AssetType.QUANTITY_TRACKED) {
+              return [
+                {
+                  organizationId,
+                  actorUserId: userId,
+                  action: "ASSET_LOCATION_CHANGED" as const,
+                  entityType: "ASSET" as const,
+                  entityId: asset.id,
+                  assetId: asset.id,
+                  locationId: newLocation?.id,
+                  field: "locationId",
+                  fromValue: getPrimaryLocation(asset)?.id ?? null,
+                  toValue: newLocation?.id ?? null,
+                },
+              ];
+            }
+
+            const sourceEvents: Parameters<typeof recordEvents>[0] =
+              previousPlacements
+                .filter((placement) => placement.locationId !== newLocation?.id)
+                .map((placement) => ({
+                  organizationId,
+                  actorUserId: userId,
+                  action: "ASSET_LOCATION_CHANGED" as const,
+                  entityType: "ASSET" as const,
+                  entityId: asset.id,
+                  assetId: asset.id,
+                  locationId: placement.locationId,
+                  field: "locationId",
+                  fromValue: placement.locationId,
+                  toValue: null,
+                  meta: assetQtyMeta(asset, placement.quantity),
+                }));
+            const quantityAtTarget =
+              previousPlacements.find(
+                (placement) => placement.locationId === newLocation?.id
+              )?.quantity ?? 0;
+            const quantityAddedAtTarget = newLocation
+              ? (asset.quantity ?? 0) - quantityAtTarget
+              : 0;
+            if (newLocation && quantityAddedAtTarget > 0) {
+              sourceEvents.push({
+                organizationId,
+                actorUserId: userId,
+                action: "ASSET_LOCATION_CHANGED" as const,
+                entityType: "ASSET" as const,
+                entityId: asset.id,
+                assetId: asset.id,
+                locationId: newLocation.id,
+                field: "locationId",
+                fromValue: null,
+                toValue: newLocation.id,
+                meta: assetQtyMeta(asset, quantityAddedAtTarget),
+              });
+            }
+            return sourceEvents;
+          }
+        );
+        if (locationEvents.length > 0) {
+          await recordEvents(locationEvents, tx);
+        }
+      },
+      {
+        timeout: 15_000,
+      }
+    );
+
+    // Create location activity notes for every previous placement, not only
+    // the primary one. This is important when a quantity pool was split
+    // across multiple locations and is now consolidated.
     const userLink = wrapUserLinkForNote({ ...user, id: userId });
     /**
-     * The rows the transaction above actually wrote — quantity-tracked assets
-     * are filtered out of this path entirely, and an asset already at the
-     * target moves nowhere. A location's timeline must not claim either of
-     * them arrived, so these notes read the set the transaction wrote rather
-     * than re-deriving one from every selected asset.
+     * Only record assets whose individual location actually changed.
+     * `changedLocations` also preserves every previous placement so IOIO can
+     * write accurate activity notes when an item had multiple locations.
      */
-    const assetData = assetsToUpdate.map((a) => ({
-      id: a.id,
-      title: a.title,
+    const assetData = changedLocations.map(({ asset }) => ({
+      id: asset.id,
+      title: asset.title,
     }));
 
     // Group assets by their previous (primary) location
@@ -7150,17 +9097,20 @@ export async function bulkUpdateAssetLocation({
       string,
       { name: string; assets: typeof assetData }
     >();
-    for (const asset of assetsToUpdate) {
-      const prev = getPrimaryLocation(asset);
-      if (!prev) continue;
-      const existing = byPrevLocation.get(prev.id);
-      if (existing) {
-        existing.assets.push({ id: asset.id, title: asset.title });
-      } else {
-        byPrevLocation.set(prev.id, {
-          name: prev.name,
-          assets: [{ id: asset.id, title: asset.title }],
-        });
+    for (const { asset, previousPlacements } of changedLocations) {
+      for (const prev of previousPlacements) {
+        if (prev.locationId === newLocation?.id) continue;
+        const existing = byPrevLocation.get(prev.locationId);
+        if (existing) {
+          if (!existing.assets.some((item) => item.id === asset.id)) {
+            existing.assets.push({ id: asset.id, title: asset.title });
+          }
+        } else {
+          byPrevLocation.set(prev.locationId, {
+            name: prev.location.name,
+            assets: [{ id: asset.id, title: asset.title }],
+          });
+        }
       }
     }
 
@@ -8221,9 +10171,7 @@ export async function getEntitiesWithSelectedValues({
 }) {
   const [
     // Categories
-    categoryExcludedSelected,
-    selectedCategories,
-    totalCategories,
+    allCategories,
 
     // Tags
     tagsExcludedSelected,
@@ -8240,17 +10188,8 @@ export async function getEntitiesWithSelectedValues({
     selectedAssetModels,
     totalAssetModels,
   ] = await Promise.all([
-    /** Categories start */
-    db.category.findMany({
-      where: { organizationId, id: { notIn: selectedCategoryIds } },
-      take: allSelectedEntries.includes("category") ? undefined : 12,
-    }),
-    selectedCategoryIds.length > 0
-      ? db.category.findMany({
-          where: { organizationId, id: { in: selectedCategoryIds } },
-        })
-      : Promise.resolve([]),
-    db.category.count({ where: { organizationId } }),
+    /** Categories start. All category pickers use the same active source. */
+    getActiveCategoriesForOrganization({ organizationId }),
     /** Categories end */
 
     /** Tags start */
@@ -8316,9 +10255,22 @@ export async function getEntitiesWithSelectedValues({
     /** Asset Models end */
   ]);
 
+  const categoryIds = new Set(selectedCategoryIds);
+  const selectedCategories = allCategories.filter((category) =>
+    categoryIds.has(category.id)
+  );
+  const categoryExcludedSelected = allCategories.filter(
+    (category) => !categoryIds.has(category.id)
+  );
+
   return {
-    categories: [...selectedCategories, ...categoryExcludedSelected],
-    totalCategories,
+    categories: [
+      ...selectedCategories,
+      ...(allSelectedEntries.includes("category")
+        ? categoryExcludedSelected
+        : categoryExcludedSelected.slice(0, 12)),
+    ],
+    totalCategories: allCategories.length,
     tags: [...selectedTags, ...tagsExcludedSelected],
     totalTags,
     locations: [...selectedLocations, ...locationExcludedSelected],
@@ -8411,31 +10363,30 @@ export async function getCategoriesForCreateAndEdit({
   const getAllEntries = searchParams.getAll("getAll") as AllowedModelNames[];
 
   try {
-    const [categoryExcludedSelected, selectedCategories, totalCategories] =
-      await Promise.all([
-        db.category.findMany({
-          where: {
-            organizationId,
-            id: Array.isArray(categorySelected)
-              ? { notIn: categorySelected }
-              : { not: categorySelected },
-          },
-          take: getAllEntries.includes("category") ? undefined : 12,
-        }),
-        db.category.findMany({
-          where: {
-            organizationId,
-            id: Array.isArray(categorySelected)
-              ? { in: categorySelected }
-              : categorySelected,
-          },
-        }),
-        db.category.count({ where: { organizationId } }),
-      ]);
+    const allCategories = await getActiveCategoriesForOrganization({
+      organizationId,
+    });
+    const selectedIds = new Set(
+      (Array.isArray(categorySelected)
+        ? categorySelected
+        : [categorySelected]
+      ).filter(Boolean)
+    );
+    const selectedCategories = allCategories.filter((category) =>
+      selectedIds.has(category.id)
+    );
+    const categoryExcludedSelected = allCategories.filter(
+      (category) => !selectedIds.has(category.id)
+    );
 
     return {
-      categories: [...selectedCategories, ...categoryExcludedSelected],
-      totalCategories,
+      categories: [
+        ...selectedCategories,
+        ...(getAllEntries.includes("category")
+          ? categoryExcludedSelected
+          : categoryExcludedSelected.slice(0, 12)),
+      ],
+      totalCategories: allCategories.length,
     };
   } catch (cause) {
     throw new ShelfError({
