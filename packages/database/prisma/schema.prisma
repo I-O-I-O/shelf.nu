@@ -34,20 +34,20 @@ model Image {
 }
 
 model User {
-  id                    String  @id @default(cuid())
-  email                 String  @unique
-  username              String  @unique @default(cuid())
-  firstName             String?
-  lastName              String?
-  displayName           String?
-  profilePicture        String?
-  usedFreeTrial         Boolean @default(false)
-  onboarded             Boolean @default(false)
-  customerId            String? @unique // Stripe customer id
-  sso                   Boolean @default(false)
-  createdWithInvite     Boolean @default(false) // Set to true if the user was created by being invited to a workspace
-  skipSubscriptionCheck Boolean @default(false) // Set to true if the user has opted out of subscription checks
-  hasUnpaidInvoice     Boolean @default(false) // Set via Stripe webhooks when invoice payment fails
+  id                     String  @id @default(cuid())
+  email                  String  @unique
+  username               String  @unique @default(cuid())
+  firstName              String?
+  lastName               String?
+  displayName            String?
+  profilePicture         String?
+  usedFreeTrial          Boolean @default(false)
+  onboarded              Boolean @default(false)
+  customerId             String? @unique // Stripe customer id
+  sso                    Boolean @default(false)
+  createdWithInvite      Boolean @default(false) // Set to true if the user was created by being invited to a workspace
+  skipSubscriptionCheck  Boolean @default(false) // Set to true if the user has opted out of subscription checks
+  hasUnpaidInvoice       Boolean @default(false) // Set via Stripe webhooks when invoice payment fails
   warnForNoPaymentMethod Boolean @default(false) // Set when subscription is transferred to a user without a payment method
 
   // Last selected organization for cross-device workspace persistence
@@ -72,43 +72,61 @@ model User {
   // the resolver falls back to live browser hints (today's behavior) until the
   // user's next authenticated load lazily backfills concrete values. See
   // ~/utils/date-format (resolveFormatPrefs / detectFormatPrefsFromHints).
-  dateFormat DateFormatPreference? // null → not yet detected
-  timeFormat TimeFormatPreference? // null → not yet detected
-  weekStart  WeekStartPreference?  // null → not yet detected
-  timeZone   String?               // IANA name; null → not yet detected
+  dateFormat                DateFormatPreference? // null → not yet detected
+  timeFormat                TimeFormatPreference? // null → not yet detected
+  weekStart                 WeekStartPreference? // null → not yet detected
+  timeZone                  String? // IANA name; null → not yet detected
+  staffDashboardPreferences Json?
 
   // Relationships
-  assets             Asset[]
-  categories         Category[]
-  notes              Note[]
-  bookingNotes      BookingNote[]      @relation("BookingNoteUser")
-  auditNotes        AuditNote[]        @relation("AuditNoteUser")
-  locationNotes     LocationNote[]     @relation("LocationNoteUser")
-  qrCodes            Qr[]
-  scans              Scan[]
-  tags               Tag[]
-  roles              Role[]
-  locations          Location[]
-  images             Image[]
-  organizations      Organization[]
-  customFields       CustomField[]
-  sentInvites        Invite[]           @relation("inviter")
-  receivedInvites    Invite[]           @relation("invitee")
-  teamMembers        TeamMember[]
-  userOrganizations  UserOrganization[]
-  bookings           Booking[]          @relation("creator")
-  custodies          Booking[]          @relation("custodian")
-  createdKits        Kit[]
-  tierId             TierId             @default(free)
-  tier               Tier               @relation(fields: [tierId], references: [id])
-  assetReminders     AssetReminder[]
-  contact            UserContact?
-  businessIntel      UserBusinessIntel?
-  auditsCreated      AuditSession[]
-  auditAssignments   AuditAssignment[]
-  auditAssetsScanned AuditAsset[]
-  auditScans         AuditScan[]
-  auditImagesUploaded AuditImage[] @relation("AuditImageUploader")
+  assets                    Asset[]
+  categories                Category[]
+  notes                     Note[]
+  bookingNotes              BookingNote[]              @relation("BookingNoteUser")
+  auditNotes                AuditNote[]                @relation("AuditNoteUser")
+  locationNotes             LocationNote[]             @relation("LocationNoteUser")
+  qrCodes                   Qr[]
+  scans                     Scan[]
+  tags                      Tag[]
+  roles                     Role[]
+  locations                 Location[]
+  images                    Image[]
+  organizations             Organization[]
+  customFields              CustomField[]
+  sentInvites               Invite[]                   @relation("inviter")
+  receivedInvites           Invite[]                   @relation("invitee")
+  teamMembers               TeamMember[]
+  userOrganizations         UserOrganization[]
+  bookings                  Booking[]                  @relation("creator")
+  custodies                 Booking[]                  @relation("custodian")
+  createdKits               Kit[]
+  tierId                    TierId                     @default(free)
+  tier                      Tier                       @relation(fields: [tierId], references: [id])
+  assetReminders            AssetReminder[]
+  contact                   UserContact?
+  businessIntel             UserBusinessIntel?
+  auditsCreated             AuditSession[]
+  auditAssignments          AuditAssignment[]
+  auditAssetsScanned        AuditAsset[]
+  auditScans                AuditScan[]
+  auditImagesUploaded       AuditImage[]               @relation("AuditImageUploader")
+  ioioLabTAAssignments      IoioLabTA[]
+  labTasksCreated           LabTask[]                  @relation("LabTaskCreator")
+  labTasksAssigned          LabTask[]                  @relation("LabTaskAssignee")
+  labTasksCompleted         LabTask[]                  @relation("LabTaskCompleter")
+  purchasingRequestsCreated PurchaseRequest[]          @relation("PurchaseRequestCreator")
+  purchasesCreated          Purchase[]                 @relation("PurchaseCreator")
+  budgetAdjustmentsMade     PurchaseBudgetAdjustment[] @relation("BudgetAdjustmentActor")
+  purchaseCorrectionsMade   PurchaseCorrection[]       @relation("PurchaseCorrectionActor")
+  purchaseReceiptDrafts     PurchaseReceiptDraft[]     @relation("PurchaseReceiptUploader")
+  taHourAllocations         TAHoursAllocation[]        @relation("TAHoursAllocationMember")
+  taHourAllocationsCreated  TAHoursAllocation[]        @relation("TAHoursAllocationCreator")
+  taHourAllocationsUpdated  TAHoursAllocation[]        @relation("TAHoursAllocationUpdater")
+  taShifts                  TAShift[]                  @relation("TAShiftMember")
+  taShiftsCreated           TAShift[]                  @relation("TAShiftCreator")
+  taShiftsConfirmed         TAShift[]                  @relation("TAShiftConfirmer")
+  taHourCorrectionsMade     TAHoursCorrection[]        @relation("TAHoursCorrectionEditor")
+  taHoursBudgetAdjustments  TAHoursBudgetAdjustment[]  @relation("TAHoursBudgetEditor")
 
   // @deprecated - Historical data only. New entries go to UserBusinessIntel table
   referralSource String? // "How did you hear about us?" field.
@@ -126,12 +144,24 @@ model User {
   createdUpdates Update[]
   updateReads    UserUpdateRead[]
 
+  cardAccessRequests                CardAccessRequest[]                @relation("CardAccessApplicant")
+  cardAccessBatchesCreated          CardAccessBatch[]                  @relation("CardAccessBatchCreator")
+  cardAccessBatchesSent             CardAccessBatch[]                  @relation("CardAccessBatchSender")
+  cardAccessBatchesReceived         CardAccessBatch[]                  @relation("CardAccessBatchRecipient")
+  cardAccessBatchesItSent           CardAccessBatch[]                  @relation("CardAccessBatchItSender")
+  annualAccessApprovals             AnnualAccessApproval[]             @relation("AnnualAccessApprovalStudent")
+  annualAccessApprovalNotifications AnnualAccessApprovalNotification[]
+  annualAccessReviews               AnnualAccessApproval[]             @relation("AnnualAccessApprovalReviewer")
+  updatedAccessApprovalPolicies     Organization[]                     @relation("AccessApprovalSettingsUpdater")
+  updatedIoioAiGuidelines           IoioAiGuidelines[]                 @relation("IoioAiGuidelinesUpdater")
+
   // This relationship will be used only when tierId == custom
   customTierLimit CustomTierLimit?
 
   assetFilterPresets AssetFilterPreset[]
   assetModels        AssetModel[]
   consumptionLogs    ConsumptionLog[]
+  emailPreference    UserEmailPreference?
 
   // Org-scoped SCIM external IDs (one per org, managed by the org's identity provider)
   scimExternalIds UserScimExternalId[]
@@ -225,27 +255,39 @@ model UserBusinessIntel {
 }
 
 model Asset {
-  id                  String      @id @default(cuid())
-  title               String
-  description         String?
-  mainImage           String?
-  thumbnailImage      String?
-  mainImageExpiration DateTime?
-  status              AssetStatus @default(AVAILABLE)
-  valuation           Float?      @map("value") // Field to store the monetary value of an asset
-  availableToBook     Boolean     @default(true)
-  sequentialId        String? // Sequential identifier for the asset (e.g., "SAM-0001")
+  id                        String              @id @default(cuid())
+  title                     String
+  description               String?
+  mainImage                 String?
+  thumbnailImage            String?
+  mainImageExpiration       DateTime?
+  /// Canonical Storage object identities. The bucket is `assets` for this model.
+  mainImageStoragePath      String?
+  thumbnailImageStoragePath String?
+  status                    AssetStatus         @default(AVAILABLE)
+  valuation                 Float?              @map("value") // Field to store the monetary value of an asset
+  availableToBook           Boolean             @default(true)
+  requiresBorrowApproval    Boolean             @default(false)
+  requiresStaffPreparation  Boolean             @default(false)
+  requiresReturnPhoto       Boolean             @default(false)
+  /// Maximum initial borrowing period shared by a logical product's units.
+  maxBorrowDays             Int                 @default(45)
+  /// Additional borrowing period requested after Staff approval. Null keeps
+  /// legacy assets on the maximum borrowing period as a safe default.
+  extensionBorrowDays       Int?
+  returnHandling            AssetReturnHandling @default(RETURN_TO_STORAGE)
+  sequentialId              String? // Sequential identifier for the asset (e.g., "SAM-0001")
 
   // Tracking method & model
-  type            AssetType        @default(INDIVIDUAL)
-  assetModelId    String?
-  assetModel      AssetModel?      @relation(fields: [assetModelId], references: [id])
+  type         AssetType   @default(INDIVIDUAL)
+  assetModelId String?
+  assetModel   AssetModel? @relation(fields: [assetModelId], references: [id])
 
   // Quantity-tracked fields (null for INDIVIDUAL assets)
-  quantity        Int? // Total quantity at this location
-  minQuantity     Int? // Low-stock alert threshold
-  consumptionType ConsumptionType? // How consumption is tracked
-  unitOfMeasure   String? // e.g., "pcs", "boxes", "liters"
+  quantity           Int? // Total quantity at this location
+  minQuantity        Int? // Low-stock alert threshold
+  consumptionType    ConsumptionType? // How consumption is tracked
+  unitOfMeasure      String? // e.g., "pcs", "boxes", "liters"
   // Debounce marker for low-stock alerting: set when available first crosses
   // to/below minQuantity (alert sent), cleared when it recovers above. Prevents
   // re-alerting on every subsequent decrement while already low.
@@ -268,20 +310,21 @@ model Asset {
   // INDIVIDUAL assets are capped at one row via the
   // `enforce_individual_asset_single_location` trigger.
 
-  custody      Custody[]
-  notes        Note[]
-  qrCodes      Qr[]
-  barcodes     Barcode[]              @relation("AssetBarcodes")
-  reports      ReportFound[]
-  tags         Tag[]
-  customFields AssetCustomFieldValue[]
+  custody         Custody[]
+  notes           Note[]
+  qrCodes         Qr[]
+  barcodes        Barcode[]               @relation("AssetBarcodes")
+  reports         ReportFound[]
+  tags            Tag[]
+  customFields    AssetCustomFieldValue[]
   bookingAssets   BookingAsset[]
   consumptionLogs ConsumptionLog[]
   reminders       AssetReminder[]
   auditEntries    AuditAsset[]
   auditScans      AuditScan[]
-  assetKits      AssetKit[]
-  assetLocations AssetLocation[]
+  assetKits       AssetKit[]
+  assetLocations  AssetLocation[]
+  purchaseItems   PurchaseItem[]
 
   // Per-asset override: when an org has multiple linked Barcodes (only possible
   // with the barcode add-on), this picks the specific Barcode to display in
@@ -321,25 +364,76 @@ model Asset {
   @@index([userId])
 }
 
+/**
+ * IOIO-only reversible archive markers. The referenced Asset, Kit, or Category
+ * row is deliberately kept native during Archive or Trash and is not deleted.
+ * Item ids are plain values so this small presentation-layer feature does not
+ * add relations or alter Shelf's native lifecycle semantics.
+ */
+model IoioArchivedItem {
+  id                   String               @id @default(cuid())
+  organizationId       String
+  itemType             IoioArchivedItemType
+  itemId               String
+  disposition          IoioItemDisposition  @default(ARCHIVE)
+  originalCategoryId   String?
+  originalCategoryName String?
+  originalLocationId   String?
+  originalLocationName String?
+  archivedAt           DateTime             @default(now()) @db.Timestamptz(3)
+  archivedById         String
+  restoredAt           DateTime?            @db.Timestamptz(3)
+  restoredById         String?
+
+  @@index([organizationId, restoredAt])
+  @@index([organizationId, itemType, itemId, restoredAt])
+  @@index([organizationId, disposition, restoredAt])
+}
+
+enum IoioArchivedItemType {
+  ASSET
+  KIT
+  CATEGORY
+}
+
+enum IoioItemDisposition {
+  ARCHIVE
+  TRASH
+}
+
 enum AssetStatus {
   AVAILABLE
   IN_CUSTODY
   CHECKED_OUT
 }
 
-/** Determines how an asset is tracked throughout the system. Immutable after creation. */
+/**
+ * Determines how an asset is tracked throughout the system. Immutable after creation.
+ */
 enum AssetType {
   INDIVIDUAL // Default. One row = one physical item.
   QUANTITY_TRACKED // One row = N fungible items at a location.
 }
 
-/** Controls what happens after checkout for quantity-tracked assets. */
+/**
+ * Controls where an item is placed after a successful Student return.
+ */
+enum AssetReturnHandling {
+  RETURN_TO_STORAGE
+  RETURN_TO_RETURN_ZONE
+}
+
+/**
+ * Controls what happens after checkout for quantity-tracked assets.
+ */
 enum ConsumptionType {
   ONE_WAY // Checked out and consumed. No return expected.
   TWO_WAY // Checked out and returned, with consumption report.
 }
 
-/** Classifies the type of quantity change in a ConsumptionLog entry. */
+/**
+ * Classifies the type of quantity change in a ConsumptionLog entry.
+ */
 enum ConsumptionCategory {
   CHECKOUT // Items checked out to a custodian or booking
   RETURN // Items returned from a custodian or booking
@@ -449,11 +543,15 @@ model AssetModel {
   /// asset of this model that has no image of its own. Public — and therefore
   /// never-expiring and cacheable — like Location.imageUrl; see
   /// resolveAssetImage() for the cascade.
-  image String?
+  image            String?
+  /// Canonical object path in the public `files` bucket.
+  imageStoragePath String?
 
   /// Public URL of the 108px thumbnail generated alongside `image`. Used at
   /// list sizes so inheriting assets never render the full-size original.
-  thumbnailImage String?
+  thumbnailImage            String?
+  /// Canonical object path for the model thumbnail in `files`.
+  thumbnailImageStoragePath String?
 
   // Template defaults (applied when creating a new asset from this model)
   defaultCategoryId String?
@@ -461,12 +559,14 @@ model AssetModel {
   defaultValuation  Float?
 
   // Relationships
-  assets         Asset[]
-  modelRequests  BookingModelRequest[]
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  organizationId String
-  createdBy      User         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  userId         String
+  assets               Asset[]
+  modelRequests        BookingModelRequest[]
+  handbookArticles     HandbookArticleAssetModel[]
+  handbookObservations HandbookObservation[]
+  organization         Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  organizationId       String
+  createdBy            User                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  userId               String
 
   // Datetime
   createdAt DateTime @default(now())
@@ -765,6 +865,59 @@ model ReportFound {
   @@index([kitId])
 }
 
+/// Durable coordination and audit record for narrowly scoped IOIO assistant
+/// writes. This is workflow state, not a second inventory representation.
+model IoioWriteOperation {
+  id               String    @id @default(cuid())
+  operationType    String
+  source           String    @default("IOIO_ASSISTANT")
+  status           String
+  idempotencyKey   String    @unique
+  userId           String
+  organizationId   String
+  reportType       String
+  description      String
+  assetId          String?
+  kitId            String?
+  locationId       String?
+  quantity         Int?
+  selectedAssetIds Json?
+  bookingId        String?
+  bookingAssetId   String?
+  from             DateTime?
+  to               DateTime?
+  resultReportId   String?
+  failureCode      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  completedAt      DateTime?
+  reviewComment    String?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+
+  @@index([organizationId, operationType, createdAt])
+  @@index([userId, operationType, createdAt])
+  @@index([bookingId])
+}
+
+/// Shared database-backed fixed-window counters for IOIO assistant writes.
+/// The key includes the authenticated user, organization, operation, and
+/// window, so multiple web processes share the same guardrail.
+model IoioRateLimitBucket {
+  id              String   @id @default(cuid())
+  key             String   @unique
+  operationType   String
+  userId          String
+  organizationId  String
+  windowStartedAt DateTime
+  count           Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, operationType, windowStartedAt])
+  @@index([userId, operationType, windowStartedAt])
+}
+
 enum ErrorCorrection {
   L
   M
@@ -814,13 +967,19 @@ model Location {
   name        String
   description String?
   address     String?
+  // IOIO presentation color. Sibling locations use distinct palette values.
+  color       String?
 
   // Cached geocoding coordinates
   latitude  Float?
   longitude Float?
 
-  imageUrl     String?
-  thumbnailUrl String?
+  imageUrl                  String?
+  thumbnailUrl              String?
+  /// Canonical public `files` bucket object paths. Legacy URL fields remain
+  /// readable for existing rows while new uploads write these path fields.
+  imageStoragePath          String?
+  thumbnailImageStoragePath String?
 
   image   Image?  @relation(fields: [imageId], references: [id])
   imageId String? @unique
@@ -841,7 +1000,7 @@ model Location {
   // single location, like INDIVIDUAL assets).
   assetLocations AssetLocation[]
   kits           Kit[]
-  notes          LocationNote[] @relation("LocationNotes")
+  notes          LocationNote[]  @relation("LocationNotes")
 
   // Self-relation for nested locations
   parentId String?
@@ -885,8 +1044,8 @@ model TeamMember {
   userId          String?
   kitCustodies    KitCustody[]
 
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
   deletedAt       DateTime?
   bookings        Booking[]
   assetReminders  AssetReminder[]
@@ -919,8 +1078,8 @@ model Custody {
   // custody automatically removes the asset-side rows that were
   // inherited from the kit, while leaving operator-assigned rows
   // (kitCustodyId = null) untouched.
-  kitCustody    KitCustody? @relation(fields: [kitCustodyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  kitCustodyId  String?
+  kitCustody   KitCustody? @relation(fields: [kitCustodyId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  kitCustodyId String?
 
   quantity Int @default(1) // How many units in custody (1 for individual assets)
 
@@ -954,9 +1113,9 @@ model Organization {
   userId   String
   currency Currency @default(USD)
 
-  members TeamMember[]
-  assets  Asset[]
-  assetKits AssetKit[]
+  members        TeamMember[]
+  assets         Asset[]
+  assetKits      AssetKit[]
   assetLocations AssetLocation[]
 
   image   Image?  @relation("orgImage", fields: [imageId], references: [id])
@@ -983,9 +1142,9 @@ model Organization {
   usedBarcodeTrial  Boolean   @default(false) // Set once a 7-day free barcode trial is activated (prevents reuse)
 
   // Audit add-on (per-organization, managed via Stripe subscription)
-  auditsEnabled    Boolean   @default(false) // If true, this organization can use audit functionality
-  auditsEnabledAt  DateTime? // Track when audit feature was enabled
-  usedAuditTrial   Boolean   @default(false) // Set once a 7-day free audit trial is activated (prevents reuse)
+  auditsEnabled   Boolean   @default(false) // If true, this organization can use audit functionality
+  auditsEnabledAt DateTime? // Track when audit feature was enabled
+  usedAuditTrial  Boolean   @default(false) // Set once a 7-day free audit trial is activated (prevents reuse)
 
   // This is used to disable the workspace for the user. It is set to true when the user leaves the workspace
   workspaceDisabled Boolean @default(false) // If true, the workspace is disabled and the user cannot access it
@@ -1009,17 +1168,31 @@ model Organization {
   assetReminders     AssetReminder[]
   assetFilterPresets AssetFilterPreset[]
 
-  auditSessions      AuditSession[]
-  auditImages        AuditImage[]
+  auditSessions AuditSession[]
+  auditImages   AuditImage[]
 
   usersWithLastSelected User[] @relation("lastSelectedOrg")
-  
-  scimTokens      ScimToken[]
-  scimExternalIds UserScimExternalId[]
-  roleChangeLogs  RoleChangeLog[]
-  teamMemberNotes     TeamMemberNote[]
-  activityEvents      ActivityEvent[]
 
+  scimTokens                        ScimToken[]
+  scimExternalIds                   UserScimExternalId[]
+  roleChangeLogs                    RoleChangeLog[]
+  teamMemberNotes                   TeamMemberNote[]
+  activityEvents                    ActivityEvent[]
+  cardAccessRequests                CardAccessRequest[]
+  cardAccessBatches                 CardAccessBatch[]
+  annualAccessApprovals             AnnualAccessApproval[]
+  annualAccessApprovalNotifications AnnualAccessApprovalNotification[]
+
+  // IOIO Student borrowing approval policy. Defaults preserve the existing
+  // yearly approval requirement while allowing each organization to configure it.
+  accessApprovalRequired        Boolean                         @default(true)
+  accessApprovalRenewalMode     AnnualAccessApprovalRenewalMode @default(ACADEMIC_YEAR)
+  accessApprovalRenewalMonth    Int                             @default(9)
+  accessApprovalCustomMonths    Int?
+  accessApprovalStudentMessage  String?                         @db.VarChar(1000)
+  accessApprovalUpdatedByUserId String?
+  accessApprovalUpdatedBy       User?                           @relation("AccessApprovalSettingsUpdater", fields: [accessApprovalUpdatedByUserId], references: [id], onDelete: SetNull)
+  accessApprovalUpdatedAt       DateTime?
 
   // Migration flag to track if sequential IDs have been generated for this organization's existing assets
   hasSequentialIdsMigrated Boolean @default(false)
@@ -1037,9 +1210,702 @@ model Organization {
   // Custom footer text appended to workspace emails
   customEmailFooter String? @db.VarChar(500)
 
+  emailTemplates        EmailTemplate[]
+  ioioLabInformation         IoioLabInformation?
+  ioioLabInformationSections IoioLabInformationSection[]
+  ioioAiGuidelines      IoioAiGuidelines?
+  ioioLabTAs            IoioLabTA[]
+  labTasks              LabTask[]
+  annualBudgets         AnnualBudget[]
+  purchaseRequests      PurchaseRequest[]
+  purchases             Purchase[]
+  purchaseReceiptDrafts PurchaseReceiptDraft[]
+  taHoursPeriods        TAHoursPeriod[]
+  taShifts              TAShift[]
+  handbookArticles      HandbookArticle[]
+  handbookSources       HandbookSource[]
+  handbookObservations  HandbookObservation[]
+
   // Indexes for foreign keys
   @@index([userId])
   @@index([ssoDetailsId])
+  @@index([accessApprovalUpdatedByUserId])
+}
+
+enum HandbookArticleStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum HandbookObservationStatus {
+  PENDING_REVIEW
+  REVIEWED
+  DISMISSED
+}
+
+enum HandbookSourceKind {
+  EXTERNAL_REFERENCE
+  UPLOADED_DOCUMENT
+  LEGACY_MATERIAL
+  STAFF_CONTRIBUTION
+}
+
+/// Human-facing knowledge page. Draft fields remain separate from published
+/// snapshots so readers never see unreviewed edits.
+model HandbookArticle {
+  id                 String                @id @default(cuid())
+  organizationId     String
+  slug               String
+  status             HandbookArticleStatus @default(DRAFT)
+  draftTitle         String                @db.VarChar(180)
+  draftSummary       String                @default("") @db.VarChar(700)
+  draftContent       String                @db.Text
+  draftSection       String                @default("General") @db.VarChar(80)
+  draftAssetModelIds String[]              @default([])
+  draftKitIds        String[]              @default([])
+  draftSourceUrls    String[]              @default([])
+  publishedVersionId String?               @unique
+  createdByUserId    String
+  updatedByUserId    String
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  versions         HandbookArticleVersion[] @relation("HandbookArticleVersions")
+  publishedVersion HandbookArticleVersion?  @relation("HandbookPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
+  observations     HandbookObservation[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, status, updatedAt])
+}
+
+/// Append-only snapshot created by an explicit Staff publication.
+model HandbookArticleVersion {
+  id                String   @id @default(cuid())
+  articleId         String
+  versionNumber     Int
+  title             String   @db.VarChar(180)
+  summary           String   @default("") @db.VarChar(700)
+  content           String   @db.Text
+  section           String   @db.VarChar(80)
+  publishedByUserId String
+  publishedAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  article      HandbookArticle             @relation("HandbookArticleVersions", fields: [articleId], references: [id], onDelete: Cascade)
+  publishedFor HandbookArticle?            @relation("HandbookPublishedVersion")
+  assetModels  HandbookArticleAssetModel[]
+  kits         HandbookArticleKit[]
+  sources      HandbookVersionSource[]
+  observations HandbookObservation[]       @relation("ObservationPublishedVersion")
+
+  @@unique([articleId, versionNumber])
+  @@index([articleId, publishedAt(sort: Desc)])
+}
+
+model HandbookArticleAssetModel {
+  versionId    String
+  assetModelId String
+  version      HandbookArticleVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  assetModel   AssetModel             @relation(fields: [assetModelId], references: [id], onDelete: Cascade)
+
+  @@id([versionId, assetModelId])
+  @@index([assetModelId])
+}
+
+model HandbookArticleKit {
+  versionId String
+  kitId     String
+  version   HandbookArticleVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  kit       Kit                    @relation(fields: [kitId], references: [id], onDelete: Cascade)
+
+  @@id([versionId, kitId])
+  @@index([kitId])
+}
+
+/// Source records support current structured knowledge but do not themselves
+/// become authoritative content. File analysis/upload is a separate future
+/// workflow; storage fields reserve the canonical object identity.
+model HandbookSource {
+  id                String             @id @default(cuid())
+  organizationId    String
+  kind              HandbookSourceKind @default(EXTERNAL_REFERENCE)
+  title             String             @db.VarChar(240)
+  url               String?            @db.VarChar(500)
+  storageObjectPath String?
+  contentType       String?
+  extractedText     String?            @db.Text
+  createdByUserId   String
+  createdAt         DateTime           @default(now())
+
+  organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  versions     HandbookVersionSource[]
+
+  @@unique([organizationId, url])
+  @@index([organizationId, kind, createdAt])
+}
+
+model HandbookVersionSource {
+  versionId String
+  sourceId  String
+  version   HandbookArticleVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  source    HandbookSource         @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@id([versionId, sourceId])
+  @@index([sourceId])
+}
+
+/// Human-submitted operational notes are reviewable evidence, never policy by
+/// themselves. A student can create only PENDING_REVIEW observations.
+model HandbookObservation {
+  id                 String                    @id @default(cuid())
+  organizationId     String
+  contributorUserId  String
+  status             HandbookObservationStatus @default(PENDING_REVIEW)
+  title              String                    @db.VarChar(180)
+  content            String                    @db.VarChar(4000)
+  articleId          String?
+  assetModelId       String?
+  kitId              String?
+  conversationId     String?
+  messageId          String?
+  reviewedByUserId   String?
+  reviewedAt         DateTime?                 @db.Timestamptz(3)
+  publishedVersionId String?
+  createdAt          DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime                  @updatedAt
+
+  organization     Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article          HandbookArticle?        @relation(fields: [articleId], references: [id], onDelete: SetNull)
+  assetModel       AssetModel?             @relation(fields: [assetModelId], references: [id], onDelete: SetNull)
+  kit              Kit?                    @relation(fields: [kitId], references: [id], onDelete: SetNull)
+  publishedVersion HandbookArticleVersion? @relation("ObservationPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, createdAt(sort: Desc)])
+  @@index([articleId, createdAt(sort: Desc)])
+  @@index([assetModelId, createdAt(sort: Desc)])
+  @@index([kitId, createdAt(sort: Desc)])
+}
+
+model IoioLabInformation {
+  id                         String       @id @default(cuid())
+  organization               Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId             String       @unique
+  aboutText                  String       @db.Text
+  borrowingText              String       @db.Text
+  rulesText                  String       @db.Text
+  returnText                 String       @db.Text
+  helpText                   String       @db.Text
+  taLastReviewedAt           DateTime?
+  taLastReviewedAcademicYear String?
+  createdAt                  DateTime     @default(now())
+  updatedAt                  DateTime     @updatedAt
+
+  @@index([organizationId])
+}
+
+/// Ordered, organization-scoped navigation metadata for Lab Info sections.
+/// Built-in section text remains in IoioLabInformation; only custom sections
+/// store content here.
+model IoioLabInformationSection {
+  id             String       @id @default(cuid())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  organizationId String
+  key            String       @db.VarChar(80)
+  title          String?      @db.VarChar(120)
+  content        String?      @db.Text
+  position       Int
+  isCustom       Boolean      @default(false)
+  images         IoioLabInformationImage[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId, position])
+}
+
+/// Storage metadata only; image bytes stay in the existing Supabase files bucket.
+model IoioLabInformationImage {
+  id             String                    @id @default(cuid())
+  section        IoioLabInformationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sectionId      String
+  storagePath    String                    @db.Text
+  position       Int                       @default(0)
+  caption        String?                   @db.VarChar(300)
+  altText        String?                   @db.VarChar(300)
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+
+  @@index([sectionId, position])
+}
+
+/// Organization-scoped, Staff-editable response guidance for Ask IOIO.
+/// This data is supplemental only; code-owned grounding and safety rules remain authoritative.
+model IoioAiGuidelines {
+  id              String       @id @default(cuid())
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId  String       @unique
+  sections        Json
+  updatedBy       User?        @relation("IoioAiGuidelinesUpdater", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+  updatedByUserId String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([updatedByUserId])
+}
+
+model IoioLabTA {
+  id             String       @id @default(cuid())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([organizationId])
+}
+
+model LabTask {
+  id                String          @id @default(cuid())
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId    String
+  title             String          @db.VarChar(180)
+  description       String?         @db.Text
+  assignedTo        User?           @relation("LabTaskAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  assignedToUserId  String?
+  createdBy         User            @relation("LabTaskCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUserId   String
+  completedBy       User?           @relation("LabTaskCompleter", fields: [completedByUserId], references: [id], onDelete: SetNull)
+  completedByUserId String?
+  priority          LabTaskPriority @default(NORMAL)
+  status            LabTaskStatus   @default(OPEN)
+  dueDate           DateTime?       @db.Date
+  completedAt       DateTime?
+  deletedAt         DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([organizationId, status, deletedAt, dueDate])
+  @@index([organizationId, assignedToUserId, status, deletedAt])
+  @@index([createdByUserId])
+  @@index([completedByUserId])
+}
+
+enum LabTaskPriority {
+  NORMAL
+  IMPORTANT
+  URGENT
+}
+
+enum LabTaskStatus {
+  OPEN
+  COMPLETED
+}
+
+model TAHoursPeriod {
+  id                String                    @id @default(cuid())
+  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId    String
+  academicYear      String                    @db.VarChar(9)
+  startDate         DateTime                  @db.Date
+  endDate           DateTime                  @db.Date
+  totalHoursBudget      Decimal   @default(0) @db.Decimal(10, 2)
+  budgetAmountSek       Decimal?  @db.Decimal(14, 2)
+  hourlyRateSekPerHour  Decimal?  @db.Decimal(14, 2)
+  allocations       TAHoursAllocation[]
+  shifts            TAShift[]
+  budgetAdjustments TAHoursBudgetAdjustment[]
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@unique([organizationId, academicYear])
+  @@index([organizationId, startDate, endDate])
+}
+
+model TAHoursAllocation {
+  id              String        @id @default(cuid())
+  period          TAHoursPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  periodId        String
+  user            User          @relation("TAHoursAllocationMember", fields: [userId], references: [id], onDelete: Restrict)
+  userId          String
+  allocatedHours  Decimal       @default(0) @db.Decimal(10, 2)
+  createdBy       User          @relation("TAHoursAllocationCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUserId String
+  updatedBy       User          @relation("TAHoursAllocationUpdater", fields: [updatedByUserId], references: [id], onDelete: Restrict)
+  updatedByUserId String
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([periodId, userId])
+  @@index([userId])
+  @@index([periodId, allocatedHours])
+}
+
+model TAShift {
+  id                 String              @id @default(cuid())
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId     String
+  period             TAHoursPeriod       @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  periodId           String
+  user               User                @relation("TAShiftMember", fields: [userId], references: [id], onDelete: Restrict)
+  userId             String
+  scheduledDate      DateTime            @db.Date
+  scheduledStartTime String              @db.VarChar(5)
+  scheduledEndTime   String              @db.VarChar(5)
+  actualHours        Decimal?            @db.Decimal(6, 2)
+  actualHoursReason  String?             @db.VarChar(500)
+  isManual           Boolean             @default(false)
+  manualEntryKey     String?             @unique
+  status             TAShiftStatus       @default(SCHEDULED)
+  cancelledAt        DateTime?
+  createdBy          User                @relation("TAShiftCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUserId    String
+  confirmedBy        User?               @relation("TAShiftConfirmer", fields: [confirmedByUserId], references: [id], onDelete: SetNull)
+  confirmedByUserId  String?
+  confirmedAt        DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  corrections        TAHoursCorrection[]
+
+  @@index([organizationId, periodId, scheduledDate, cancelledAt])
+  @@index([organizationId, userId, scheduledDate, status])
+  @@index([createdByUserId])
+  @@index([confirmedByUserId])
+}
+
+model TAHoursCorrection {
+  id              String   @id @default(cuid())
+  shift           TAShift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  shiftId         String
+  previousHours   Decimal? @db.Decimal(6, 2)
+  newHours        Decimal  @db.Decimal(6, 2)
+  reason          String?  @db.VarChar(500)
+  changedBy       User     @relation("TAHoursCorrectionEditor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+  changedByUserId String
+  createdAt       DateTime @default(now())
+
+  @@index([shiftId, createdAt])
+}
+
+model TAHoursBudgetAdjustment {
+  id              String        @id @default(cuid())
+  period          TAHoursPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  periodId        String
+  previousHours   Decimal       @db.Decimal(10, 2)
+  newHours        Decimal       @db.Decimal(10, 2)
+  reason          String?       @db.VarChar(500)
+  changedBy       User          @relation("TAHoursBudgetEditor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+  changedByUserId String
+  createdAt       DateTime      @default(now())
+
+  @@index([periodId, createdAt])
+}
+
+enum TAShiftStatus {
+  SCHEDULED
+  AWAITING_CONFIRMATION
+  CONFIRMED
+  ADJUSTED
+}
+
+model AnnualBudget {
+  id               String                     @id @default(cuid())
+  organization     Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId   String
+  academicYear     String                     @db.VarChar(9)
+  amount           Decimal                    @default(0) @db.Decimal(14, 2)
+  accountingResetAt DateTime?                  @db.Timestamptz(3)
+  currency         Currency                   @default(SEK)
+  purchaseRequests PurchaseRequest[]
+  purchases        Purchase[]
+  adjustments      PurchaseBudgetAdjustment[]
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+
+  @@unique([organizationId, academicYear])
+  @@index([organizationId, academicYear])
+}
+
+model PurchaseBudgetAdjustment {
+  id              String       @id @default(cuid())
+  budget          AnnualBudget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  budgetId        String
+  previousAmount  Decimal      @db.Decimal(14, 2)
+  newAmount       Decimal      @db.Decimal(14, 2)
+  reason          String?      @db.VarChar(1000)
+  changedBy       User         @relation("BudgetAdjustmentActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+  changedByUserId String
+  createdAt       DateTime     @default(now())
+
+  @@index([budgetId, createdAt])
+}
+
+model PurchaseRequest {
+  id                String                @id @default(cuid())
+  organization      Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId    String
+  budget            AnnualBudget          @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  budgetId          String
+  title             String                @db.VarChar(240)
+  quantity          Int                   @default(1)
+  estimatedCost     Decimal?              @db.Decimal(14, 2)
+  priority          PurchasePriority      @default(MEDIUM)
+  status            PurchaseRequestStatus @default(PLANNED)
+  requestedBy       User                  @relation("PurchaseRequestCreator", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  requestedByUserId String
+  note              String?               @db.VarChar(2000)
+  link              String?               @db.VarChar(2048)
+  purchase          Purchase?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([organizationId, budgetId, status, priority])
+  @@index([requestedByUserId])
+}
+
+model Purchase {
+  id                  String               @id @default(cuid())
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId      String
+  budget              AnnualBudget         @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  budgetId            String
+  purchaseRequest     PurchaseRequest?     @relation(fields: [purchaseRequestId], references: [id], onDelete: SetNull)
+  purchaseRequestId   String?              @unique
+  vendor              String?              @db.VarChar(240)
+  purchaseDate        DateTime             @db.Date
+  actualTotal         Decimal              @db.Decimal(14, 2)
+  removedFromPurchasedAt DateTime?          @db.Timestamptz(3)
+  note                String?              @db.VarChar(2000)
+  receiptPath         String?
+  receiptOriginalName String?              @db.VarChar(255)
+  receiptMimeType     String?              @db.VarChar(100)
+  receiptSize         Int?
+  createdBy           User                 @relation("PurchaseCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUserId     String
+  items               PurchaseItem[]
+  corrections         PurchaseCorrection[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@index([organizationId, budgetId, purchaseDate])
+  @@index([createdByUserId])
+}
+
+model PurchaseItem {
+  id            String   @id @default(cuid())
+  purchase      Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  purchaseId    String
+  name          String   @db.VarChar(240)
+  quantity      Int      @default(1)
+  lineTotal     Decimal? @db.Decimal(14, 2)
+  linkedAsset   Asset?   @relation(fields: [linkedAssetId], references: [id], onDelete: SetNull)
+  linkedAssetId String?
+  createdAt     DateTime @default(now())
+
+  @@index([purchaseId])
+  @@index([linkedAssetId])
+}
+
+model PurchaseCorrection {
+  id              String   @id @default(cuid())
+  purchase        Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  purchaseId      String
+  previousTotal   Decimal  @db.Decimal(14, 2)
+  newTotal        Decimal  @db.Decimal(14, 2)
+  reason          String?  @db.VarChar(1000)
+  changedBy       User     @relation("PurchaseCorrectionActor", fields: [changedByUserId], references: [id], onDelete: Restrict)
+  changedByUserId String
+  createdAt       DateTime @default(now())
+
+  @@index([purchaseId, createdAt])
+}
+
+model PurchaseReceiptDraft {
+  id               String       @id @default(cuid())
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId   String
+  uploadedBy       User         @relation("PurchaseReceiptUploader", fields: [uploadedByUserId], references: [id], onDelete: Cascade)
+  uploadedByUserId String
+  receiptPath      String
+  originalName     String       @db.VarChar(255)
+  mimeType         String       @db.VarChar(100)
+  size             Int
+  extractedData    Json?
+  expiresAt        DateTime
+  createdAt        DateTime     @default(now())
+
+  @@index([organizationId, uploadedByUserId, expiresAt])
+}
+
+enum PurchasePriority {
+  HIGH
+  MEDIUM
+  LATER
+}
+
+enum PurchaseRequestStatus {
+  PLANNED
+  RESERVED
+  PURCHASED
+  CANCELLED
+}
+
+model UserEmailPreference {
+  id                    String   @id @default(cuid())
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                String   @unique
+  borrowingConfirmation Boolean  @default(true)
+  returnReminders       Boolean  @default(true)
+  extensionUpdates      Boolean  @default(true)
+  readyForPickup        Boolean  @default(true)
+  cardAccessUpdates     Boolean  @default(true)
+  annualAccessUpdates   Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model EmailTemplate {
+  id             String       @id @default(cuid())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+  key            String
+  name           String
+  category       String
+  subject        String       @db.VarChar(200)
+  body           String       @db.Text
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+model CardAccessRequest {
+  id                 String                   @id @default(cuid())
+  organization       Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId     String
+  applicant          User                     @relation("CardAccessApplicant", fields: [applicantId], references: [id], onDelete: Cascade)
+  applicantId        String
+  cardNumber         String
+  status             CardAccessRequestStatus  @default(WAITING_FOR_SUBMISSION)
+  consentConfirmedAt DateTime
+  submittedAt        DateTime?
+  approvedAt         DateTime?
+  cancelledAt        DateTime?
+  batches            CardAccessBatchRequest[]
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  @@index([organizationId, status])
+  @@index([organizationId, applicantId, status])
+}
+
+model CardAccessBatch {
+  id               String                   @id @default(cuid())
+  organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId   String
+  createdBy        User                     @relation("CardAccessBatchCreator", fields: [createdById], references: [id])
+  createdById      String
+  sentBy           User?                    @relation("CardAccessBatchSender", fields: [sentById], references: [id])
+  sentById         String?
+  recipient        User?                    @relation("CardAccessBatchRecipient", fields: [recipientId], references: [id])
+  recipientId      String?
+  recipientEmail   String?
+  recipientName    String?
+  sentAt           DateTime?
+  itRecipientEmail String?
+  itSentAt         DateTime?
+  itSentBy         User?                    @relation("CardAccessBatchItSender", fields: [itSentById], references: [id])
+  itSentById       String?
+  requests         CardAccessBatchRequest[]
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([recipientId])
+  @@index([itSentById])
+}
+
+model CardAccessBatchRequest {
+  batch     CardAccessBatch   @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  batchId   String
+  request   CardAccessRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  requestId String
+  createdAt DateTime          @default(now())
+
+  @@id([batchId, requestId])
+  @@index([requestId])
+}
+
+enum CardAccessRequestStatus {
+  WAITING_FOR_SUBMISSION
+  SUBMITTED
+  APPROVED
+  NEEDS_ATTENTION
+  CANCELLED
+}
+
+enum AnnualAccessApprovalStatus {
+  PENDING
+  APPROVED
+  DECLINED
+  REVOKED
+}
+
+enum AnnualAccessApprovalRenewalMode {
+  ACADEMIC_YEAR
+  TWELVE_MONTHS
+  SIX_MONTHS
+  CUSTOM
+}
+
+model AnnualAccessApproval {
+  id               String                             @id @default(cuid())
+  organization     Organization                       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId   String
+  student          User                               @relation("AnnualAccessApprovalStudent", fields: [userId], references: [id], onDelete: Cascade)
+  notifications    AnnualAccessApprovalNotification[]
+  userId           String
+  approvalYear     Int
+  status           AnnualAccessApprovalStatus         @default(PENDING)
+  requestedAt      DateTime                           @default(now())
+  approvedAt       DateTime?
+  validUntil       DateTime?
+  reviewedAt       DateTime?
+  reviewedBy       User?                              @relation("AnnualAccessApprovalReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  reviewedByUserId String?
+  staffComment     String?
+  createdAt        DateTime                           @default(now())
+  updatedAt        DateTime                           @updatedAt
+
+  @@index([organizationId, userId, approvalYear])
+  @@index([organizationId, approvalYear, status])
+  @@index([organizationId, userId, status, requestedAt])
+  @@index([reviewedByUserId])
+}
+
+/// Event record for each Staff-granted borrowing approval. The per-event read
+/// timestamp makes acknowledgement consistent across devices.
+model AnnualAccessApprovalNotification {
+  id             String               @id @default(cuid())
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+  student        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  approval       AnnualAccessApproval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+  approvalId     String
+  eventAt        DateTime
+  createdAt      DateTime             @default(now())
+  readAt         DateTime?
+
+  @@unique([approvalId, eventAt])
+  @@index([organizationId, userId, eventAt])
+  @@index([organizationId, userId, readAt])
 }
 
 model UserOrganization {
@@ -1053,6 +1919,9 @@ model UserOrganization {
   roles     OrganizationRoles[]
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
+  // Existing memberships are grandfathered; new Student memberships are
+  // explicitly marked incomplete by the account-association service.
+  labIntroductionCompleted Boolean @default(true)
 
   /// Secret, unguessable token for this member's iCal calendar-feed subscription
   /// in this workspace. Null until the user generates a feed; regenerating it
@@ -1521,12 +2390,12 @@ enum BookingStatus {
  * Quantity is always positive — direction is determined by category.
  */
 model ConsumptionLog {
-  id        String              @id @default(cuid())
-  asset     Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  assetId   String
-  category  ConsumptionCategory
-  quantity  Int // Always positive. Direction determined by category (Decision #9).
-  note      String?
+  id       String              @id @default(cuid())
+  asset    Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  assetId  String
+  category ConsumptionCategory
+  quantity Int // Always positive. Direction determined by category (Decision #9).
+  note     String?
 
   performedBy User   @relation(fields: [userId], references: [id])
   userId      String
@@ -1824,7 +2693,7 @@ model BookingSettings {
   // calendar and don't check out/in). Reuses autoArchiveDays for the delay.
   autoArchiveExpiredReservations Boolean @default(false)
 
-  requireExplicitCheckinForAdmin      Boolean @default(false) // When true, admins must use explicit check-in (scanner) instead of quick check-in
+  requireExplicitCheckinForAdmin       Boolean @default(false) // When true, admins must use explicit check-in (scanner) instead of quick check-in
   requireExplicitCheckinForSelfService Boolean @default(false) // When true, self-service users must use explicit check-in (scanner) instead of quick check-in
 
   requireExplicitCheckoutForAdmin       Boolean @default(false) // When true, admins must use explicit check-out (scan or select) instead of quick check-out
@@ -1834,8 +2703,8 @@ model BookingSettings {
   countKitsAsSingleUnit Boolean @default(false) // When true, the booking check-in progress bar treats each kit as one unit instead of counting the assets inside it
 
   // Notification settings
-  notifyBookingCreator     Boolean @default(true) // Whether the booking creator receives email notifications
-  notifyAdminsOnNewBooking Boolean @default(true) // Whether all admins receive a notification when a booking is reserved
+  notifyBookingCreator     Boolean      @default(true) // Whether the booking creator receives email notifications
+  notifyAdminsOnNewBooking Boolean      @default(true) // Whether all admins receive a notification when a booking is reserved
   alwaysNotifyTeamMembers  TeamMember[] @relation("BookingSettingsAlwaysNotify") // Team members who always receive ALL booking email notifications
 
   // Relationships
@@ -1897,12 +2766,12 @@ model PartialBookingCheckout {
   id String @id @default(cuid())
 
   // Track which assets were checked out during this session
-  assetIds      String[] // Array of asset IDs checked out
+  assetIds        String[] // Array of asset IDs checked out
   // Units checked out per entry in `assetIds` (positional alignment).
   // INDIVIDUAL assets always record `1`. QUANTITY_TRACKED slices record the
   // unit count submitted for the matching `bookingAssetId`. Empty default
   // keeps legacy rows (written before Wave B) readable without a backfill.
-  quantities    Int[]    @default([])
+  quantities      Int[]    @default([])
   // BookingAsset (slice) IDs per entry in `assetIds` (positional alignment
   // with `assetIds`/`quantities`). Disambiguates a QUANTITY_TRACKED asset that
   // is booked as multiple slices (e.g. standalone + kit member). An empty
@@ -1968,19 +2837,28 @@ model MobileAuthCode {
 model Kit {
   id String @id @default(cuid())
 
-  name        String
-  description String?
-  status      KitStatus @default(AVAILABLE)
+  name                String
+  description         String?
+  status              KitStatus @default(AVAILABLE)
+  /// Maximum initial student borrowing period, shared by all physical units.
+  maxBorrowDays       Int       @default(14)
+  /// Additional borrowing period requested after Staff approval. Null keeps
+  /// legacy Kits on the maximum borrowing period as a safe default.
+  extensionBorrowDays Int?
 
-  image           String?
-  imageExpiration DateTime?
+  image            String?
+  imageExpiration  DateTime?
+  /// Canonical private `kits` bucket object path.
+  imageStoragePath String?
 
   // `assets Asset[]` reverse relation on Asset.kitId.
-  assetKits AssetKit[]
-  custody  KitCustody?
-  qrCodes  Qr[]
-  barcodes Barcode[]
-  reports  ReportFound[]
+  assetKits            AssetKit[]
+  custody              KitCustody?
+  qrCodes              Qr[]
+  barcodes             Barcode[]
+  reports              ReportFound[]
+  handbookArticles     HandbookArticleKit[]
+  handbookObservations HandbookObservation[]
 
   // NOTE: there is intentionally no `bookingAssets BookingAsset[]`
   // back-relation here. `BookingAsset.sourceKitId` is a plain FK column
@@ -2050,15 +2928,15 @@ model KitCustody {
 /// add a type-aware single-row trigger + sum-within-total CONSTRAINT
 /// TRIGGER (parallel to the Custody / BookingAsset pivots).
 model AssetKit {
-  id             String          @id @default(cuid())
-  asset          Asset           @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id             String       @id @default(cuid())
+  asset          Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   assetId        String
-  kit            Kit             @relation(fields: [kitId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  kit            Kit          @relation(fields: [kitId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   kitId          String
-  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   organizationId String
 
-  quantity       Int             @default(1)
+  quantity Int @default(1)
 
   // Back-relation to the AssetLocation rows that are "driven by" this
   // kit membership — at most one per AssetKit. Created when the kit has
@@ -2076,8 +2954,8 @@ model AssetKit {
   // where: { assetKitId } })`. The `SET NULL` cascade still fires at
   // the DB level when an AssetKit row is deleted.
 
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // The "INDIVIDUAL asset belongs to at most one kit" cap is enforced
   // by the `enforce_individual_asset_single_kit` trigger rather than a
@@ -2099,7 +2977,7 @@ model AssetLocation {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   organizationId String
 
-  quantity       Int          @default(1)
+  quantity Int @default(1)
 
   // Manual-vs-kit-driven discriminator. NULL = manual placement (user-
   // managed via the manage-placements dialog or location picker).
@@ -2110,11 +2988,11 @@ model AssetLocation {
   // `Kit.locationId`. The `onDelete: Cascade` means removing the asset
   // from the kit auto-deletes the kit-driven row. Mirrors the
   // `Custody.kitCustodyId` discriminator pattern.
-  assetKit       AssetKit?    @relation(fields: [assetKitId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  assetKitId     String?
+  assetKit   AssetKit? @relation(fields: [assetKitId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  assetKitId String?
 
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // The "INDIVIDUAL asset at one location" cap is enforced by the
   // `enforce_individual_asset_single_location` trigger; the
@@ -2362,10 +3240,10 @@ model AuditSession {
   missingAssetCount    Int @default(0)
   unexpectedAssetCount Int @default(0)
 
-  startedAt   DateTime?
-  dueDate     DateTime?
-  completedAt DateTime?
-  cancelledAt DateTime?
+  startedAt                DateTime?
+  dueDate                  DateTime?
+  completedAt              DateTime?
+  cancelledAt              DateTime?
   activeSchedulerReference String?
 
   createdBy      User         @relation(fields: [createdById], references: [id])
@@ -2426,9 +3304,9 @@ model AuditAsset {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  scans AuditScan[]
+  scans  AuditScan[]
   images AuditImage[]
-  notes AuditNote[]
+  notes  AuditNote[]
 
   @@unique([auditSessionId, assetId])
   @@index([status])
@@ -2483,9 +3361,13 @@ model AuditScan {
 model AuditImage {
   id String @id @default(cuid())
 
-  imageUrl     String
-  thumbnailUrl String?
-  description  String?
+  imageUrl                  String?
+  thumbnailUrl              String?
+  /// Canonical public `files` bucket object paths. URL fields are retained for
+  /// backward-compatible consumers and existing audit history.
+  imageStoragePath          String?
+  thumbnailImageStoragePath String?
+  description               String?
 
   // Relationships
   auditSession   AuditSession @relation(fields: [auditSessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -2596,6 +3478,7 @@ enum ActivityEntity {
   CUSTODY
   USER
   ORGANIZATION
+  HANDBOOK_ARTICLE
 }
 
 // Additive-only. Never rename or remove values — query compatibility depends
@@ -2671,4 +3554,7 @@ enum ActivityAction {
 
   // Organization (workspace-level configuration changes)
   ORGANIZATION_QR_ID_DISPLAY_PREFERENCE_CHANGED
+  IOIO_AI_GUIDELINES_UPDATED
+  IOIO_HANDBOOK_ARTICLE_PUBLISHED
+  IOIO_HANDBOOK_OBSERVATION_SUBMITTED
 }
