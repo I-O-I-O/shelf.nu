@@ -116,14 +116,15 @@ export async function getUserByID(
       });
     }
 
-    const user = await db.user.findUniqueOrThrow({
+    const queryOptions: Prisma.UserFindUniqueOrThrowArgs = {
       where: { id },
       ...(select
         ? { select }
         : include
         ? { include }
         : { select: { id: true } }),
-    });
+    };
+    const user = await db.user.findUniqueOrThrow(queryOptions);
 
     return user;
   } catch (cause) {
@@ -141,18 +142,22 @@ export async function getUserWithContact<T extends Prisma.UserInclude>(
   id: string,
   include?: T
 ) {
-  type ReturnType = Prisma.UserGetPayload<{
-    include: T & { contact: true };
+  type SelectedContact = Prisma.UserContactGetPayload<{
+    select: typeof USER_CONTACT_SELECT;
+  }>;
+  type UserWithMaybeContact = Prisma.UserGetPayload<{
+    include: Omit<T, "contact">;
   }> & {
-    contact: NonNullable<
-      Prisma.UserContactGetPayload<{
-        select: typeof USER_CONTACT_SELECT;
-      }>
-    >; // Guarantee contact is never null
+    contact: SelectedContact | null;
+  };
+  type ReturnType = Prisma.UserGetPayload<{
+    include: Omit<T, "contact">;
+  }> & {
+    contact: NonNullable<SelectedContact>; // Guarantee contact is never null
   };
 
   try {
-    const user = await db.user.findUniqueOrThrow({
+    const queryOptions: Prisma.UserFindUniqueOrThrowArgs = {
       where: { id },
       include: {
         ...include,
@@ -160,7 +165,10 @@ export async function getUserWithContact<T extends Prisma.UserInclude>(
           select: USER_CONTACT_SELECT,
         },
       },
-    });
+    };
+    const user = (await db.user.findUniqueOrThrow(
+      queryOptions
+    )) as UserWithMaybeContact;
 
     // If contact exists, return user as-is
     if (user.contact) {
@@ -1235,7 +1243,7 @@ export async function updateUser<T extends Prisma.UserInclude>(
   );
 
   try {
-    const updatedUser = await db.user.update({
+    const queryOptions: Prisma.UserUpdateArgs = {
       where: { id: updateUserPayload.id },
       data: {
         ...cleanClone,
@@ -1255,7 +1263,8 @@ export async function updateUser<T extends Prisma.UserInclude>(
       include: {
         ...extraIncludes,
       },
-    });
+    };
+    const updatedUser = await db.user.update(queryOptions);
 
     if (
       updateUserPayload.password &&
