@@ -4,6 +4,7 @@ import { parseFormData } from "@remix-run/form-data-parser";
 import type { LRUCache } from "lru-cache";
 import type { ResizeOptions } from "sharp";
 
+import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   ASSET_MAX_IMAGE_UPLOAD_SIZE,
@@ -28,6 +29,73 @@ import { BlockedAddressError, safeFetch } from "./ssrf.server";
 import type { SafeFetchResult } from "./ssrf.server";
 
 const label: ErrorLabel = "File storage";
+
+export type StorageImageBucket = "assets" | "kits" | "files";
+
+/**
+ * Resolve an image's current presentation URL without making that URL its
+ * persisted identity. Legacy Supabase URLs are parsed only when they
+ * unambiguously identify an object in the expected bucket. Other external
+ * URLs are passed through unchanged for compatibility.
+ */
+export async function resolveStorageImageUrl({
+  bucketName,
+  objectPath,
+  legacyUrl,
+  isPublic,
+}: {
+  bucketName: StorageImageBucket;
+  objectPath?: string | null;
+  legacyUrl?: string | null;
+  isPublic: boolean;
+}): Promise<string | null> {
+  const normalizedPath = objectPath?.trim() || null;
+  const legacyPath = legacyUrl
+    ? extractLegacySupabaseObjectPath(legacyUrl, bucketName)
+    : null;
+  const path = normalizedPath ?? legacyPath;
+
+  if (!path) return legacyUrl ?? null;
+  if (isPublic) return getPublicFileURL({ filename: path, bucketName });
+  return createSignedUrl({ filename: path, bucketName });
+}
+
+/** Only interpret legacy URLs as Storage objects when their URL path explicitly
+ * matches Supabase's object endpoint for the expected bucket. This avoids
+ * converting unrelated CDN URLs into accidental object keys. */
+function extractLegacySupabaseObjectPath(
+  value: string,
+  bucketName: StorageImageBucket
+): string | null {
+  if (!value.includes("://")) {
+    return extractStoragePath(value, bucketName);
+  }
+  try {
+    const pathname = new URL(value).pathname;
+    const match = pathname.match(
+      new RegExp(
+        `/storage/v1/object/(?:public|sign|authenticated)/${bucketName}/(.+)$`
+      )
+    );
+    return match?.[1] ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove one explicitly owned object after its database reference is cleared. */
+export async function removeStorageImageObject({
+  bucketName,
+  objectPath,
+}: {
+  bucketName: StorageImageBucket;
+  objectPath: string;
+}) {
+  const { error } = await getSupabaseAdmin()
+    .storage.from(bucketName)
+    .remove([objectPath]);
+  if (error) throw error;
+}
 
 export function getPublicFileURL({
   filename,
@@ -839,7 +907,12 @@ export function getFileUploadPath({
   typeId,
 }: {
   organizationId: string;
-  type: "locations" | "audits" | "asset-models";
+  type:
+    | "locations"
+    | "audits"
+    | "asset-models"
+    | "booking-returns"
+    | "lab-info";
   typeId: string;
 }) {
   return `${organizationId}/${type}/${typeId}/${id()}`;
