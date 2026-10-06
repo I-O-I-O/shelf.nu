@@ -44,10 +44,12 @@ export async function getOrganizationById<T extends Prisma.OrganizationInclude>(
   extraIncludes?: T
 ) {
   try {
-    return (await db.organization.findUniqueOrThrow({
+    const queryOptions: Prisma.OrganizationFindUniqueOrThrowArgs = {
       where: { id },
       include: extraIncludes,
-    })) as Prisma.OrganizationGetPayload<{ include: T }>;
+    };
+    const organization = await db.organization.findUniqueOrThrow(queryOptions);
+    return organization as Prisma.OrganizationGetPayload<{ include: T }>;
   } catch (cause) {
     throw new ShelfError({
       cause,
