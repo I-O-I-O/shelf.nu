@@ -1,4 +1,6 @@
+import { useRef, useState } from "react";
 import type { Prisma } from "@prisma/client";
+import { isAuthApiError } from "@supabase/supabase-js";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -28,7 +30,7 @@ import {
 import { assertEmailChangeAllowed } from "~/modules/auth/sso-enforcement.server";
 import { requireStudentAccountSettings } from "~/modules/ioio-student/route.server";
 import { getUserByID, updateUserEmail } from "~/modules/user/service.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
 
 const accountActionSchema = z.union([
@@ -47,7 +49,10 @@ const accountActionSchema = z.union([
   z.object({
     intent: z.literal("verify-email"),
     newEmail: z.string().email("Enter a valid email address."),
-    otp: z.string().min(1, "Enter the verification code."),
+    otp: z
+      .string()
+      .min(6, "Code must be 6 digits")
+      .max(6, "Code must be 6 digits"),
   }),
 ]);
 
@@ -84,12 +89,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
 
     if (parsed.intent === "change-email") {
-      if (parsed.newEmail === email) {
-        return data({
-          error: { message: "Enter a different email address.", label: "Auth" },
-        });
-      }
-
       const verification = await signInWithEmail(email, parsed.currentPassword);
       if (!verification || "requiresEmailVerification" in verification) {
         return data({
@@ -116,18 +115,25 @@ export async function action({ context, request }: ActionFunctionArgs) {
           newEmail: parsed.newEmail,
         });
       if (generateError) {
-        return data(
-          {
-            error: {
-              message:
-                generateError.code === "email_exists"
-                  ? "Please choose a different email address which is not already in use."
-                  : "Failed to send an email verification code.",
-              label: "Auth",
+        if (generateError.code === "email_exists") {
+          return data(
+            {
+              error: {
+                message:
+                  "Please choose a different email address which is not already in use.",
+                label: "Auth",
+              },
             },
-          },
-          { status: 400 }
-        );
+            { status: 400 }
+          );
+        }
+
+        throw new ShelfError({
+          cause: generateError,
+          message: "Failed to initiate email change.",
+          additionalData: { userId, newEmail: parsed.newEmail },
+          label: "Auth",
+        });
       }
       const otp = linkData.properties.email_otp;
       sendEmail({
@@ -151,15 +157,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
         type: "email_change",
       });
       if (verifyError) {
-        return data(
-          {
-            error: {
-              message: "Invalid or expired verification code.",
-              label: "Auth",
+        if (isAuthApiError(verifyError) && verifyError.code === "otp_expired") {
+          return data(
+            {
+              error: {
+                message: "Invalid or expired verification code",
+                label: "Auth",
+              },
             },
-          },
-          { status: 400 }
-        );
+            { status: 400 }
+          );
+        }
+
+        throw new ShelfError({
+          cause: verifyError,
+          message: "Failed to verify email change code.",
+          additionalData: { userId, newEmail: parsed.newEmail },
+          label: "Auth",
+        });
       }
       await updateUserEmail({
         userId,
@@ -200,16 +215,24 @@ export const meta: MetaFunction = () => [{ title: "Account settings" }];
 export default function StudentAccountSettings() {
   const { email, sso } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const lastProcessedActionRef = useRef<typeof actionData | null>(null);
+  if (actionData && lastProcessedActionRef.current !== actionData) {
+    lastProcessedActionRef.current = actionData;
+
+    if ("awaitingEmailVerification" in actionData) {
+      queueMicrotask(() => setPendingEmail(actionData.newEmail));
+    } else if ("ok" in actionData && actionData.kind === "email") {
+      queueMicrotask(() => setPendingEmail(null));
+    }
+  }
   const navigation = useNavigation();
   const isSubmitting = navigation.state !== "idle";
   const errorMessage =
     actionData && "error" in actionData ? actionData.error?.message : null;
   const successMessage =
     actionData && "message" in actionData ? actionData.message : null;
-  const emailAwaitingVerification =
-    actionData && "awaitingEmailVerification" in actionData
-      ? actionData.newEmail
-      : null;
+  const emailAwaitingVerification = pendingEmail;
 
   return (
     <div className="max-w-3xl space-y-5">
@@ -274,7 +297,9 @@ export default function StudentAccountSettings() {
                   label="Verification code"
                   name="otp"
                   type="text"
+                  placeholder="Enter 6-digit code"
                   autoComplete="one-time-code"
+                  maxLength={6}
                   required
                   className="mt-1"
                 />
