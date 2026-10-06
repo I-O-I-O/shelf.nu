@@ -41,7 +41,11 @@ export async function action({ request, context }: ActionFunctionArgs) {
       case "bulk-delete": {
         const { categoryIds } = parseData(formData, BulkDeleteCategorySchema);
 
-        await bulkDeleteCategories({ categoryIds, organizationId });
+        await bulkDeleteCategories({
+          categoryIds,
+          organizationId,
+          movedById: userId,
+        });
 
         sendNotification({
           title: "Categories deleted",
