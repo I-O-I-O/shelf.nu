@@ -16,6 +16,7 @@ export default function Header({
   preHeading,
   hidePageDescription = false,
   hideBreadcrumbs = false,
+  hideQuickFind = false,
   classNames,
   slots,
 }: {
@@ -28,6 +29,8 @@ export default function Header({
   preHeading?: ReactNode;
   hidePageDescription?: boolean;
   hideBreadcrumbs?: boolean;
+  /** Hide the command-palette Quick Find control on focused surfaces. */
+  hideQuickFind?: boolean;
   classNames?: string;
   slots?: {
     [key in SlotKeys]?: ReactNode;
@@ -43,7 +46,9 @@ export default function Header({
           <div className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 md:min-h-[67px] md:py-3">
             <Breadcrumbs />
             <div className="hidden items-center gap-3 md:flex">
-              <CommandPaletteButton className="w-auto md:w-auto" />
+              {!hideQuickFind ? (
+                <CommandPaletteButton className="w-auto md:w-auto" />
+              ) : null}
               {children ? (
                 <div className="flex shrink-0 items-center gap-3">
                   {children}

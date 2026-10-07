@@ -107,6 +107,30 @@ describe("IOIO asset creation form", () => {
     );
   });
 
+  it("uses the same IOIO fields when editing a general item", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Makey Kit"
+        description="Shared product description"
+        productGroup={{
+          name: "Makey Kit",
+          locationIsMixed: false,
+          hasImage: false,
+        }}
+        showAssetModel={false}
+      />
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("Makey Kit");
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "Shared product description"
+    );
+    expect(screen.getByText("Basic fields")).toBeInTheDocument();
+    expect(screen.queryByText("Alternative Barcodes")).not.toBeInTheDocument();
+    expect(screen.queryByText("Custom Fields")).not.toBeInTheDocument();
+  });
+
   it("switches from quantity to individual physical-unit quantity", () => {
     render(<IoioAssetCreateForm showAssetModel={false} />);
 

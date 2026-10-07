@@ -1,4 +1,4 @@
-import { BarcodeType, OrganizationRoles } from "@prisma/client";
+import { BarcodeType } from "@prisma/client";
 import { DateTime } from "luxon";
 import type {
   ActionFunctionArgs,
@@ -35,6 +35,10 @@ import {
   normalizeBarcodeValue,
 } from "~/modules/barcode/validation";
 import { computeBookingAssetRemainingToCheckOut } from "~/modules/booking/service.server";
+import {
+  archiveIoioItems,
+  trashIoioItems,
+} from "~/modules/ioio-staff/archive.server";
 import { getTeamMembersForQuantityCustody } from "~/modules/team-member/service.server";
 import assetCss from "~/styles/asset.css?url";
 
@@ -282,7 +286,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       : { teamMembers: [], totalTeamMembers: 0 };
 
     const header: HeaderData = {
-      title: asset.title,
+      title: asset.assetModel?.name ?? asset.title,
     };
 
     /**
@@ -331,6 +335,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       z.object({
         intent: z.enum([
           "delete",
+          "archive",
+          "trash",
           "relink-qr-code",
           "set-reminder",
           "add-barcode",
@@ -340,6 +346,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const intent2ActionMap: { [K in typeof intent]: PermissionAction } = {
       delete: PermissionAction.delete,
+      archive: PermissionAction.delete,
+      trash: PermissionAction.delete,
       "relink-qr-code": PermissionAction.update,
       "set-reminder": PermissionAction.update,
       "add-barcode": PermissionAction.update,
@@ -353,6 +361,36 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     });
 
     switch (intent) {
+      case "archive": {
+        await archiveIoioItems({
+          organizationId,
+          itemIds: [id],
+          archivedById: userId,
+        });
+        sendNotification({
+          title: "Asset archived",
+          message: "The item was archived and can be restored later.",
+          icon: { name: "success", variant: "success" },
+          senderId: userId,
+        });
+        return redirect("/assets");
+      }
+
+      case "trash": {
+        await trashIoioItems({
+          organizationId,
+          items: [{ itemType: "ASSET", itemId: id }],
+          trashedById: userId,
+        });
+        sendNotification({
+          title: "Item moved to Trash",
+          message: "The item can be restored from Trash.",
+          icon: { name: "success", variant: "success" },
+          senderId: userId,
+        });
+        return redirect("/assets");
+      }
+
       case "delete": {
         const { mainImageUrl } = parseData(
           formData,
@@ -587,14 +625,16 @@ export default function AssetDetailsPage() {
           ),
         }}
         subHeading={
-          <div className="flex gap-2">
-            <AssetStatusBadge
-              id={asset.id}
-              status={asset.status}
-              availableToBook={asset.availableToBook}
-              asset={asset}
-            />
-          </div>
+          asset.assetModelId ? null : (
+            <div className="flex gap-2">
+              <AssetStatusBadge
+                id={asset.id}
+                status={asset.status}
+                availableToBook={asset.availableToBook}
+                asset={asset}
+              />
+            </div>
+          )
         }
       >
         <When

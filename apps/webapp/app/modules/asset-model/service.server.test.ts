@@ -4,8 +4,12 @@ import { db } from "~/database/db.server";
 import { recordEvents } from "~/modules/activity-event/service.server";
 import { createNotes } from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
-import { parseFileFormData } from "~/utils/storage.server";
 import {
+  parseFileFormData,
+  removeStorageImageObject,
+} from "~/utils/storage.server";
+import {
+  clearAssetModelImage,
   createAssetModel,
   createAssetModelsIfNotExists,
   resolveImportedAssetModel,
@@ -81,6 +85,7 @@ vitest.mock("~/utils/storage.server", async () => {
   return {
     ...actual,
     parseFileFormData: vitest.fn(),
+    removeStorageImageObject: vitest.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -306,6 +311,51 @@ describe("getAssetModels", () => {
         take: 10,
       })
     );
+  });
+});
+
+describe("clearAssetModelImage", () => {
+  beforeEach(() => {
+    vitest.clearAllMocks();
+  });
+
+  it("clears only the model in the active organization and removes its image objects", async () => {
+    // why: storage deletion is an external Supabase boundary; the service test
+    // verifies the paths and tenant scope passed to that boundary.
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue({
+      image:
+        "https://xyz.supabase.co/storage/v1/object/public/files/org/model.jpg",
+      thumbnailImage:
+        "https://xyz.supabase.co/storage/v1/object/public/files/org/model-thumb.jpg",
+      imageStoragePath: null,
+      thumbnailImageStoragePath: null,
+    });
+
+    await clearAssetModelImage({
+      assetModelId: "model-1",
+      organizationId: "org-1",
+    });
+
+    expect(db.assetModel.findFirst).toHaveBeenCalledWith({
+      where: { id: "model-1", organizationId: "org-1" },
+      select: {
+        image: true,
+        thumbnailImage: true,
+        imageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
+    });
+    expect(db.assetModel.updateMany).toHaveBeenCalledWith({
+      where: { id: "model-1", organizationId: "org-1" },
+      data: {
+        image: null,
+        thumbnailImage: null,
+        imageStoragePath: null,
+        thumbnailImageStoragePath: null,
+      },
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledTimes(2);
   });
 });
 

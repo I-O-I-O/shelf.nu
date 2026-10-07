@@ -1185,7 +1185,7 @@ export default function LabelsPage() {
 
   return (
     <div className="ioio-label-route">
-      <Header classNames="ioio-label-route-header" />
+      <Header hideQuickFind classNames="ioio-label-route-header" />
       <div className="ioio-label-workspace mx-auto max-w-7xl px-4 py-1 sm:px-6 lg:px-8">
         <div className="ioio-label-controls ioio-label-page-header mb-1 flex flex-wrap items-start justify-between gap-2">
           <div>

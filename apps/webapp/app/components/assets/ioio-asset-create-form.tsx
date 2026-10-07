@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Asset, Barcode, Qr } from "@prisma/client";
+import type {
+  Asset,
+  AssetModel,
+  Barcode,
+  CustomField,
+  Qr,
+} from "@prisma/client";
 import { AssetType, ConsumptionType } from "@prisma/client";
 import { useAtom, useAtomValue } from "jotai";
 import {
@@ -30,7 +36,6 @@ import {
   getIoioKitDisplayName,
   getIoioPhysicalUnitDisplayName,
 } from "~/modules/kit/ioio-kit-presentation";
-import type { loader as newAssetLoader } from "~/routes/_layout+/assets.new";
 import { resolveCancelTo } from "~/utils/cancel-destination";
 import { ACCEPT_SUPPORTED_IMAGES } from "~/utils/constants";
 import type { CustomFieldZodSchema } from "~/utils/custom-fields";
@@ -62,6 +67,7 @@ import { RefererRedirectInput } from "../forms/referer-redirect-input";
 import InlineEntityCreationDialog from "../inline-entity-creation-dialog/inline-entity-creation-dialog";
 import { IoioImagePicker } from "../ioio/ioio-image-picker";
 import { IoioLocationCascadeSelect } from "../location/ioio-location-cascade-select";
+import type { IoioLocationOption } from "../location/ioio-location-cascade-select";
 import { Button } from "../shared/button";
 import { ButtonGroup } from "../shared/button-group";
 import { Card } from "../shared/card";
@@ -181,6 +187,22 @@ export const NewAssetBulkFormSchema = NewAssetFormSchema.extend({
       .max(100, "Count must be at most 100")
   ),
 });
+
+type IoioAssetFormLoaderData = {
+  customFields: Array<
+    Pick<
+      CustomField,
+      "id" | "name" | "helpText" | "required" | "type" | "options" | "active"
+    >
+  >;
+  locations: IoioLocationOption[];
+  assetModels?: Array<
+    Pick<
+      AssetModel,
+      "id" | "name" | "defaultCategoryId" | "image" | "thumbnailImage"
+    >
+  >;
+};
 
 /** Pass props of the values to be used as default for the form fields */
 
@@ -308,8 +330,13 @@ export const IoioAssetCreateForm = ({
 }: Props) => {
   const navigation = useNavigation();
   const navigate = useNavigate();
-  const customFields = useLoaderData<typeof newAssetLoader>()
-    .customFields.filter((field) => field.active)
+  const {
+    customFields: loaderCustomFields,
+    locations,
+    assetModels,
+  } = useLoaderData<IoioAssetFormLoaderData>();
+  const customFields = loaderCustomFields
+    .filter((field) => field.active)
     .map(
       (field): CustomFieldZodSchema => ({
         id: field.id,
@@ -362,8 +389,6 @@ export const IoioAssetCreateForm = ({
   const fileError = useAtomValue(fileErrorAtom);
   const [, validateFile] = useAtom(assetImageValidateFileAtom);
   const [, updateDynamicTitle] = useAtom(updateDynamicTitleAtom);
-
-  const { locations } = useLoaderData<typeof newAssetLoader>();
 
   /** Whether we are in edit mode (asset already exists). */
   const isEditMode = Boolean(id);
@@ -655,15 +680,7 @@ export const IoioAssetCreateForm = ({
   });
 
   /** Asset models from the loader, used to look up defaults on selection. */
-  const assetModelsData = useLoaderData<{
-    assetModels?: Array<{
-      id: string;
-      name?: string;
-      defaultCategoryId?: string | null;
-      image?: string | null;
-      thumbnailImage?: string | null;
-    }>;
-  }>()?.assetModels;
+  const assetModelsData = assetModels;
 
   /** The chosen model's row, used for the inherited-image preview + copy. */
   const selectedAssetModel = selectedAssetModelId

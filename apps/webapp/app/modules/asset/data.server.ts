@@ -1,7 +1,7 @@
 /** In this file you can find the different ways of fetching data for the asset index. They are either for the simple or advanced mode */
 
 import type { AssetIndexSettings, Kit } from "@prisma/client";
-import { OrganizationRoles } from "@prisma/client";
+import { AssetType, OrganizationRoles } from "@prisma/client";
 import { data, redirect } from "react-router";
 import type { Filter } from "~/components/assets/assets-index/advanced-filters/schema";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -34,6 +34,8 @@ import { hasPermission } from "~/utils/permissions/permission.validator.server";
 import { canImportAssets } from "~/utils/subscription.server";
 import type { UserNameFields } from "~/utils/user";
 import { resolveUserDisplayName } from "~/utils/user";
+import { getAssetAvailabilityBatch } from "./availability.server";
+import { getPreparedPickupHeldUnitIds } from "./individual-product-quantity.server";
 import { parseFiltersWithHierarchy } from "./query.server";
 import {
   getAdvancedPaginatedAndFilterableAssets,
@@ -81,6 +83,8 @@ interface Props {
    * and an optional field would let a caller silently restore that.
    */
   canSeeAllCustody: boolean;
+  /** Optional IOIO Inventory lifecycle filter and availability projection. */
+  excludeAssetIds?: string[];
 }
 
 const searchFieldTooltipText = `
@@ -167,6 +171,7 @@ export async function simpleModeLoader({
   user,
   settings,
   canSeeAllCustody,
+  excludeAssetIds,
 }: Props) {
   // Threaded into the asset query so the custodian FILTER seed is scoped —
   // it used a role-only check that let BASE through unscoped. See
@@ -305,6 +310,7 @@ export async function simpleModeLoader({
           : undefined,
       isSelfService,
       userId,
+      excludeAssetIds,
     }),
     getTagsForBookingTagsFilter({
       organizationId,
@@ -344,6 +350,37 @@ export async function simpleModeLoader({
   // in the initial asset query (via assetIndexFields), so this just reshapes
   // it into the `custody.custodian` structure the UI expects.
   assets = updateAssetsWithBookingCustodians(assets);
+
+  // The IOIO Inventory list needs the same physical-now availability and
+  // prepared-pickup state as the student catalog. Keep the generic Shelf
+  // payload unchanged unless this caller opts into the archive-aware view.
+  let physicalAvailabilityByAssetId: Awaited<
+    ReturnType<typeof getAssetAvailabilityBatch>
+  > | null = null;
+  let preparedPickupHeldUnitIds = new Set<string>();
+  if (excludeAssetIds !== undefined) {
+    preparedPickupHeldUnitIds = await getPreparedPickupHeldUnitIds({
+      organizationId,
+      assetIds: assets
+        .filter((asset) => asset.type === AssetType.INDIVIDUAL)
+        .map((asset) => asset.id),
+    });
+    try {
+      physicalAvailabilityByAssetId = await getAssetAvailabilityBatch(
+        assets.map((asset) => asset.id),
+        { organizationId, window: null }
+      );
+    } catch (cause) {
+      Logger.error(
+        new ShelfError({
+          cause,
+          message: "Failed to load IOIO physical inventory availability",
+          additionalData: { organizationId, assetCount: assets.length },
+          label: "Assets",
+        })
+      );
+    }
+  }
 
   // Refresh expired signed URLs before returning so users never see broken images.
   // Runs after the main query completes but is awaited to ensure fresh URLs.
@@ -430,7 +467,19 @@ export async function simpleModeLoader({
        * present at runtime.
        */
       items: redactCustodianForViewer(
-        assets as unknown as Array<(typeof assets)[number] & RowWithCustody>,
+        assets.map((asset) => ({
+          ...asset,
+          ...(physicalAvailabilityByAssetId
+            ? {
+                physicalAvailable:
+                  physicalAvailabilityByAssetId.get(asset.id)
+                    ?.physicalAvailable ?? 0,
+              }
+            : {}),
+          ...(preparedPickupHeldUnitIds.has(asset.id)
+            ? { preparedPickupHeld: true }
+            : {}),
+        })) as unknown as Array<(typeof assets)[number] & RowWithCustody>,
         { canSeeAllCustody, userId }
       ),
       /* The model view is advanced-only, but both loaders must offer the same

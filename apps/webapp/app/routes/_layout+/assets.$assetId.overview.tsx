@@ -1,20 +1,29 @@
 import { useState } from "react";
 import type { RenderableTreeNode } from "@markdoc/markdoc";
 import {
+  AssetType,
   AssetStatus,
+  BookingStatus,
   CustomFieldType,
-  OrganizationRoles,
 } from "@prisma/client";
+import {
+  ArchiveIcon,
+  MoreHorizontalIcon,
+  PrinterIcon,
+  Trash2Icon,
+} from "lucide-react";
+import { data, useFetcher, useLoaderData } from "react-router";
 import type {
   MetaFunction,
   ActionFunctionArgs,
   LoaderFunctionArgs,
 } from "react-router";
-import { data, useFetcher, useLoaderData } from "react-router";
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { CustodyCard } from "~/components/assets/asset-custody-card";
+import { AssetImage } from "~/components/assets/asset-image";
 import { AssetReminderCards } from "~/components/assets/asset-reminder-cards";
+import { DeleteAsset } from "~/components/assets/delete-asset";
 import { MoveUnitsDialog } from "~/components/assets/move-units-dialog";
 import { QuantityCustodyList } from "~/components/assets/quantity-custody-list";
 import { QuantityOverviewCard } from "~/components/assets/quantity-overview-card";
@@ -25,6 +34,8 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import Input from "~/components/forms/input";
 import { Switch } from "~/components/forms/switch";
 import Icon from "~/components/icons/icon";
+import { AskAboutItemButton } from "~/components/ioio/ask-about-item-button";
+import { StaffItemDetail } from "~/components/ioio-staff/staff-item-detail";
 import ContextualModal from "~/components/layout/contextual-modal";
 import type { HeaderData } from "~/components/layout/header/types";
 import { LocationBadge } from "~/components/location/location-badge";
@@ -36,6 +47,12 @@ import { Button } from "~/components/shared/button";
 import { Card } from "~/components/shared/card";
 import { DateS } from "~/components/shared/date";
 import { DateTimePicker } from "~/components/shared/date-time-picker";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "~/components/shared/dropdown";
 import { InfoTooltip } from "~/components/shared/info-tooltip";
 import { InlineEditableField } from "~/components/shared/inline-editable-field";
 import { Tag } from "~/components/shared/tag";
@@ -53,10 +70,12 @@ import { usePosition } from "~/hooks/use-position";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getAssetAvailability } from "~/modules/asset/availability.server";
 import { getAssetOverviewFields } from "~/modules/asset/fields";
+import { getIndividualUnitAvailability } from "~/modules/asset/individual-product-quantity.server";
 import {
   MOVE_UNITS_INTENT_FIELD,
   type MoveAxis,
 } from "~/modules/asset/move-units.types";
+import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import {
   buildQuantityData,
   type QuantityData,
@@ -69,9 +88,11 @@ import {
   moveAssetLocationUnits,
   parseAssetValuation,
   placeUnplacedUnits,
+  setIndividualAssetAvailability,
   updateAsset,
   updateAssetBookingAvailability,
 } from "~/modules/asset/service.server";
+import { getStaffInventoryEditTarget } from "~/modules/asset/staff-inventory-view";
 import type { ShelfAssetCustomFieldValueType } from "~/modules/asset/types";
 import {
   getPrimaryKit,
@@ -81,6 +102,8 @@ import {
 import { getRemindersForOverviewPage } from "~/modules/asset-reminder/service.server";
 import { getCustodyCardHolderUserId } from "~/modules/custody/utils";
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
+import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { moveAssetKitUnits } from "~/modules/kit/service.server";
 import { generateQrObj } from "~/modules/qr/utils.server";
 import { getLastScanForViewer } from "~/modules/scan/service.server";
@@ -178,6 +201,186 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       request,
       include: getAssetOverviewFields(canUseBarcodes),
     });
+
+    const canEditAssetModel = asset.assetModelId
+      ? await hasPermission({
+          userId,
+          organizationId,
+          roles,
+          entity: PermissionEntity.assetModel,
+          action: PermissionAction.update,
+        })
+      : false;
+    const archivedAssetIds =
+      asset.type === AssetType.INDIVIDUAL
+        ? await getIoioArchivedItemIds({ organizationId, itemType: "ASSET" })
+        : [];
+    const individualProductUnits =
+      asset.type === AssetType.INDIVIDUAL
+        ? await db.asset.findMany({
+            where: {
+              organizationId,
+              type: AssetType.INDIVIDUAL,
+              ...(asset.assetModelId
+                ? { assetModelId: asset.assetModelId }
+                : { id: asset.id }),
+              ...(archivedAssetIds.length
+                ? { id: { notIn: archivedAssetIds } }
+                : {}),
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              availableToBook: true,
+              bookingAssets: {
+                where: {
+                  checkedInAt: null,
+                  booking: {
+                    status: {
+                      in: [
+                        BookingStatus.RESERVED,
+                        BookingStatus.ONGOING,
+                        BookingStatus.OVERDUE,
+                      ],
+                    },
+                  },
+                },
+                select: { booking: { select: { status: true } } },
+              },
+              custody: { select: { id: true } },
+              mainImage: true,
+              thumbnailImage: true,
+              mainImageExpiration: true,
+              mainImageStoragePath: true,
+              thumbnailImageStoragePath: true,
+            },
+          })
+        : [];
+    const individualUnitIds = individualProductUnits.map((unit) => unit.id);
+    const [individualAvailability, physicalUnitOperations] = await Promise.all([
+      individualUnitIds.length
+        ? getIndividualUnitAvailability({
+            organizationId,
+            assetIds: individualUnitIds,
+            window: null,
+          })
+        : Promise.resolve({ total: 0, available: 0, availableUnitIds: [] }),
+      individualUnitIds.length
+        ? db.ioioWriteOperation.findMany({
+            where: {
+              organizationId,
+              assetId: { in: individualUnitIds },
+              OR: [
+                { operationType: "REPORT_PROBLEM", status: "SUCCEEDED" },
+                {
+                  operationType: "IOIO_PREPARATION",
+                  status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
+                },
+              ],
+            },
+            select: {
+              assetId: true,
+              operationType: true,
+              reportType: true,
+              status: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+    const availablePhysicalUnitIds = new Set(
+      individualAvailability.availableUnitIds
+    );
+    const operationsByPhysicalUnitId = new Map<
+      string,
+      typeof physicalUnitOperations
+    >();
+    for (const operation of physicalUnitOperations) {
+      if (!operation.assetId) continue;
+      operationsByPhysicalUnitId.set(operation.assetId, [
+        ...(operationsByPhysicalUnitId.get(operation.assetId) ?? []),
+        operation,
+      ]);
+    }
+    const logicalProductName =
+      asset.assetModel?.name ?? asset.title.replace(/\s+#\d+$/u, "");
+    const physicalUnitRows = individualProductUnits.map((unit) => {
+      const operations = operationsByPhysicalUnitId.get(unit.id) ?? [];
+      const issueReport = operations.find(
+        (operation) => operation.operationType === "REPORT_PROBLEM"
+      );
+      const hasBrokenReport =
+        issueReport?.reportType === "ITEM_DAMAGED" ||
+        issueReport?.reportType === "ITEM_NOT_WORKING" ||
+        issueReport?.reportType === "PART_MISSING" ||
+        issueReport?.reportType === "KIT_INCOMPLETE";
+      const preparationState = operations.find(
+        (operation) => operation.operationType === "IOIO_PREPARATION"
+      )?.status;
+      const bookingStatuses = unit.bookingAssets.map(
+        (bookingAsset) => bookingAsset.booking.status
+      );
+      const status = hasBrokenReport
+        ? "Broken"
+        : issueReport
+        ? "Issue reported"
+        : preparationState === "CANCELLED_PICKUP"
+        ? "Put back required"
+        : preparationState === "READY_FOR_PICKUP"
+        ? "Ready for pickup"
+        : unit.status === AssetStatus.IN_CUSTODY ||
+          unit.status === AssetStatus.CHECKED_OUT
+        ? "In use"
+        : bookingStatuses.includes(BookingStatus.RESERVED)
+        ? "Reserved"
+        : !unit.availableToBook
+        ? "Temporarily unavailable"
+        : availablePhysicalUnitIds.has(unit.id)
+        ? "Available"
+        : "Unavailable";
+      const canChangeAvailability =
+        unit.status === AssetStatus.AVAILABLE &&
+        unit.custody.length === 0 &&
+        unit.bookingAssets.length === 0 &&
+        !preparationState &&
+        !issueReport;
+
+      return {
+        id: unit.id,
+        title: getIoioPhysicalUnitDisplayName({
+          logicalProductName,
+          unitNumber: getPhysicalUnitLabelFromTitle(unit.title),
+          missingUnitLabel: "Unit number missing",
+        }),
+        status,
+        canChangeAvailability,
+        unavailableReason: !canChangeAvailability
+          ? issueReport
+            ? "Resolve the issue report before making this unit available."
+            : preparationState === "CANCELLED_PICKUP"
+            ? "Put this unit back before changing its availability."
+            : preparationState === "READY_FOR_PICKUP"
+            ? "This unit is staged for pickup."
+            : unit.custody.length
+            ? "Release this unit from custody first."
+            : unit.bookingAssets.length
+            ? "This unit is reserved or part of an active loan."
+            : "This unit is currently in use."
+          : null,
+      };
+    });
+    const individualProductSummary =
+      individualProductUnits.length > 1
+        ? {
+            total: individualProductUnits.length,
+            available: individualAvailability.available,
+            image:
+              individualProductUnits.find(
+                (unit) => unit.mainImage || unit.thumbnailImage
+              ) ?? null,
+          }
+        : null;
 
     /**
      * We get the first QR code(for now we can only have 1)
@@ -412,6 +615,11 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       allCustomFieldDefs,
       moveDestinations,
       unplacedQuantity,
+      individualProductSummary,
+      individualProductUnitIds: individualUnitIds,
+      physicalUnitRows,
+      archivedAssetIds,
+      canEditAssetModel,
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -463,8 +671,45 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const { intent } = parseData(
       formData,
-      z.object({ intent: z.enum(["toggle", "updateField"]) })
+      z.object({
+        intent: z.enum(["toggle", "updateField", "physicalUnitAvailability"]),
+      })
     );
+
+    if (intent === "physicalUnitAvailability") {
+      const input = parseData(
+        formData,
+        z.object({
+          unitId: z.string().min(1),
+          action: z.enum(["unavailable", "available", "broken"]),
+          note: z.string().max(500).optional().default(""),
+        })
+      );
+      try {
+        const result = await setIndividualAssetAvailability({
+          id: input.unitId,
+          detailAssetId: id,
+          organizationId,
+          userId,
+          action: input.action,
+          note: input.note,
+        });
+        return data({
+          ok: true,
+          intent,
+          unitId: input.unitId,
+          status: result.status,
+        });
+      } catch (cause) {
+        if (cause instanceof ShelfError && cause.status === 409) {
+          return data(
+            { ok: false, intent, unitId: input.unitId, error: cause.message },
+            { status: 409 }
+          );
+        }
+        throw cause;
+      }
+    }
 
     if (intent === "toggle") {
       const { availableToBook } = parseData(
@@ -768,6 +1013,10 @@ export default function AssetOverview() {
     allCustomFieldDefs,
     moveDestinations,
     unplacedQuantity,
+    individualProductSummary,
+    individualProductUnitIds,
+    physicalUnitRows,
+    canEditAssetModel,
   } = useLoaderData<typeof loader>();
   const { prefs } = useDateFormatter();
 
@@ -829,6 +1078,214 @@ export default function AssetOverview() {
     organization: currentOrganization,
   });
   const canEditAsset = canUpdateAvailability;
+
+  const inventoryAvailableQuantity = individualProductSummary
+    ? individualProductSummary.available
+    : isQuantityTracked(asset)
+    ? Math.max(0, quantityData?.available ?? asset.quantity ?? 0)
+    : physicalUnitRows.length > 0
+    ? physicalUnitRows.filter((unit) => unit.status === "Available").length
+    : asset.status === AssetStatus.AVAILABLE && asset.availableToBook
+    ? 1
+    : 0;
+  const inventoryDetailTitle = individualProductSummary
+    ? asset.assetModel?.name ?? asset.title.replace(/\s+#\d+$/u, "")
+    : asset.title;
+  const inventoryImage = individualProductSummary?.image ?? asset;
+  const inventoryCanEditGeneralItem = asset.assetModelId
+    ? canEditAssetModel
+    : canEditAsset;
+  const inventoryLabelAssetIds = individualProductSummary
+    ? individualProductUnitIds
+    : [asset.id];
+
+  // IOIO Staff Inventory uses the same item presentation for individual units
+  // and quantity pools. Keep Shelf's detailed editor data in the loader for
+  // its existing APIs, but render the IOIO item hierarchy on this route.
+  if (asset.type === AssetType.INDIVIDUAL || isQuantityTracked(asset)) {
+    return (
+      <StaffItemDetail
+        title={inventoryDetailTitle}
+        image={
+          <AssetImage
+            asset={{
+              id: inventoryImage.id,
+              mainImage: inventoryImage.mainImage,
+              thumbnailImage: inventoryImage.thumbnailImage,
+              mainImageExpiration: inventoryImage.mainImageExpiration,
+              assetModel: asset.assetModel ?? null,
+              kitImage: asset.assetKits[0]?.kit.image ?? null,
+            }}
+            alt={`Image of ${inventoryDetailTitle}`}
+            useThumbnail={false}
+            withPreview
+            className="size-full"
+          />
+        }
+        availableQuantity={inventoryAvailableQuantity}
+        unitLabel={
+          individualProductSummary
+            ? /\bkit\b/i.test(inventoryDetailTitle)
+              ? "kits"
+              : "units"
+            : isQuantityTracked(asset)
+            ? asset.unitOfMeasure || "items"
+            : "item"
+        }
+        categoryName={asset.category?.name}
+        locationPath={location ? [location.name] : []}
+        description={asset.description}
+        physicalUnits={physicalUnitRows}
+        physicalUnitsActionUrl={`/assets/${encodeURIComponent(
+          asset.id
+        )}/overview`}
+        canEditPhysicalUnits={canEditAsset}
+        maxBorrowDays={asset.maxBorrowDays ?? 45}
+        tracking={
+          individualProductSummary
+            ? "Individual QR tracking"
+            : isQuantityTracked(asset)
+            ? "Quantity pool"
+            : null
+        }
+        status={
+          individualProductSummary
+            ? undefined
+            : asset.status === AssetStatus.AVAILABLE && asset.availableToBook
+            ? "Available"
+            : "Unavailable"
+        }
+        additionalFields={[
+          {
+            label: "Extension period",
+            value: `${
+              asset.extensionBorrowDays ?? asset.maxBorrowDays ?? 45
+            } days`,
+            help: "Additional borrowing time available after a TA approves an extension request.",
+          },
+          {
+            label: "Borrowing approval",
+            value: asset.requiresBorrowApproval ? "Required" : "Not required",
+          },
+          {
+            label: "Preparation",
+            value: asset.requiresStaffPreparation
+              ? "A TA prepares this item before pickup."
+              : "No preparation required.",
+          },
+          {
+            label: "Returns",
+            value: `${
+              asset.returnHandling === "RETURN_TO_RETURN_ZONE"
+                ? "Return Zone for TA check"
+                : "Assigned storage location"
+            }${asset.requiresReturnPhoto ? "; photo required" : ""}`,
+          },
+        ]}
+        assistantAction={
+          <AskAboutItemButton
+            itemName={inventoryDetailTitle}
+            assetId={asset.id}
+            locationId={location?.id}
+            to="/staff/ask"
+          />
+        }
+        actions={
+          <>
+            {inventoryCanEditGeneralItem ? (
+              <Button
+                to={getStaffInventoryEditTarget({
+                  assetId: asset.id,
+                  assetModelId: asset.assetModelId,
+                })}
+                size="sm"
+                variant="secondary"
+              >
+                {asset.assetModelId ? "Edit general item" : "Edit"}
+              </Button>
+            ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  aria-label="More item actions"
+                  tooltip="More item actions"
+                >
+                  <MoreHorizontalIcon className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52 p-1">
+                <DropdownMenuItem className="p-0">
+                  <Button
+                    to={`/labels?assetIds=${encodeURIComponent(
+                      inventoryLabelAssetIds.join(",")
+                    )}`}
+                    variant="link"
+                    className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-gray-700 hover:bg-gray-50"
+                  >
+                    <PrinterIcon className="size-4 shrink-0" />
+                    <span>Print label / QR</span>
+                  </Button>
+                </DropdownMenuItem>
+                {canEditAsset ? (
+                  <DropdownMenuItem
+                    className="p-0"
+                    onSelect={(event) => event.preventDefault()}
+                  >
+                    <DeleteAsset
+                      asset={{
+                        id: asset.id,
+                        title: inventoryDetailTitle,
+                        mainImage: asset.mainImage,
+                      }}
+                      behavior="archive"
+                      trigger={
+                        <Button
+                          type="button"
+                          variant="link"
+                          className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-gray-700 hover:bg-gray-50"
+                        >
+                          <ArchiveIcon className="size-4 shrink-0" />
+                          <span>Archive</span>
+                        </Button>
+                      }
+                    />
+                  </DropdownMenuItem>
+                ) : null}
+                {canEditAsset ? (
+                  <DropdownMenuItem
+                    className="p-0"
+                    onSelect={(event) => event.preventDefault()}
+                  >
+                    <DeleteAsset
+                      asset={{
+                        id: asset.id,
+                        title: inventoryDetailTitle,
+                        mainImage: asset.mainImage,
+                      }}
+                      behavior="trash"
+                      trigger={
+                        <Button
+                          type="button"
+                          variant="link"
+                          className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-red-700 hover:bg-red-50"
+                        >
+                          <Trash2Icon className="size-4 shrink-0" />
+                          <span>Move to Trash</span>
+                        </Button>
+                      }
+                    />
+                  </DropdownMenuItem>
+                ) : null}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        }
+      />
+    );
+  }
 
   return (
     <div>

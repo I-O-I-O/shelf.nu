@@ -1,4 +1,5 @@
 import type { AssetModel, Organization, Prisma, User } from "@prisma/client";
+import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import type { RecordEventTxClient } from "~/modules/activity-event/service.server";
@@ -19,7 +20,11 @@ import {
 } from "~/utils/error";
 import { ALL_SELECTED_KEY } from "~/utils/list";
 import { assertCategoryBelongsToOrg } from "~/utils/org-validation.server";
-import { getFileUploadPath, parseFileFormData } from "~/utils/storage.server";
+import {
+  getFileUploadPath,
+  parseFileFormData,
+  removeStorageImageObject,
+} from "~/utils/storage.server";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
 
 const label: ErrorLabel = "Asset Model";
@@ -312,6 +317,62 @@ export async function updateAssetModelImage({
       label,
     });
   }
+}
+
+/** Clears the shared model image and removes its owned storage objects. */
+export async function clearAssetModelImage({
+  assetModelId,
+  organizationId,
+}: {
+  assetModelId: AssetModel["id"];
+  organizationId: Organization["id"];
+}) {
+  const model = await db.assetModel.findFirst({
+    where: { id: assetModelId, organizationId },
+    select: {
+      image: true,
+      thumbnailImage: true,
+      imageStoragePath: true,
+      thumbnailImageStoragePath: true,
+    },
+  });
+
+  if (!model) {
+    throw new ShelfError({
+      cause: null,
+      title: "Asset model not found",
+      message: "This inventory product could not be found.",
+      additionalData: { assetModelId, organizationId },
+      label,
+      status: 404,
+      shouldBeCaptured: false,
+    });
+  }
+
+  await db.assetModel.updateMany({
+    where: { id: assetModelId, organizationId },
+    data: {
+      image: null,
+      thumbnailImage: null,
+      imageStoragePath: null,
+      thumbnailImageStoragePath: null,
+    },
+  });
+
+  const paths = [
+    model.imageStoragePath ??
+      (model.image ? extractStoragePath(model.image, PUBLIC_BUCKET) : null),
+    model.thumbnailImageStoragePath ??
+      (model.thumbnailImage
+        ? extractStoragePath(model.thumbnailImage, PUBLIC_BUCKET)
+        : null),
+  ].filter((path): path is string => Boolean(path));
+
+  await Promise.all(
+    paths.map((objectPath) =>
+      removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+    )
+  );
 }
 
 /**

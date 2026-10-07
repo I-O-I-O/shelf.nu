@@ -7,20 +7,19 @@ import type {
 } from "react-router";
 import { data, useLoaderData } from "react-router";
 import { z } from "zod";
-import { AssetsList } from "~/components/assets/assets-index/assets-list";
+import { StaffInventoryList } from "~/components/assets/assets-index/staff-inventory-list";
 import { ImportButton } from "~/components/assets/import-button";
 import { NewAssetDropdown } from "~/components/assets/new-asset-dropdown";
 import Header from "~/components/layout/header";
 import When from "~/components/when/when";
 import { db } from "~/database/db.server";
 
-import { useAssetIndexViewState } from "~/hooks/use-asset-index-view-state";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
+import { simpleModeLoader } from "~/modules/asset/data.server";
 import {
-  advancedModeLoader,
-  simpleModeLoader,
-} from "~/modules/asset/data.server";
-import { bulkDeleteAssets } from "~/modules/asset/service.server";
+  addIndividualUnitsToAssetModel,
+  bulkDeleteAssets,
+} from "~/modules/asset/service.server";
 import { CurrentSearchParamsSchema } from "~/modules/asset/utils.server";
 import {
   CreatePresetFormSchema,
@@ -38,6 +37,11 @@ import {
   changeMode,
   getAssetIndexSettings,
 } from "~/modules/asset-index-settings/service.server";
+import {
+  archiveIoioItems,
+  getIoioArchivedItemIds,
+  trashIoioItems,
+} from "~/modules/ioio-staff/archive.server";
 import assetCss from "~/styles/assets.css?url";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -111,10 +115,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       canUseBarcodes,
       role,
     });
-    const mode = settings.mode;
-
     /** For base and self service users, we dont allow to view the advanced index */
-    if (mode === "ADVANCED" && ["BASE", "SELF_SERVICE"].includes(role)) {
+    if (
+      settings.mode === "ADVANCED" &&
+      ["BASE", "SELF_SERVICE"].includes(role)
+    ) {
       await changeMode({
         userId,
         organizationId,
@@ -131,29 +136,32 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       });
     }
 
-    return mode === "SIMPLE"
-      ? await simpleModeLoader({
-          request,
-          userId,
-          organizationId,
-          organizations,
-          role,
-          currentOrganization,
-          user,
-          settings,
-          canSeeAllCustody,
-        })
-      : await advancedModeLoader({
-          request,
-          userId,
-          organizationId,
-          organizations,
-          role,
-          currentOrganization,
-          user,
-          settings,
-          canSeeAllCustody,
-        });
+    // Staff Inventory is intentionally a single presentation. The underlying
+    // Shelf loader and saved preference remain untouched, while the list view
+    // omits the advanced-mode and availability-mode controls.
+    const inventoryUrl = new URL(request.url);
+    inventoryUrl.searchParams.set("per_page", "100");
+    inventoryUrl.searchParams.set("getAll", "location");
+    const inventoryRequest = new Request(inventoryUrl, {
+      headers: request.headers,
+    });
+    const archivedAssetIds = await getIoioArchivedItemIds({
+      organizationId,
+      itemType: "ASSET",
+    });
+
+    return await simpleModeLoader({
+      request: inventoryRequest,
+      userId,
+      organizationId,
+      organizations,
+      role,
+      currentOrganization,
+      user,
+      settings,
+      canSeeAllCustody,
+      excludeAssetIds: archivedAssetIds,
+    });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -169,6 +177,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const IntentSchema = z.enum([
       "bulk-delete",
+      "bulk-archive",
+      "bulk-trash",
+      "add-individual-units",
       "create-preset",
       "rename-preset",
       "delete-preset",
@@ -182,6 +193,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
       PermissionAction
     > = {
       "bulk-delete": PermissionAction.delete,
+      "bulk-archive": PermissionAction.delete,
+      "bulk-trash": PermissionAction.delete,
+      "add-individual-units": PermissionAction.update,
       "create-preset": PermissionAction.read,
       "rename-preset": PermissionAction.read,
       "delete-preset": PermissionAction.read,
@@ -204,6 +218,91 @@ export async function action({ context, request }: ActionFunctionArgs) {
     });
 
     switch (intent) {
+      case "add-individual-units": {
+        const { assetModelId, count } = parseData(
+          formData,
+          z.object({
+            assetModelId: z.string().min(1),
+            count: z.coerce.number().int().min(1).max(100),
+          })
+        );
+
+        const result = await addIndividualUnitsToAssetModel({
+          assetModelId,
+          count,
+          organizationId,
+          userId,
+        });
+
+        sendNotification({
+          title: "Physical units added",
+          message: `${result.addedCount} physical units were added with new QR identities.`,
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+
+        return payload({
+          success: true,
+          addedCount: result.addedCount,
+          createdAssetIds: result.createdAssetIds,
+        });
+      }
+      case "bulk-archive": {
+        const { assetIds } = parseData(
+          formData,
+          z
+            .object({ assetIds: z.array(z.string()).min(1) })
+            .and(CurrentSearchParamsSchema)
+        );
+
+        await archiveIoioItems({
+          organizationId,
+          itemIds: assetIds,
+          archivedById: userId,
+        });
+
+        sendNotification({
+          title: "Assets archived",
+          message:
+            "The selected assets were archived and can be restored later.",
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+
+        return payload({
+          success: true,
+          undo: { operation: "archive" as const },
+        });
+      }
+      case "bulk-trash": {
+        const { assetIds } = parseData(
+          formData,
+          z
+            .object({ assetIds: z.array(z.string()).min(1) })
+            .and(CurrentSearchParamsSchema)
+        );
+
+        await trashIoioItems({
+          organizationId,
+          items: assetIds.map((itemId) => ({
+            itemType: "ASSET" as const,
+            itemId,
+          })),
+          trashedById: userId,
+        });
+
+        sendNotification({
+          title: "Items moved to Trash",
+          message: "The selected inventory items can be restored from Trash.",
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+
+        return payload({
+          success: true,
+          undo: { operation: "trash" as const },
+        });
+      }
       case "bulk-delete": {
         const { assetIds, currentSearchParams } = parseData(
           formData,
@@ -349,25 +448,28 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 export default function AssetIndexPage() {
   const { roles } = useUserRoleHelper();
   const { canImportAssets } = useLoaderData<typeof loader>();
-  const { modeIsAdvanced } = useAssetIndexViewState();
 
   return (
     <div className="relative">
-      <Header hidePageDescription={modeIsAdvanced}>
-        <When
-          truthy={userHasPermission({
-            roles,
-            entity: PermissionEntity.asset,
-            action: PermissionAction.create,
-          })}
-        >
-          <>
-            <ImportButton canImportAssets={canImportAssets} />
-            <NewAssetDropdown canImportAssets={canImportAssets} />
-          </>
-        </When>
-      </Header>
-      <AssetsList
+      <Header hideQuickFind hidePageDescription />
+      <StaffInventoryList
+        headerActions={
+          <When
+            truthy={userHasPermission({
+              roles,
+              entity: PermissionEntity.asset,
+              action: PermissionAction.create,
+            })}
+          >
+            <>
+              <ImportButton
+                canImportAssets={canImportAssets}
+                to="/staff/import"
+              />
+              <NewAssetDropdown canImportAssets={canImportAssets} />
+            </>
+          </When>
+        }
         customEmptyStateContent={{
           title: "No assets yet",
           text: "Assets are the core of your inventory. Create your first asset to start tracking equipment, devices, or anything your team manages.",

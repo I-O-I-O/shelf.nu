@@ -41,6 +41,13 @@ export function getStaffInventoryEditTarget({
     : `/assets/${encodeURIComponent(assetId)}/edit`;
 }
 
+/** Expand a logical row to its actual Asset records before bulk mutations. */
+export function getStaffInventoryActionTargets<
+  T extends StaffInventoryCandidate,
+>(row: StaffInventoryDisplayRow<T>): T[] {
+  return row.members.length > 0 ? row.members : [row];
+}
+
 export type LogicalInventoryQuantity = {
   totalQuantity: number;
   availableQuantity: number;

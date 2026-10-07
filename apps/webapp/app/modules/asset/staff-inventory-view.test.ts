@@ -3,6 +3,7 @@ import {
   deduplicateStaffInventoryRows,
   groupStaffInventoryCandidates,
   getStaffInventoryEditTarget,
+  getStaffInventoryActionTargets,
   normalizeInventoryTitle,
   selectCanonicalInventoryCandidate,
   summarizeStaffInventory,
@@ -144,6 +145,9 @@ describe("staff inventory presentation helpers", () => {
       isExpandable: true,
       duplicateRecordCount: 2,
     });
+    expect(
+      getStaffInventoryActionTargets(rows[0]).map((unit) => unit.id)
+    ).toEqual(["unit-2", "unit-1"]);
     expect(rows.find((row) => row.id === "unrelated")).toMatchObject({
       logicalTitle: "Makey Makey Kit #003",
       isExpandable: false,

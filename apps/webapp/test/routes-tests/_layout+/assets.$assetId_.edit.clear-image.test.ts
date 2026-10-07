@@ -46,6 +46,7 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
 }));
 
 import {
+  getAsset,
   updateAsset,
   updateAssetMainImage,
 } from "~/modules/asset/service.server";
@@ -81,6 +82,7 @@ function buildArgs(overrides: Record<string, string> = {}) {
 describe("assets.$assetId_.edit — clearMainImage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getAsset).mockResolvedValue({ assetKits: [] } as never);
     vi.mocked(updateAssetMainImage).mockResolvedValue(false);
     vi.mocked(updateAsset).mockResolvedValue({
       id: "asset-1",

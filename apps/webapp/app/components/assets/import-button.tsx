@@ -3,11 +3,13 @@ import { Button } from "../shared/button";
 
 export const ImportButton = ({
   canImportAssets,
+  to = "import",
 }: {
   canImportAssets: boolean;
+  to?: string;
 }) => (
   <Button
-    to={`import`}
+    to={to}
     variant="secondary"
     role="link"
     disabled={
