@@ -3,25 +3,16 @@ import type {
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import {
-  data,
-  redirect,
-  useActionData,
-  useLoaderData,
-  useNavigation,
-} from "react-router";
+import { data, redirect, useActionData, useNavigation } from "react-router";
 
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { Form } from "~/components/custom-form";
 
 import Input from "~/components/forms/input";
-import PasswordInput from "~/components/forms/password-input";
 import { Button } from "~/components/shared/button";
-import { config } from "~/config/shelf.config";
 import { useSearchParams } from "~/hooks/search-params";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
-import { ContinueWithEmailForm } from "~/modules/auth/components/continue-with-email-form";
 import {
   INVALID_CREDENTIALS_MESSAGE,
   signInWithEmail,
@@ -52,15 +43,13 @@ import {
 import { validEmail } from "~/utils/misc";
 
 export function loader({ context }: LoaderFunctionArgs) {
-  const title = "Log in";
-  const subHeading = "Welcome back! Enter your details below to log in.";
-  const { disableSignup, disableSSO } = config;
+  const title = "Welcome back";
 
   if (context.isAuthenticated) {
     return redirect("/assets");
   }
 
-  return data(payload({ title, subHeading, disableSignup, disableSSO }));
+  return data(payload({ title }));
 }
 
 const LoginFormSchema = z.object({
@@ -192,18 +181,12 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 ];
 
 export default function IndexLoginForm() {
-  const { disableSignup, disableSSO } = useLoaderData<typeof loader>();
   const zo = useZorm("NewQuestionWizardScreen", LoginFormSchema);
   const [searchParams] = useSearchParams();
   const redirectTo = searchParams.get("redirectTo") ?? undefined;
   const acceptedInvite = searchParams.get("acceptedInvite");
   const passwordReset = searchParams.get("password_reset");
-  /** Set by the app layout when it ends a session whose address must use SSO. */
-  const ssoRequired = searchParams.get("sso_required");
   const data = useActionData<typeof action>();
-  const ssoDomainHint = Boolean(
-    data && "ssoDomainHint" in data && data.ssoDomainHint
-  );
 
   const navigation = useNavigation();
   const disabled = isFormProcessing(navigation.state);
@@ -226,112 +209,54 @@ export default function IndexLoginForm() {
           password to login.
         </div>
       ) : null}
-
-      {ssoRequired ? (
-        <div role="alert" className="mb-8 text-center text-error-600">
-          This email address signs in with single sign-on. Please use Login with
-          SSO.
-        </div>
-      ) : null}
       <Form ref={zo.ref} method="post" replace className="flex flex-col gap-5">
         <div>
           <Input
             ref={emailInputRef}
             data-test-id="email"
-            label="Email address"
-            placeholder="zaans@huisje.com"
+            label="Email"
+            placeholder="you@example.com"
             required
             name={zo.fields.email()}
             type="email"
             autoComplete="username"
             disabled={disabled}
-            inputClassName="w-full"
+            inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
             error={zo.errors.email()?.message || data?.error.message}
           />
         </div>
-        <PasswordInput
+        <Input
           label="Password"
-          placeholder="**********"
+          placeholder="Enter your password"
           data-test-id="password"
           name={zo.fields.password()}
+          type="password"
           autoComplete="current-password"
           disabled={disabled}
-          inputClassName="w-full"
+          inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
           error={zo.errors.password()?.message || data?.error.message}
         />
         <input type="hidden" name={zo.fields.redirectTo()} value={redirectTo} />
-        {ssoDomainHint ? (
-          <p role="status" className="text-sm text-gray-600">
-            If your organization uses single sign-on, use{" "}
-            <Button variant="link" to="/sso-login">
-              Login with SSO
-            </Button>
-            .
-          </p>
-        ) : null}
         <Button
-          className="text-center"
+          className="min-h-11 w-full rounded-xl border-red-700 bg-red-700 text-center text-white focus:ring-2 focus:ring-red-600 enabled:hover:border-red-800 enabled:hover:bg-red-800 disabled:border-red-300 disabled:bg-red-300"
           type="submit"
           data-test-id="login"
           disabled={disabled}
         >
-          Log In
+          {disabled ? "Logging in..." : "Log in"}
         </Button>
-        <div className="flex flex-col items-center justify-center">
-          <div className="text-center text-sm text-gray-500">
-            Don't remember your password?{" "}
-            <Button
-              variant="link"
-              to={{
-                pathname: "/forgot-password",
-                search: searchParams.toString(),
-              }}
-            >
-              Reset password
-            </Button>
-          </div>
-        </div>
       </Form>
-      {!disableSSO && (
-        <div className="mt-6 text-center">
-          <Button variant="link" to="/sso-login">
-            Login with SSO
-          </Button>
-        </div>
-      )}
-
-      <div className="mt-6">
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-gray-300" />
-          </div>
-          <div className="relative flex justify-center text-sm">
-            <span className="bg-white px-2 text-gray-500">
-              Or use a{" "}
-              <strong title="One Time Password (OTP) is the most secure way to login. We will send you a code to your email.">
-                One Time Password
-              </strong>
-            </span>
-          </div>
-        </div>
-        <div className="mt-6">
-          <ContinueWithEmailForm mode="login" />
-        </div>
-        {disableSignup ? null : (
-          <div className="mt-6 text-center text-sm text-gray-500">
-            Don't have an account?{" "}
-            <Button
-              variant="link"
-              data-test-id="signupButton"
-              to={{
-                pathname: "/join",
-                search: searchParams.toString(),
-              }}
-            >
-              Sign up
-            </Button>
-          </div>
-        )}
+      <div className="mt-5 text-center text-sm text-gray-500">
+        <Button
+          variant="link"
+          className="text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
+          to={{
+            pathname: "/forgot-password",
+            search: searchParams.toString(),
+          }}
+        >
+          Forgot password?
+        </Button>
       </div>
     </div>
   );
