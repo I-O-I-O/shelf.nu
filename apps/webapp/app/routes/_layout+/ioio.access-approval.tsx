@@ -80,7 +80,7 @@ export default function AnnualAccessApprovalPage() {
           role="status"
           className="rounded-xl bg-green-50 px-4 py-3 text-sm font-semibold text-green-800"
         >
-          Your request has been sent to IOIO Lab Staff. Approval may take a few
+          Your request has been sent to the IOIO TAs. Approval may take a few
           days.
         </p>
       ) : null}

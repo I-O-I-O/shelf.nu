@@ -948,7 +948,7 @@ function CheckoutLine({
                     : accessApprovalRequired
                     ? "IOIO borrowing approval required"
                     : requiresBorrowApproval
-                    ? "Staff approval required"
+                    ? "TA approval required"
                     : "Available now"}
                 </p>
                 {dateAvailability > 0 && requiresStaffPreparation ? (
@@ -1028,7 +1028,7 @@ function CheckoutLine({
           >
             <span className="block font-bold">Prepare for me</span>
             <span className="mt-0.5 block text-xs text-gray-600">
-              Staff prepares a unit
+              A TA prepares a unit
             </span>
           </button>
         </fieldset>
@@ -1060,7 +1060,7 @@ function CheckoutLine({
 
       {pendingApproval ? (
         <div className="mt-4 rounded-xl bg-blue-50 p-4 text-sm text-blue-950">
-          <p className="font-semibold">Request submitted for Staff approval.</p>
+          <p className="font-semibold">Request submitted for TA approval.</p>
           <p className="mt-1">
             The item will be assigned after it is approved.
           </p>
@@ -1253,14 +1253,7 @@ function CheckoutLine({
                   <>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
                       <span className="font-semibold text-amber-900">
-                        {[
-                          "Preparation required",
-                          requiresBorrowApproval
-                            ? "Staff approval required"
-                            : null,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                        {["Preparation required"].filter(Boolean).join(" · ")}
                       </span>
                     </div>
                     {requestPreparation ? (
@@ -1279,7 +1272,7 @@ function CheckoutLine({
                     }`}
                   >
                     {requiresBorrowApproval
-                      ? "Staff approval required"
+                      ? "TA approval required"
                       : "Ready to borrow"}
                   </span>
                 )}
@@ -1318,7 +1311,7 @@ function CheckoutLine({
             availabilityData &&
             !canRequestPreparation ? (
               <p className="mt-2 text-xs text-amber-900">
-                A Staff reservation overlaps this period. The requested quantity
+                A TA reservation overlaps this period. The requested quantity
                 must be available without using equipment reserved for a course.
               </p>
             ) : null}

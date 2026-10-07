@@ -613,7 +613,7 @@ export default function IoioReturn() {
                     rows={3}
                     maxLength={1000}
                     className="mt-2 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 font-normal"
-                    placeholder="Tell staff what they should check."
+                    placeholder="Tell the TAs what they should check."
                   />
                 </label>
               </div>
@@ -674,7 +674,7 @@ export default function IoioReturn() {
                     "Do not place this item back into normal storage."
                   : destinationIsReturnZone
                   ? selectedDestination?.path.join(" / ") ??
-                    "Staff will check this item before it becomes available again."
+                    "A TA will check this item before it becomes available again."
                   : normalLocation.join(" / ")
               }
               image={

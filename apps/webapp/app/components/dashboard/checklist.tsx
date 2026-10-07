@@ -1,5 +1,4 @@
-import { Link, useFetcher, useLoaderData } from "react-router";
-import type { loader } from "~/routes/_layout+/home";
+import { Link, useFetcher } from "react-router";
 import { tw } from "~/utils/tw";
 import {
   AddUserIcon,
@@ -14,9 +13,21 @@ import { Button } from "../shared/button";
 import Heading from "../shared/heading";
 import SubHeading from "../shared/sub-heading";
 
-export default function OnboardingChecklist() {
+export type OnboardingChecklistOptions = {
+  hasAssets: boolean;
+  hasCategories: boolean;
+  hasTags: boolean;
+  hasTeamMembers: boolean;
+  hasCustodies: boolean;
+  hasCustomFields: boolean;
+};
+
+export default function OnboardingChecklist({
+  checklistOptions,
+}: {
+  checklistOptions: OnboardingChecklistOptions;
+}) {
   const fetcher = useFetcher();
-  const { checklistOptions } = useLoaderData<typeof loader>();
 
   return (
     <div className="mt-6 rounded border bg-white px-4 py-5 lg:px-20 lg:py-16">

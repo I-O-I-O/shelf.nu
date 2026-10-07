@@ -199,8 +199,8 @@ export default function StudentLabIntroductionPage() {
             {step === 0
               ? "Welcome to IOIO Lab"
               : step === finalStep
-                ? "You're ready to use IOIO Lab"
-                : (section?.title ?? "")}
+              ? "You're ready to use IOIO Lab"
+              : section?.title ?? ""}
           </h1>
           {step > 0 && step < finalStep ? (
             <div className="mt-4 flex items-center gap-3">
@@ -230,7 +230,7 @@ export default function StudentLabIntroductionPage() {
           {step === 0 ? (
             <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm sm:p-8">
               <p className="max-w-2xl text-base leading-7 text-gray-700">
-                Take a quick guided look at the information Staff maintains for
+                Take a quick guided look at the information the TAs maintain for
                 IOIO Lab. You can revisit it anytime in About IOIO Lab.
               </p>
               <p className="mt-3 text-sm text-gray-500">

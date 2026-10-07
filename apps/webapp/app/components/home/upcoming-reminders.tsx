@@ -1,5 +1,3 @@
-import { useLoaderData } from "react-router";
-import type { loader } from "~/routes/_layout+/home";
 import { ClickableTr } from "../dashboard/clickable-tr";
 import { DashboardEmptyState } from "../dashboard/empty-state";
 import { Button } from "../shared/button";
@@ -7,13 +5,18 @@ import { DateS } from "../shared/date";
 
 import { Table, Td } from "../table";
 
-type ReminderItem = ReturnType<
-  typeof useLoaderData<typeof loader>
->["upcomingReminders"][number];
+export type DashboardReminder = {
+  id: string;
+  name: string;
+  alertDateTime: Date | string;
+  asset: { id: string; title: string };
+};
 
-export default function UpcomingReminders() {
-  const { upcomingReminders } = useLoaderData<typeof loader>();
-
+export default function UpcomingReminders({
+  upcomingReminders,
+}: {
+  upcomingReminders: DashboardReminder[];
+}) {
   return (
     <div className="flex h-full flex-col rounded border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b px-4 py-3 md:px-6">
@@ -33,7 +36,7 @@ export default function UpcomingReminders() {
       {upcomingReminders.length > 0 ? (
         <Table className="flex-1">
           <tbody>
-            {upcomingReminders.map((reminder: ReminderItem) => (
+            {upcomingReminders.map((reminder) => (
               <ClickableTr
                 key={reminder.id}
                 to={`/assets/${reminder.asset.id}/reminders`}

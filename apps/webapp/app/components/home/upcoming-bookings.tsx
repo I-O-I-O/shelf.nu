@@ -1,7 +1,6 @@
-import { useLoaderData } from "react-router";
 import { useCanUseBookings } from "~/hooks/use-can-use-bookings";
-import type { loader } from "~/routes/_layout+/home";
 import { getBookingCustodianName } from "~/utils/bookings";
+import type { DashboardBooking } from "./dashboard-booking";
 import { PremiumFeatureTeaser } from "./premium-feature-teaser";
 import { ClickableTr } from "../dashboard/clickable-tr";
 import { DashboardEmptyState } from "../dashboard/empty-state";
@@ -10,12 +9,11 @@ import { DateS } from "../shared/date";
 
 import { Table, Td } from "../table";
 
-type BookingItem = ReturnType<
-  typeof useLoaderData<typeof loader>
->["upcomingBookings"][number];
-
-export default function UpcomingBookings() {
-  const { upcomingBookings } = useLoaderData<typeof loader>();
+export default function UpcomingBookings({
+  upcomingBookings,
+}: {
+  upcomingBookings: DashboardBooking[];
+}) {
   const canUseBookings = useCanUseBookings();
 
   return (
@@ -46,14 +44,9 @@ export default function UpcomingBookings() {
       ) : upcomingBookings.length > 0 ? (
         <Table className="flex-1">
           <tbody>
-            {upcomingBookings.map((booking: BookingItem) => {
+            {upcomingBookings.map((booking) => {
               const custodian = getBookingCustodianName(booking);
-              const assetCount =
-                (
-                  booking as BookingItem & {
-                    _count?: { bookingAssets?: number };
-                  }
-                )._count?.bookingAssets ?? 0;
+              const assetCount = booking._count?.bookingAssets ?? 0;
 
               return (
                 <ClickableTr key={booking.id} to={`/bookings/${booking.id}`}>

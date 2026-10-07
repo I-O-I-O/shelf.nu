@@ -354,14 +354,14 @@ export default function IoioReport() {
     <div>
       <SectionHeading
         title="Report"
-        text="Tell staff what happened. Inventory is not changed automatically."
+        text="Tell the TAs what happened. Inventory is not changed automatically."
       />
       {result && "ok" in result && result.ok ? (
         <div
           className="mb-5 rounded-xl bg-green-100 p-4 text-sm font-medium text-green-800"
           role="status"
         >
-          Thanks - your report was sent for staff review.
+          Thanks - your report was sent for TA review.
         </div>
       ) : null}
       {result && "error" in result ? (
@@ -413,7 +413,7 @@ export default function IoioReport() {
             maxLength={2000}
             rows={6}
             className="mt-1 block w-full rounded-xl border border-gray-300 px-3 py-2 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
-            placeholder="Tell staff what happened and include location details if useful."
+            placeholder="Tell the TAs what happened and include location details if useful."
           />
         </label>
         <button
@@ -449,7 +449,7 @@ function BorrowedProblemForm({
     <div>
       <SectionHeading
         title="Report an issue"
-        text="Tell staff what happened. Your loan will remain active until you return the item."
+        text="Tell the TAs what happened. Your loan will remain active until you return the item."
       />
       {result && "error" in result ? (
         <div
@@ -516,7 +516,7 @@ function BorrowedProblemForm({
             maxLength={2000}
             rows={5}
             className="mt-1 block w-full rounded-xl border border-gray-300 px-3 py-2 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
-            placeholder="Describe the problem for staff."
+            placeholder="Describe the problem for the TAs."
           />
         </label>
         <div className="flex flex-wrap items-center gap-3">

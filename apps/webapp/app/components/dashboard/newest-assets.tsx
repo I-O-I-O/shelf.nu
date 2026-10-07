@@ -1,6 +1,4 @@
 import type { Asset, Category } from "@prisma/client";
-import { useLoaderData } from "react-router";
-import type { loader } from "~/routes/_layout+/home";
 import { ClickableTr } from "./clickable-tr";
 import { DashboardEmptyState } from "./empty-state";
 import { AssetImage } from "../assets/asset-image/component";
@@ -22,8 +20,13 @@ const PLACEHOLDER_ROW_KEYS = [
   "placeholder-4",
 ] as const;
 
-export default function NewestAssets() {
-  const { newAssets } = useLoaderData<typeof loader>();
+type NewestAssetItem = Parameters<typeof Row>[0]["item"];
+
+export default function NewestAssets({
+  newAssets,
+}: {
+  newAssets: NewestAssetItem[];
+}) {
   return (
     <div className="flex h-full flex-col rounded border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b px-4 py-3 md:px-6">

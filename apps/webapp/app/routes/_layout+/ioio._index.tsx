@@ -571,8 +571,8 @@ export default function IoioHome() {
           role="status"
           className="rounded-2xl border border-green-200 bg-green-50 p-4 text-sm font-semibold text-green-900"
         >
-          Return submitted. Staff will check the item before it becomes
-          available again.
+          Return submitted. A TA will check the item before it becomes available
+          again.
         </div>
       ) : null}
       <section className="space-y-5">
@@ -795,7 +795,7 @@ function NeedsYourAttention({
                 {formatStudentTitle(item.title)}
               </p>
               <p className="text-xs text-gray-700">
-                Staff is preparing your equipment.
+                A TA is preparing your equipment.
               </p>
             </div>
             <Link
@@ -815,7 +815,7 @@ function NeedsYourAttention({
                 Access approval pending
               </p>
               <p className="text-xs text-gray-600">
-                Your request has been sent to IOIO Lab Staff. You can continue
+                Your request has been sent to the IOIO TAs. You can continue
                 browsing while you wait.
               </p>
             </div>

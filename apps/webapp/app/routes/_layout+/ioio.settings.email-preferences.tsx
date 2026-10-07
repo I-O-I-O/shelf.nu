@@ -167,7 +167,7 @@ export default function StudentEmailPreferences() {
       </div>
       <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
         <p className="text-sm font-bold text-gray-950">
-          Direct messages from IOIO Staff
+          Direct messages from IOIO TAs
         </p>
         <p className="mt-1 text-sm text-gray-600">Always enabled</p>
       </div>

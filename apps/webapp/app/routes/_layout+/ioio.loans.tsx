@@ -695,7 +695,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     });
     if (existing)
       throw new Error(
-        "You already have an extension request waiting for Staff review."
+        "You already have an extension request waiting for TA review."
       );
     const message = parsed.message?.trim();
     await db.ioioWriteOperation.create({
@@ -882,7 +882,7 @@ export default function IoioLoans() {
           className="mb-4 rounded-xl bg-green-100 p-4 text-sm font-medium text-green-800"
           role="status"
         >
-          Problem reported. Staff has been notified.
+          Problem reported. The TAs have been notified.
         </div>
       ) : null}
       {result && !result.ok ? (
@@ -1496,7 +1496,7 @@ export default function IoioLoans() {
                   Preparation requested
                 </h2>
                 <p className="mt-1 text-sm text-gray-600">
-                  Staff will choose and check the exact equipment for you.
+                  A TA will choose and check the exact equipment for you.
                 </p>
               </div>
               {preparationRequests.map((request) => (
@@ -1657,7 +1657,7 @@ export default function IoioLoans() {
                   Pending returns
                 </h2>
                 <p className="mt-1 text-sm text-gray-600">
-                  Staff will check these items before they become available
+                  A TA will check these items before they become available
                   again.
                 </p>
               </div>
@@ -1709,7 +1709,7 @@ export default function IoioLoans() {
                             </p>
                           ) : (
                             <p className="mt-1 text-sm font-semibold text-blue-900">
-                              Returned · Awaiting staff check
+                              Returned · Awaiting TA check
                             </p>
                           )}
                         </div>
@@ -2078,7 +2078,7 @@ function ExtensionRequest({
       [request.reviewer.firstName, request.reviewer.lastName]
         .filter(Boolean)
         .join(" ") ||
-      "Staff member"
+      "TA"
     : null;
   useEffect(() => {
     if (fetcher.data?.ok) setOpen(false);
@@ -2086,7 +2086,7 @@ function ExtensionRequest({
   if (request?.status === "PENDING_APPROVAL") {
     return (
       <p className="text-sm font-medium text-blue-800">
-        Extension request waiting for Staff
+        Extension request waiting for a TA
       </p>
     );
   }
@@ -2133,7 +2133,7 @@ function ExtensionRequest({
                     className="mt-1 inline-block font-semibold underline"
                     href={`mailto:${request.reviewer.email}`}
                   >
-                    Contact Staff
+                    Contact a TA
                   </a>
                 ) : null}
               </div>
@@ -2155,16 +2155,16 @@ function ExtensionRequest({
               </div>
             </dl>
             <p className="text-sm text-gray-600">
-              This {extensionDays}-day extension requires Staff approval.
+              This {extensionDays}-day extension requires TA approval.
             </p>
             <label className="block text-sm font-semibold text-gray-800">
-              Message to Staff <span className="font-normal">(optional)</span>
+              Message to a TA <span className="font-normal">(optional)</span>
               <textarea
                 name="message"
                 rows={3}
                 maxLength={1000}
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-normal text-gray-950"
-                placeholder="Add context for Staff"
+                placeholder="Add context for a TA"
               />
             </label>
             {fetcher.data && !fetcher.data.ok ? (
@@ -2228,7 +2228,7 @@ function _ReturnLoanAction({
   if (submitted) {
     return (
       <p className="mt-3 rounded-lg bg-blue-50 p-3 text-sm font-semibold text-blue-900">
-        Return submitted. Place the item in the IOIO Return Zone. Staff will
+        Return submitted. Place the item in the IOIO Return Zone. A TA will
         check it before it becomes available again.
       </p>
     );

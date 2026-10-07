@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  data,
+  type ActionFunctionArgs,
+  type LoaderFunctionArgs,
+} from "react-router";
+import {
   Form,
   Link,
   useActionData,
   useFetcher,
   useLoaderData,
-} from "react-router";
-import {
-  data,
-  type ActionFunctionArgs,
-  type LoaderFunctionArgs,
-  type MetaFunction,
 } from "react-router";
 import { z } from "zod";
 import {
@@ -24,15 +23,14 @@ import {
   type ChatHistoryStore,
 } from "~/components/ioio-student/chat-history";
 import {
-  AssetCard,
   formatStudentDateOnly,
   formatStudentLabel,
   SectionHeading,
+  StudentAssetPlaceholder,
 } from "~/components/ioio-student/student-ui";
-import {
-  answerInventoryAssistant,
-  type InventoryAssistantAnswer,
-} from "~/modules/ioio-student/assistant.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
+import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
+import type { InventoryAssistantAnswer } from "~/modules/ioio-student/assistant.server";
 import {
   borrowItem,
   cancelBorrowItem,
@@ -40,8 +38,8 @@ import {
 } from "~/modules/ioio-student/borrow-item.server";
 import { getIoioChatScope } from "~/modules/ioio-student/chat-scope.server";
 import {
-  normalizeConversationHistory,
   cleanAssistantText,
+  normalizeConversationHistory,
   parseConversationHistory,
   parseEntityContext,
   parseEntityContextQuery,
@@ -60,11 +58,8 @@ import {
   returnItem,
   type PreparedReturnProposal,
 } from "~/modules/ioio-student/return-item.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
-import { makeShelfError, ShelfError } from "~/utils/error";
+import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
-
-export const meta: MetaFunction<typeof loader> = () => [{ title: "Ask IOIO" }];
 
 const ActionSchema = z.object({
   intent: z.enum([
@@ -88,38 +83,38 @@ const ActionSchema = z.object({
   to: z.string().datetime({ offset: true }).optional(),
 });
 
+export async function loader({ context, request }: LoaderFunctionArgs) {
+  const { userId, organizationId, role } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  return data(
+    payload({
+      ready: true,
+      chatScope: getIoioChatScope(userId, organizationId, role),
+    })
+  );
+}
+
 export async function action({ context, request }: ActionFunctionArgs) {
-  const auth = await requireStudentRead({
+  const auth = await requireIoioStaffAccess({
     context,
     request,
   });
   const { userId, organizationId } = auth;
+
   try {
     const formData = await request.formData();
     const parsed = ActionSchema.safeParse(Object.fromEntries(formData));
     if (!parsed.success) {
-      throw new ShelfError({
-        cause: null,
-        message: "Invalid Ask Shelf request.",
-        label: "Request validation",
-        status: 400,
-        shouldBeCaptured: false,
-      });
+      throw new Error("Invalid staff Ask request.");
     }
 
     if (parsed.data.intent === "ask") {
-      if (!parsed.data.question) {
-        throw new ShelfError({
-          cause: null,
-          message: "Ask a question first.",
-          label: "Request validation",
-          status: 400,
-          shouldBeCaptured: false,
-        });
-      }
+      if (!parsed.data.question) throw new Error("Ask a question first.");
       return payload({
         kind: "assistant" as const,
-        answer: await answerInventoryAssistant({
+        answer: await answerStaffAssistant({
           context,
           request,
           question: parsed.data.question,
@@ -130,13 +125,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
 
     if (!parsed.data.confirmationToken) {
-      throw new ShelfError({
-        cause: null,
-        message: "This Shelf proposal is missing its confirmation token.",
-        label: "Request validation",
-        status: 400,
-        shouldBeCaptured: false,
-      });
+      throw new Error("This Shelf proposal is missing its confirmation token.");
     }
 
     if (parsed.data.intent === "cancel-report") {
@@ -179,13 +168,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
     if (parsed.data.intent === "confirm-return") {
       if (parsed.data.quantity === undefined) {
-        throw new ShelfError({
-          cause: null,
-          message: "Review the return quantity before submitting.",
-          label: "Booking",
-          status: 400,
-          shouldBeCaptured: false,
-        });
+        throw new Error("Review the return quantity before submitting.");
       }
       return payload({
         ...(await returnItem(
@@ -204,13 +187,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
         !parsed.data.from ||
         !parsed.data.to
       ) {
-        throw new ShelfError({
-          cause: null,
-          message: "Review the borrow quantity and dates before submitting.",
-          label: "Booking",
-          status: 400,
-          shouldBeCaptured: false,
-        });
+        throw new Error(
+          "Review the borrow quantity and dates before submitting."
+        );
       }
       return payload({
         ...(await borrowItem(
@@ -226,13 +205,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
     if (!parsed.data.reportType || !parsed.data.description) {
-      throw new ShelfError({
-        cause: null,
-        message: "Review the report type and description before submitting.",
-        label: "Report",
-        status: 400,
-        shouldBeCaptured: false,
-      });
+      throw new Error(
+        "Review the report type and description before submitting."
+      );
     }
     return payload({
       ...(await reportProblem(
@@ -251,18 +226,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
   }
 }
 
-export async function loader({ context, request }: LoaderFunctionArgs) {
-  const { userId, organizationId, role } = await requireStudentRead({
-    context,
-    request,
-  });
-  return data(
-    payload({
-      ready: true,
-      chatScope: getIoioChatScope(userId, organizationId, role),
-    })
-  );
-}
+export const meta = () => [{ title: "Ask IOIO" }];
 
 type ChatMessage = IoioConversationMessage & {
   id: string;
@@ -272,19 +236,32 @@ type ChatMessage = IoioConversationMessage & {
 type ActionState = {
   kind?: "borrow" | "return" | "report";
   status?: string;
-  remainingQuantity?: number;
   proposal?: PreparedReportProposal;
 };
 
-const STARTER_PROMPTS = [
-  "I need a board for controlling a motor",
-  "Where are the Arduino Nanos?",
-  "What do I currently have borrowed?",
-  "I need something for measuring voltage",
-];
+type StaffActionResponse =
+  | {
+      error: null;
+      kind: "assistant";
+      answer: InventoryAssistantAnswer;
+    }
+  | {
+      error: null;
+      kind: "borrow" | "return" | "report";
+      status: string;
+      proposal?: PreparedReportProposal;
+      remainingQuantity?: number;
+    }
+  | { error: { message: string } };
 
+const STARTER_PROMPTS = [
+  "How many Arduino Nanos do we have?",
+  "Which loans are active?",
+  "Which items are in B443?",
+  "Show incomplete kits",
+];
 function newMessageId() {
-  return `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `staff-chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function isAssistantResult(
@@ -298,25 +275,8 @@ function isAssistantResult(
   );
 }
 
-function getPersistedMessages(messages: readonly ChatMessage[]) {
-  return messages.slice(-12).map((message) => {
-    if (!message.answer) return message;
-    const answer = Object.fromEntries(
-      Object.entries(message.answer).filter(
-        ([key]) =>
-          ![
-            "proposal",
-            "borrowProposal",
-            "returnProposal",
-            "toolsUsed",
-            "providerModel",
-            "mode",
-            "fallbackReason",
-          ].includes(key)
-      )
-    ) as InventoryAssistantAnswer;
-    return { ...message, answer };
-  });
+function displayAssistantText(value: string) {
+  return formatStudentLabel(cleanAssistantText(value));
 }
 
 function actionWasResolved(
@@ -327,18 +287,11 @@ function actionWasResolved(
 ) {
   if (proposalToken !== submittedProposalToken) return false;
   return (
-    (actionState?.kind === kind &&
-      ["submitted", "duplicate", "cancelled"].includes(
-        actionState.status ?? ""
-      )) ||
-    (kind === "return" &&
-      actionState?.kind === "report" &&
-      actionState.status === "prepared")
+    ["submitted", "duplicate", "cancelled"].includes(
+      actionState?.status ?? ""
+    ) ||
+    (kind === "return" && actionState?.status === "prepared")
   );
-}
-
-function displayAssistantText(value: string) {
-  return formatStudentLabel(cleanAssistantText(value));
 }
 
 function BorrowCard({
@@ -386,11 +339,6 @@ function BorrowCard({
           <dd className="inline">{proposal.asset.location ?? "Not placed"}</dd>
         </div>
       </dl>
-      {proposal.restriction ? (
-        <p className="text-sm font-medium text-amber-800">
-          Restriction: {proposal.restriction}
-        </p>
-      ) : null}
       <div className="flex flex-wrap gap-2">
         <button
           type="submit"
@@ -449,11 +397,6 @@ function ReturnCard({
           <dd className="inline">{proposal.remainingQuantity}</dd>
         </div>
       </dl>
-      {proposal.restriction ? (
-        <p className="text-sm font-medium text-amber-800">
-          Restriction: {proposal.restriction}
-        </p>
-      ) : null}
       <div className="flex flex-wrap gap-2">
         <button
           type="submit"
@@ -574,6 +517,45 @@ function ReportCard({
   );
 }
 
+function StaffAssetCard({
+  asset,
+}: {
+  asset: InventoryAssistantAnswer["assets"][number];
+}) {
+  const category =
+    typeof asset.category === "string" ? asset.category : asset.category?.name;
+  return (
+    <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm">
+      <StudentAssetPlaceholder />
+      <div className="flex flex-1 flex-col p-3">
+        <Link
+          to={`/assets/${asset.id}`}
+          className="line-clamp-2 font-bold leading-5 text-gray-950 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700"
+        >
+          {formatStudentLabel(asset.title)}
+        </Link>
+        <p className="mt-3 line-clamp-2 min-h-10 text-xs leading-4 text-gray-500">
+          {asset.locations.length
+            ? asset.locations
+                .map((location) => formatStudentLabel(location.name))
+                .join(" / ")
+            : "Location not recorded"}
+        </p>
+        <p
+          className={`mt-auto pt-3 text-sm font-bold ${
+            asset.availableQuantity ? "text-red-800" : "text-gray-600"
+          }`}
+        >
+          {asset.availableQuantity
+            ? `Available · ${asset.availableQuantity}`
+            : "Unavailable"}
+          {category ? ` · ${category}` : ""}
+        </p>
+      </div>
+    </article>
+  );
+}
+
 function ActionStatus({
   actionState,
 }: {
@@ -583,10 +565,10 @@ function ActionStatus({
   const text =
     actionState.status === "submitted"
       ? actionState.kind === "borrow"
-        ? "Your borrow was recorded in Shelf."
+        ? "The borrow was recorded in Shelf."
         : actionState.kind === "return"
-        ? "Your return was recorded in Shelf."
-        : "Your problem report was submitted for TA review."
+        ? "The return was recorded in Shelf."
+        : "The problem report was submitted for staff review."
       : actionState.status === "duplicate"
       ? "Shelf already recorded this action; no duplicate was created."
       : actionState.status === "cancelled"
@@ -599,10 +581,10 @@ function ActionStatus({
   );
 }
 
-export default function IoioAsk() {
+export default function StaffAsk() {
   const { chatScope } = useLoaderData<typeof loader>();
   const actionResult = useActionData<typeof action>();
-  const fetcher = useFetcher<typeof action>();
+  const fetcher = useFetcher<StaffActionResponse>();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatHistoryStore>({
     activeChatId: null,
@@ -619,7 +601,7 @@ export default function IoioAsk() {
   const pendingQuestion = useRef<string | null>(null);
   const syncedChatSignature = useRef<string | null>(null);
   const actionState = actionResult as unknown as ActionState | undefined;
-  const chatStorageKey = getChatHistoryStorageKey("student", chatScope);
+  const chatStorageKey = getChatHistoryStorageKey("staff", chatScope);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -679,7 +661,13 @@ export default function IoioAsk() {
           id: chatId,
           title: existingSession?.title ?? makeChatTitle(question),
           messages: [
-            ...(existingSession?.messages ?? getPersistedMessages(messages)),
+            ...(existingSession?.messages ??
+              messages.map(({ id, role, content, answer }) => ({
+                id,
+                role,
+                content,
+                answer,
+              }))),
             userMessage,
           ],
           entityContext,
@@ -710,7 +698,11 @@ export default function IoioAsk() {
 
   useEffect(() => {
     if (!hydrated || !activeChatId) return;
-    const persistedMessages = getPersistedMessages(messages);
+    const persistedMessages = messages.slice(-12).map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    }));
     const signature = JSON.stringify([
       activeChatId,
       persistedMessages,
@@ -734,8 +726,10 @@ export default function IoioAsk() {
 
   useEffect(() => {
     if (!hydrated) return;
-    const store = { activeChatId, sessions: chatHistory.sessions };
-    writeChatHistory(window.sessionStorage, chatStorageKey, store);
+    writeChatHistory(window.sessionStorage, chatStorageKey, {
+      activeChatId,
+      sessions: chatHistory.sessions,
+    });
     window.dispatchEvent(new Event(CHAT_HISTORY_UPDATED_EVENT));
   }, [activeChatId, chatHistory, chatStorageKey, hydrated]);
 
@@ -794,11 +788,11 @@ export default function IoioAsk() {
     actionState?.kind === "report" ? actionState.proposal : undefined;
 
   return (
-    <div>
+    <div className="mx-auto max-w-5xl">
       <div className="flex items-start justify-between gap-4">
         <SectionHeading
           title="Ask IOIO"
-          text="Tell me what you need from the lab, and I’ll help you find it."
+          text="Ask about workspace inventory, locations, loans, kits, and operational status."
         />
         <div className="mt-5 flex shrink-0 gap-2">
           <Link
@@ -813,7 +807,7 @@ export default function IoioAsk() {
             disabled={fetcher.state !== "idle"}
             className="rounded-xl border border-red-200 bg-white px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            + New chat
+            New chat
           </button>
         </div>
       </div>
@@ -824,7 +818,7 @@ export default function IoioAsk() {
           activeChatId={activeChatId}
           onNewChat={startNewChat}
           onOpenChat={openChat}
-          to="/ioio/ask"
+          to="/staff/ask"
           className="hidden w-60 shrink-0 self-start lg:block"
         />
         <div className="flex min-w-0 flex-1 flex-col gap-3">
@@ -833,7 +827,7 @@ export default function IoioAsk() {
             activeChatId={activeChatId}
             onNewChat={startNewChat}
             onOpenChat={openChat}
-            to="/ioio/ask"
+            to="/staff/ask"
             className="lg:hidden"
           />
           <div className="flex min-h-[520px] flex-col rounded-[2rem] border border-red-100 bg-gray-50/70 p-3 shadow-sm sm:p-5">
@@ -844,10 +838,10 @@ export default function IoioAsk() {
               {!messages.length ? (
                 <div className="rounded-2xl border border-red-100 bg-white p-6 text-center sm:p-8">
                   <p className="text-xl font-bold text-gray-950">
-                    What do you need help with?
+                    What do you need to check?
                   </p>
                   <p className="mt-2 text-sm text-gray-600">
-                    Ask about equipment, locations, kits, or your own loans.
+                    Shelf-backed answers for staff operations.
                   </p>
                   <div className="mt-4 flex flex-wrap justify-center gap-2">
                     {STARTER_PROMPTS.map((prompt) => (
@@ -863,10 +857,10 @@ export default function IoioAsk() {
                     ))}
                   </div>
                   <Link
-                    to="/ioio/browse"
+                    to="/assets"
                     className="mt-5 inline-block text-sm font-semibold text-red-700"
                   >
-                    Browse Shelf inventory →
+                    Open staff inventory
                   </Link>
                 </div>
               ) : null}
@@ -924,14 +918,10 @@ export default function IoioAsk() {
                             onAction={setSubmittedProposalToken}
                           />
                         ) : null}
-                        {message.answer.displayAssets?.length ? (
+                        {message.answer.assets.length ? (
                           <div className="mt-4 grid gap-3 md:grid-cols-2">
-                            {message.answer.displayAssets?.map((asset) => (
-                              <AssetCard
-                                key={asset.id}
-                                asset={asset}
-                                variant="assistant"
-                              />
+                            {message.answer.assets.map((asset) => (
+                              <StaffAssetCard key={asset.id} asset={asset} />
                             ))}
                           </div>
                         ) : null}
@@ -947,7 +937,7 @@ export default function IoioAsk() {
                     className="rounded-2xl rounded-bl-md border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500"
                     role="status"
                   >
-                    Thinking…
+                    Thinking...
                   </p>
                 </div>
               ) : null}
@@ -975,11 +965,11 @@ export default function IoioAsk() {
               }}
               className="sticky bottom-0 mt-auto flex items-end gap-2 rounded-2xl border border-gray-200 bg-white p-2 shadow-sm"
             >
-              <label htmlFor="ask-q" className="sr-only">
+              <label htmlFor="staff-ask-q" className="sr-only">
                 Message Ask IOIO
               </label>
               <textarea
-                id="ask-q"
+                id="staff-ask-q"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
@@ -988,7 +978,7 @@ export default function IoioAsk() {
                     sendMessage();
                   }
                 }}
-                placeholder="Ask about equipment…"
+                placeholder="Ask about inventory, loans, reports..."
                 rows={1}
                 disabled={fetcher.state !== "idle"}
                 className="min-h-11 flex-1 resize-none rounded-xl border-0 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-600 disabled:bg-gray-50"
