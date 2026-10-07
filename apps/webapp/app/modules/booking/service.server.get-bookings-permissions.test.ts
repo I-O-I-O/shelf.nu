@@ -21,7 +21,11 @@
 import type { Prisma } from "@prisma/client";
 
 import { db } from "~/database/db.server";
-import { bookingDraftVisibilityClause, getBookings } from "./service.server";
+import {
+  bookingDraftVisibilityClause,
+  getBookings,
+  getBookingsFilterData,
+} from "./service.server";
 
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
@@ -36,6 +40,7 @@ vitest.mock("~/database/db.server", () => ({
       findMany: vitest.fn().mockResolvedValue([]),
       count: vitest.fn().mockResolvedValue(0),
     },
+    teamMember: { findMany: vitest.fn().mockResolvedValue([]) },
   },
 }));
 
@@ -105,6 +110,21 @@ function andClausesOf(
 
   return Array.isArray(where.AND) ? where.AND : [where.AND];
 }
+
+describe("getBookingsFilterData with an empty member scope", () => {
+  it("keeps a user-only custody restriction when no team member exists", async () => {
+    const filterData = await getBookingsFilterData({
+      request: new Request("https://shelf.test/bookings"),
+      userId: RESTRICTED_USER_ID,
+      canSeeAllBookings: false,
+      organizationId: "org-1",
+    });
+
+    expect(filterData.selfServiceData).toEqual({
+      custodianScope: { userId: RESTRICTED_USER_ID, teamMemberIds: [] },
+    });
+  });
+});
 
 /**
  * Evaluates a built `where` against a candidate row so tests can assert what

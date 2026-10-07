@@ -4,7 +4,14 @@ import type {
   LoaderFunctionArgs,
   ShouldRevalidateFunction,
 } from "react-router";
-import { data, redirect, Link, Outlet, useMatches } from "react-router";
+import {
+  data,
+  redirect,
+  Link,
+  Outlet,
+  useLoaderData,
+  useMatches,
+} from "react-router";
 import BookingFilters from "~/components/booking/booking-filters";
 import BulkActionsDropdown from "~/components/booking/bulk-actions-dropdown";
 import CreateBookingDialog from "~/components/booking/create-booking-dialog";
@@ -26,6 +33,7 @@ import { decorateBookingsForList } from "~/modules/booking/list-flags.server";
 import {
   getBookings,
   getBookingsFilterData,
+  resolveCustodianScope,
 } from "~/modules/booking/service.server";
 import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { TAG_WITH_COLOR_SELECT } from "~/modules/tag/constants";
@@ -110,11 +118,19 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       userId,
     });
 
+    // `mine=1` is an explicit staff view. Admins normally see the whole
+    // organization, so resolve the same safe user/team-member scope used by
+    // restricted users and apply it to the current-user view as well.
+    const mineOnly = new URL(request.url).searchParams.get("mine") === "1";
+    const mineCustodianScope = mineOnly
+      ? await resolveCustodianScope({ userId, organizationId })
+      : null;
     const hasActiveFilters = computeHasActiveFilters(searchParams);
 
     /** We only do that when we are on the index page */
     if (filters && redirectNeeded) {
       const cookieParams = new URLSearchParams(filters);
+      if (mineOnly) cookieParams.set("mine", "1");
       return redirect(`/bookings?${cookieParams.toString()}`);
     }
 
@@ -137,6 +153,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         }),
         custodianTeamMemberIds: teamMemberIds,
         ...selfServiceData,
+        // Preserve restricted-user scoping and make My Loans explicit for
+        // admins, whose ordinary booking view is organization-wide.
+        ...(mineCustodianScope ? { custodianScope: mineCustodianScope } : {}),
         orderBy,
         orderDirection,
         tags: filterTags,
@@ -216,12 +235,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     });
 
     const header: HeaderData = {
-      title: "Bookings",
+      title: mineOnly ? `My Loans - ${bookingCount}` : "Bookings",
     };
-    const modelName = {
-      singular: "booking",
-      plural: "bookings",
-    };
+    const modelName = mineOnly
+      ? { singular: "loan", plural: "loans" }
+      : { singular: "booking", plural: "bookings" };
 
     return data(
       payload({
@@ -235,6 +253,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         perPage,
         modelName,
         hasActiveFilters,
+        mineOnly,
         ...teamMembersData,
         // For BASE/SELF_SERVICE users, provide dedicated form team members
         // For ADMIN users, reuse the filter team members
@@ -245,7 +264,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         tags,
         totalTags: tags.length,
         searchFieldTooltip: {
-          title: "Search your bookings",
+          title: mineOnly ? "Search your loans" : "Search your bookings",
           text: parseMarkdownToReact(bookingsSearchFieldTooltipText),
         },
       }),
@@ -295,6 +314,7 @@ export default function BookingsIndexPage({
 }) {
   const matches = useMatches();
   const { isBaseOrSelfService } = useUserRoleHelper();
+  const { mineOnly = false } = useLoaderData<typeof loader>();
 
   const currentRoute: RouteHandleWithName = matches[matches.length - 1];
 
@@ -338,34 +358,61 @@ export default function BookingsIndexPage({
     >
       {!isChildBookingsPage ? (
         <Header>
-          <CreateBookingDialog
-            trigger={
-              <Button
-                type="button"
-                aria-label="new booking"
-                data-test-id="createNewBooking"
-                prefetch="none"
-              >
-                New booking
-              </Button>
-            }
-          />
+          {!mineOnly ? (
+            <CreateBookingDialog
+              trigger={
+                <Button
+                  type="button"
+                  aria-label="new booking"
+                  data-test-id="createNewBooking"
+                  prefetch="none"
+                >
+                  New booking
+                </Button>
+              }
+            />
+          ) : null}
         </Header>
       ) : null}
       <ListContentWrapper className={className}>
+        {mineOnly ? (
+          <div
+            className="mb-3 flex items-center gap-2 text-sm"
+            aria-label="My Loans view"
+          >
+            <Link
+              to="/bookings"
+              className="font-semibold text-red-700 hover:text-red-800 hover:underline"
+            >
+              Loans
+            </Link>
+            <span aria-hidden="true" className="text-gray-400">
+              /
+            </span>
+            <span className="font-semibold text-gray-700">My Loans</span>
+          </div>
+        ) : (
+          <></>
+        )}
         <BookingFilters />
 
         <List
           bulkActions={
-            disableBulkActions || isBaseOrSelfService ? undefined : (
+            disableBulkActions ||
+            isBaseOrSelfService ||
+            mineOnly ? undefined : (
               <BulkActionsDropdown />
             )
           }
           customEmptyStateContent={{
-            title: "No bookings yet",
-            text: "Bookings let your team reserve assets for specific dates. Create a booking to schedule equipment checkouts and returns.",
-            newButtonRoute: "/bookings/new",
-            newButtonContent: "Create your first booking",
+            title: mineOnly ? "No matching loans" : "No bookings yet",
+            text: mineOnly
+              ? "Loans assigned to you will appear here."
+              : "Bookings let your team reserve assets for specific dates. Create a booking to schedule equipment checkouts and returns.",
+            newButtonRoute: mineOnly ? undefined : "/bookings/new",
+            newButtonContent: mineOnly
+              ? undefined
+              : "Create your first booking",
           }}
           ItemComponent={ListBookingsContent}
           headerChildren={

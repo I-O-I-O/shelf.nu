@@ -12,6 +12,7 @@ import {
 } from "react-router";
 import { Form } from "~/components/custom-form";
 import { getAnnualAccessNoticeEventKey } from "~/modules/ioio-student/annual-access";
+import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import {
   StudentCheckoutProvider,
@@ -20,7 +21,7 @@ import {
 
 const navigation = [
   { to: "/ioio", label: "Home", end: true },
-  { to: "/ioio/loans", label: "My Loans", end: false },
+  { to: getMyLoansPath("student"), label: "My Loans", end: false },
   { to: "/ioio/lab", label: "About the IOIO Lab", end: false },
   { to: "/handbook", label: "Handbook", end: false },
   { to: "/ioio/report", label: "Report", end: false },

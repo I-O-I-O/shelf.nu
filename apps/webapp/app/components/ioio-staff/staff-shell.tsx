@@ -29,6 +29,7 @@ import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
 import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
+import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
 const navigation = [
@@ -209,7 +210,7 @@ function StaffNavigation({
               {loansExpanded ? (
                 <div className="ml-7 space-y-0.5 border-l border-red-100 pl-2">
                   <NavLink
-                    to="/ioio/loans"
+                    to={getMyLoansPath("staff")}
                     end
                     onClick={onNavigate}
                     className={({ isActive }) =>

@@ -11887,8 +11887,8 @@ export async function extendBooking({
  * them. A `findFirst` would silently hide bookings linked via the other rows.
  *
  * Returns `teamMemberIds: []` when the user has no team member — callers that
- * require one (the index, the iCal feed) throw on that; list surfaces simply
- * fall back to matching on the user link alone.
+ * require one (such as the iCal feed) may enforce that separately; list
+ * surfaces can safely fall back to matching on the user link alone.
  *
  * @param params.userId - The user whose bookings the scope restricts to
  * @param params.organizationId - The active workspace
@@ -11972,20 +11972,10 @@ export async function getBookingsFilterData({
       organizationId,
     });
 
-    if (!custodianScope.teamMemberIds.length) {
-      throw new ShelfError({
-        cause: null,
-        title: "Team member not found",
-        message:
-          "You are not part of a team in this organization. Please contact your organization admin to resolve this",
-        label: "Booking",
-        shouldBeCaptured: false,
-      });
-    }
-
     // If the user is self service/base without override, we only show bookings
     // that belong to that user — matched via their user link OR any of their
-    // team-member links.
+    // team-member links. An empty teamMemberIds list is valid for a fresh
+    // organization; the user link still scopes results safely.
     selfServiceData = { custodianScope };
   }
 

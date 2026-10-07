@@ -10,8 +10,9 @@ import luxonPlugin from "@fullcalendar/luxon3";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import { type BookingStatus, type Tag } from "@prisma/client";
+import { Plus } from "lucide-react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import { data, Link, Outlet, useLoaderData, useLocation } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
 import BookingFilters from "~/components/booking/booking-filters";
 import CreateBookingDialog from "~/components/booking/create-booking-dialog";
@@ -34,6 +35,7 @@ import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { getBookingsForCalendar } from "~/modules/booking/service.server";
 import { getMemberCalendarFeedUrl } from "~/modules/calendar-subscription/service.server";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import { getTagsForBookingTagsFilter } from "~/modules/tag/service.server";
 import {
   getTeamMemberForCustodianFilter,
@@ -113,6 +115,9 @@ export type CalendarExtendedProps = {
   /** Availability view only: ISO instant of the latest check-in among the
    * folded slices; null unless `returned`. */
   returnedAt?: string | null;
+  /** Calendar-only label details for IOIO staff reservations. */
+  assetNames?: string[];
+  isIoioReservation?: boolean;
 };
 
 // Loader Function to Return Bookings Data
@@ -127,6 +132,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       organizationId,
       canSeeAllBookings,
       canSeeAllCustody,
+      role,
     } = await requirePermission({
       userId,
       request,
@@ -155,7 +161,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       teamMembersData,
       teamMembersForFormData,
       tagsData,
-      events,
+      allEvents,
       calendarFeedUrl,
     ] = await Promise.all([
       // Team members for filters - when canSeeAllCustody is false, only current user's team member
@@ -192,6 +198,37 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       getMemberCalendarFeedUrl({ organizationId, userId }),
     ]);
 
+    // IOIO Calendar is the staff reservation planner. Generic Shelf loans
+    // remain available from Loans and should not be mixed into this view.
+    const events = allEvents
+      .filter(
+        (event) =>
+          event.extendedProps?.description ===
+          IOIO_STAFF_RESERVATION_DESCRIPTION
+      )
+      .map((event) => {
+        const details = event.extendedProps;
+        if (!details) return event;
+
+        return {
+          ...event,
+          title: [
+            ...(details.assetNames ?? []),
+            details.name,
+            details.creator.name,
+          ]
+            .filter(Boolean)
+            .join(" - "),
+          extendedProps: {
+            ...details,
+            isIoioReservation: true,
+            url: `/calendar/new-reservation?bookingId=${encodeURIComponent(
+              details.id
+            )}`,
+          },
+        };
+      });
+
     const modelName = {
       singular: "booking",
       plural: "bookings",
@@ -210,6 +247,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       ...tagsData,
       modelName,
       isSelfServiceOrBase,
+      canManageIoioReservations: role === "ADMIN" || role === "OWNER",
       userId,
       calendarFeedUrl,
       searchFieldTooltip: {
@@ -228,6 +266,11 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 
 // Calendar Component
 export default function Calendar() {
+  const location = useLocation();
+  return location.pathname === "/calendar" ? <CalendarPage /> : <Outlet />;
+}
+
+function CalendarPage() {
   const { isMd } = useViewportHeight();
   const { prefs } = useDateFormatter();
   // Drive FullCalendar's clock (12h vs 24h) from the user's time-format pref.
@@ -239,7 +282,7 @@ export default function Calendar() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
-  const { events, calendarFeedUrl, organizationId } =
+  const { events, calendarFeedUrl, organizationId, canManageIoioReservations } =
     useLoaderData<typeof loader>();
   const isLoading = useDisabled();
   const [calendarHeader, setCalendarHeader] = useState<{
@@ -258,7 +301,8 @@ export default function Calendar() {
   const initialDate = useMemo(() => {
     const startParam = searchParams.get("start");
     if (startParam) {
-      return new Date(startParam);
+      const parsedDate = new Date(startParam);
+      if (!Number.isNaN(parsedDate.getTime())) return parsedDate;
     }
     return new Date(); // Default to current date
   }, [searchParams]);
@@ -288,7 +332,11 @@ export default function Calendar() {
     updateTitle(view);
   };
 
-  const updateViewClasses = (calendarContainer: any, viewType: any) => {
+  const updateViewClasses = (
+    calendarContainer: HTMLElement | null,
+    viewType: string
+  ) => {
+    if (!calendarContainer) return;
     calendarContainer.classList.remove("month-view", "week-view", "day-view");
     if (viewType === "dayGridMonth") {
       calendarContainer.classList.add("month-view");
@@ -301,20 +349,30 @@ export default function Calendar() {
 
   return (
     <>
-      <Header hidePageDescription>
-        <CreateBookingDialog
-          trigger={
-            <Button type="button" aria-label="new booking">
-              New booking
-            </Button>
-          }
-        />
+      <Header subHeading="Plan upcoming equipment reservations.">
+        {canManageIoioReservations ? (
+          <Link
+            to="/calendar/new-reservation"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-red-700 px-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+          >
+            <Plus className="size-4 shrink-0" aria-hidden="true" />
+            New reservation
+          </Link>
+        ) : (
+          <CreateBookingDialog
+            trigger={
+              <Button type="button" aria-label="new booking">
+                New booking
+              </Button>
+            }
+          />
+        )}
       </Header>
 
       <BookingFilters className="mt-4" hideSortBy />
 
-      <div className="mt-4">
-        <div className="flex items-center justify-between gap-4 rounded-t-md border bg-white px-4 py-3">
+      <div className="mt-5 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-gray-50/70 p-3 sm:px-4">
           <div className="flex items-center gap-2">
             <TitleContainer
               calendarTitle={calendarHeader.title}
@@ -328,7 +386,7 @@ export default function Calendar() {
             )}
           </div>
 
-          <div className="flex items-center">
+          <div className="flex flex-wrap items-center gap-2">
             <CalendarNavigation
               calendarRef={calendarRef}
               updateTitle={() => updateTitle(calendarView)}
@@ -343,6 +401,9 @@ export default function Calendar() {
                 ]}
                 currentView={calendarView}
                 onViewChange={handleViewChange}
+                size="xs"
+                activeClassName="!border-red-700 !bg-red-700 !text-white"
+                className="rounded-lg border border-gray-200 bg-white [&>button]:!h-9 [&>button]:!py-0"
               />
             ) : null}
 
@@ -357,87 +418,95 @@ export default function Calendar() {
             </Button>
           </div>
         </div>
-        <ClientOnly fallback={<FallbackLoading className="size-[150px]" />}>
-          {() => (
-            <FullCalendar
-              ref={calendarRef}
-              // luxonPlugin registers named-IANA-timezone resolution so
-              // `timeZone={prefs.timeZone}` below renders events in the user's
-              // chosen zone instead of falling back to UTC (see import note).
-              plugins={[dayGridPlugin, listPlugin, timeGridPlugin, luxonPlugin]}
-              initialView={calendarView}
-              initialDate={initialDate}
-              expandRows={true}
-              height="auto"
-              // Week start, display timezone, and 12/24h clock all follow the
-              // acting user's resolved formatting prefs (see useDateFormatter).
-              firstDay={prefs.weekStartsOn}
-              timeZone={prefs.timeZone}
-              nowIndicator
-              headerToolbar={false}
-              events={events}
-              slotEventOverlap={true}
-              dayMaxEvents={3}
-              dayMaxEventRows={4}
-              moreLinkClick="popover"
-              eventMouseEnter={handleEventMouseEnter("dayGridMonth")}
-              eventMouseLeave={handleEventMouseLeave("dayGridMonth")}
-              eventClick={handleEventClick}
-              windowResize={handleWindowResize}
-              eventContent={renderEventCard}
-              eventTimeFormat={{
-                hour: "numeric",
-                minute: "2-digit",
-                meridiem: "short",
-                hour12,
-              }}
-              // Slot labels (timeGrid Week/Day axis) also honor the 12/24h pref.
-              slotLabelFormat={{
-                hour: "numeric",
-                minute: "2-digit",
-                omitZeroMinute: true,
-                meridiem: "short",
-                hour12,
-              }}
-              viewDidMount={(args) => {
-                const calendarContainer = args.el;
-                const viewType = args.view.type;
-                updateViewClasses(calendarContainer, viewType);
-                updateTitle(viewType);
-              }}
-              datesSet={(args) => {
-                const calendarContainer = document.querySelector(".fc");
-                const viewType = args.view.type;
+        <div className="ioio-calendar-shell">
+          <ClientOnly fallback={<FallbackLoading className="size-[150px]" />}>
+            {() => (
+              <FullCalendar
+                ref={calendarRef}
+                // luxonPlugin registers named-IANA-timezone resolution so
+                // `timeZone={prefs.timeZone}` below renders events in the user's
+                // chosen zone instead of falling back to UTC (see import note).
+                plugins={[
+                  dayGridPlugin,
+                  listPlugin,
+                  timeGridPlugin,
+                  luxonPlugin,
+                ]}
+                initialView={calendarView}
+                initialDate={initialDate}
+                expandRows={true}
+                height="auto"
+                // Week start, display timezone, and 12/24h clock all follow the
+                // acting user's resolved formatting prefs (see useDateFormatter).
+                firstDay={prefs.weekStartsOn}
+                timeZone={prefs.timeZone}
+                nowIndicator
+                headerToolbar={false}
+                events={events}
+                slotEventOverlap={true}
+                dayMaxEvents={3}
+                dayMaxEventRows={4}
+                moreLinkClick="popover"
+                eventMouseEnter={handleEventMouseEnter("dayGridMonth")}
+                eventMouseLeave={handleEventMouseLeave("dayGridMonth")}
+                eventClick={handleEventClick}
+                windowResize={handleWindowResize}
+                eventContent={renderEventCard}
+                eventTimeFormat={{
+                  hour: "numeric",
+                  minute: "2-digit",
+                  meridiem: "short",
+                  hour12,
+                }}
+                // Slot labels (timeGrid Week/Day axis) also honor the 12/24h pref.
+                slotLabelFormat={{
+                  hour: "numeric",
+                  minute: "2-digit",
+                  omitZeroMinute: true,
+                  meridiem: "short",
+                  hour12,
+                }}
+                viewDidMount={(args) => {
+                  const calendarContainer = args.el;
+                  const viewType = args.view.type;
+                  updateViewClasses(calendarContainer, viewType);
+                  updateTitle(viewType);
+                }}
+                datesSet={(args) => {
+                  const calendarContainer =
+                    document.querySelector<HTMLElement>(".fc");
+                  const viewType = args.view.type;
 
-                updateViewClasses(calendarContainer, viewType);
+                  updateViewClasses(calendarContainer, viewType);
 
-                // Only update URL params after initial load
-                if (!isInitialLoad) {
-                  setSearchParams((prev) => {
-                    const newParams = new URLSearchParams(prev);
-                    newParams.set("start", args.start.toISOString());
-                    newParams.set("end", args.end.toISOString());
-                    return newParams;
-                  });
-                } else {
-                  setIsInitialLoad(false);
-                }
-              }}
-              eventClassNames={(eventInfo) => {
-                const viewType = eventInfo.view.type;
-                const isOneDay = isOneDayEvent(
-                  eventInfo.event.start,
-                  eventInfo.event.end
-                );
-                return getStatusClasses(
-                  eventInfo.event.extendedProps.status,
-                  isOneDay,
-                  viewType
-                );
-              }}
-            />
-          )}
-        </ClientOnly>
+                  // Only update URL params after initial load
+                  if (!isInitialLoad) {
+                    setSearchParams((prev) => {
+                      const newParams = new URLSearchParams(prev);
+                      newParams.set("start", args.start.toISOString());
+                      newParams.set("end", args.end.toISOString());
+                      return newParams;
+                    });
+                  } else {
+                    setIsInitialLoad(false);
+                  }
+                }}
+                eventClassNames={(eventInfo) => {
+                  const viewType = eventInfo.view.type;
+                  const isOneDay = isOneDayEvent(
+                    eventInfo.event.start,
+                    eventInfo.event.end
+                  );
+                  return getStatusClasses(
+                    eventInfo.event.extendedProps.status,
+                    isOneDay,
+                    viewType
+                  );
+                }}
+              />
+            )}
+          </ClientOnly>
+        </div>
       </div>
 
       <CalendarSubscribeDialog

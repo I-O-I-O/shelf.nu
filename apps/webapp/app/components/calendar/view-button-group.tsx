@@ -12,6 +12,7 @@ interface ViewButtonGroupProps {
   currentView: string;
   onViewChange: (view: string) => void;
   className?: string;
+  activeClassName?: string;
   size?: "xs" | "sm" | "md";
 }
 
@@ -20,6 +21,7 @@ export const ViewButtonGroup = ({
   currentView,
   onViewChange,
   className = "", // Additional styling
+  activeClassName = "",
   size = "sm",
 }: ViewButtonGroupProps) => {
   const disabledButtonStyles =
@@ -34,7 +36,11 @@ export const ViewButtonGroup = ({
           variant={"secondary"}
           size={size}
           onClick={() => onViewChange(value)}
-          className={tw(currentView === value ? `${disabledButtonStyles}` : "")}
+          className={tw(
+            currentView === value
+              ? `${disabledButtonStyles} ${activeClassName}`
+              : ""
+          )}
           disabled={currentView === value}
         >
           {label}

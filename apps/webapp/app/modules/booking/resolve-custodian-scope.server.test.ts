@@ -46,8 +46,8 @@ describe("resolveCustodianScope", () => {
       organizationId: ORG,
     });
 
-    // Callers that require a team member (index, iCal feed) throw on this;
-    // list surfaces fall back to the user link alone.
+    // List surfaces retain the user link as the custody restriction when the
+    // team has not created a TeamMember row for this user yet.
     expect(scope).toEqual({ userId: USER, teamMemberIds: [] });
   });
 });
