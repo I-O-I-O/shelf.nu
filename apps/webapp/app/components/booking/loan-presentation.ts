@@ -87,6 +87,20 @@ export type LoanLifecycle = {
   statusLabel: "Active" | "Partially returned" | "Returned" | "Overdue";
 };
 
+/** Friendly status text for IOIO-facing loan details. */
+export function getLoanStatusLabel(status: BookingStatus) {
+  const labels: Record<BookingStatus, string> = {
+    [BookingStatus.DRAFT]: "Draft",
+    [BookingStatus.RESERVED]: "Reserved",
+    [BookingStatus.ONGOING]: "Borrowed",
+    [BookingStatus.OVERDUE]: "Overdue",
+    [BookingStatus.COMPLETE]: "Returned",
+    [BookingStatus.ARCHIVED]: "Archived",
+    [BookingStatus.CANCELLED]: "Cancelled",
+  };
+  return labels[status];
+}
+
 /**
  * Converts a planned booking value into a calendar-date string before display.
  * Planned return dates are calendar values in the staff UI, so formatting the

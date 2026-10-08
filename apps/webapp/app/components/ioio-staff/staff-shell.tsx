@@ -94,7 +94,7 @@ function StaffLogo({ compact = false }: { compact?: boolean }) {
   );
 }
 
-function StaffNavigation({
+export function StaffNavigation({
   onNavigate,
   navigationOrder,
   onReorder,
@@ -142,10 +142,17 @@ function StaffNavigation({
         : location.pathname === pathname ||
           location.pathname.startsWith(`${pathname}/`);
       const mineQuery = new URLSearchParams(location.search).get("mine");
-      const queryMatches = query ? mineQuery === "1" : mineQuery !== "1";
+      const isBookingList =
+        to === "/bookings" && location.pathname === pathname;
+      const queryMatches = query
+        ? mineQuery === "1"
+        : !isBookingList || mineQuery !== "1";
       return pathMatches && queryMatches;
     })
     .sort((left, right) => right.to.length - left.to.length)[0]?.to;
+  const isStaffMyLoansActive =
+    location.pathname === "/bookings" &&
+    new URLSearchParams(location.search).get("mine") === "1";
 
   return (
     <nav aria-label="IOIO staff navigation" className="space-y-0.5">
@@ -156,9 +163,9 @@ function StaffNavigation({
           return (
             <div key={to} className="space-y-0.5">
               <div className="flex min-w-0 items-center gap-1">
-                <NavLink
+                <Link
                   to="/bookings"
-                  end
+                  aria-current={active ? "page" : undefined}
                   onClick={onNavigate}
                   draggable
                   title="Click to open. Drag and hold to place this section underneath another section."
@@ -191,7 +198,7 @@ function StaffNavigation({
                     aria-hidden="true"
                     className="size-3.5 shrink-0 text-gray-300"
                   />
-                </NavLink>
+                </Link>
                 <button
                   type="button"
                   aria-label={`${loansExpanded ? "Collapse" : "Expand"} Loans`}
@@ -209,20 +216,18 @@ function StaffNavigation({
               </div>
               {loansExpanded ? (
                 <div className="ml-7 space-y-0.5 border-l border-red-100 pl-2">
-                  <NavLink
+                  <Link
                     to={getMyLoansPath("staff")}
-                    end
+                    aria-current={isStaffMyLoansActive ? "page" : undefined}
                     onClick={onNavigate}
-                    className={({ isActive }) =>
-                      `block rounded-lg px-3 py-1.5 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 ${
-                        isActive
-                          ? "bg-red-50 text-red-800"
-                          : "text-gray-600 hover:bg-red-50 hover:text-red-800"
-                      }`
-                    }
+                    className={`block rounded-lg px-3 py-1.5 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 ${
+                      isStaffMyLoansActive
+                        ? "bg-red-50 text-red-800"
+                        : "text-gray-600 hover:bg-red-50 hover:text-red-800"
+                    }`}
                   >
                     My Loans
-                  </NavLink>
+                  </Link>
                 </div>
               ) : null}
             </div>

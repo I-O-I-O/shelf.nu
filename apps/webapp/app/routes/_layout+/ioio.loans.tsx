@@ -31,6 +31,7 @@ import {
 import { z } from "zod";
 import { AssetImage } from "~/components/assets/asset-image";
 import type { AssetForThumbnail } from "~/components/assets/asset-image/types";
+import { getLoanStatusLabel } from "~/components/booking/loan-presentation";
 import {
   formatStudentDateOnly,
   formatStudentLabel,
@@ -1029,7 +1030,7 @@ export default function IoioLoans() {
                                     ? "Overdue"
                                     : loan.status === "ONGOING"
                                     ? "Borrowed"
-                                    : loan.status.replaceAll("_", " ")}
+                                    : getLoanStatusLabel(loan.status)}
                                 </span>
                                 {preparation?.status === "READY_FOR_PICKUP" ? (
                                   <span className="font-semibold text-gray-800">

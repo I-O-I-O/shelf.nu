@@ -5,6 +5,7 @@ import {
   getLoanLifecycle,
   getLoanListDateValue,
   getLoanPhysicalUnitNumber,
+  getLoanStatusLabel,
 } from "./loan-presentation";
 
 describe("staff loan asset display names", () => {
@@ -131,5 +132,19 @@ describe("staff loan lifecycle presentation", () => {
 
     expect(result.statusLabel).toBe("Partially returned");
     expect(result.returnedAt).toEqual(new Date("2030-01-15T11:00:00.000Z"));
+  });
+});
+
+describe("friendly IOIO loan status labels", () => {
+  it.each([
+    [BookingStatus.DRAFT, "Draft"],
+    [BookingStatus.RESERVED, "Reserved"],
+    [BookingStatus.ONGOING, "Borrowed"],
+    [BookingStatus.OVERDUE, "Overdue"],
+    [BookingStatus.COMPLETE, "Returned"],
+    [BookingStatus.ARCHIVED, "Archived"],
+    [BookingStatus.CANCELLED, "Cancelled"],
+  ])("maps %s to %s", (status, label) => {
+    expect(getLoanStatusLabel(status)).toBe(label);
   });
 });

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getBookingsFilterData: vi.fn(),
   getBookings: vi.fn(),
   resolveCustodianScope: vi.fn(),
+  custodianScopeClause: vi.fn(),
   decorateBookingsForList: vi.fn(),
   getTeamMemberForCustodianFilter: vi.fn(),
   getTeamMemberForForm: vi.fn(),
@@ -14,21 +15,40 @@ const mocks = vi.hoisted(() => ({
   getMemberCalendarFeedUrl: vi.fn(),
   getTagsForBookingTagsFilter: vi.fn(),
   findBookingTags: vi.fn(),
+  findLoanDateYears: vi.fn(),
+  findIoioOperations: vi.fn(),
+  findBookingAssets: vi.fn(),
+  findKits: vi.fn(),
+  findAssets: vi.fn(),
+  findBorrowerMemberships: vi.fn(),
 }));
 
 // why: the route loaders are exercised without a seeded organization or a
 // database connection; each query returns the same empty result as a new org.
 vi.mock("~/database/db.server", () => ({
-  db: { tag: { findMany: mocks.findBookingTags } },
+  db: {
+    tag: { findMany: mocks.findBookingTags },
+    booking: { findMany: mocks.findLoanDateYears },
+    ioioWriteOperation: { findMany: mocks.findIoioOperations },
+    bookingAsset: { findMany: mocks.findBookingAssets },
+    kit: { findMany: mocks.findKits },
+    asset: { findMany: mocks.findAssets },
+    userOrganization: { findMany: mocks.findBorrowerMemberships },
+  },
 }));
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: mocks.requirePermission,
 }));
 vi.mock("~/modules/booking/service.server", () => ({
+  custodianScopeClause: mocks.custodianScopeClause,
   getBookingsFilterData: mocks.getBookingsFilterData,
   getBookings: mocks.getBookings,
   resolveCustodianScope: mocks.resolveCustodianScope,
   getBookingsForCalendar: mocks.getBookingsForCalendar,
+}));
+// why: no booking image URLs are asserted in this loader test; avoid storage configuration.
+vi.mock("~/modules/asset/service.server", () => ({
+  resolveAssetImagesForPresentation: vi.fn((assets) => Promise.resolve(assets)),
 }));
 vi.mock("~/modules/booking/list-flags.server", () => ({
   decorateBookingsForList: mocks.decorateBookingsForList,
@@ -89,6 +109,7 @@ beforeEach(() => {
     userId: "user-1",
     teamMemberIds: ["team-member-1"],
   });
+  mocks.custodianScopeClause.mockReturnValue({ custodianUserId: "user-1" });
   mocks.decorateBookingsForList.mockResolvedValue([]);
   mocks.getTeamMemberForCustodianFilter.mockResolvedValue({
     teamMembers: [],
@@ -102,6 +123,12 @@ beforeEach(() => {
     teamMembersForNotify: [],
   });
   mocks.findBookingTags.mockResolvedValue([]);
+  mocks.findLoanDateYears.mockResolvedValue([]);
+  mocks.findIoioOperations.mockResolvedValue([]);
+  mocks.findBookingAssets.mockResolvedValue([]);
+  mocks.findKits.mockResolvedValue([]);
+  mocks.findAssets.mockResolvedValue([]);
+  mocks.findBorrowerMemberships.mockResolvedValue([]);
   mocks.getBookingsForCalendar.mockResolvedValue([]);
   mocks.getTagsForBookingTagsFilter.mockResolvedValue({
     tags: [],
@@ -179,7 +206,55 @@ describe("empty booking and calendar route loaders", () => {
 
     expect(mocks.resolveCustodianScope).not.toHaveBeenCalled();
     expect(mocks.getBookings).toHaveBeenCalledWith(
-      expect.not.objectContaining({ custodianScope: expect.anything() })
+      expect.objectContaining({
+        organizationId: organization.id,
+        excludeBookingDescriptions: expect.any(Array),
+      })
+    );
+    expect(mocks.getBookings.mock.calls.at(-1)?.[0]).not.toHaveProperty(
+      "custodianScope"
+    );
+  });
+
+  it("keeps My Loans scoped when filters and pagination are active", async () => {
+    mocks.getBookingsFilterData.mockResolvedValueOnce({
+      page: 3,
+      perPage: 20,
+      search: "camera",
+      status: "OVERDUE",
+      teamMemberIds: [],
+      orderBy: "from",
+      orderDirection: "desc",
+      selfServiceData: null,
+      searchParams: new URLSearchParams(
+        "mine=1&s=camera&status=OVERDUE&page=3"
+      ),
+      cookie: {},
+      filtersCookie: null,
+      filters: null,
+      redirectNeeded: false,
+      tags: [],
+    });
+
+    await bookingsLoader(
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "user-1" }) },
+        request: new Request(
+          "http://localhost/bookings?mine=1&s=camera&status=OVERDUE&page=3"
+        ),
+      })
+    );
+
+    expect(mocks.getBookings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        page: 3,
+        search: "camera",
+        statuses: ["OVERDUE"],
+        custodianScope: {
+          userId: "user-1",
+          teamMemberIds: ["team-member-1"],
+        },
+      })
     );
   });
 

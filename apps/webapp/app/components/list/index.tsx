@@ -54,6 +54,8 @@ export interface IndexResponse {
 export type ListProps = {
   title?: string;
   ItemComponent: any;
+  /** Optional compact card renderer for narrow screens. */
+  MobileItemComponent?: any;
   headerChildren?: ReactNode;
   hideFirstHeaderColumn?: boolean;
   /** Function to be passed if the rows of the table should navigate */
@@ -74,6 +76,12 @@ export type ListProps = {
 
   /** Optionally recieve an element for custom pagination */
   customPagination?: ReactElement;
+  /** Hide the generic list title/count when the page already has its own heading. */
+  hideListTitle?: boolean;
+  /** Optional fixed table layout for a purpose-built row design. */
+  tableClassName?: string;
+  /** Hide the edge fade when a fixed table has no intended horizontal scroll. */
+  disableTableOverflowGradient?: boolean;
   /** Any extra content to the right in Header */
   headerExtraContent?: ReactNode;
   /** Any extra props directly passed to ItemComponent */
@@ -119,10 +127,14 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     hideFirstHeaderColumn = false,
     navigate,
     className,
+    MobileItemComponent,
     customEmptyStateContent,
     emptyStateClassName,
     bulkActions,
     customPagination,
+    hideListTitle = false,
+    tableClassName,
+    disableTableOverflowGradient = false,
     headerExtraContent,
     extraItemComponentProps,
     disableSelectAllItems,
@@ -161,54 +173,76 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
       ) : (
         <>
           {/* The title and the total number of items. This basically acts like a fake table row */}
-          <div
-            className={tw(
-              modeIsAdvanced ? "p-3 pb-[5px]" : "flex-col p-4 pb-2 md:flex-row",
-              "flex justify-between border-b md:items-center "
-            )}
-          >
-            <div>
-              <ListTitle
-                title={title}
-                disableSelectAllItems={disableSelectAllItems}
-                hasBulkActions={!!bulkActions}
-                items={items}
-                countLabel={countLabel}
-                countLabelIsTotal={countLabelIsTotal}
-              />
-            </div>
-            <div className="flex items-center justify-end gap-2">
-              <When truthy={!!headerExtraContent}>{headerExtraContent}</When>
-              <When truthy={modeIsAdvanced && !isModelView}>
-                <ExportAssetsButton />
-              </When>
-              <When truthy={!!bulkActions}>{bulkActions}</When>
-            </div>
-          </div>
-          <Table
-            className={tw("list", bulkActions && "list-with-bulk-actions")}
-          >
-            <ListHeader
-              bulkActions={bulkActions}
-              items={items}
-              hideFirstColumn={hideFirstHeaderColumn}
+          {!hideListTitle ? (
+            <div
+              className={tw(
+                modeIsAdvanced
+                  ? "p-3 pb-[5px]"
+                  : "flex-col p-4 pb-2 md:flex-row",
+                "flex justify-between border-b md:items-center "
+              )}
             >
-              {headerChildren}
-            </ListHeader>
-            <tbody>
+              <div>
+                <ListTitle
+                  title={title}
+                  disableSelectAllItems={disableSelectAllItems}
+                  hasBulkActions={!!bulkActions}
+                  items={items}
+                  countLabel={countLabel}
+                  countLabelIsTotal={countLabelIsTotal}
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2">
+                <When truthy={!!headerExtraContent}>{headerExtraContent}</When>
+                <When truthy={modeIsAdvanced && !isModelView}>
+                  <ExportAssetsButton />
+                </When>
+                <When truthy={!!bulkActions}>{bulkActions}</When>
+              </div>
+            </div>
+          ) : null}
+          {MobileItemComponent ? (
+            <div className="space-y-3 p-3 md:hidden">
               {items.map((item) => (
-                <ListItem item={item} key={item.id} navigate={navigate}>
-                  {bulkActions ? <BulkListItemCheckbox item={item} /> : null}
-                  <ItemComponent
-                    item={item}
-                    extraProps={extraItemComponentProps}
-                    bulkActions={bulkActions}
-                    isUserPage={isUserPage}
-                  />
-                </ListItem>
+                <MobileItemComponent
+                  item={item}
+                  extraProps={extraItemComponentProps}
+                  key={item.id}
+                />
               ))}
-            </tbody>
-          </Table>
+            </div>
+          ) : null}
+          <div className={tw(MobileItemComponent && "hidden md:block")}>
+            <Table
+              disableOverflowGradient={disableTableOverflowGradient}
+              className={tw(
+                "list",
+                bulkActions && "list-with-bulk-actions",
+                tableClassName
+              )}
+            >
+              <ListHeader
+                bulkActions={bulkActions}
+                items={items}
+                hideFirstColumn={hideFirstHeaderColumn}
+              >
+                {headerChildren}
+              </ListHeader>
+              <tbody>
+                {items.map((item) => (
+                  <ListItem item={item} key={item.id} navigate={navigate}>
+                    {bulkActions ? <BulkListItemCheckbox item={item} /> : null}
+                    <ItemComponent
+                      item={item}
+                      extraProps={extraItemComponentProps}
+                      bulkActions={bulkActions}
+                      isUserPage={isUserPage}
+                    />
+                  </ListItem>
+                ))}
+              </tbody>
+            </Table>
+          </div>
           {!customPagination && <Pagination />}
         </>
       )}

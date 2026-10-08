@@ -1,6 +1,11 @@
+import { BookingStatus } from "@prisma/client";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, useLoaderData } from "react-router";
-import { getLoanAssetDisplayName } from "~/components/booking/loan-presentation";
+import {
+  getLoanAssetDisplayName,
+  getLoanStatusLabel,
+} from "~/components/booking/loan-presentation";
+import { Button } from "~/components/shared/button";
 import { PageBackLink } from "~/components/shared/page-back-link";
 import { db } from "~/database/db.server";
 import { getIoioKitDisplayName } from "~/modules/kit/ioio-kit-presentation";
@@ -149,7 +154,7 @@ export default function IoioStaffLoanDetail() {
               Status
             </dt>
             <dd className="mt-1 font-semibold text-gray-950">
-              {booking.status.replaceAll("_", " ")}
+              {getLoanStatusLabel(booking.status)}
             </dd>
           </div>
           <div>
@@ -166,6 +171,20 @@ export default function IoioStaffLoanDetail() {
           </div>
         </dl>
       </section>
+      {booking.status === BookingStatus.RESERVED ? (
+        <div className="flex flex-wrap gap-2">
+          <Button to={`/bookings/${booking.id}/overview/fulfil-and-checkout`}>
+            Check out loan
+          </Button>
+        </div>
+      ) : booking.status === BookingStatus.ONGOING ||
+        booking.status === BookingStatus.OVERDUE ? (
+        <div className="flex flex-wrap gap-2">
+          <Button to={`/bookings/${booking.id}/overview/checkin-assets`}>
+            Check in / return
+          </Button>
+        </div>
+      ) : null}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <h2 className="font-bold text-gray-950">Items</h2>
         <ul className="mt-3 space-y-2 text-sm text-gray-800">
