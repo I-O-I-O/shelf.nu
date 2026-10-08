@@ -816,10 +816,12 @@ export async function createLocation({
   userId,
   organizationId,
   parentId,
+  color,
 }: Pick<Location, "description" | "name" | "address"> & {
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
+  color?: Location["color"];
 }) {
   try {
     // Geocode the address if provided
@@ -840,6 +842,7 @@ export async function createLocation({
           name: name.trim(),
           description,
           address,
+          ...(color !== undefined ? { color } : {}),
           latitude: coordinates?.lat || null,
           longitude: coordinates?.lon || null,
           user: {
@@ -1014,12 +1017,21 @@ export async function updateLocation(payload: {
   name?: Location["name"];
   address?: Location["address"];
   description?: Location["description"];
+  color?: Location["color"];
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
 }) {
-  const { id, name, address, description, userId, organizationId, parentId } =
-    payload;
+  const {
+    id,
+    name,
+    address,
+    description,
+    color,
+    userId,
+    organizationId,
+    parentId,
+  } = payload;
 
   try {
     // Get the current location to check for changes
@@ -1067,6 +1079,7 @@ export async function updateLocation(payload: {
           name: name?.trim(),
           description,
           address,
+          ...(color !== undefined ? { color } : {}),
           ...(shouldUpdateCoordinates && {
             latitude: coordinates?.lat || null,
             longitude: coordinates?.lon || null,
@@ -1361,6 +1374,40 @@ export async function bulkDeleteLocations({
       cause,
       message: "Something went wrong while bulk deleting locations.",
       additionalData: { locationIds, organizationId },
+      label,
+    });
+  }
+}
+
+export async function removeLocationImage({
+  locationId,
+  organizationId,
+}: {
+  locationId: Location["id"];
+  organizationId: Organization["id"];
+}) {
+  try {
+    const location = await db.location.findUniqueOrThrow({
+      where: { id: locationId, organizationId },
+      select: { id: true, imageUrl: true, thumbnailUrl: true },
+    });
+
+    await db.location.update({
+      where: { id: locationId, organizationId },
+      data: {
+        imageUrl: null,
+        thumbnailUrl: null,
+        imageStoragePath: null,
+        thumbnailImageStoragePath: null,
+      },
+    });
+
+    await safeRemoveImageFilesOfLocations([location]);
+  } catch (cause) {
+    throw new ShelfError({
+      cause,
+      message: "Something went wrong while removing the location image.",
+      additionalData: { locationId, organizationId },
       label,
     });
   }

@@ -1,22 +1,13 @@
-import type { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data } from "react-router";
-import ImageWithPreview from "~/components/image-with-preview/image-with-preview";
-
+import { data, Link, useLoaderData } from "react-router";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
-import { List } from "~/components/list";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
 import { Filters } from "~/components/list/filters";
 import { SortBy } from "~/components/list/filters/sort-by";
-import BulkActionsDropdown from "~/components/location/bulk-actions-dropdown";
-import { LocationBadge } from "~/components/location/location-badge";
-import { LocationDescriptionColumn } from "~/components/location/location-description-column";
-import LocationQuickActions from "~/components/location/location-quick-actions";
+import { IoioLocationHierarchy } from "~/components/location/ioio-location-hierarchy";
 import { Button } from "~/components/shared/button";
-import { Td, Th } from "~/components/table";
-import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
-import type { LOCATION_LIST_INCLUDE } from "~/modules/location/service.server";
+import { useSearchParams } from "~/hooks/search-params";
 import { getLocations } from "~/modules/location/service.server";
 import { LOCATION_SORTING_OPTIONS } from "~/modules/location/utils";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -49,11 +40,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const searchParams = getCurrentSearchParams(request);
     const { page, perPageParam, search, orderBy, orderDirection } =
       getParamsValues(searchParams);
+    const selectedLocationId = searchParams.get("selectedLocation");
     const hasActiveFilters = computeHasActiveFilters(searchParams);
     const cookie = await updateCookieWithPerPage(request, perPageParam);
     const { perPage } = cookie;
 
-    const { locations, totalLocations } = await getLocations({
+    const firstPage = await getLocations({
       organizationId,
       page,
       perPage,
@@ -61,10 +53,20 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       orderBy,
       orderDirection,
     });
-    const totalPages = Math.ceil(totalLocations / perPage);
+    const { locations, totalLocations } =
+      firstPage.totalLocations > firstPage.locations.length
+        ? await getLocations({
+            organizationId,
+            page: 1,
+            perPage: firstPage.totalLocations,
+            search,
+            orderBy,
+            orderDirection,
+          })
+        : firstPage;
 
     const header: HeaderData = {
-      title: "Locations",
+      title: `Locations - ${totalLocations}`,
     };
     const modelName = {
       singular: "location",
@@ -76,12 +78,14 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         header,
         items: locations,
         search,
-        page,
+        page: 1,
         totalItems: totalLocations,
-        totalPages,
-        perPage,
+        totalPages: 1,
+        perPage: Math.max(perPage, totalLocations),
         modelName,
+        searchFieldLabel: "Search locations",
         hasActiveFilters,
+        selectedLocationId,
       }),
       {
         headers: [setCookie(await userPrefs.serialize(cookie))],
@@ -98,20 +102,15 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 ];
 
 export default function LocationsIndexPage() {
-  const { isBaseOrSelfService } = useUserRoleHelper();
+  const { items, selectedLocationId } = useLoaderData<typeof loader>();
+  const [searchParams] = useSearchParams();
+  const createdLocationId = searchParams.get("created")
+    ? selectedLocationId
+    : null;
 
   return (
     <>
-      <Header>
-        <Button
-          to="new"
-          role="link"
-          aria-label={`new location`}
-          data-test-id="createNewLocation"
-        >
-          New location
-        </Button>
-      </Header>
+      <Header hideQuickFind />
       <ListContentWrapper>
         <Filters
           slots={{
@@ -123,94 +122,59 @@ export default function LocationsIndexPage() {
               />
             ),
           }}
-        />
-        <List
-          bulkActions={
-            isBaseOrSelfService ? undefined : <BulkActionsDropdown />
-          }
-          customEmptyStateContent={{
-            title: "No locations yet",
-            text: "Locations help you track where your assets are. Create locations to organize assets by room, building, or site.",
-            newButtonRoute: "/locations/new",
-            newButtonContent: "Create your first location",
-          }}
-          ItemComponent={ListItemContent}
-          headerChildren={
-            <>
-              <Th>Description</Th>
-              <Th>Parent location</Th>
-              <Th className="whitespace-nowrap">Child locations</Th>
-              <Th>Assets</Th>
-              <Th>Kits</Th>
-              <Th>Actions</Th>
-            </>
-          }
-        />
+        >
+          <div className="flex w-full justify-end md:w-auto">
+            <Button
+              to="new"
+              role="link"
+              aria-label="new location"
+              data-test-id="createNewLocation"
+              className="whitespace-nowrap"
+            >
+              New location
+            </Button>
+          </div>
+        </Filters>
+        {createdLocationId ? (
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+            <span>Location created successfully.</span>
+            <div className="flex items-center gap-2">
+              <Link
+                to={`/labels?locationId=${encodeURIComponent(
+                  createdLocationId
+                )}`}
+                className="rounded-lg bg-green-800 px-3 py-2 font-semibold text-white hover:bg-green-900"
+              >
+                Create label
+              </Link>
+              <Link
+                to="/locations"
+                className="rounded-lg border border-green-300 bg-white px-3 py-2 font-semibold text-green-900 hover:bg-green-100"
+              >
+                Done
+              </Link>
+            </div>
+          </div>
+        ) : null}
+        {items.length ? (
+          <IoioLocationHierarchy
+            locations={items}
+            initialSelectedId={selectedLocationId}
+          />
+        ) : (
+          <div className="rounded-2xl border border-dashed border-gray-200 bg-white px-5 py-10 text-center">
+            <p className="text-lg font-bold text-gray-950">
+              No locations found.
+            </p>
+            <p className="mt-2 text-sm text-gray-600">
+              Create a location to organize assets by room, building, or site.
+            </p>
+            <Button to="new" className="mt-5">
+              New location
+            </Button>
+          </div>
+        )}
       </ListContentWrapper>
     </>
   );
 }
-
-const ListItemContent = ({
-  item,
-}: {
-  item: Prisma.LocationGetPayload<{ include: typeof LOCATION_LIST_INCLUDE }>;
-}) => (
-  <>
-    <Td className="w-full p-0 md:p-0">
-      <div className="flex justify-between gap-3 p-4 md:justify-normal md:px-6">
-        <div className="flex items-center gap-3">
-          <div className="flex size-12 items-center justify-center">
-            <ImageWithPreview
-              thumbnailUrl={item.thumbnailUrl}
-              alt={`${item.name} main image`}
-              className="size-full"
-            />
-          </div>
-          <div className="flex flex-row items-center gap-2 md:flex-col md:items-start md:gap-0">
-            <Button
-              to={`${item.id}/assets`}
-              variant="link"
-              className="text-left font-medium text-gray-900 hover:text-gray-700"
-            >
-              {item.name}
-            </Button>
-            <div className="hidden text-gray-600 md:block">{item.address}</div>
-          </div>
-        </div>
-      </div>
-    </Td>
-    {item.description ? (
-      <LocationDescriptionColumn value={item.description} />
-    ) : (
-      <Td>-</Td>
-    )}
-    <Td>
-      {item.parent ? (
-        <LocationBadge
-          location={{
-            id: item.parent.id,
-            name: item.parent.name,
-            parentId: item.parent.parentId ?? undefined,
-            childCount: item.parent._count?.children ?? 0,
-          }}
-          className="m-0"
-        />
-      ) : (
-        "-"
-      )}
-    </Td>
-    <Td>{item._count.children}</Td>
-    <Td>{item._count.assetLocations}</Td>
-    <Td>{item._count.kits}</Td>
-    <Td>
-      <LocationQuickActions
-        location={{
-          id: item.id,
-          name: item.name,
-          childCount: item._count.children,
-        }}
-      />
-    </Td>
-  </>
-);

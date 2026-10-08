@@ -1,28 +1,26 @@
-import { useAtomValue } from "jotai";
+import type { Location } from "@prisma/client";
 import type {
   ActionFunctionArgs,
-  MetaFunction,
   LoaderFunctionArgs,
+  MetaFunction,
 } from "react-router";
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
-import { dynamicTitleAtom } from "~/atoms/dynamic-title-atom";
 import Header from "~/components/layout/header";
-import type { HeaderData } from "~/components/layout/header/types";
 import {
   LocationForm,
   NewLocationFormSchema,
 } from "~/components/location/form";
-import { Button } from "~/components/shared/button";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
   getLocation,
+  removeLocationImage,
   updateLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import {
   payload,
   error,
@@ -37,6 +35,135 @@ import {
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
 
+type LocationFormType = "room" | "section" | "shelf" | "container";
+type LocationNode = Pick<Location, "id" | "name" | "parentId">;
+const IoioLocationEditSchema = NewLocationFormSchema.extend({
+  address: z
+    .string()
+    .optional()
+    .transform((value) => value ?? ""),
+});
+
+function getLocationFormType(
+  locationId: string,
+  locations: LocationNode[]
+): LocationFormType {
+  const locationsById = new Map(
+    locations.map((location) => [location.id, location])
+  );
+  const visited = new Set<string>();
+  let current = locationsById.get(locationId);
+  const childName = current?.name ?? "";
+  const parentName = current?.parentId
+    ? locationsById.get(current.parentId)?.name ?? ""
+    : "";
+  let depth = 0;
+
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    depth += 1;
+    current = current.parentId
+      ? locationsById.get(current.parentId)
+      : undefined;
+  }
+
+  if (depth <= 1) return "room";
+  if (depth === 2) {
+    return childName.toLocaleLowerCase().includes("shelf")
+      ? "shelf"
+      : "section";
+  }
+  if (depth === 3) {
+    return parentName.toLocaleLowerCase().includes("shelf")
+      ? "container"
+      : "shelf";
+  }
+  return "container";
+}
+
+function getLocationDescendantIds(
+  locationId: string,
+  locations: LocationNode[]
+) {
+  const descendants = new Set<string>();
+  const pending = [locationId];
+
+  while (pending.length > 0) {
+    const parentId = pending.pop();
+    if (!parentId) continue;
+
+    for (const location of locations) {
+      if (location.parentId !== parentId || descendants.has(location.id)) {
+        continue;
+      }
+      descendants.add(location.id);
+      pending.push(location.id);
+    }
+  }
+
+  return [...descendants];
+}
+
+function getLocationDepth(locationId: string, locations: LocationNode[]) {
+  const locationsById = new Map(
+    locations.map((location) => [location.id, location])
+  );
+  const visited = new Set<string>();
+  let current = locationsById.get(locationId);
+  let depth = 0;
+
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    depth += 1;
+    current = current.parentId
+      ? locationsById.get(current.parentId)
+      : undefined;
+  }
+
+  return depth;
+}
+
+function validateParentForLocationType({
+  locationType,
+  parentId,
+  locations,
+}: {
+  locationType: LocationFormType;
+  parentId: string | null;
+  locations: LocationNode[];
+}) {
+  const parent = parentId
+    ? locations.find((location) => location.id === parentId)
+    : undefined;
+  const parentDepth = parent ? getLocationDepth(parent.id, locations) : null;
+  const valid =
+    locationType === "room"
+      ? !parentId
+      : locationType === "section"
+      ? parentDepth === 1
+      : locationType === "shelf"
+      ? parentDepth === 1 || parentDepth === 2
+      : parentDepth === 3 ||
+        (parentDepth === 2 && /^shelf\b/iu.test(parent?.name ?? ""));
+
+  if (!valid) {
+    throw new ShelfError({
+      cause: null,
+      message:
+        locationType === "section"
+          ? "A section must be placed inside a room."
+          : locationType === "shelf"
+          ? "A shelf must be placed inside a room or section."
+          : locationType === "container"
+          ? "A container must be placed inside a shelf."
+          : "A room cannot have a parent location.",
+      label: "Location",
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+}
+
 export async function loader({ context, request, params }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
@@ -50,12 +177,11 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
 
   try {
     const { organizationId, userOrganizations } = await requirePermission({
-      userId: authSession.userId,
+      userId,
       request,
       entity: PermissionEntity.location,
       action: PermissionAction.update,
     });
-
     const { location } = await getLocation({
       organizationId,
       id,
@@ -63,25 +189,26 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       request,
       orderBy: "createdAt",
     });
-
-    // why: getLocationsForCreateAndEdit uses location.parentId as the
-    // defaultLocation fallback, so it must run after getLocation resolves.
+    const pickerUrl = new URL(request.url);
+    pickerUrl.searchParams.set("getAll", "location");
     const { locations, totalLocations } = await getLocationsForCreateAndEdit({
       organizationId,
-      request,
+      request: new Request(pickerUrl),
       defaultLocation: location.parentId,
     });
-
-    const header: HeaderData = {
-      title: `Edit | ${location.name}`,
-      subHeading: location.id,
-    };
+    const locationType = getLocationFormType(location.id, locations);
+    const excludeLocationIds = [
+      location.id,
+      ...getLocationDescendantIds(location.id, locations),
+    ];
 
     return payload({
       location,
       locations,
       totalLocations,
-      header,
+      locationType,
+      excludeLocationIds,
+      header: { title: "Edit location" },
       referer: getRefererPath(request),
     });
   } catch (cause) {
@@ -111,41 +238,62 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
   );
 
   try {
-    const { organizationId } = await requirePermission({
-      userId: authSession.userId,
+    const { organizationId, userOrganizations } = await requirePermission({
+      userId,
       request,
       entity: PermissionEntity.location,
       action: PermissionAction.update,
     });
-    const clonedRequest = request.clone();
-
-    const parsedData = parseData(
-      await clonedRequest.formData(),
-      NewLocationFormSchema,
-      {
-        additionalData: { userId, organizationId, id },
-      }
-    );
-
-    const { name, description, address, parentId } = parsedData;
-
-    const location = await updateLocation({
+    const imageRequest = request.clone();
+    const formData = await request.formData();
+    const parsedData = parseData(formData, IoioLocationEditSchema, {
+      additionalData: { userId, organizationId, id },
+    });
+    const { location } = await getLocation({
+      organizationId,
       id,
-      userId: authSession.userId,
+      userOrganizations,
+      request,
+    });
+    const pickerUrl = new URL(request.url);
+    pickerUrl.searchParams.set("getAll", "location");
+    const { locations } = await getLocationsForCreateAndEdit({
+      organizationId,
+      request: new Request(pickerUrl),
+      defaultLocation: location.parentId,
+    });
+    const locationType = getLocationFormType(id, locations);
+    const { name, description, address, parentId, color } = parsedData;
+    validateParentForLocationType({
+      locationType,
+      parentId,
+      locations,
+    });
+
+    const updatedLocation = await updateLocation({
+      id,
+      userId,
       name,
       description,
       address,
       organizationId,
       parentId,
+      color,
     });
-
-    await updateLocationImage({
-      request,
-      locationId: id,
-      organizationId,
-      prevImageUrl: location.imageUrl,
-      prevThumbnailUrl: location.thumbnailUrl,
-    });
+    const hasNewImage =
+      formData.get("image") instanceof File &&
+      (formData.get("image") as File).size > 0;
+    if (formData.get("clearImage") === "true" && !hasNewImage) {
+      await removeLocationImage({ locationId: id, organizationId });
+    } else {
+      await updateLocationImage({
+        request: imageRequest,
+        locationId: id,
+        organizationId,
+        prevImageUrl: updatedLocation.imageUrl,
+        prevThumbnailUrl: updatedLocation.thumbnailUrl,
+      });
+    }
 
     sendNotification({
       title: "Location updated",
@@ -154,18 +302,10 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       senderId: userId,
     });
 
-    /**
-     * "Add another" asks for a blank create form next, which outranks
-     * `redirectTo`: that records where the user arrived from, while this is what
-     * they have just asked to do. Matches the asset edit route and the location
-     * create route, which the same shared button posts to.
-     */
     if (parsedData.addAnother) {
       return redirect("/locations/new");
     }
 
-    // If redirectTo is provided, redirect back to previous page
-    // Otherwise stay on current page (e.g., when opened in new tab)
     if (parsedData.redirectTo) {
       return redirect(safeRedirect(parsedData.redirectTo, `/locations/${id}`));
     }
@@ -178,28 +318,27 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 }
 
 export default function LocationEditPage() {
-  const name = useAtomValue(dynamicTitleAtom);
-  const { location, referer } = useLoaderData<typeof loader>();
+  const { location, locations, locationType, excludeLocationIds, referer } =
+    useLoaderData<typeof loader>();
 
   return (
     <div className="relative">
-      <Header
-        title={
-          <Button to={`/locations/${location.id}`} variant={"inherit"}>
-            {name !== "" ? name : location.name}
-          </Button>
-        }
-      />
-      <div className="items-top flex w-full justify-between md:w-min">
+      <Header title="Edit location" />
+      <div className="items-top mt-6 flex w-full justify-between md:w-min">
         <LocationForm
           name={location.name}
           description={location.description}
           address={location.address}
           imageUrl={location.imageUrl}
           thumbnailUrl={location.thumbnailUrl}
+          color={location.color}
           parentId={location.parentId}
           referer={referer}
           excludeLocationId={location.id}
+          excludeLocationIds={excludeLocationIds}
+          locations={locations}
+          locationType={locationType}
+          ioioMode
         />
       </div>
     </div>
