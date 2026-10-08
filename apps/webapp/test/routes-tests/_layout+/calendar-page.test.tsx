@@ -68,21 +68,39 @@ vi.mock("~/components/layout/header", () => ({
 vi.mock("~/components/booking/booking-filters", () => ({
   default: () => <div>Booking filters</div>,
 }));
-vi.mock("~/components/booking/create-booking-dialog", () => ({
-  default: () => <button type="button">New booking</button>,
+vi.mock("~/components/calendar/ioio-calendar-filters", () => ({
+  IoioCalendarFilters: () => <div>IOIO Calendar filters</div>,
 }));
 vi.mock("~/components/calendar/calendar-navigation", () => ({
   CalendarNavigation: () => <div>Calendar navigation</div>,
-}));
-vi.mock("~/components/calendar/calendar-subscribe-dialog", () => ({
-  default: () => null,
 }));
 vi.mock("~/components/calendar/event-card", () => ({ default: () => null }));
 vi.mock("~/components/calendar/title-container", () => ({
   default: () => <div>October 2026</div>,
 }));
 vi.mock("~/components/calendar/view-button-group", () => ({
-  ViewButtonGroup: () => null,
+  ViewButtonGroup: ({
+    views,
+    currentView,
+    onViewChange,
+  }: {
+    views: Array<{ label: string; value: string }>;
+    currentView: string;
+    onViewChange: (view: string) => void;
+  }) => (
+    <div aria-label="Calendar view">
+      {views.map((view) => (
+        <button
+          key={view.value}
+          type="button"
+          aria-pressed={currentView === view.value}
+          onClick={() => onViewChange(view.value)}
+        >
+          {view.label}
+        </button>
+      ))}
+    </div>
+  ),
 }));
 vi.mock("~/components/dashboard/fallback-loading", () => ({
   default: () => <div>Loading</div>,
@@ -135,10 +153,9 @@ describe("IOIO Calendar page", () => {
         loader: () => ({
           header: { title: "Calendar" },
           events: [{ id: "reservation-1", title: "Microscope - Lab setup" }],
-          calendarFeedUrl: null,
-          organizationId: "org-1",
           canManageIoioReservations: true,
-          isSelfServiceOrBase: false,
+          modelName: { singular: "booking", plural: "bookings" },
+          search: "",
         }),
         HydrateFallback: () => <div>Loading calendar test</div>,
       },
@@ -152,7 +169,17 @@ describe("IOIO Calendar page", () => {
     expect(
       screen.getByRole("link", { name: "New reservation" })
     ).toHaveAttribute("href", "/calendar/new-reservation");
+    expect(screen.getByText("IOIO Calendar filters")).toBeInTheDocument();
     expect(screen.getByText("Microscope - Lab setup")).toBeInTheDocument();
+    for (const view of ["Month", "Week", "Day"]) {
+      expect(screen.getByRole("button", { name: view })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Week" }));
+    expect(screen.getByRole("button", { name: "Week" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
 
     act(() => {
       fireEvent.click(
@@ -172,5 +199,30 @@ describe("IOIO Calendar page", () => {
         "focus=week&start=2026-10-08T00%3A00%3A00.000Z&end=2026-10-15T00%3A00%3A00.000Z"
       );
     });
+  });
+
+  it("does not expose staff reservation controls to a SELF_SERVICE user", async () => {
+    const Stub = createRoutesStub([
+      {
+        path: "/calendar",
+        Component: CalendarRoute,
+        loader: () => ({
+          header: { title: "Calendar" },
+          events: [],
+          canManageIoioReservations: false,
+          modelName: { singular: "booking", plural: "bookings" },
+          search: "",
+        }),
+        HydrateFallback: () => <div>Loading calendar test</div>,
+      },
+    ]);
+
+    render(<Stub initialEntries={["/calendar"]} />);
+
+    expect(
+      await screen.findByText("Plan upcoming equipment reservations.")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "New reservation" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New booking" })).toBeNull();
   });
 });

@@ -175,6 +175,23 @@ describe("EventCardContent — per-slice breakdown gating", () => {
     expect(screen.queryByText(/^Qty /)).toBeNull();
     expect(screen.queryByText(/Total reserved/)).toBeNull();
   });
+
+  it("shows IOIO reservation equipment and labels the creator as Reserved by", () => {
+    render(
+      <EventCardContent
+        booking={makeBooking({
+          isIoioReservation: true,
+          assetNames: ["Microscope", "Camera Kit"],
+          name: "Open lab setup",
+        })}
+      />
+    );
+
+    expect(screen.getByText("Microscope, Camera Kit")).toBeInTheDocument();
+    expect(screen.getByText("Open lab setup")).toBeInTheDocument();
+    expect(screen.getByText("Reserved by:")).toBeInTheDocument();
+    expect(screen.queryByText("Created by:")).toBeNull();
+  });
 });
 
 describe("EventCardContent — returned asset", () => {

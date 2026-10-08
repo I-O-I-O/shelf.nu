@@ -183,7 +183,7 @@ describe("empty booking and calendar route loaders", () => {
     );
   });
 
-  it("loads Calendar with no bookings, assets, or saved calendar feed", async () => {
+  it("loads Calendar with no reservations and gives SELF_SERVICE no staff controls", async () => {
     mocks.requirePermission.mockResolvedValueOnce({
       organizationId: organization.id,
       currentOrganization: organization,
@@ -199,7 +199,10 @@ describe("empty booking and calendar route loaders", () => {
       })
     );
 
-    expect(result).toMatchObject({ events: [], calendarFeedUrl: null });
+    expect(result).toMatchObject({
+      events: [],
+      canManageIoioReservations: false,
+    });
     expect(mocks.requirePermission).toHaveBeenCalledWith(
       expect.objectContaining({ entity: "booking", action: "read" })
     );
@@ -209,6 +212,26 @@ describe("empty booking and calendar route loaders", () => {
         canSeeAllBookings: false,
       })
     );
+  });
+
+  it("keeps the personal-workspace booking restriction", async () => {
+    mocks.requirePermission.mockResolvedValueOnce({
+      organizationId: "personal-org",
+      currentOrganization: { id: "personal-org", type: "PERSONAL" },
+      role: "OWNER",
+      canSeeAllBookings: true,
+      canSeeAllCustody: true,
+    });
+
+    await expect(
+      calendarLoader(
+        createLoaderArgs({
+          context: { getSession: () => ({ userId: "user-1" }) },
+          request: new Request("http://localhost/calendar"),
+        })
+      )
+    ).rejects.toMatchObject({ init: { status: 403 } });
+    expect(mocks.getBookingsForCalendar).not.toHaveBeenCalled();
   });
 
   it("keeps only IOIO reservation events and links them to reservation review", async () => {

@@ -33,11 +33,11 @@ export default function TitleContainer({
 
   return (
     <div className={className}>
-      <div className="text-left font-sans text-lg font-semibold leading-[20px] ">
+      <div className="text-left font-sans text-base font-bold leading-5 text-gray-950 sm:text-lg">
         {titleToRender}
       </div>
       {!isMd || calendarView.endsWith("Week") ? (
-        <div className="text-gray-600">{calendarSubtitle}</div>
+        <div className="text-xs text-gray-500">{calendarSubtitle}</div>
       ) : null}
     </div>
   );

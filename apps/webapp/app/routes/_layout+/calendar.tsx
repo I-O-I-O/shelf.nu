@@ -14,33 +14,22 @@ import { Plus } from "lucide-react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Link, Outlet, useLoaderData, useLocation } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
-import BookingFilters from "~/components/booking/booking-filters";
-import CreateBookingDialog from "~/components/booking/create-booking-dialog";
-
 import { CalendarNavigation } from "~/components/calendar/calendar-navigation";
-import CalendarSubscribeDialog from "~/components/calendar/calendar-subscribe-dialog";
 import renderEventCard from "~/components/calendar/event-card";
+import { IoioCalendarFilters } from "~/components/calendar/ioio-calendar-filters";
 import TitleContainer from "~/components/calendar/title-container";
 import { ViewButtonGroup } from "~/components/calendar/view-button-group";
 import FallbackLoading from "~/components/dashboard/fallback-loading";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
-import { Button } from "~/components/shared/button";
 import { Spinner } from "~/components/shared/spinner";
 import type { TeamMemberForBadge } from "~/components/user/team-member-badge";
 import { useSearchParams } from "~/hooks/search-params";
 import { useDateFormatter } from "~/hooks/use-date-formatter";
 import { useDisabled } from "~/hooks/use-disabled";
-import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { getBookingsForCalendar } from "~/modules/booking/service.server";
-import { getMemberCalendarFeedUrl } from "~/modules/calendar-subscription/service.server";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
-import { getTagsForBookingTagsFilter } from "~/modules/tag/service.server";
-import {
-  getTeamMemberForCustodianFilter,
-  getTeamMemberForForm,
-} from "~/modules/team-member/service.server";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
@@ -53,16 +42,13 @@ import {
 } from "~/utils/calendar";
 import { getWeekStartingAndEndingDates } from "~/utils/date-fns";
 import { makeShelfError, ShelfError } from "~/utils/error";
-import { payload, error, getCurrentSearchParams } from "~/utils/http.server";
-import { getParamsValues } from "~/utils/list";
-import { parseMarkdownToReact } from "~/utils/md";
+import { payload, error } from "~/utils/http.server";
 import { isPersonalOrg } from "~/utils/organization";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-import { bookingsSearchFieldTooltipText } from "./bookings._index";
 
 export function links() {
   return [{ rel: "stylesheet", href: calendarStyles }];
@@ -127,7 +113,6 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   try {
     const {
-      isSelfServiceOrBase,
       currentOrganization,
       organizationId,
       canSeeAllBookings,
@@ -147,6 +132,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         message:
           "You cannot use bookings in a personal workspaces. Please create a Team workspace to create bookings.",
         label: "Booking",
+        status: 403,
         shouldBeCaptured: false,
       });
     }
@@ -155,48 +141,13 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       title: `Calendar`,
     };
 
-    const searchParams = getCurrentSearchParams(request);
-    const { teamMemberIds } = getParamsValues(searchParams);
-    const [
-      teamMembersData,
-      teamMembersForFormData,
-      tagsData,
-      allEvents,
-      calendarFeedUrl,
-    ] = await Promise.all([
-      // Team members for filters - when canSeeAllCustody is false, only current user's team member
-      getTeamMemberForCustodianFilter({
-        organizationId,
-        selectedTeamMembers: teamMemberIds,
-        getAll:
-          searchParams.has("getAll") &&
-          hasGetAllValue(searchParams, "teamMember"),
-        filterByUserId: !canSeeAllCustody,
-        userId,
-      }),
-      // Team members for CreateBookingDialog - BASE/SELF_SERVICE always get their team member
-      isSelfServiceOrBase
-        ? getTeamMemberForForm({
-            organizationId,
-            userId,
-            isSelfServiceOrBase,
-            getAll:
-              searchParams.has("getAll") &&
-              hasGetAllValue(searchParams, "teamMember"),
-          })
-        : Promise.resolve(null), // ADMIN users reuse teamMembersData
-      getTagsForBookingTagsFilter({
-        organizationId,
-      }),
-      getBookingsForCalendar({
-        request,
-        organizationId,
-        userId,
-        canSeeAllBookings,
-        canSeeAllCustody,
-      }),
-      getMemberCalendarFeedUrl({ organizationId, userId }),
-    ]);
+    const allEvents = await getBookingsForCalendar({
+      request,
+      organizationId,
+      userId,
+      canSeeAllBookings,
+      canSeeAllCustody,
+    });
 
     // IOIO Calendar is the staff reservation planner. Generic Shelf loans
     // remain available from Loans and should not be mixed into this view.
@@ -237,23 +188,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     return payload({
       header,
       events,
-      organizationId,
-      ...teamMembersData,
-      // For BASE/SELF_SERVICE users, provide dedicated form team members
-      // For ADMIN users, reuse the filter team members
-      teamMembersForForm:
-        teamMembersForFormData?.teamMembers ?? teamMembersData.teamMembers,
-      currentOrganization,
-      ...tagsData,
-      modelName,
-      isSelfServiceOrBase,
       canManageIoioReservations: role === "ADMIN" || role === "OWNER",
-      userId,
-      calendarFeedUrl,
-      searchFieldTooltip: {
-        title: "Search your bookings",
-        text: parseMarkdownToReact(bookingsSearchFieldTooltipText),
-      },
+      search: "",
+      modelName,
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -281,9 +218,7 @@ function CalendarPage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [subscribeOpen, setSubscribeOpen] = useState(false);
-  const { events, calendarFeedUrl, organizationId, canManageIoioReservations } =
-    useLoaderData<typeof loader>();
+  const { events, canManageIoioReservations } = useLoaderData<typeof loader>();
   const isLoading = useDisabled();
   const [calendarHeader, setCalendarHeader] = useState<{
     title?: string;
@@ -358,18 +293,10 @@ function CalendarPage() {
             <Plus className="size-4 shrink-0" aria-hidden="true" />
             New reservation
           </Link>
-        ) : (
-          <CreateBookingDialog
-            trigger={
-              <Button type="button" aria-label="new booking">
-                New booking
-              </Button>
-            }
-          />
-        )}
+        ) : null}
       </Header>
 
-      <BookingFilters className="mt-4" hideSortBy />
+      <IoioCalendarFilters className="mt-4" />
 
       <div className="mt-5 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-gray-50/70 p-3 sm:px-4">
@@ -406,16 +333,6 @@ function CalendarPage() {
                 className="rounded-lg border border-gray-200 bg-white [&>button]:!h-9 [&>button]:!py-0"
               />
             ) : null}
-
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="ml-3"
-              onClick={() => setSubscribeOpen(true)}
-            >
-              Subscribe
-            </Button>
           </div>
         </div>
         <div className="ioio-calendar-shell">
@@ -508,13 +425,6 @@ function CalendarPage() {
           </ClientOnly>
         </div>
       </div>
-
-      <CalendarSubscribeDialog
-        organizationId={organizationId}
-        calendarFeedUrl={calendarFeedUrl}
-        open={subscribeOpen}
-        onClose={() => setSubscribeOpen(false)}
-      />
     </>
   );
 }

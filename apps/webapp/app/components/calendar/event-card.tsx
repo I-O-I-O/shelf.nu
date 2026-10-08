@@ -231,7 +231,19 @@ export default function renderEventCard({ event }: EventCardProps) {
             ) : (
               <DateS date={booking.start} options={{ timeStyle: "short" }} />
             )}{" "}
-            | {event.title}
+            |{" "}
+            {booking.isIoioReservation ? (
+              <span className="inline-flex min-w-0 items-center gap-1">
+                <span className="truncate font-medium">
+                  {booking.assetNames?.join(", ") || "Equipment"}
+                </span>
+                {booking.name ? (
+                  <span className="truncate opacity-75">· {booking.name}</span>
+                ) : null}
+              </span>
+            ) : (
+              event.title
+            )}
             {showKitGlyph ? (
               <span
                 className="inline-flex items-center gap-0.5"
@@ -298,7 +310,12 @@ export function EventCardContent({
   return (
     <>
       <div className="mb-3 mt-2 flex items-center gap-2 ">
-        <div className="text-text-md font-medium">{booking.name}</div>
+        <div className="text-text-md font-medium">
+          {booking.assetNames?.length ? (
+            <div>{booking.assetNames.join(", ")}</div>
+          ) : null}
+          <div>{booking.name}</div>
+        </div>
         <BookingStatusBadge
           status={booking.status}
           custodianUserId={booking.custodian.user?.id}
@@ -331,7 +348,9 @@ export function EventCardContent({
           </div>
         </div>
         <div>
-          <p className="mb-1 text-sm font-normal">Created by:</p>
+          <p className="mb-1 text-sm font-normal">
+            {booking.assetNames?.length ? "Reserved by:" : "Created by:"}
+          </p>
           <div className="mb-3 flex items-center gap-2">
             <TeamMemberBadge teamMember={booking.creator} />
           </div>
