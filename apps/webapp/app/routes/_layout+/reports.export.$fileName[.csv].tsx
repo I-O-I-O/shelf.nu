@@ -286,6 +286,32 @@ export const loader = async ({
         break;
       }
 
+      case "asset-usage-distribution": {
+        const [usageReport, distributionReport] = await Promise.all([
+          assetUtilizationReport({
+            organizationId,
+            timeframe,
+            categoryId: searchParams.get("category") || undefined,
+            locationId: searchParams.get("location") || undefined,
+            page: 1,
+            pageSize: 10000,
+          }),
+          assetDistributionReport({
+            organizationId,
+            currency,
+            page: 1,
+            pageSize: 10000,
+          }),
+        ]);
+        csvString = [
+          generateAssetUtilizationCsv(
+            usageReport.rows as AssetUtilizationRow[]
+          ),
+          generateDistributionCsv(distributionReport.distributionBreakdown),
+        ].join("\n\n");
+        break;
+      }
+
       case "asset-activity": {
         const reportData = await assetActivityReport({
           organizationId,

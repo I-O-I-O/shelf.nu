@@ -172,6 +172,11 @@ export interface ReportPayload<TRow = Record<string, unknown>> {
   // Top Booked Kits report specific fields
   /** The #1 most booked kit (independent of pagination) */
   topBookedKit?: TopBookedKitRow | null;
+
+  /** Distribution metrics included with the combined IOIO usage report. */
+  distributionKpis?: ReportKpi[];
+  /** Distribution breakdown included with the combined IOIO usage report. */
+  distributionBreakdown?: DistributionBreakdown;
 }
 
 // -----------------------------------------------------------------------------

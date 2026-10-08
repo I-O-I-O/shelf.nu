@@ -155,6 +155,21 @@ export const REPORTS: ReportDefinition[] = [
     exportable: true,
   },
   {
+    id: "asset-usage-distribution",
+    title: "Asset Usage & Distribution",
+    description:
+      "See how equipment is used and where inventory is distributed.",
+    category: "assets",
+    icon: "BarChart3",
+    enabled: true,
+    filters: [
+      { type: "category", label: "Category", multi: true },
+      { type: "location", label: "Location", multi: false },
+    ],
+    hasChart: true,
+    exportable: true,
+  },
+  {
     id: "idle-assets",
     title: "Idle Assets",
     description:

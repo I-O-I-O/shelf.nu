@@ -12,7 +12,7 @@
  */
 import type { LoaderFunctionArgs } from "react-router";
 import type { Mock } from "vitest";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLoaderArgs } from "@mocks/remix";
 import {
   assetActivityReport,
@@ -29,10 +29,12 @@ import {
 } from "~/modules/reports/helpers.server";
 import type {
   AssetDistributionRow,
+  AssetUtilizationRow,
   MonthlyBookingTrendRow,
   ReportPayload,
   ResolvedTimeframe,
 } from "~/modules/reports/types";
+import { loader as exportLoader } from "~/routes/_layout+/reports.export.$fileName[.csv]";
 import {
   PermissionAction,
   PermissionEntity,
@@ -77,19 +79,9 @@ vi.mock("~/utils/date-format.server", () => ({
   ),
 }));
 
-let loader: (typeof import("~/routes/_layout+/reports.export.$fileName[.csv]"))["loader"];
-
 const requirePermissionMock = vi.mocked(requirePermission);
 const assetDistributionReportMock = vi.mocked(assetDistributionReport);
 const custodySnapshotReportMock = vi.mocked(custodySnapshotReport);
-const assetInventoryReportMock = vi.mocked(assetInventoryReport);
-const bookingComplianceReportMock = vi.mocked(bookingComplianceReport);
-
-beforeAll(async () => {
-  ({ loader } = await import(
-    "~/routes/_layout+/reports.export.$fileName[.csv]"
-  ));
-});
 
 describe("app/routes/_layout+/reports.export.$fileName[.csv] loader", () => {
   const context = {
@@ -141,7 +133,7 @@ describe("app/routes/_layout+/reports.export.$fileName[.csv] loader", () => {
   });
 
   const runLoader = () =>
-    loader(
+    exportLoader(
       createLoaderArgs({
         request: new Request(
           "http://localhost:3000/reports/export/distribution-last_30d-2026-08-24.csv?reportId=distribution"
@@ -199,7 +191,7 @@ describe("app/routes/_layout+/reports.export.$fileName[.csv] loader", () => {
       `http://localhost:3000/reports/export/report-2026-08-28.csv?${query}`;
 
     const runLoaderWith = (query: string) =>
-      loader(
+      exportLoader(
         createLoaderArgs({
           request: new Request(exportUrl(query)),
           params: { fileName: "report-2026-08-28" },
@@ -310,6 +302,12 @@ describe("app/routes/_layout+/reports.export.$fileName[.csv] loader", () => {
         expected: { categoryId: "cat-1", locationId: "loc-1" },
       },
       {
+        reportId: "asset-usage-distribution",
+        query: "category=cat-1&location=loc-1",
+        mock: vi.mocked(assetUtilizationReport),
+        expected: { categoryId: "cat-1", locationId: "loc-1" },
+      },
+      {
         reportId: "asset-activity",
         query: "asset=asset-1&category=cat-1",
         mock: vi.mocked(assetActivityReport),
@@ -344,6 +342,31 @@ describe("app/routes/_layout+/reports.export.$fileName[.csv] loader", () => {
         expect(mock).toHaveBeenCalledWith(expect.objectContaining(expected));
       }
     );
+
+    it("exports both usage rows and the distribution breakdown", async () => {
+      vi.mocked(assetUtilizationReport).mockResolvedValue(
+        emptyPayload<AssetUtilizationRow>()
+      );
+      assetDistributionReportMock.mockResolvedValue({
+        ...emptyPayload<AssetDistributionRow>(),
+        distributionBreakdown: arabicBreakdown,
+      });
+
+      const response = (await runLoaderWith(
+        "reportId=asset-usage-distribution&category=cat-1&location=loc-1"
+      )) as unknown as Response;
+      const csv = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(csv).toContain(
+        "Asset ID,Asset Name,Category,Location,Booking Count,Days in Use,Total Days,Utilization Rate"
+      );
+      expect(csv).toContain("Breakdown Type,Group,Asset Count");
+      expect(csv).toContain("Category,حاسوب محمول,12");
+      expect(assetDistributionReportMock).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: "org-1", currency: "USD" })
+      );
+    });
 
     it.each([
       // A cutoff at or after now would mark every asset idle.

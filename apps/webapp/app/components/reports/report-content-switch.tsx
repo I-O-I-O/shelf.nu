@@ -34,6 +34,7 @@ import type {
 import { AssetActivityContent } from "./asset-activity-content";
 import { AssetDistributionContent } from "./asset-distribution-content";
 import { AssetInventoryContent } from "./asset-inventory-content";
+import { AssetUsageDistributionContent } from "./asset-usage-distribution-content";
 import { AssetUtilizationContent } from "./asset-utilization-content";
 import { BookingComplianceContent } from "./booking-compliance-content";
 import { CustodySnapshotContent } from "./custody-snapshot-content";
@@ -67,6 +68,8 @@ type Props = {
   topBookedKit?: TopBookedKitRow | null;
   /** Distribution-only payload extra. */
   distributionBreakdown?: DistributionBreakdown;
+  /** Distribution metrics for the combined IOIO usage report. */
+  distributionKpis?: ReportKpi[];
   /** Monthly-booking-trends-only payload extra. */
   chartSeries?: ChartSeries[];
   /** Stable row-click handlers from `useReportRowHandlers`. */
@@ -87,6 +90,7 @@ export function ReportContentSwitch({
   topBookedAsset,
   topBookedKit,
   distributionBreakdown,
+  distributionKpis,
   chartSeries,
   handlers,
 }: Props) {
@@ -98,6 +102,19 @@ export function ReportContentSwitch({
       <AssetDistributionContent
         kpis={kpis}
         distributionBreakdown={distributionBreakdown}
+      />
+    );
+  }
+
+  if (reportId === "asset-usage-distribution") {
+    return (
+      <AssetUsageDistributionContent
+        usageRows={rows as AssetUtilizationRow[]}
+        usageKpis={kpis}
+        usageTotalRows={totalRows}
+        distributionKpis={distributionKpis ?? []}
+        distributionBreakdown={distributionBreakdown}
+        onRowClick={handlers.onAssetRowClick}
       />
     );
   }
