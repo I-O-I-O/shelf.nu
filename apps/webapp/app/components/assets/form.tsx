@@ -27,6 +27,7 @@ import { updateDynamicTitleAtom } from "~/atoms/dynamic-title-atom";
 import { fileErrorAtom, assetImageValidateFileAtom } from "~/atoms/file";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
+import { assetAdvancedSettingsSchema } from "~/modules/asset/advanced-settings";
 import { getPrimaryKit, isQuantityTracked } from "~/modules/asset/utils";
 import type {
   AssetEditLoaderData,
@@ -165,6 +166,11 @@ export const NewAssetFormSchema = z.object({
       .nonnegative("Min quantity cannot be negative")
       .nullable()
   ),
+  // IOIO advanced options are rendered by IoioAssetCreateForm, while this
+  // schema is the route action's parser. Keep the field optional so older or
+  // non-IOIO forms retain their existing behavior, but accept the selected
+  // value so the edit action can persist it.
+  returnHandling: assetAdvancedSettingsSchema.shape.returnHandling.optional(),
   consumptionType: z
     .nativeEnum(ConsumptionType, {
       errorMap: () => ({ message: "Please select a consumption type" }),

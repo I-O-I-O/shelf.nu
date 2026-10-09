@@ -22,7 +22,19 @@ export function requireStudentRead({
     request,
     entity: PermissionEntity.asset,
     action: PermissionAction.read,
-  }).then((permission) => ({ ...permission, userId }));
+  }).then((permission) => {
+    if (permission.role !== OrganizationRoles.SELF_SERVICE) {
+      throw new ShelfError({
+        cause: null,
+        title: "Student access required",
+        message: "This page is only available to Student accounts.",
+        status: 403,
+        label: "Permission",
+        shouldBeCaptured: false,
+      });
+    }
+    return { ...permission, userId };
+  });
 }
 
 export type IoioAuth = Awaited<ReturnType<typeof requireStudentRead>>;

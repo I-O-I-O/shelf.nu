@@ -33,6 +33,7 @@ import {
 } from "~/modules/ioio-staff/preparation";
 import {
   borrowItem,
+  acknowledgeBorrowItemStaffReservation,
   cancelBorrowItem,
   getBorrowItemAvailability,
   prepareBorrowItem,
@@ -42,6 +43,7 @@ import {
 } from "~/modules/ioio-student/borrow-item.server";
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
+import { normalizeQrScanValue } from "~/modules/qr/normalize-scan-value";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { makeShelfError } from "~/utils/error";
 import { payload } from "~/utils/http.server";
@@ -86,11 +88,20 @@ const checkoutActionSchema = z.discriminatedUnion("intent", [
     quantity: z.coerce.number().int().min(1),
   }),
   z.object({
+    intent: z.literal("acknowledge-preparation-reservation"),
+    assetId: z.string().min(1),
+    candidateAssetIds: z.string().optional(),
+    quantity: z.coerce.number().int().min(1),
+  }),
+  z.object({
     intent: z.literal("confirm"),
     confirmationToken: z.string().min(1),
     quantity: z.coerce.number().int().min(1),
     selectedPhysicalUnitIds: z.string().optional(),
-    allowStaffReservationOverlap: z.enum(["true"]).optional(),
+  }),
+  z.object({
+    intent: z.literal("acknowledge-reservation"),
+    confirmationToken: z.string().min(1),
   }),
   z.object({
     intent: z.literal("confirm-all"),
@@ -115,7 +126,6 @@ const confirmAllProposalSchema = z
         confirmationToken: z.string().min(1),
         quantity: z.number().int().min(1),
         selectedPhysicalUnitIds: z.array(z.string()).optional(),
-        allowStaffReservationOverlap: z.boolean().optional(),
       }),
       z.object({
         kind: z.literal("preparation"),
@@ -213,6 +223,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
     if (parsed.intent === "resolve-qr") {
+      const qrId = normalizeQrScanValue(parsed.qrId);
+      if (!qrId) throw new Error("Scan a valid physical unit QR code.");
       const requestedAsset = await db.asset.findFirst({
         where: { id: parsed.assetId, organizationId: auth.organizationId },
         select: {
@@ -224,7 +236,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
       const qr = await db.qr.findFirst({
         where: {
-          id: parsed.qrId,
+          id: qrId,
           organizationId: auth.organizationId,
         },
         select: { assetId: true },
@@ -287,7 +299,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
           title: resolvedUnit.title,
           unitNumber: resolvedUnit.unitNumber,
         },
-        qrId: parsed.qrId,
+        qrId,
       });
     }
     if (parsed.intent === "resolve-unit") {
@@ -352,6 +364,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
         result,
       });
     }
+    if (parsed.intent === "acknowledge-preparation-reservation") {
+      const result = await requestPreparationForItem(
+        {
+          assetId: parsed.assetId,
+          candidateAssetIds: parsed.candidateAssetIds
+            ? parsed.candidateAssetIds.split(",").filter(Boolean)
+            : undefined,
+          quantity: parsed.quantity,
+          acknowledgeStaffReservationOverlap: true,
+        },
+        { context, request }
+      );
+      return data({
+        ok: true as const,
+        intent: "preparation-requested" as const,
+        result,
+      });
+    }
 
     if (parsed.intent === "confirm") {
       const result = await borrowItem(
@@ -364,12 +394,21 @@ export async function action({ context, request }: ActionFunctionArgs) {
                 .max(100)
                 .parse(JSON.parse(parsed.selectedPhysicalUnitIds))
             : undefined,
-          allowStaffReservationOverlap:
-            parsed.allowStaffReservationOverlap === "true",
         },
         { context, request }
       );
       return data({ ok: true as const, intent: "confirmed" as const, result });
+    }
+
+    if (parsed.intent === "acknowledge-reservation") {
+      await acknowledgeBorrowItemStaffReservation(parsed.confirmationToken, {
+        context,
+        request,
+      });
+      return data({
+        ok: true as const,
+        intent: "reservation-acknowledged" as const,
+      });
     }
 
     if (parsed.intent === "confirm-all") {
@@ -412,8 +451,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
                 confirmationToken: proposal.confirmationToken,
                 quantity: proposal.quantity,
                 selectedPhysicalUnitIds: proposal.selectedPhysicalUnitIds,
-                allowStaffReservationOverlap:
-                  proposal.allowStaffReservationOverlap === true,
               },
               { context, request }
             );
@@ -497,6 +534,7 @@ type CheckoutActionData =
       result: { ok: true; status: "requested"; requestId: string };
     }
   | { ok: true; intent: "confirmed" | "cancelled"; result?: unknown }
+  | { ok: true; intent: "reservation-acknowledged" }
   | {
       ok: true;
       intent: "confirmed-all";
@@ -561,11 +599,13 @@ type PreparationBasketConfiguration = {
   assetId: string;
   candidateAssetIds: string[];
   quantity: number;
+  requiresStaffReservationAcknowledgement: boolean;
 };
 
 function CheckoutLine({
   item,
   onPrepared,
+  onPreparationSubmitted,
   onPreparationConfigured,
   pendingApproval,
   accessApprovalRequired,
@@ -578,6 +618,7 @@ function CheckoutLine({
     displayTitle: string,
     reservationAcknowledged: boolean
   ) => void;
+  onPreparationSubmitted: (itemId: string, title: string) => void;
   onPreparationConfigured: (
     itemId: string,
     configuration: PreparationBasketConfiguration | null
@@ -690,12 +731,27 @@ function CheckoutLine({
         false
       );
     }
+    if (response.intent === "reservation-acknowledged" && proposal) {
+      setReservationAcknowledged(true);
+      onPrepared(item.id, proposal, item.title, true);
+    }
+    if (response.intent === "preparation-requested") {
+      onPreparationSubmitted(item.id, item.title);
+    }
     if (response.intent === "cancelled") {
       setProposal(null);
       setReservationAcknowledged(false);
       onPrepared(item.id, null, item.title, false);
     }
-  }, [fetcher.data, item.id, item.title, onPrepared, selectedUnits]);
+  }, [
+    fetcher.data,
+    item.id,
+    item.title,
+    onPreparationSubmitted,
+    onPrepared,
+    proposal,
+    selectedUnits,
+  ]);
 
   useEffect(() => {
     const response = qrFetcher.data;
@@ -772,6 +828,8 @@ function CheckoutLine({
             assetId: item.id,
             candidateAssetIds: item.candidateAssetIds,
             quantity,
+            requiresStaffReservationAcknowledgement:
+              (availabilityData?.staffReservedCount ?? 0) > 0,
           }
         : null
     );
@@ -781,6 +839,7 @@ function CheckoutLine({
     item.candidateAssetIds,
     item.id,
     onPreparationConfigured,
+    availabilityData?.staffReservedCount,
     quantity,
     requestPreparation,
   ]);
@@ -850,7 +909,7 @@ function CheckoutLine({
   ]);
 
   function resolveQr(qrId: string) {
-    const normalized = qrId.trim();
+    const normalized = normalizeQrScanValue(qrId);
     if (!normalized || selectedUnits.length >= quantity) return;
     setResolutionError(null);
     void qrFetcher.submit(
@@ -1112,6 +1171,9 @@ function CheckoutLine({
                 from {formatReadableDate(proposal.staffReservationWarning.from)}{" "}
                 to {formatReadableDate(proposal.staffReservationWarning.to)}.
               </p>
+              <p className="mt-1">
+                Only continue if you have permission to borrow them.
+              </p>
               {reservationAcknowledged ? (
                 <p className="mt-2 font-semibold">
                   Continue anyway is selected.
@@ -1121,11 +1183,19 @@ function CheckoutLine({
                   type="button"
                   className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
                   onClick={() => {
-                    setReservationAcknowledged(true);
-                    onPrepared(item.id, proposal, item.title, true);
+                    void fetcher.submit(
+                      {
+                        intent: "acknowledge-reservation",
+                        confirmationToken: proposal.confirmationToken,
+                      },
+                      { method: "post" }
+                    );
                   }}
+                  disabled={fetcher.state !== "idle"}
                 >
-                  Continue anyway
+                  {fetcher.state !== "idle"
+                    ? "Saving permission…"
+                    : "Continue anyway"}
                 </button>
               )}
             </div>
@@ -1309,10 +1379,52 @@ function CheckoutLine({
             ) : null}
             {requestPreparation &&
             availabilityData &&
+            canRequestPreparation &&
+            availabilityData.staffReservedCount > 0 ? (
+              <div className="mt-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
+                <p className="font-bold">Course reservation overlaps</p>
+                <p className="mt-1">
+                  {availabilityData.staffReservedCount} of{" "}
+                  {availabilityData.totalQuantity} units are reserved from{" "}
+                  {availabilityData.staffReservationFrom
+                    ? ` ${formatReadableDate(
+                        availabilityData.staffReservationFrom
+                      )}`
+                    : " course dates"}
+                  {availabilityData.staffReservationTo
+                    ? ` to ${formatReadableDate(
+                        availabilityData.staffReservationTo
+                      )}`
+                    : ""}
+                  . Only continue if you have permission to borrow them.
+                </p>
+                <button
+                  type="button"
+                  className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
+                  onClick={() => {
+                    void fetcher.submit(
+                      {
+                        intent: "acknowledge-preparation-reservation",
+                        assetId: item.id,
+                        candidateAssetIds: item.candidateAssetIds.join(","),
+                        quantity: String(quantity),
+                      },
+                      { method: "post" }
+                    );
+                  }}
+                  disabled={fetcher.state !== "idle"}
+                >
+                  {fetcher.state !== "idle"
+                    ? "Submitting request…"
+                    : "I have permission — continue"}
+                </button>
+              </div>
+            ) : null}
+            {requestPreparation &&
+            availabilityData &&
             !canRequestPreparation ? (
               <p className="mt-2 text-xs text-amber-900">
-                A TA reservation overlaps this period. The requested quantity
-                must be available without using equipment reserved for a course.
+                The requested quantity is not available for these dates.
               </p>
             ) : null}
           </div>
@@ -1464,6 +1576,8 @@ export default function IoioCheckout() {
         if (
           previous?.assetId === configuration.assetId &&
           previous.quantity === configuration.quantity &&
+          previous.requiresStaffReservationAcknowledgement ===
+            configuration.requiresStaffReservationAcknowledgement &&
           previous.candidateAssetIds.join(",") ===
             configuration.candidateAssetIds.join(",")
         ) {
@@ -1473,6 +1587,14 @@ export default function IoioCheckout() {
       });
     },
     []
+  );
+
+  const handlePreparationSubmitted = useCallback(
+    (itemId: string, title: string) => {
+      setPreparationRequestTitles((current) => [...current, title]);
+      removeItem(itemId);
+    },
+    [removeItem]
   );
 
   useEffect(() => {
@@ -1544,7 +1666,7 @@ export default function IoioCheckout() {
       const line = preparedLines[item.id];
       const preparation = preparationConfigurations[item.id];
       return Boolean(
-        preparation ||
+        (preparation && !preparation.requiresStaffReservationAcknowledgement) ||
           (line &&
             !pendingApprovalIds.has(item.id) &&
             (line.proposal.staffReservationWarning === null ||
@@ -1561,7 +1683,6 @@ export default function IoioCheckout() {
         confirmationToken: line.proposal.confirmationToken,
         quantity: line.proposal.quantity,
         selectedPhysicalUnitIds: line.proposal.selectedPhysicalUnitIds,
-        allowStaffReservationOverlap: line.reservationAcknowledged,
       });
       return;
     }
@@ -1570,7 +1691,9 @@ export default function IoioCheckout() {
       batchProposals.push({
         kind: "preparation",
         itemId: item.id,
-        ...preparation,
+        assetId: preparation.assetId,
+        candidateAssetIds: preparation.candidateAssetIds,
+        quantity: preparation.quantity,
       });
     }
   });
@@ -1670,6 +1793,7 @@ export default function IoioCheckout() {
               key={item.id}
               item={{ ...item, ...(currentImages[item.id] ?? {}) }}
               onPrepared={handlePrepared}
+              onPreparationSubmitted={handlePreparationSubmitted}
               onPreparationConfigured={handlePreparationConfigured}
               pendingApproval={pendingApprovalIds.has(item.id)}
               accessApprovalRequired={annualApprovalRequired}

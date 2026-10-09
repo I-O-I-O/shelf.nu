@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { AssetType } from "@prisma/client";
 import { MoreHorizontal } from "lucide-react";
 import {
   useActionData,
@@ -33,10 +32,9 @@ import {
 } from "~/components/shared/modal";
 import { PageBackLink } from "~/components/shared/page-back-link";
 import { db } from "~/database/db.server";
-import { recordEvent } from "~/modules/activity-event/service.server";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
-import { setIndividualAssetAvailability } from "~/modules/asset/service.server";
 import { getSafeReturnTo } from "~/modules/booking/return-review-navigation";
+import { disableReturnedAssetFromUse } from "~/modules/ioio-staff/return-inspection.server";
 import { completeSubmittedReturn } from "~/modules/ioio-student/return-item.server";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import {
@@ -44,7 +42,6 @@ import {
   getIoioPhysicalUnitDisplayName,
 } from "~/modules/kit/ioio-kit-presentation";
 import { getCompactLocationSummary } from "~/modules/location/compact-location";
-import { createNote } from "~/modules/note/service.server";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
 import {
@@ -289,8 +286,14 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
               : returnToReturnZone
               ? locationName(
                   locations,
-                  ["Kit Return Zone", "IOIO Return Zone", "Return Zone"],
-                  "Return Zone"
+                  [
+                    "Kit Return Zone",
+                    "IOIO Return Zone",
+                    "Return Zone",
+                    "Return Section",
+                    "Returns Area",
+                  ],
+                  "Return section"
                 )
               : "Assigned storage location"),
         },
@@ -328,75 +331,21 @@ export async function action({ context, params, request }: ActionFunctionArgs) {
     if (!operation) {
       throw new Error("This return task is no longer available.");
     }
-    if (intent === "disable" && operation.reportType === "RETURN_ITEM") {
-      throw new Error("Only a reported problem can be disabled here.");
-    }
     await completeSubmittedReturn(
       { operationId: operation.id },
-      { context, request }
+      { context, request, auth }
     );
 
     if (intent === "disable") {
       if (!operation.assetId) {
         throw new Error("The returned item could not be identified.");
       }
-      const asset = await db.asset.findFirst({
-        where: { id: operation.assetId, organizationId: auth.organizationId },
-        select: { id: true, type: true, availableToBook: true },
+      await disableReturnedAssetFromUse({
+        assetId: operation.assetId,
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        note,
       });
-      if (!asset) {
-        throw new Error("The returned item could not be found.");
-      }
-
-      const safeNote = note.trim();
-      if (asset.type === AssetType.INDIVIDUAL) {
-        await setIndividualAssetAvailability({
-          id: asset.id,
-          detailAssetId: asset.id,
-          organizationId: auth.organizationId,
-          userId: auth.userId,
-          action: "unavailable",
-          note: safeNote || "Disabled after return inspection.",
-        });
-      } else if (asset.availableToBook) {
-        await db.$transaction(async (tx) => {
-          await tx.asset.update({
-            where: { id: asset.id, organizationId: auth.organizationId },
-            data: { availableToBook: false },
-          });
-          await createNote(
-            {
-              content: `Temporarily disabled after return inspection.${
-                safeNote ? ` ${safeNote}` : ""
-              }`,
-              type: "UPDATE",
-              userId: auth.userId,
-              assetId: asset.id,
-              organizationId: auth.organizationId,
-            },
-            tx
-          );
-          await recordEvent(
-            {
-              organizationId: auth.organizationId,
-              actorUserId: auth.userId,
-              action: "ASSET_STATUS_CHANGED",
-              entityType: "ASSET",
-              entityId: asset.id,
-              assetId: asset.id,
-              field: "availableToBook",
-              fromValue: true,
-              toValue: false,
-              meta: {
-                source: "STAFF_RETURN_INSPECTION",
-                action: "unavailable",
-                note: safeNote || null,
-              },
-            },
-            tx
-          );
-        });
-      }
     }
     return redirect(returnTo);
   } catch (cause) {
@@ -509,33 +458,31 @@ export default function ReturnCheckPage() {
           </p>
         ) : null}
         <div className="mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-gray-100 pt-4">
-          {task.isProblem ? (
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  aria-label={`Return actions for ${task.title}`}
-                  disabled={isSubmitting}
-                  className="inline-flex size-10 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-700 hover:border-red-300 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-300 disabled:opacity-50"
-                >
-                  <MoreHorizontal className="size-5" aria-hidden="true" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48 p-1">
-                <DropdownMenuItem
-                  onSelect={() => setDisableDialogOpen(true)}
-                  className="text-red-800 focus:bg-red-50"
-                >
-                  Checked - disable
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label={`Return actions for ${task.title}`}
+                disabled={isSubmitting}
+                className="inline-flex size-10 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-700 hover:border-red-300 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-300 disabled:opacity-50"
+              >
+                <MoreHorizontal className="size-5" aria-hidden="true" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48 p-1">
+              <DropdownMenuItem
+                onSelect={() => setDisableDialogOpen(true)}
+                className="text-red-800 focus:bg-red-50"
+              >
+                Remove from service
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Form method="post">
             <input type="hidden" name="intent" value="mark-available" />
             <input type="hidden" name="returnTo" value={task.returnTo} />
             <Button type="submit" disabled={isSubmitting}>
-              Checked - make available
+              Mark checked
             </Button>
           </Form>
         </div>
@@ -543,10 +490,12 @@ export default function ReturnCheckPage() {
       <AlertDialog open={disableDialogOpen} onOpenChange={setDisableDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Keep {task.title} unavailable?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Remove {task.title} from service?
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              The item has been checked and will remain unavailable for
-              borrowing.
+              The return will be checked and this item will be marked broken,
+              removed from borrowing, and added to Broken items.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Form method="post" className="space-y-4">
@@ -588,7 +537,7 @@ export default function ReturnCheckPage() {
                 </Button>
               </AlertDialogCancel>
               <Button type="submit" variant="danger" disabled={isSubmitting}>
-                Disable
+                Remove from service
               </Button>
             </AlertDialogFooter>
           </Form>

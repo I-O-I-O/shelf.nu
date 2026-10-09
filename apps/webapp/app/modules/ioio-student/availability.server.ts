@@ -8,6 +8,8 @@ import {
 } from "~/modules/ioio-staff/archive.server";
 
 export const IOIO_STAFF_RESERVATION_DESCRIPTION = "IOIO staff reservation";
+export const IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT =
+  "Student acknowledged IOIO staff reservation overlap.";
 
 export type IoioAvailability = {
   totalActive: number;

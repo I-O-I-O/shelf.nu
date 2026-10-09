@@ -442,9 +442,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
               `Only ${summary.available} of ${summary.total} units are available for the full reservation period. ` +
               `Requested: ${parsed.quantity}. Short by: ${summary.shortfall}.`,
             availability: summary,
-            canCreateAnyway:
-              summary.loanBookingIds.length > 0 ||
-              summary.staffReservationBookingIds.length > 0,
+            canCreateAnyway: summary.staffReservationBookingIds.length > 0,
           },
           { status: 409 }
         );

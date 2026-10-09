@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import type { Dispatch, FormEvent, ReactNode, SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Popover,
   PopoverContent,
@@ -21,6 +21,7 @@ import {
   useFetcher,
   useLoaderData,
   useLocation,
+  useRevalidator,
 } from "react-router";
 import {
   data,
@@ -52,6 +53,7 @@ import {
 import {
   cancelStudentPreparationRequest,
   confirmStudentPreparationPickup,
+  validateStudentPreparationPickup,
 } from "~/modules/ioio-staff/preparation.server";
 import { isIoioExtensionAvailable } from "~/modules/ioio-student/availability.server";
 import { addCalendarDaysUtcEnd } from "~/modules/ioio-student/date-range";
@@ -65,6 +67,7 @@ import {
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import { getMyStudentLoans } from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
+import { normalizeQrScanValue } from "~/modules/qr/normalize-scan-value";
 import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
 import { getClientHint } from "~/utils/client-hints";
 import { makeShelfError } from "~/utils/error";
@@ -80,6 +83,11 @@ const extensionSchema = z.object({
 
 const loanActionSchema = z.discriminatedUnion("intent", [
   extensionSchema,
+  z.object({
+    intent: z.literal("validate-pickup"),
+    operationId: z.string().min(1),
+    verificationValue: z.string().trim().optional(),
+  }),
   z.object({
     intent: z.literal("confirm-pickup"),
     operationId: z.string().min(1),
@@ -180,6 +188,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
               "READY_FOR_PICKUP",
               "CANCELLED",
               "CANCELLED_PICKUP",
+              "DECLINED",
             ],
           },
           OR: [
@@ -326,9 +335,13 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       (operation) => {
         if (
           operation.status !== "CANCELLED" &&
-          operation.status !== "CANCELLED_PICKUP"
+          operation.status !== "CANCELLED_PICKUP" &&
+          operation.status !== "DECLINED"
         ) {
           return false;
+        }
+        if (operation.status === "DECLINED") {
+          return operation.source === "IOIO_PREPARATION_REQUEST";
         }
         const wasStudentCancelled = operation.reviewComment?.startsWith(
           "Cancelled by Student."
@@ -382,7 +395,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           title: displayName,
           cancelledAt: operation.reviewedAt ?? operation.createdAt,
           status: operation.status,
-          statusLabel: getPreparationCancellationLabel(operation.reviewComment),
+          statusLabel:
+            operation.status === "DECLINED"
+              ? "Declined by Staff"
+              : getPreparationCancellationLabel(operation.reviewComment),
+          message:
+            operation.status === "DECLINED" ? operation.reviewComment : null,
           pickupLocation: operation.locationId
             ? getPickupLocationDisplay({
                 organizationId,
@@ -409,7 +427,15 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const returnZoneRecord = await db.location.findFirst({
       where: {
         organizationId,
-        name: { in: ["Kit Return Zone", "IOIO Return Zone", "Return Zone"] },
+        name: {
+          in: [
+            "Kit Return Zone",
+            "IOIO Return Zone",
+            "Return Zone",
+            "Return Section",
+            "Returns Area",
+          ],
+        },
       },
       select: {
         id: true,
@@ -533,6 +559,20 @@ export async function action({ context, request }: ActionFunctionArgs) {
     const parsed = loanActionSchema.parse(
       Object.fromEntries(await request.formData())
     );
+    if (parsed.intent === "validate-pickup") {
+      const validation = await validateStudentPreparationPickup({
+        organizationId: auth.organizationId,
+        operationId: parsed.operationId,
+        borrowerUserId: userId,
+        verificationValue: parsed.verificationValue,
+      });
+      return data({
+        ok: true as const,
+        intent: "pickup-validated" as const,
+        inputValue: parsed.verificationValue ?? "",
+        validation,
+      });
+    }
     if (parsed.intent === "confirm-pickup") {
       let pickup;
       try {
@@ -561,17 +601,34 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
     if (parsed.intent === "cancel-preparation-request") {
-      const result = await cancelStudentPreparationRequest({
-        organizationId: auth.organizationId,
-        operationId: parsed.operationId,
-        borrowerUserId: userId,
-        hints: getClientHint(request),
-      });
-      return data({
-        ok: true as const,
-        intent: "preparation-cancelled" as const,
-        result,
-      });
+      try {
+        const result = await cancelStudentPreparationRequest({
+          organizationId: auth.organizationId,
+          operationId: parsed.operationId,
+          borrowerUserId: userId,
+          hints: getClientHint(request),
+        });
+        return data({
+          ok: true as const,
+          intent: "preparation-cancelled" as const,
+          result,
+        });
+      } catch (cause) {
+        const reason = makeShelfError(cause, { userId });
+        const requestChanged =
+          /cannot be cancelled at the current state|can no longer be cancelled|already changing|no longer open/iu.test(
+            reason.message
+          );
+        return data(
+          {
+            ok: false as const,
+            error: requestChanged
+              ? "This request changed while you were cancelling it. Refresh My Loans and try again."
+              : reason.message,
+          },
+          { status: reason.status ?? 400 }
+        );
+      }
     }
     if (parsed.intent === "prepare-return") {
       return data({
@@ -738,6 +795,12 @@ type ReturnActionData =
       result?: unknown;
     }
   | { ok: true; intent: "pickup-confirmed"; result: unknown }
+  | {
+      ok: true;
+      intent: "pickup-validated";
+      inputValue: string;
+      validation: Awaited<ReturnType<typeof validateStudentPreparationPickup>>;
+    }
   | { ok: false; error: string };
 
 export default function IoioLoans() {
@@ -769,9 +832,9 @@ export default function IoioLoans() {
     new URLSearchParams(location.search).get("view") === "past"
       ? "past"
       : "current";
-  const [openPickupOperationId, setOpenPickupOperationId] = useState<
-    string | null
-  >(() => new URLSearchParams(location.search).get("pickup"));
+  const openPickupOperationId = new URLSearchParams(location.search).get(
+    "pickup"
+  );
   useEffect(() => {
     if (!openPickupOperationId) return;
     document
@@ -788,6 +851,8 @@ export default function IoioLoans() {
     isReadyForPickup: boolean;
   } | null>(null);
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
+  const [pickupValidationState, setPickupValidationState] =
+    useState<StudentPickupValidationState>(null);
   const cancelFetcher = useFetcher<typeof action>();
   useEffect(() => {
     if (
@@ -1070,15 +1135,17 @@ export default function IoioLoans() {
                             </div>
                             {preparation?.status === "READY_FOR_PICKUP" ? (
                               <button
-                                type="button"
-                                aria-expanded={
-                                  openPickupOperationId === preparation.id
+                                type="submit"
+                                form={`pickup-form-${preparation.id}`}
+                                disabled={
+                                  item.asset.type === "INDIVIDUAL" &&
+                                  !(
+                                    pickupValidationState?.operationId ===
+                                      preparation.id &&
+                                    pickupValidationState.validation.valid
+                                  )
                                 }
-                                aria-controls={`pickup-panel-${preparation.id}`}
-                                onClick={() =>
-                                  setOpenPickupOperationId(preparation.id)
-                                }
-                                className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-red-700 px-3 py-2 text-xs font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                                className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-lg bg-red-700 px-3 py-2 text-xs font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                               >
                                 Pick up item
                               </button>
@@ -1114,8 +1181,7 @@ export default function IoioLoans() {
                               </button>
                             ) : null}
                           </div>
-                          {preparation?.status === "READY_FOR_PICKUP" &&
-                          openPickupOperationId === preparation.id ? (
+                          {preparation?.status === "READY_FOR_PICKUP" ? (
                             <section
                               id={`pickup-panel-${preparation.id}`}
                               aria-label={`Pick up ${formatStudentLabel(
@@ -1218,7 +1284,7 @@ export default function IoioLoans() {
                                         `Find and verify ${formatStudentLabel(
                                           displayName
                                         )}.`,
-                                        "Confirm pickup using the control below.",
+                                        "Scan the assigned unit, then choose Pick up item.",
                                       ].map((step, index) => (
                                         <li
                                           key={step}
@@ -1234,22 +1300,19 @@ export default function IoioLoans() {
                                   </div>
                                   <div className="rounded-xl border border-gray-200 bg-white p-3">
                                     <h3 className="font-bold text-gray-950">
-                                      Confirm your kit
+                                      Verify your kit
                                     </h3>
-                                    <StudentPickupForm
-                                      operationId={preparation.id}
-                                      needsUnitVerification={
-                                        item.asset.type === "INDIVIDUAL"
-                                      }
-                                    />
                                   </div>
                                 </div>
                               </div>
                               <StudentPickupForm
                                 operationId={preparation.id}
+                                formId={`pickup-form-${preparation.id}`}
                                 needsUnitVerification={
                                   item.asset.type === "INDIVIDUAL"
                                 }
+                                validationState={pickupValidationState}
+                                setValidationState={setPickupValidationState}
                               />
                               <div className="mt-4 border-t border-gray-200">
                                 <PickupDisclosure
@@ -1263,8 +1326,8 @@ export default function IoioLoans() {
                                         displayName
                                       )}.`,
                                       "Check the unit number on its label or scan its QR code.",
-                                      "Enter or scan that unit number in the confirmation field above.",
-                                      "Confirm pickup only after the unit matches your assignment.",
+                                      "Enter or scan its unit number above.",
+                                      "Choose Pick up item after the assigned unit is verified.",
                                     ].map((step, index) => (
                                       <li
                                         key={step}
@@ -1385,7 +1448,7 @@ export default function IoioLoans() {
                                   "RETURN_TO_RETURN_ZONE" && returnZone ? (
                                   <p className="mt-3 text-sm text-gray-700">
                                     <span className="font-medium">
-                                      Return to
+                                      Return section:
                                     </span>{" "}
                                     {returnZone.label}
                                   </p>
@@ -1732,47 +1795,253 @@ export default function IoioLoans() {
   );
 }
 
-function StudentPickupForm({
+type StudentPickupValidationState = {
+  operationId: string;
+  validation: Awaited<ReturnType<typeof validateStudentPreparationPickup>>;
+} | null;
+
+export function StudentPickupForm({
   operationId,
+  formId,
   needsUnitVerification,
+  validationState,
+  setValidationState,
 }: {
   operationId: string;
+  formId: string;
   needsUnitVerification: boolean;
+  validationState: StudentPickupValidationState;
+  setValidationState: Dispatch<SetStateAction<StudentPickupValidationState>>;
 }) {
   const fetcher = useFetcher<typeof action>();
+  const validationFetcher = useFetcher<typeof action>();
+  const submitValidation = validationFetcher.submit;
+  const resetValidation = validationFetcher.reset;
+  const revalidator = useRevalidator();
   const [verificationValue, setVerificationValue] = useState("");
   const [scanOpen, setScanOpen] = useState(false);
   const [scanPaused, setScanPaused] = useState(false);
+  const lastValidatedTokenRef = useRef<string | null>(null);
+  const inFlightTokenRef = useRef<string | null>(null);
+  const queuedTokenRef = useRef<string | null>(null);
+  const pickupSubmittedRef = useRef(false);
+  const pickupRefreshTriggeredRef = useRef(false);
+  const validation =
+    validationState?.operationId === operationId
+      ? validationState.validation
+      : null;
   const errorMessage =
     fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
+  const validationError =
+    validationFetcher.data &&
+    !validationFetcher.data.ok &&
+    lastValidatedTokenRef.current === normalizeQrScanValue(verificationValue)
+      ? validationFetcher.data.error
+      : null;
+
+  const validateToken = useCallback(
+    (rawValue: string) => {
+      const token = normalizeQrScanValue(rawValue);
+      if (
+        !needsUnitVerification ||
+        token.length < 3 ||
+        lastValidatedTokenRef.current === token
+      ) {
+        return;
+      }
+      if (inFlightTokenRef.current) {
+        if (inFlightTokenRef.current !== token) {
+          queuedTokenRef.current = token;
+        }
+        return;
+      }
+
+      // Lock synchronously before submitting: camera decoders can invoke the
+      // callback many times before React has rendered the paused state.
+      inFlightTokenRef.current = token;
+      lastValidatedTokenRef.current = token;
+      setVerificationValue(token);
+      setValidationState((current) =>
+        current?.operationId === operationId ? null : current
+      );
+      resetValidation();
+      const formData = new FormData();
+      formData.set("intent", "validate-pickup");
+      formData.set("operationId", operationId);
+      formData.set("verificationValue", token);
+      void submitValidation(formData, { method: "post" });
+    },
+    [
+      needsUnitVerification,
+      operationId,
+      resetValidation,
+      setValidationState,
+      submitValidation,
+    ]
+  );
+
+  useEffect(() => {
+    if (!needsUnitVerification || !verificationValue.trim()) return;
+    const timeoutId = window.setTimeout(() => {
+      validateToken(verificationValue);
+    }, 320);
+    return () => window.clearTimeout(timeoutId);
+  }, [needsUnitVerification, validateToken, verificationValue]);
+
+  useEffect(() => {
+    const response = validationFetcher.data;
+    if (validationFetcher.state === "idle" && inFlightTokenRef.current) {
+      inFlightTokenRef.current = null;
+    }
+    if (!response) return;
+
+    if (
+      response.ok &&
+      response.intent === "pickup-validated" &&
+      response.inputValue === verificationValue
+    ) {
+      setValidationState({ operationId, validation: response.validation });
+    } else if (!response.ok) {
+      setValidationState((current) =>
+        current?.operationId === operationId ? null : current
+      );
+    }
+
+    const responseToken =
+      response.ok && response.intent === "pickup-validated"
+        ? normalizeQrScanValue(response.inputValue)
+        : lastValidatedTokenRef.current;
+    if (
+      responseToken &&
+      inFlightTokenRef.current === responseToken &&
+      validationFetcher.state !== "idle"
+    ) {
+      inFlightTokenRef.current = null;
+    }
+
+    if (!scanOpen) return;
+    if (
+      response.ok &&
+      response.intent === "pickup-validated" &&
+      response.validation.valid
+    ) {
+      queuedTokenRef.current = null;
+      setScanPaused(true);
+      setScanOpen(false);
+    } else {
+      // Keep the camera available after a wrong scan. The same token remains
+      // deduped, while a different code can be validated immediately.
+      setScanPaused(false);
+      const queuedToken = queuedTokenRef.current;
+      queuedTokenRef.current = null;
+      if (queuedToken) validateToken(queuedToken);
+    }
+  }, [
+    validationFetcher.data,
+    validationFetcher.state,
+    verificationValue,
+    scanOpen,
+    operationId,
+    setValidationState,
+    validateToken,
+  ]);
+
+  useEffect(() => {
+    if (fetcher.data?.ok && fetcher.data.intent === "pickup-confirmed") {
+      pickupSubmittedRef.current = true;
+      if (!pickupRefreshTriggeredRef.current) {
+        pickupRefreshTriggeredRef.current = true;
+        void revalidator.revalidate();
+      }
+    } else if (fetcher.state === "idle" && fetcher.data && !fetcher.data.ok) {
+      pickupSubmittedRef.current = false;
+      pickupRefreshTriggeredRef.current = false;
+    }
+  }, [fetcher.data, fetcher.state, revalidator]);
+
+  const handlePickupSubmit = (event: FormEvent<HTMLFormElement>) => {
+    if (pickupSubmittedRef.current) {
+      event.preventDefault();
+      return;
+    }
+    pickupSubmittedRef.current = true;
+  };
+
+  const visibleValidationValue = validation?.valid
+    ? validation.assignedUnitLabel
+    : validation?.scannedUnitLabel ?? normalizeQrScanValue(verificationValue);
+
   return (
-    <fetcher.Form method="post" className="mt-3 space-y-2">
+    <fetcher.Form
+      id={formId}
+      method="post"
+      className="mt-3 space-y-2"
+      onSubmitCapture={handlePickupSubmit}
+    >
       <input type="hidden" name="intent" value="confirm-pickup" />
       <input type="hidden" name="operationId" value={operationId} />
+      <input type="hidden" name="verificationValue" value={verificationValue} />
       {needsUnitVerification ? (
         <>
           <label className="block text-xs font-semibold text-gray-800">
-            Scan the assigned unit QR or enter its unit number
+            Scan the assigned item's QR code or enter its unit number
             <input
-              name="verificationValue"
-              value={verificationValue}
-              onChange={(event) => setVerificationValue(event.target.value)}
-              required
+              value={visibleValidationValue}
+              onChange={(event) => {
+                lastValidatedTokenRef.current = null;
+                setValidationState((current) =>
+                  current?.operationId === operationId ? null : current
+                );
+                resetValidation();
+                setVerificationValue(event.target.value);
+              }}
               autoComplete="off"
               placeholder="Scan QR or enter #001"
-              className="mt-1 min-h-10 w-full rounded-lg border border-gray-300 bg-white px-3 text-sm font-normal"
+              className={`mt-1 min-h-10 w-full rounded-lg border bg-white px-3 text-sm font-normal ${
+                validation?.valid
+                  ? "border-green-500 bg-green-50 text-green-950"
+                  : validation?.status === "wrong-item" ||
+                    validation?.status === "wrong-unit"
+                  ? "border-red-400 bg-red-50 text-red-950"
+                  : "border-gray-300"
+              }`}
             />
           </label>
-          <button
-            type="button"
-            onClick={() => {
-              setScanOpen((open) => !open);
-              setScanPaused(false);
-            }}
-            className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
-          >
-            {scanOpen ? "Close scanner" : "Scan QR"}
-          </button>
+          {validation?.valid ? (
+            <div
+              role="status"
+              className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900"
+            >
+              <p className="font-bold">✓ Correct item</p>
+              <p>{validation.assignedUnitLabel}</p>
+            </div>
+          ) : validation?.status === "wrong-unit" ||
+            validation?.status === "wrong-item" ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900"
+            >
+              <p className="font-bold">✕ Wrong item</p>
+              <p>Expected {validation.assignedUnitLabel}</p>
+            </div>
+          ) : null}
+          {validationError ? (
+            <p role="alert" className="text-xs font-semibold text-red-800">
+              {validationError}
+            </p>
+          ) : null}
+          {!validation?.valid ? (
+            <button
+              type="button"
+              onClick={() => {
+                setScanOpen((open) => !open);
+                setScanPaused(false);
+              }}
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
+            >
+              {scanOpen ? "Close scanner" : "Scan QR"}
+            </button>
+          ) : null}
           {scanOpen ? (
             <div className="mx-auto aspect-video w-full max-w-2xl overflow-hidden rounded-lg border border-gray-200 bg-slate-900">
               <CodeScanner
@@ -1784,9 +2053,8 @@ function StudentPickupForm({
                 paused={scanPaused}
                 setPaused={setScanPaused}
                 onCodeDetectionSuccess={({ value }) => {
-                  setVerificationValue(value);
+                  validateToken(value);
                   setScanPaused(true);
-                  setScanOpen(false);
                 }}
               />
             </div>
@@ -1798,16 +2066,6 @@ function StudentPickupForm({
           {errorMessage}
         </p>
       ) : null}
-      <button
-        type="submit"
-        disabled={
-          fetcher.state !== "idle" ||
-          (needsUnitVerification && !verificationValue.trim())
-        }
-        className="rounded-xl bg-red-700 px-4 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {fetcher.state === "submitting" ? "Confirming…" : "Confirm pickup"}
-      </button>
     </fetcher.Form>
   );
 }
@@ -1823,6 +2081,7 @@ function PastLoansSection({
     cancelledAt: Date;
     status: string;
     statusLabel: string;
+    message: string | null;
     pickupLocation: string | null;
     asset: AssetForThumbnail | null;
   }>;
@@ -1928,7 +2187,10 @@ function PastLoansSection({
         </div>
       ) : null}
       {cancelledPreparations.length ? (
-        <div className="mt-4 space-y-2" aria-label="Cancelled requests">
+        <div
+          className="mt-4 space-y-2"
+          aria-label="Preparation request history"
+        >
           {cancelledPreparations.map((request) => (
             <article
               key={request.id}
@@ -1970,6 +2232,11 @@ function PastLoansSection({
                   {request.statusLabel} ·{" "}
                   {formatStudentDateOnly(request.cancelledAt)}
                 </p>
+                {request.status === "DECLINED" && request.message ? (
+                  <p className="mt-1 text-sm text-gray-700">
+                    {request.message}
+                  </p>
+                ) : null}
               </div>
               <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-700">
                 {request.statusLabel}
@@ -2229,8 +2496,8 @@ function _ReturnLoanAction({
   if (submitted) {
     return (
       <p className="mt-3 rounded-lg bg-blue-50 p-3 text-sm font-semibold text-blue-900">
-        Return submitted. Place the item in the IOIO Return Zone. A TA will
-        check it before it becomes available again.
+        Return submitted. Place the item in the Return section. A TA will check
+        it before it becomes available again.
       </p>
     );
   }
@@ -2242,8 +2509,7 @@ function _ReturnLoanAction({
           Return {proposal.asset.title}
         </p>
         <p className="mt-1 text-sm text-gray-700">
-          Confirm the exact physical item, then place it in the IOIO Return
-          Zone.
+          Confirm the exact physical item, then place it in the Return section.
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <fetcher.Form method="post">
@@ -2259,7 +2525,7 @@ function _ReturnLoanAction({
               disabled={fetcher.state !== "idle"}
               className="rounded-xl bg-red-700 px-4 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
             >
-              I&apos;ve placed it in the Return Zone
+              I&apos;ve placed it in the Return section
             </button>
           </fetcher.Form>
           <fetcher.Form method="post">

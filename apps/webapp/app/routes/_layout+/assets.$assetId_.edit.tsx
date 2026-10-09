@@ -343,7 +343,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       availabilityBlock,
       currency: currentOrganization?.currency,
       customFields,
-      referer: getRefererPath(request),
+      // Inventory edits should always have a useful way back, including when
+      // the form was opened directly or in a new tab without a Referer.
+      referer: getRefererPath(request) ?? "/assets",
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
@@ -774,7 +776,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         senderId: userId,
       });
 
-      return payload({ success: true });
+      return redirect(safeRedirect(parsedData.redirectTo, "/assets"));
     }
 
     const customFieldsValues = extractCustomFieldValuesFromPayload({
@@ -947,13 +949,9 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       return redirect(`/assets/new`);
     }
 
-    // If redirectTo is provided, redirect back to previous page
-    // Otherwise stay on current page (e.g., when opened in new tab)
-    if (redirectTo) {
-      return redirect(safeRedirect(redirectTo, `/assets/${id}`));
-    }
-
-    return payload({ success: true });
+    // Return to the originating Inventory view when available; direct/new-tab
+    // edits fall back to the Inventory list instead of the generic asset page.
+    return redirect(safeRedirect(redirectTo, "/assets"));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
     return data(error(reason), { status: reason.status });

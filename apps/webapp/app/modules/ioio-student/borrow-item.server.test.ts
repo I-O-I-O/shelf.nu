@@ -37,6 +37,8 @@ vi.mock("./route.server", () => ({
 // unit cases need deterministic available/over-capacity values.
 vi.mock("./availability.server", () => ({
   getIoioAvailability: getIoioAvailabilityMock,
+  IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT:
+    "Student acknowledged IOIO staff reservation overlap.",
 }));
 // why: persistent quota accounting is tested separately; these cases focus on
 // borrow validation and idempotency.
@@ -87,6 +89,7 @@ vi.mock("~/utils/logger", () => ({
 
 import {
   borrowItem,
+  acknowledgeBorrowItemStaffReservation,
   prepareBorrowItem,
   requestPreparationForItem,
   resolvePhysicalUnitNumber,
@@ -246,6 +249,7 @@ describe("IOIO borrow_item", () => {
     expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
+          organizationId: auth.organizationId,
           source: "IOIO_PREPARATION_REQUEST",
           status: "PENDING_PREPARATION",
           assetId: asset.id,
@@ -255,6 +259,243 @@ describe("IOIO borrow_item", () => {
       })
     );
     expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("requires a Student acknowledgement before creating a request across a course reservation", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      requiresStaffPreparation: true,
+      maxBorrowDays: 45,
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 8,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 8,
+      staffReservationBookingIds: ["course-booking"],
+      staffReservationFrom: new Date("2026-10-11T00:00:00.000Z"),
+      staffReservationTo: new Date("2027-01-30T00:00:00.000Z"),
+      availableWithoutStaffReservations: 8,
+    });
+
+    await expect(
+      requestPreparationForItem(
+        { assetId: asset.id, quantity: 1 },
+        { context, request }
+      )
+    ).rejects.toThrow("Confirm that you have permission");
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+  });
+
+  it("persists an acknowledged course overlap on the preparation request", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      requiresStaffPreparation: true,
+      maxBorrowDays: 45,
+    });
+    dbMock.ioioWriteOperation.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "op-a" });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 8,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 8,
+      staffReservationBookingIds: ["course-booking"],
+      staffReservationFrom: new Date("2026-10-11T00:00:00.000Z"),
+      staffReservationTo: new Date("2027-01-30T00:00:00.000Z"),
+      availableWithoutStaffReservations: 8,
+    });
+
+    await requestPreparationForItem(
+      {
+        assetId: asset.id,
+        quantity: 1,
+        acknowledgeStaffReservationOverlap: true,
+      },
+      { context, request }
+    );
+
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          description: expect.stringContaining(
+            "Student acknowledged IOIO staff reservation overlap."
+          ),
+        }),
+      })
+    );
+  });
+
+  it("rejects a forged final override without the stored acknowledgement", async () => {
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-a",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      assetId: asset.id,
+      kitId: null,
+      quantity: 1,
+      selectedAssetIds: null,
+      from: new Date(from),
+      to: new Date(to),
+      bookingId: null,
+      createdAt: new Date(),
+      description: "Borrow proposal for Shelf asset asset-a",
+    });
+
+    await expect(
+      borrowItem(
+        {
+          confirmationToken: "forged-token",
+          quantity: 1,
+          allowStaffReservationOverlap: true,
+        },
+        { context, request }
+      )
+    ).rejects.toThrow("Confirm that you have permission");
+  });
+
+  it("persists the acknowledgement only for the authenticated proposal owner", async () => {
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-a",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      assetId: asset.id,
+      selectedAssetIds: null,
+      quantity: 1,
+      from: new Date(from),
+      to: new Date(to),
+      description: "Borrow proposal for Shelf asset asset-a",
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 8,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 8,
+      staffReservationBookingIds: ["course-booking"],
+      staffReservationFrom: new Date("2026-10-11T00:00:00.000Z"),
+      staffReservationTo: new Date("2027-01-30T00:00:00.000Z"),
+      availableWithoutStaffReservations: 8,
+    });
+
+    await expect(
+      acknowledgeBorrowItemStaffReservation("proposal-token", {
+        context,
+        request,
+      })
+    ).resolves.toEqual({ ok: true, acknowledged: true });
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "op-a",
+          userId: auth.userId,
+          organizationId: auth.organizationId,
+        }),
+        data: expect.objectContaining({
+          description: expect.stringContaining(
+            "Student acknowledged IOIO staff reservation overlap."
+          ),
+        }),
+      })
+    );
+  });
+
+  it("validates the exact I have the kit unit against soft and hard availability", async () => {
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-exact-unit",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      assetId: "makey-logical-item",
+      selectedAssetIds: ["makey-unit-003"],
+      quantity: 1,
+      from: new Date(from),
+      to: new Date(to),
+      description: "Borrow proposal for Makey Kit",
+    });
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      id: "makey-logical-item",
+      type: "INDIVIDUAL",
+      assetModelId: "makey-model",
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: ["makey-unit-003"],
+      conflicts: [],
+      staffReservedCount: 5,
+      staffReservationBookingIds: ["course-booking"],
+      staffReservationFrom: new Date("2026-10-11T00:00:00.000Z"),
+      staffReservationTo: new Date("2027-01-30T00:00:00.000Z"),
+      availableWithoutStaffReservations: 1,
+    });
+
+    await acknowledgeBorrowItemStaffReservation("exact-unit-proposal", {
+      context,
+      request,
+    });
+
+    expect(getIoioAvailabilityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        productId: "makey-logical-item",
+        candidateAssetIds: ["makey-unit-003"],
+      })
+    );
+  });
+
+  it("does not acknowledge an exact unit with a hard physical conflict", async () => {
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-exact-unit",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      assetId: "makey-logical-item",
+      selectedAssetIds: ["makey-unit-003"],
+      quantity: 1,
+      from: new Date(from),
+      to: new Date(to),
+      description: "Borrow proposal for Makey Kit",
+    });
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      id: "makey-logical-item",
+      type: "INDIVIDUAL",
+      assetModelId: "makey-model",
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 1,
+      staffReservationBookingIds: ["course-booking"],
+      staffReservationFrom: new Date("2026-10-11T00:00:00.000Z"),
+      staffReservationTo: new Date("2027-01-30T00:00:00.000Z"),
+      availableWithoutStaffReservations: 0,
+    });
+
+    await expect(
+      acknowledgeBorrowItemStaffReservation("exact-unit-proposal", {
+        context,
+        request,
+      })
+    ).rejects.toThrow("Some equipment is unavailable for these dates");
+    expect(dbMock.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not reuse an assigned request after its pickup task is finished", async () => {

@@ -26,6 +26,7 @@ import {
   createNote,
 } from "~/modules/note/service.server";
 import { getQr } from "~/modules/qr/service.server";
+import { createReport } from "~/modules/report-found/service.server";
 import { ShelfError } from "~/utils/error";
 import { createSignedUrl } from "~/utils/storage.server";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
@@ -48,6 +49,7 @@ import {
   createAsset,
   duplicateAsset,
   setKitCustodyAfterAssetImport,
+  setIndividualAssetAvailability,
   getActiveCustomFieldsForAsset,
   moveAssetLocationUnits,
   getAssets,
@@ -164,6 +166,11 @@ vitest.mock("~/database/db.server", () => ({
     // why: availability math must subtract units tied to ONGOING/OVERDUE bookings
     bookingAsset: {
       aggregate: vitest.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      findFirst: vitest.fn().mockResolvedValue(null),
+    },
+    ioioWriteOperation: {
+      findFirst: vitest.fn().mockResolvedValue(null),
+      create: vitest.fn().mockResolvedValue({ id: "broken-operation-1" }),
     },
     // why: moveAssetLocationUnits + placeUnplacedUnits read/write the
     // AssetLocation pivot for the manual placement rows. `findFirst` is
@@ -204,6 +211,9 @@ vitest.mock("~/database/db.server", () => ({
       findFirst: vitest
         .fn()
         .mockResolvedValue({ firstName: "John", lastName: "Doe" }),
+      findUniqueOrThrow: vitest
+        .fn()
+        .mockResolvedValue({ email: "staff@example.test" }),
     },
   },
 }));
@@ -278,6 +288,12 @@ vitest.mock("~/modules/category/service.server", async () => {
 // why: avoid real QR lookup during relink tests
 vitest.mock("~/modules/qr/service.server", () => ({
   getQr: vitest.fn(),
+}));
+
+// why: the broken-unit test verifies the report operation created in the same
+// transaction without writing a real Shelf report row.
+vitest.mock("~/modules/report-found/service.server", () => ({
+  createReport: vitest.fn().mockResolvedValue({ id: "report-broken-1" }),
 }));
 
 // why: setKitCustodyAfterAssetImport delegates to the canonical bulkAssignKitCustody
@@ -2608,6 +2624,25 @@ describe("updateAsset asset-model activity", () => {
         expect.objectContaining({ action: "ASSET_MODEL_CHANGED" }),
       ]),
       expect.anything()
+    );
+  });
+
+  it("writes the selected IOIO Return section handling to the Asset row", async () => {
+    await updateAsset({
+      id: "asset-1",
+      organizationId: "org-1",
+      userId: "user-1",
+      returnHandling: "RETURN_TO_RETURN_ZONE",
+      request: new Request("http://localhost/assets/asset-1/edit"),
+    } as never);
+
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "asset-1", organizationId: "org-1" },
+        data: expect.objectContaining({
+          returnHandling: "RETURN_TO_RETURN_ZONE",
+        }),
+      })
     );
   });
 
@@ -6278,5 +6313,63 @@ describe("bulkUpdateAssetLocation — location activity notes", () => {
       expect(content).toContain("asset-individual");
       expect(content).not.toContain("asset-qty");
     }
+  });
+});
+
+describe("setIndividualAssetAvailability", () => {
+  it("marks a physical unit broken and writes a report for the Broken items queue", async () => {
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue({
+      id: "unit-002",
+      organizationId: "org-1",
+      assetModelId: "makey-model",
+      title: "Makey Kit #002",
+      type: AssetType.INDIVIDUAL,
+      status: AssetStatus.AVAILABLE,
+      availableToBook: true,
+    });
+    //@ts-expect-error mock setup
+    db.custody.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.bookingAsset.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.ioioWriteOperation.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.user.findUniqueOrThrow.mockResolvedValue({
+      email: "staff@example.test",
+    });
+
+    const result = await setIndividualAssetAvailability({
+      id: "unit-002",
+      detailAssetId: "unit-002",
+      organizationId: "org-1",
+      userId: "staff-1",
+      action: "broken",
+      note: "Broken connector",
+    });
+
+    expect(result).toMatchObject({
+      availableToBook: false,
+      status: "BROKEN",
+    });
+    expect(createReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "staff@example.test",
+        assetId: "unit-002",
+        content: expect.stringContaining("Issue: ITEM_DAMAGED"),
+      })
+    );
+    expect(db.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          operationType: "REPORT_PROBLEM",
+          source: "IOIO_STAFF_INVENTORY",
+          status: "SUCCEEDED",
+          reportType: "ITEM_DAMAGED",
+          assetId: "unit-002",
+          description: "Broken connector",
+        }),
+      })
+    );
   });
 });

@@ -9,6 +9,7 @@ import {
   data,
   Form,
   Link,
+  redirect,
   useActionData,
   useFetcher,
   useLoaderData,
@@ -38,11 +39,15 @@ import {
   buildOperationsReturnTo,
   withReturnTo,
 } from "~/modules/booking/return-review-navigation";
-import { getLabStatus } from "~/modules/ioio-staff/lab-status.server";
+import {
+  getLabStatus,
+  returnBrokenAssetToService,
+} from "~/modules/ioio-staff/lab-status.server";
 import {
   getPreparationPickupDeadline,
   getPreparationTargetDate,
 } from "~/modules/ioio-staff/preparation";
+import { getStaffPreparationQueueOrganizationId } from "~/modules/ioio-staff/preparation-queue.server";
 import {
   confirmPreparationReady,
   declinePreparation,
@@ -51,6 +56,7 @@ import {
   PREPARATION_PENDING,
   putBackCancelledPreparationPickup,
 } from "~/modules/ioio-staff/preparation.server";
+import { disableReturnedAssetFromUse } from "~/modules/ioio-staff/return-inspection.server";
 import { formatApprovalDate } from "~/modules/ioio-student/annual-access";
 import {
   declineAnnualAccessApproval,
@@ -61,15 +67,18 @@ import {
 } from "~/modules/ioio-student/annual-access.server";
 import {
   getIoioAvailability,
+  IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT,
   IOIO_STAFF_RESERVATION_DESCRIPTION,
 } from "~/modules/ioio-student/availability.server";
 import { completeSubmittedReturn } from "~/modules/ioio-student/return-item.server";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { getCompactLocationSummary } from "~/modules/location/compact-location";
+import { setSelectedOrganizationIdCookie } from "~/modules/organization/context.server";
 import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { getClientHint } from "~/utils/client-hints";
+import { setCookie } from "~/utils/cookies.server";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
 import {
@@ -127,6 +136,11 @@ type Task = {
   borrowerEmail?: string | null;
   quantity?: number;
   prepareBy?: string;
+  requestedPeriod?: string;
+  availableForRequestedPeriod?: number;
+  availableNow?: number;
+  totalPhysicalUnits?: number;
+  physicalUnitAssignment?: string;
   pickupBy?: Date;
   locationName?: string;
   assetId?: string;
@@ -135,10 +149,13 @@ type Task = {
   preparationRequest?: boolean;
   bulkReadyEligible?: boolean;
   preparationBlockedReason?: string;
+  softReservationOverlap?: boolean;
   returnCheckEligible?: boolean;
   returnIssue?: string;
   returnLocation?: string;
   returnIssueReportId?: string | null;
+  returnToServiceEligible?: boolean;
+  physicalUnit?: boolean;
   cancelledAt?: Date;
 };
 
@@ -156,6 +173,36 @@ function formatOperationsDate(date: Date | null | undefined) {
     "en-US",
     { year: "numeric" }
   )}`;
+}
+
+function formatRequestedPeriod(from: Date, to: Date) {
+  const start = from.toLocaleString("en-US", {
+    timeZone: "UTC",
+    day: "numeric",
+    month: "short",
+  });
+  const end = to.toLocaleString("en-US", {
+    timeZone: "UTC",
+    day: "numeric",
+    month: "short",
+  });
+  const startYear = from.getUTCFullYear();
+  const endYear = to.getUTCFullYear();
+  return startYear === endYear
+    ? `${start} – ${end}, ${endYear}`
+    : `${start}, ${startYear} – ${end}, ${endYear}`;
+}
+
+function getBrokenItemDescription(detail: string) {
+  const [summary, ...reasonParts] = detail.split(" — ");
+  const reason = reasonParts.join(" — ").trim();
+  return {
+    summary: summary.trim(),
+    reason:
+      reason && reason !== "Disabled after return inspection."
+        ? reason
+        : undefined,
+  };
 }
 
 function formatOperationsLocationPath(
@@ -196,7 +243,7 @@ export function getBrokenItemDestination(
   locationById: ReadonlyMap<string, unknown>
 ) {
   if (operation.assetId && assetById.has(operation.assetId)) {
-    return { href: `/assets/${operation.assetId}`, actionLabel: "Open asset" };
+    return { href: `/assets/${operation.assetId}`, actionLabel: "Open unit" };
   }
   if (operation.kitId && kitById.has(operation.kitId)) {
     return { href: `/kits/${operation.kitId}`, actionLabel: "Open kit" };
@@ -230,7 +277,11 @@ type ReturnCheckItemResult =
 type ReturnCheckActionResult =
   | {
       ok: true;
-      intent: "complete-return" | "complete-return-bulk";
+      intent:
+        | "complete-return"
+        | "complete-return-bulk"
+        | "disable-return"
+        | "disable-return-bulk";
       operationId?: string;
       results?: ReturnCheckItemResult[];
       succeeded: number;
@@ -238,7 +289,11 @@ type ReturnCheckActionResult =
     }
   | {
       ok: false;
-      intent: "complete-return" | "complete-return-bulk";
+      intent:
+        | "complete-return"
+        | "complete-return-bulk"
+        | "disable-return"
+        | "disable-return-bulk";
       operationId?: string;
       error: string;
     };
@@ -332,14 +387,35 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = context.getSession();
 
   try {
-    const { organizationId } = await requirePermission({
-      userId,
-      request,
-      entity: PermissionEntity.reports,
-      action: PermissionAction.read,
-    });
+    const { organizationId, currentOrganization, userOrganizations } =
+      await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.reports,
+        action: PermissionAction.read,
+      });
+    const url = new URL(request.url);
+    if (
+      currentOrganization.type === "PERSONAL" &&
+      getView(url.searchParams.get("view")) === "to-prepare"
+    ) {
+      const queueOrganizationId = await getStaffPreparationQueueOrganizationId({
+        organizationId,
+        organizationType: currentOrganization.type,
+        userOrganizations,
+      });
+      if (queueOrganizationId !== organizationId) {
+        return redirect(url.toString(), {
+          headers: [
+            setCookie(
+              await setSelectedOrganizationIdCookie(queueOrganizationId)
+            ),
+          ],
+        });
+      }
+    }
     const operationsReturnTo = buildOperationsReturnTo(
-      new URL(request.url).searchParams.get("view")
+      url.searchParams.get("view")
     );
 
     const [
@@ -410,6 +486,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           organizationId,
           operationType: IOIO_PREPARATION_OPERATION,
           status: PREPARATION_PENDING,
+          source: { in: ["IOIO_PREPARATION_REQUEST", "IOIO_ASSISTANT"] },
         },
         select: {
           id: true,
@@ -426,6 +503,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           createdAt: true,
           status: true,
           reviewComment: true,
+          description: true,
         },
         orderBy: [{ from: "asc" }, { id: "asc" }],
       }),
@@ -557,7 +635,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       ...readyPickupOperations,
     ]
       .map((operation) => operation.assetId)
-      .filter((id): id is string => Boolean(id));
+      .filter((id): id is string => Boolean(id))
+      .concat(
+        assignmentBookings.flatMap((booking) =>
+          booking.bookingAssets.map(({ assetId }) => assetId)
+        )
+      );
     const returnKitIds = returnTasks.flatMap((operation) => {
       const sourceKitId = operation.bookingAssetId
         ? returnBookingAssetById.get(operation.bookingAssetId)?.sourceKitId
@@ -653,6 +736,29 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const assignmentBookingById = new Map(
       assignmentBookings.map((booking) => [booking.id, booking])
     );
+    const reportedBrokenPhysicalAssetIds = new Set<string>();
+    const reportOperationsForQueue = reportOperationsForAll.filter(
+      (operation) => {
+        const asset = operation.assetId
+          ? assetById.get(operation.assetId)
+          : undefined;
+        const isBrokenPhysicalReport = Boolean(
+          asset?.type === "INDIVIDUAL" &&
+            [
+              "ITEM_DAMAGED",
+              "ITEM_NOT_WORKING",
+              "PART_MISSING",
+              "KIT_INCOMPLETE",
+            ].includes(operation.reportType ?? "")
+        );
+        if (!isBrokenPhysicalReport || !operation.assetId) return true;
+        if (reportedBrokenPhysicalAssetIds.has(operation.assetId)) return false;
+        reportedBrokenPhysicalAssetIds.add(operation.assetId);
+        return true;
+      }
+    );
+    const now = new Date();
+    const nowEnd = new Date(now.getTime() + 1);
     const preparationAvailability = await Promise.all(
       preparationOperations
         .filter(
@@ -667,25 +773,55 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         .map(async (operation) => {
           const product = assetById.get(operation.assetId!);
           const candidateAssetIds = readIdArray(operation.selectedAssetIds);
-          if (!product) return [operation.id, 0] as const;
-          const availability = await getIoioAvailability({
-            organizationId,
-            productId: product.id,
-            candidateAssetIds:
-              product.type === "INDIVIDUAL" ? candidateAssetIds : undefined,
-            from: operation.from!,
-            to: operation.to!,
-            excludeBookingId: operation.bookingId ?? undefined,
-          });
+          if (!product) {
+            return [
+              operation.id,
+              { availableForRequestedPeriod: 0, availableNow: 0, total: 0 },
+            ] as const;
+          }
+          const [periodAvailability, currentAvailability] = await Promise.all([
+            getIoioAvailability({
+              organizationId,
+              productId: product.id,
+              candidateAssetIds:
+                product.type === "INDIVIDUAL" ? candidateAssetIds : undefined,
+              from: operation.from!,
+              to: operation.to!,
+              excludeBookingId: operation.bookingId ?? undefined,
+            }),
+            getIoioAvailability({
+              organizationId,
+              productId: product.id,
+              from: now,
+              to: nowEnd,
+            }),
+          ]);
           return [
             operation.id,
-            product.type === "INDIVIDUAL"
-              ? availability.availableUnitIdsWithoutStaffReservations.length
-              : availability.availableWithoutStaffReservations,
+            {
+              availableForRequestedPeriod:
+                product.type === "INDIVIDUAL"
+                  ? (operation.description?.includes(
+                      IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT
+                    ) ?? false
+                      ? periodAvailability.availableUnitIdsWithoutStaffReservations
+                      : periodAvailability.availableUnitIds
+                    ).length
+                  : operation.description?.includes(
+                      IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT
+                    ) ?? false
+                  ? periodAvailability.availableWithoutStaffReservations
+                  : periodAvailability.availableCount,
+              availableNow:
+                product.type === "INDIVIDUAL"
+                  ? currentAvailability.availableCount
+                  : currentAvailability.availableWithoutStaffReservations,
+              total: periodAvailability.totalActive,
+            },
           ] as const;
         })
     );
-    const availableCountByPreparationId = new Map(preparationAvailability);
+    const availabilityByPreparationId = new Map(preparationAvailability);
     const tasks: Task[] = [
       ...overdueLoans.map((loan) => ({
         id: `overdue-${loan.id}`,
@@ -800,9 +936,24 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           returnIssueReportId: operation.resultReportId,
         };
       }),
-      ...reportOperationsForAll.map((operation) => {
-        const reference = operation.assetId
-          ? assetById.get(operation.assetId)?.title
+      ...reportOperationsForQueue.map((operation) => {
+        const asset = operation.assetId
+          ? assetById.get(operation.assetId)
+          : undefined;
+        const physicalUnit = asset?.type === "INDIVIDUAL";
+        const reference = physicalUnit
+          ? getIoioPhysicalUnitDisplayName({
+              logicalProductName:
+                asset.assetModel?.name ??
+                getPhysicalUnitBaseTitle(asset.title) ??
+                asset.title,
+              unitNumber:
+                getPhysicalUnitNumberFromTitle(asset.title) ??
+                asset.sequentialId,
+              missingUnitLabel: "Unit number missing",
+            })
+          : operation.assetId
+          ? asset?.title
           : operation.kitId
           ? kitById.get(operation.kitId)?.name
           : operation.locationId
@@ -819,14 +970,34 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           kind: "broken" as const,
           title: reference ?? "Operational report",
           detail: [
-            `${operation.reportType ?? "Problem"} reported by ${displayName(
-              userById.get(operation.userId) ?? null
-            )}`,
+            operation.source === "IOIO_STAFF_RETURN_INSPECTION"
+              ? "Broken after return inspection"
+              : `${operation.reportType ?? "Problem"} reported by ${displayName(
+                  userById.get(operation.userId) ?? null
+                )}`,
             operation.description?.trim(),
           ]
             .filter(Boolean)
             .join(" — "),
           createdAt: operation.createdAt,
+          operationId: operation.id,
+          assetId: operation.assetId ?? undefined,
+          assetImage: asset,
+          physicalUnit,
+          locationName: formatOperationsLocationPath(
+            asset?.assetLocations[0]?.locationId ?? operation.locationId,
+            locationById
+          ),
+          returnToServiceEligible: Boolean(
+            operation.assetId &&
+              physicalUnit &&
+              [
+                "ITEM_DAMAGED",
+                "ITEM_NOT_WORKING",
+                "PART_MISSING",
+                "KIT_INCOMPLETE",
+              ].includes(operation.reportType)
+          ),
           ...destination,
         };
       }),
@@ -870,7 +1041,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
                           bookingAsset.quantity === operation.quantity
                     ))) &&
                 (assignedBooking?.status === "RESERVED" ||
-                  (availableCountByPreparationId.get(operation.id) ?? 0) >=
+                  (availabilityByPreparationId.get(operation.id)
+                    ?.availableForRequestedPeriod ?? 0) >=
                     (operation.quantity ?? 1))
             )
           : false;
@@ -896,8 +1068,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
               storedCandidateIds.length < (operation.quantity ?? 1)
             ? "There are not enough valid units attached to this request."
             : assignedBooking?.status !== "RESERVED" &&
-              (availableCountByPreparationId.get(operation.id) ?? 0) <
-                (operation.quantity ?? 1)
+              (availabilityByPreparationId.get(operation.id)
+                ?.availableForRequestedPeriod ?? 0) < (operation.quantity ?? 1)
             ? "Not enough requested items are currently available."
             : assignedBooking &&
               assignedBooking.status !== "DRAFT" &&
@@ -913,6 +1085,27 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           : assignedBooking.status !== "RESERVED"
           ? "The linked Shelf booking is not reserved."
           : "The assigned booking item does not match this request.";
+        const assignedUnitNames =
+          preparationRequest &&
+          asset?.type === "INDIVIDUAL" &&
+          assignedBooking?.status === "RESERVED"
+            ? assignedBooking.bookingAssets.flatMap(({ assetId }) => {
+                const assignedAsset = assetById.get(assetId);
+                if (!assignedAsset) return [];
+                return [
+                  getIoioPhysicalUnitDisplayName({
+                    logicalProductName:
+                      assignedAsset.assetModel?.name ??
+                      assignedAsset.assetKits[0]?.kit?.name ??
+                      getPhysicalUnitBaseTitle(assignedAsset.title),
+                    unitNumber:
+                      getPhysicalUnitNumberFromTitle(assignedAsset.title) ??
+                      assignedAsset.sequentialId,
+                    missingUnitLabel: "Unit number missing",
+                  }),
+                ];
+              })
+            : [];
         return {
           id: operation.id,
           kind: "to-prepare" as const,
@@ -932,6 +1125,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           borrowerEmail: borrower?.email ?? null,
           borrowerId: borrower?.id,
           preparationRequest,
+          softReservationOverlap:
+            operation.description?.includes(
+              IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT
+            ) ?? false,
           bulkReadyEligible,
           preparationBlockedReason: bulkReadyEligible
             ? undefined
@@ -948,6 +1145,25 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
               }
             : undefined,
           quantity: operation.quantity ?? 1,
+          requestedPeriod:
+            preparationRequest && operation.from && operation.to
+              ? formatRequestedPeriod(operation.from, operation.to)
+              : undefined,
+          availableForRequestedPeriod: availabilityByPreparationId.get(
+            operation.id
+          )?.availableForRequestedPeriod,
+          availableNow: availabilityByPreparationId.get(operation.id)
+            ?.availableNow,
+          totalPhysicalUnits: availabilityByPreparationId.get(operation.id)
+            ?.total,
+          physicalUnitAssignment:
+            asset?.type === "INDIVIDUAL"
+              ? assignedUnitNames.length
+                ? `Assigned: ${assignedUnitNames.join(", ")}`
+                : preparationRequest
+                ? "No unit assigned yet"
+                : undefined
+              : undefined,
           prepareBy:
             formatOperationsDate(
               getPreparationTargetDate(operation.createdAt, workingHours)
@@ -1046,6 +1262,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           bookingId: operation.bookingId,
           borrowerName: displayName(borrower),
           quantity: operation.quantity ?? 1,
+          physicalUnitAssignment:
+            asset?.type === "INDIVIDUAL" ? `Assigned: ${title}` : undefined,
           assetId: operation.assetId ?? undefined,
           assetImage: asset
             ? {
@@ -1083,7 +1301,17 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           overdue: labStatus.overdueLoans,
           returns: labStatus.returnChecks,
           "returned-with-issues": labStatus.returnedWithIssues,
-          broken: labStatus.unresolvedReports,
+          broken: new Set(
+            tasks
+              .filter(
+                (task) =>
+                  task.kind === "broken" &&
+                  task.returnToServiceEligible &&
+                  task.physicalUnit &&
+                  task.assetId
+              )
+              .map((task) => task.assetId)
+          ).size,
           // Derive the Operations counter from the same pending rows rendered
           // below so the count and Items to prepare list cannot drift apart.
           "to-prepare": preparationOperations.length,
@@ -1104,14 +1332,127 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 export async function action({ context, request }: ActionFunctionArgs) {
   const { userId } = context.getSession();
   try {
-    const { organizationId } = await requirePermission({
+    const permission = await requirePermission({
       userId,
       request,
       entity: PermissionEntity.reports,
       action: PermissionAction.update,
     });
+    const { organizationId } = permission;
+    const staffAuth = { organizationId, userId, role: permission.role };
     const formData = await request.formData();
     const intent = formData.get("intent");
+    if (
+      [
+        "complete-return",
+        "complete-return-bulk",
+        "disable-return",
+        "disable-return-bulk",
+      ].includes(String(intent)) &&
+      permission.role !== "ADMIN" &&
+      permission.role !== "OWNER"
+    ) {
+      throw new Response("Staff access required", { status: 403 });
+    }
+    if (intent === "return-to-service") {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const result = await returnBrokenAssetToService({
+        organizationId,
+        operationId: String(formData.get("operationId") ?? ""),
+        staffUserId: userId,
+      });
+      return data({ ok: true as const, intent, result });
+    }
+    if (intent === "return-to-service-bulk") {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const assetIds = [
+        ...new Set(
+          formData
+            .getAll("assetIds")
+            .filter((value): value is string => typeof value === "string")
+            .map((value) => value.trim())
+            .filter(Boolean)
+        ),
+      ];
+      const physicalAssets = assetIds.length
+        ? await db.asset.findMany({
+            where: {
+              organizationId,
+              id: { in: assetIds },
+              type: "INDIVIDUAL",
+            },
+            select: { id: true },
+          })
+        : [];
+      const eligibleAssetIds = new Set(physicalAssets.map((asset) => asset.id));
+      const brokenOperations = eligibleAssetIds.size
+        ? await db.ioioWriteOperation.findMany({
+            where: {
+              organizationId,
+              operationType: "REPORT_PROBLEM",
+              status: "SUCCEEDED",
+              reportType: {
+                in: [
+                  "ITEM_DAMAGED",
+                  "ITEM_NOT_WORKING",
+                  "PART_MISSING",
+                  "KIT_INCOMPLETE",
+                ],
+              },
+              assetId: { in: [...eligibleAssetIds] },
+            },
+            select: { id: true, assetId: true, createdAt: true },
+            orderBy: { createdAt: "desc" },
+          })
+        : [];
+      const operationByAssetId = new Map<string, string>();
+      for (const operation of brokenOperations) {
+        if (operation.assetId && !operationByAssetId.has(operation.assetId)) {
+          operationByAssetId.set(operation.assetId, operation.id);
+        }
+      }
+      const results = [];
+      for (const assetId of assetIds) {
+        const operationId = operationByAssetId.get(assetId);
+        if (!eligibleAssetIds.has(assetId) || !operationId) {
+          results.push({
+            assetId,
+            ok: false as const,
+            error: "This unit is no longer waiting for repair.",
+          });
+          continue;
+        }
+        try {
+          const result = await returnBrokenAssetToService({
+            organizationId,
+            operationId,
+            staffUserId: userId,
+          });
+          results.push({ assetId, ok: true as const, result });
+        } catch (cause) {
+          results.push({
+            assetId,
+            ok: false as const,
+            error:
+              cause instanceof Error
+                ? cause.message
+                : "This unit could not be returned to service.",
+          });
+        }
+      }
+      const succeeded = results.filter((result) => result.ok).length;
+      return data({
+        ok: true as const,
+        intent,
+        results,
+        succeeded,
+        failed: results.length - succeeded,
+      });
+    }
     if (intent === "complete-return") {
       const operationId = String(formData.get("operationId") ?? "");
       const operation = await db.ioioWriteOperation.findFirst({
@@ -1152,7 +1493,57 @@ export async function action({ context, request }: ActionFunctionArgs) {
         });
       }
       try {
-        await completeSubmittedReturn({ operationId }, { context, request });
+        await completeSubmittedReturn(
+          { operationId },
+          { context, request, auth: staffAuth }
+        );
+        return data({
+          ok: true as const,
+          intent,
+          operationId,
+          succeeded: 1,
+          failed: 0,
+        });
+      } catch (cause) {
+        const reason = makeShelfError(cause, { userId });
+        return data({
+          ok: false as const,
+          intent,
+          operationId,
+          error: reason.message,
+        });
+      }
+    }
+    if (intent === "disable-return") {
+      const operationId = String(formData.get("operationId") ?? "");
+      const operation = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: operationId,
+          organizationId,
+          operationType: "RETURN_ITEM",
+          status: "SUBMITTED",
+        },
+        select: { id: true, assetId: true },
+      });
+      if (!operation?.assetId) {
+        return data({
+          ok: false as const,
+          intent,
+          operationId,
+          error: "This return is no longer waiting for a staff check.",
+        });
+      }
+      try {
+        await completeSubmittedReturn(
+          { operationId },
+          { context, request, auth: staffAuth }
+        );
+        await disableReturnedAssetFromUse({
+          assetId: operation.assetId,
+          organizationId,
+          userId,
+          note: String(formData.get("note") ?? ""),
+        });
         return data({
           ok: true as const,
           intent,
@@ -1236,7 +1627,68 @@ export async function action({ context, request }: ActionFunctionArgs) {
           continue;
         }
         try {
-          await completeSubmittedReturn({ operationId }, { context, request });
+          await completeSubmittedReturn(
+            { operationId },
+            { context, request, auth: staffAuth }
+          );
+          results.push({ operationId, ok: true });
+        } catch (cause) {
+          const reason = makeShelfError(cause, { userId });
+          results.push({ operationId, ok: false, error: reason.message });
+        }
+      }
+      return data({
+        ok: true as const,
+        intent,
+        results,
+        succeeded: results.filter((result) => result.ok).length,
+        failed: results.filter((result) => !result.ok).length,
+      });
+    }
+    if (intent === "disable-return-bulk") {
+      const operationIds = [
+        ...new Set(formData.getAll("operationIds").map(String).filter(Boolean)),
+      ];
+      if (operationIds.length === 0) {
+        return data({
+          ok: false as const,
+          intent,
+          error: "Select at least one return to disable.",
+        });
+      }
+      const submittedReturns = await db.ioioWriteOperation.findMany({
+        where: {
+          id: { in: operationIds },
+          organizationId,
+          operationType: "RETURN_ITEM",
+          status: "SUBMITTED",
+        },
+        select: { id: true, assetId: true },
+      });
+      const submittedById = new Map(
+        submittedReturns.map((operation) => [operation.id, operation])
+      );
+      const results: ReturnCheckItemResult[] = [];
+      for (const operationId of operationIds) {
+        const operation = submittedById.get(operationId);
+        if (!operation?.assetId) {
+          results.push({
+            operationId,
+            ok: false,
+            error: "This return is no longer waiting for a staff check.",
+          });
+          continue;
+        }
+        try {
+          await completeSubmittedReturn(
+            { operationId },
+            { context, request, auth: staffAuth }
+          );
+          await disableReturnedAssetFromUse({
+            assetId: operation.assetId,
+            organizationId,
+            userId,
+          });
           results.push({ operationId, ok: true });
         } catch (cause) {
           const reason = makeShelfError(cause, { userId });
@@ -1391,6 +1843,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
     throw new Error("Invalid operations action.");
   } catch (cause) {
+    if (cause instanceof Response) throw cause;
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });
   }
@@ -1440,6 +1893,11 @@ function PreparationItemIdentity({
             {quantity} {quantity === 1 ? "item" : "items"}
           </span>
         )}
+        {task.physicalUnitAssignment ? (
+          <span className="mt-0.5 block text-xs text-gray-600">
+            {task.physicalUnitAssignment}
+          </span>
+        ) : null}
       </span>
     </>
   );
@@ -1478,6 +1936,11 @@ function PreparationTaskActions({
   }>();
   const borrowerName = task.borrowerName ?? "Borrower";
   const itemName = task.title;
+  const hasAvailabilitySummary =
+    task.preparationRequest &&
+    task.availableForRequestedPeriod !== undefined &&
+    task.availableNow !== undefined &&
+    task.totalPhysicalUnits !== undefined;
   const readyError =
     readyFetcher.data && !readyFetcher.data.ok
       ? typeof readyFetcher.data.error === "string"
@@ -1497,14 +1960,58 @@ function PreparationTaskActions({
   }, [declineFetcher.data, readyFetcher.data]);
 
   return (
-    <div className={`flex shrink-0 items-center gap-2 ${className}`}>
-      <button
-        type="button"
-        onClick={() => setReadyOpen(true)}
-        className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
-      >
-        Mark prepared
-      </button>
+    <div
+      className={`flex w-full min-w-0 flex-wrap items-center justify-end gap-2 ${className}`}
+    >
+      {hasAvailabilitySummary ? (
+        <div className="min-w-0 max-w-44 text-xs leading-snug">
+          {task.softReservationOverlap ? (
+            <p className="font-semibold text-amber-800">
+              Course reservation overlaps
+            </p>
+          ) : null}
+          {!task.softReservationOverlap ||
+          task.availableForRequestedPeriod < task.totalPhysicalUnits ? (
+            <p
+              className={
+                task.availableForRequestedPeriod === 0
+                  ? "font-semibold text-amber-900"
+                  : "font-semibold text-gray-700"
+              }
+            >
+              {task.availableForRequestedPeriod} of {task.totalPhysicalUnits}{" "}
+              {task.softReservationOverlap
+                ? "available for requested dates"
+                : "available for these dates"}
+            </p>
+          ) : null}
+          {!task.softReservationOverlap ? (
+            <p className="mt-0.5 text-gray-500">
+              {task.availableNow} of {task.totalPhysicalUnits} available now
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      {task.bulkReadyEligible ? (
+        <button
+          type="button"
+          onClick={() => setReadyOpen(true)}
+          className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+        >
+          Mark prepared
+        </button>
+      ) : (
+        <span
+          title={
+            hasAvailabilitySummary
+              ? "No units are reservable for the requested period."
+              : task.preparationBlockedReason
+          }
+          className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900"
+        >
+          Unavailable
+        </span>
+      )}
 
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
@@ -1717,6 +2224,79 @@ function CancelledPickupActions({ task }: { task: Task }) {
   );
 }
 
+function ReturnTaskActions({ task }: { task: Task }) {
+  const [disableOpen, setDisableOpen] = useState(false);
+
+  return (
+    <>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <Form method="post">
+          <input type="hidden" name="intent" value="complete-return" />
+          <input
+            type="hidden"
+            name="operationId"
+            value={task.operationId ?? ""}
+          />
+          <button
+            type="submit"
+            className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+          >
+            Mark checked
+          </button>
+        </Form>
+        <button
+          type="button"
+          onClick={() => setDisableOpen(true)}
+          className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+        >
+          Remove from service
+        </button>
+      </div>
+      <DialogPortal>
+        <Dialog
+          open={disableOpen}
+          onClose={() => setDisableOpen(false)}
+          title={
+            <span className="text-base font-semibold text-gray-900">
+              Remove {task.title} from service?
+            </span>
+          }
+          headerClassName="items-center py-2"
+          className="w-[min(32rem,calc(100vw-2rem))]"
+        >
+          <Form method="post" className="space-y-4 px-6 pb-4 pt-1">
+            <input type="hidden" name="intent" value="disable-return" />
+            <input
+              type="hidden"
+              name="operationId"
+              value={task.operationId ?? ""}
+            />
+            <p className="text-sm text-gray-700">
+              This item will be moved to Broken items and unavailable for
+              borrowing until it is repaired.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDisableOpen(false)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-gray-400"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
+              >
+                Remove from service
+              </button>
+            </div>
+          </Form>
+        </Dialog>
+      </DialogPortal>
+    </>
+  );
+}
+
 export default function OperationsPage() {
   const { view, summary, tasks, annualAccessApprovals } =
     useLoaderData<typeof loader>();
@@ -1726,15 +2306,34 @@ export default function OperationsPage() {
     | undefined;
   const returnActionResult =
     possibleReturnAction?.intent === "complete-return" ||
-    possibleReturnAction?.intent === "complete-return-bulk"
+    possibleReturnAction?.intent === "complete-return-bulk" ||
+    possibleReturnAction?.intent === "disable-return" ||
+    possibleReturnAction?.intent === "disable-return-bulk"
       ? possibleReturnAction
+      : null;
+  const brokenActionResult =
+    actionResult &&
+    typeof actionResult === "object" &&
+    "intent" in actionResult &&
+    actionResult.intent === "return-to-service-bulk"
+      ? (actionResult as {
+          intent: string;
+          results?: Array<{ assetId: string; ok: boolean }>;
+          failed?: number;
+        })
       : null;
   const [selectedPreparationIds, setSelectedPreparationIds] = useState<
     string[]
   >([]);
   const selectAllPreparationsRef = useRef<HTMLInputElement>(null);
   const [selectedReturnIds, setSelectedReturnIds] = useState<string[]>([]);
+  const [bulkDisableReturnsOpen, setBulkDisableReturnsOpen] = useState(false);
   const selectAllReturnsRef = useRef<HTMLInputElement>(null);
+  const [selectedBrokenAssetIds, setSelectedBrokenAssetIds] = useState<
+    string[]
+  >([]);
+  const [bulkReturnToServiceOpen, setBulkReturnToServiceOpen] = useState(false);
+  const selectAllBrokenRef = useRef<HTMLInputElement>(null);
   const selectAllCancelledPickupsRef = useRef<HTMLInputElement>(null);
   const [selectedCancelledPickupIds, setSelectedCancelledPickupIds] = useState<
     string[]
@@ -1757,7 +2356,8 @@ export default function OperationsPage() {
     if (isAnnualAccessAction(actionResult)) setSelectedApprovalIds([]);
     if (returnActionResult?.ok === true) {
       const completedIds = new Set(
-        returnActionResult.intent === "complete-return"
+        returnActionResult.intent === "complete-return" ||
+        returnActionResult.intent === "disable-return"
           ? returnActionResult.succeeded && returnActionResult.operationId
             ? [returnActionResult.operationId]
             : []
@@ -1768,8 +2368,20 @@ export default function OperationsPage() {
       setSelectedReturnIds((current) =>
         current.filter((id) => !completedIds.has(id))
       );
+      if (returnActionResult.failed === 0) setBulkDisableReturnsOpen(false);
     }
-  }, [actionResult]);
+    if (brokenActionResult) {
+      const completedAssetIds = new Set(
+        (brokenActionResult.results ?? [])
+          .filter((item) => item.ok)
+          .map((item) => item.assetId)
+      );
+      setSelectedBrokenAssetIds((current) =>
+        current.filter((id) => !completedAssetIds.has(id))
+      );
+      if (brokenActionResult.failed === 0) setBulkReturnToServiceOpen(false);
+    }
+  }, [actionResult, returnActionResult, brokenActionResult]);
   const preparationRequestBookingIds = new Set(
     tasks
       .filter(
@@ -1808,7 +2420,14 @@ export default function OperationsPage() {
       ? [task.operationId]
       : []
   );
-  const visibleBulkReadyKey = JSON.stringify(visibleBulkReadyIds);
+  const visiblePreparationIds = visibleTasks.flatMap((task) =>
+    task.kind === "to-prepare" && task.operationId ? [task.operationId] : []
+  );
+  const visibleBulkReadyIdSet = new Set(visibleBulkReadyIds);
+  const selectedBulkReadyIds = selectedPreparationIds.filter((id) =>
+    visibleBulkReadyIdSet.has(id)
+  );
+  const visiblePreparationKey = JSON.stringify(visiblePreparationIds);
   const allVisiblePreparationsSelected =
     visibleBulkReadyIds.length > 0 &&
     visibleBulkReadyIds.every((id) => selectedPreparationIds.includes(id));
@@ -1817,6 +2436,18 @@ export default function OperationsPage() {
       ? [task.operationId]
       : []
   );
+  const visibleBrokenAssetIds = visibleTasks.flatMap((task) =>
+    task.kind === "broken" &&
+    task.returnToServiceEligible &&
+    task.physicalUnit &&
+    task.assetId
+      ? [task.assetId]
+      : []
+  );
+  const visibleBrokenAssetKey = JSON.stringify(visibleBrokenAssetIds);
+  const allVisibleBrokenSelected =
+    visibleBrokenAssetIds.length > 0 &&
+    visibleBrokenAssetIds.every((id) => selectedBrokenAssetIds.includes(id));
   const visibleCancelledPickupIds = visibleTasks.flatMap((task) =>
     task.kind === "cancelled-pickups" && task.operationId
       ? [task.operationId]
@@ -1839,6 +2470,14 @@ export default function OperationsPage() {
         !allVisibleReturnsSelected;
     }
   }, [allVisibleReturnsSelected, selectedReturnIds, visibleReturnIds]);
+  useEffect(() => {
+    if (selectAllBrokenRef.current) {
+      selectAllBrokenRef.current.indeterminate =
+        selectedBrokenAssetIds.some((id) =>
+          visibleBrokenAssetIds.includes(id)
+        ) && !allVisibleBrokenSelected;
+    }
+  }, [allVisibleBrokenSelected, selectedBrokenAssetIds, visibleBrokenAssetIds]);
   useEffect(() => {
     if (selectAllCancelledPickupsRef.current) {
       selectAllCancelledPickupsRef.current.indeterminate =
@@ -1874,18 +2513,28 @@ export default function OperationsPage() {
     if (view !== "returns") setSelectedReturnIds([]);
   }, [view]);
   useEffect(() => {
-    if (selectAllPreparationsRef.current) {
-      selectAllPreparationsRef.current.indeterminate =
-        selectedPreparationIds.length > 0 && !allVisiblePreparationsSelected;
-    }
-  }, [allVisiblePreparationsSelected, selectedPreparationIds.length]);
-  useEffect(() => {
-    setSelectedPreparationIds((current) => {
-      const visible = new Set<string>(JSON.parse(visibleBulkReadyKey));
+    setSelectedBrokenAssetIds((current) => {
+      const visible = new Set<string>(JSON.parse(visibleBrokenAssetKey));
       const next = current.filter((id) => visible.has(id));
       return next.length === current.length ? current : next;
     });
-  }, [visibleBulkReadyKey]);
+  }, [visibleBrokenAssetKey]);
+  useEffect(() => {
+    if (view !== "broken") setSelectedBrokenAssetIds([]);
+  }, [view]);
+  useEffect(() => {
+    if (selectAllPreparationsRef.current) {
+      selectAllPreparationsRef.current.indeterminate =
+        selectedBulkReadyIds.length > 0 && !allVisiblePreparationsSelected;
+    }
+  }, [allVisiblePreparationsSelected, selectedBulkReadyIds.length]);
+  useEffect(() => {
+    setSelectedPreparationIds((current) => {
+      const visible = new Set<string>(JSON.parse(visiblePreparationKey));
+      const next = current.filter((id) => visible.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [visiblePreparationKey]);
   useEffect(() => {
     if (view !== "to-prepare" && view !== "all") {
       setSelectedPreparationIds([]);
@@ -1896,6 +2545,17 @@ export default function OperationsPage() {
   }
   function toggleReturnSelection(id: string) {
     setSelectedReturnIds((current) => toggleSelectionId(current, id));
+  }
+  function toggleBrokenAssetSelection(id: string) {
+    setSelectedBrokenAssetIds((current) => toggleSelectionId(current, id));
+  }
+  function toggleAllVisibleBroken() {
+    setSelectedBrokenAssetIds((current) => {
+      const visible = new Set(visibleBrokenAssetIds);
+      return allVisibleBrokenSelected
+        ? current.filter((id) => !visible.has(id))
+        : [...new Set([...current, ...visibleBrokenAssetIds])];
+    });
   }
   function toggleAllVisibleReturns() {
     setSelectedReturnIds((current) => {
@@ -1956,7 +2616,8 @@ export default function OperationsPage() {
     : [];
   const returnFailures =
     returnActionResult?.ok === true &&
-    returnActionResult.intent === "complete-return-bulk" &&
+    (returnActionResult.intent === "complete-return-bulk" ||
+      returnActionResult.intent === "disable-return-bulk") &&
     returnActionResult.results
       ? returnActionResult.results.filter(
           (result): result is Extract<ReturnCheckItemResult, { ok: false }> =>
@@ -2067,9 +2728,15 @@ export default function OperationsPage() {
                 <>
                   {returnActionResult.succeeded} return
                   {returnActionResult.succeeded === 1 ? " was" : "s were"}{" "}
-                  checked.
+                  {returnActionResult.intent === "disable-return" ||
+                  returnActionResult.intent === "disable-return-bulk"
+                    ? "disabled from use."
+                    : "checked."}
                   {returnActionResult.failed > 0
                     ? ` ${returnActionResult.failed} need review; details are shown on those rows.`
+                    : returnActionResult.intent === "disable-return" ||
+                      returnActionResult.intent === "disable-return-bulk"
+                    ? " They were added to Broken items."
                     : " The item is available again."}
                 </>
               ) : (
@@ -2503,6 +3170,13 @@ export default function OperationsPage() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => setBulkDisableReturnsOpen(true)}
+                        className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                      >
+                        Remove from service
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setSelectedReturnIds([])}
                         className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:border-red-300 hover:text-red-800"
                       >
@@ -2511,6 +3185,166 @@ export default function OperationsPage() {
                     </>
                   ) : null}
                 </Form>
+              ) : null}
+              {view === "broken" && visibleBrokenAssetIds.length > 0 ? (
+                <>
+                  <Form
+                    method="post"
+                    className="flex min-h-14 flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
+                  >
+                    <input
+                      type="hidden"
+                      name="intent"
+                      value="return-to-service-bulk"
+                    />
+                    {selectedBrokenAssetIds.map((assetId) => (
+                      <input
+                        key={assetId}
+                        type="hidden"
+                        name="assetIds"
+                        value={assetId}
+                      />
+                    ))}
+                    <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <input
+                        ref={selectAllBrokenRef}
+                        type="checkbox"
+                        checked={allVisibleBrokenSelected}
+                        onChange={toggleAllVisibleBroken}
+                        className="size-4 rounded border-gray-300 text-red-700"
+                      />
+                      Select all
+                    </label>
+                    {selectedBrokenAssetIds.length ? (
+                      <>
+                        <span className="text-sm font-bold text-gray-950">
+                          {selectedBrokenAssetIds.length} selected
+                        </span>
+                        <button
+                          type={
+                            selectedBrokenAssetIds.length === 1
+                              ? "submit"
+                              : "button"
+                          }
+                          onClick={() => {
+                            if (selectedBrokenAssetIds.length > 1)
+                              setBulkReturnToServiceOpen(true);
+                          }}
+                          className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
+                        >
+                          Return to service
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBrokenAssetIds([])}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:border-red-300"
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
+                  </Form>
+                  <DialogPortal>
+                    <Dialog
+                      open={bulkReturnToServiceOpen}
+                      onClose={() => setBulkReturnToServiceOpen(false)}
+                      title={
+                        <span className="text-base font-semibold text-gray-900">
+                          Return {selectedBrokenAssetIds.length} items to
+                          service?
+                        </span>
+                      }
+                      headerClassName="items-center py-2"
+                      className="w-[min(32rem,calc(100vw-2rem))]"
+                    >
+                      <Form method="post" className="space-y-4 px-6 pb-4 pt-1">
+                        <input
+                          type="hidden"
+                          name="intent"
+                          value="return-to-service-bulk"
+                        />
+                        {selectedBrokenAssetIds.map((assetId) => (
+                          <input
+                            key={assetId}
+                            type="hidden"
+                            name="assetIds"
+                            value={assetId}
+                          />
+                        ))}
+                        <p className="text-sm text-gray-700">
+                          These items will become available for borrowing again.
+                        </p>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setBulkReturnToServiceOpen(false)}
+                            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="rounded-lg bg-green-700 px-3 py-2 text-sm font-semibold text-white hover:bg-green-800"
+                          >
+                            Return to service
+                          </button>
+                        </div>
+                      </Form>
+                    </Dialog>
+                  </DialogPortal>
+                </>
+              ) : null}
+              {view === "returns" && selectedReturnIds.length > 0 ? (
+                <DialogPortal>
+                  <Dialog
+                    open={bulkDisableReturnsOpen}
+                    onClose={() => setBulkDisableReturnsOpen(false)}
+                    title={
+                      <span className="text-base font-semibold text-gray-900">
+                        Remove {selectedReturnIds.length} item
+                        {selectedReturnIds.length === 1 ? "" : "s"} from
+                        service?
+                      </span>
+                    }
+                    headerClassName="items-center py-2"
+                    className="w-[min(32rem,calc(100vw-2rem))]"
+                  >
+                    <Form method="post" className="space-y-4 px-6 pb-4 pt-1">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="disable-return-bulk"
+                      />
+                      {selectedReturnIds.map((operationId) => (
+                        <input
+                          key={operationId}
+                          type="hidden"
+                          name="operationIds"
+                          value={operationId}
+                        />
+                      ))}
+                      <p className="text-sm text-gray-700">
+                        These items will move to Broken items and remain
+                        unavailable for borrowing until repaired.
+                      </p>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setBulkDisableReturnsOpen(false)}
+                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-gray-400"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
+                        >
+                          Remove from service
+                        </button>
+                      </div>
+                    </Form>
+                  </Dialog>
+                </DialogPortal>
               ) : null}
               {(view === "to-prepare" || view === "all") &&
               visibleTasks.some((task) => task.kind === "to-prepare") ? (
@@ -2523,7 +3357,7 @@ export default function OperationsPage() {
                     name="intent"
                     value="confirm-prepared-bulk"
                   />
-                  {selectedPreparationIds.map((operationId) => (
+                  {selectedBulkReadyIds.map((operationId) => (
                     <input
                       key={operationId}
                       type="hidden"
@@ -2542,19 +3376,34 @@ export default function OperationsPage() {
                     />
                     {view === "all"
                       ? "Select all eligible preparation items"
-                      : "Select all"}
+                      : "Select all available for preparation"}
                   </label>
                   {selectedPreparationIds.length > 0 ? (
                     <>
                       <span className="text-sm font-bold text-gray-950">
                         {selectedPreparationIds.length} selected
                       </span>
-                      <button
-                        type="submit"
-                        className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Mark prepared
-                      </button>
+                      {selectedBulkReadyIds.length ? (
+                        <>
+                          {selectedBulkReadyIds.length <
+                          selectedPreparationIds.length ? (
+                            <span className="text-xs text-gray-600">
+                              Unavailable tasks are excluded from bulk
+                              preparation.
+                            </span>
+                          ) : null}
+                          <button
+                            type="submit"
+                            className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Mark prepared
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-gray-600">
+                          No selected tasks are available for preparation.
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
@@ -2677,17 +3526,28 @@ export default function OperationsPage() {
                   <SelectableRow
                     key={task.id}
                     selected={Boolean(
-                      task.operationId &&
-                        (selectedPreparationIds.includes(task.operationId) ||
-                          selectedReturnIds.includes(task.operationId))
+                      (task.kind === "broken" &&
+                        task.assetId &&
+                        selectedBrokenAssetIds.includes(task.assetId)) ||
+                        (task.operationId &&
+                          ((task.kind === "to-prepare" &&
+                            selectedPreparationIds.includes(
+                              task.operationId
+                            )) ||
+                            selectedReturnIds.includes(task.operationId)))
                     )}
                     onToggle={
-                      task.operationId &&
-                      ((task.kind === "to-prepare" && task.bulkReadyEligible) ||
-                        (task.kind === "returns" &&
-                          view === "returns" &&
-                          task.returnCheckEligible) ||
-                        task.kind === "cancelled-pickups")
+                      task.kind === "broken" &&
+                      task.assetId &&
+                      task.returnToServiceEligible &&
+                      task.physicalUnit
+                        ? () => toggleBrokenAssetSelection(task.assetId!)
+                        : task.operationId &&
+                          (task.kind === "to-prepare" ||
+                            (task.kind === "returns" &&
+                              view === "returns" &&
+                              task.returnCheckEligible) ||
+                            task.kind === "cancelled-pickups")
                         ? () =>
                             task.kind === "returns"
                               ? toggleReturnSelection(task.operationId!)
@@ -2783,17 +3643,13 @@ export default function OperationsPage() {
                               ? undefined
                               : task.preparationBlockedReason
                           }
-                          checked={
-                            task.bulkReadyEligible &&
-                            selectedPreparationIds.includes(task.operationId)
-                          }
-                          disabled={!task.bulkReadyEligible}
+                          checked={selectedPreparationIds.includes(
+                            task.operationId
+                          )}
                           onChange={() =>
-                            task.bulkReadyEligible
-                              ? togglePreparationSelection(task.operationId!)
-                              : undefined
+                            togglePreparationSelection(task.operationId!)
                           }
-                          className="col-start-1 row-start-1 size-4 shrink-0 rounded border-gray-300 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="col-start-1 row-start-1 size-4 shrink-0 rounded border-gray-300 text-red-700"
                         />
                         <PreparationItemIdentity
                           task={task}
@@ -2827,27 +3683,41 @@ export default function OperationsPage() {
                         </p>
                         <p
                           className="col-start-2 row-start-4 flex items-center gap-2 text-xs text-gray-600 md:col-start-3 md:row-start-2 xl:col-auto xl:row-auto"
-                          aria-label={`${
-                            task.preparationRequest ? "Requested" : "Prepare by"
-                          }: ${
-                            task.preparationRequest
-                              ? formatOperationsDate(task.createdAt)
-                              : task.prepareBy ?? "Date unavailable"
-                          }`}
-                          title={`${
-                            task.preparationRequest ? "Requested" : "Prepare by"
-                          }: ${
-                            task.preparationRequest
-                              ? formatOperationsDate(task.createdAt)
-                              : task.prepareBy ?? "Date unavailable"
-                          }`}
+                          aria-label={
+                            task.preparationRequest && task.requestedPeriod
+                              ? `Requested period: ${task.requestedPeriod}`
+                              : `${
+                                  task.preparationRequest
+                                    ? "Requested"
+                                    : "Prepare by"
+                                }: ${
+                                  task.preparationRequest
+                                    ? formatOperationsDate(task.createdAt)
+                                    : task.prepareBy ?? "Date unavailable"
+                                }`
+                          }
+                          title={
+                            task.preparationRequest && task.requestedPeriod
+                              ? `Requested period: ${task.requestedPeriod}`
+                              : `${
+                                  task.preparationRequest
+                                    ? "Requested"
+                                    : "Prepare by"
+                                }: ${
+                                  task.preparationRequest
+                                    ? formatOperationsDate(task.createdAt)
+                                    : task.prepareBy ?? "Date unavailable"
+                                }`
+                          }
                         >
                           <CalendarDays
                             className="size-4 shrink-0 text-gray-500"
                             aria-hidden="true"
                           />
-                          <span className="whitespace-nowrap">
-                            {task.preparationRequest
+                          <span className="min-w-0 break-words">
+                            {task.preparationRequest && task.requestedPeriod
+                              ? task.requestedPeriod
+                              : task.preparationRequest
                               ? formatOperationsDate(task.createdAt)
                               : task.prepareBy ?? "Date unavailable"}
                           </span>
@@ -2900,10 +3770,105 @@ export default function OperationsPage() {
                         </p>
                       </>
                     ) : (
-                      <div className="flex min-w-0 flex-1 items-center gap-3">
-                        {(task.kind === "returns" ||
-                          task.kind === "returned-with-issues") &&
-                        task.operationId ? (
+                      <div
+                        className={
+                          task.kind === "broken"
+                            ? "grid min-w-0 flex-1 grid-cols-[auto_3rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 md:grid-cols-[auto_3.5rem_minmax(240px,1.5fr)_minmax(180px,1fr)] md:gap-x-4"
+                            : "flex min-w-0 flex-1 items-center gap-3"
+                        }
+                      >
+                        {task.kind === "broken" ? (
+                          <>
+                            {task.assetId && task.physicalUnit ? (
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${task.title} for return to service`}
+                                checked={selectedBrokenAssetIds.includes(
+                                  task.assetId
+                                )}
+                                onChange={() =>
+                                  toggleBrokenAssetSelection(task.assetId!)
+                                }
+                                className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                              />
+                            ) : null}
+                            {task.assetId && task.assetImage ? (
+                              <Link
+                                to={`/assets/${task.assetId}`}
+                                aria-label={`Open unit image: ${task.title}`}
+                                className="size-12 shrink-0 overflow-hidden rounded-lg bg-gray-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-700 md:size-14"
+                              >
+                                <AssetImage
+                                  asset={task.assetImage}
+                                  alt=""
+                                  className="size-full object-cover"
+                                />
+                              </Link>
+                            ) : (
+                              <span className="size-12 shrink-0 rounded-lg bg-gray-100 md:size-14" />
+                            )}
+                            <div className="col-span-1 min-w-0 md:col-auto">
+                              <h2 className="font-bold leading-snug text-gray-950 sm:text-lg">
+                                {task.assetId ? (
+                                  <Link
+                                    to={`/assets/${task.assetId}`}
+                                    className="break-words hover:text-red-800 hover:underline"
+                                  >
+                                    {task.title}
+                                  </Link>
+                                ) : (
+                                  task.title
+                                )}
+                              </h2>
+                              {(() => {
+                                const description = getBrokenItemDescription(
+                                  task.detail
+                                );
+                                return (
+                                  <>
+                                    <p className="mt-1 break-words text-sm text-gray-600">
+                                      {description.summary}
+                                    </p>
+                                    {description.reason ? (
+                                      <p className="mt-1 break-words text-xs text-gray-500">
+                                        {description.reason}
+                                      </p>
+                                    ) : null}
+                                  </>
+                                );
+                              })()}
+                            </div>
+                            <div className="col-span-3 flex min-w-0 flex-col gap-1 pl-7 md:col-span-1 md:pl-0">
+                              {task.returnToServiceEligible ? (
+                                <span className="w-fit rounded-full bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-800">
+                                  Out of service
+                                </span>
+                              ) : null}
+                              {task.locationName ? (
+                                <span className="break-words text-sm text-gray-600">
+                                  {task.locationName}
+                                </span>
+                              ) : null}
+                              {brokenActionResult?.results
+                                ?.filter(
+                                  (result) =>
+                                    result.assetId === task.assetId &&
+                                    !result.ok
+                                )
+                                .map((result) => (
+                                  <span
+                                    key={result.assetId}
+                                    role="alert"
+                                    className="text-sm text-red-700"
+                                  >
+                                    This unit could not be returned to service.
+                                  </span>
+                                ))}
+                            </div>
+                          </>
+                        ) : (task.kind === "returns" ||
+                            task.kind === "returned-with-issues") &&
+                          task.operationId ? (
                           <>
                             {view === "returns" &&
                             task.kind === "returns" &&
@@ -3029,17 +3994,15 @@ export default function OperationsPage() {
                                 />
                               </Link>
                             ) : null}
-                            <p className="text-xs font-bold uppercase tracking-wide text-red-700">
-                              {VIEW_LABELS[task.kind]}
-                            </p>
+                            {task.kind !== "broken" ? (
+                              <p className="text-xs font-bold uppercase tracking-wide text-red-700">
+                                {VIEW_LABELS[task.kind]}
+                              </p>
+                            ) : null}
                             <h2 className="mt-1 truncate font-bold text-gray-950">
-                              {task.kind === "broken" || task.assetId ? (
+                              {task.assetId ? (
                                 <Link
-                                  to={
-                                    task.kind === "broken"
-                                      ? task.href
-                                      : `/assets/${task.assetId}`
-                                  }
+                                  to={`/assets/${task.assetId}`}
                                   className="hover:text-red-800 hover:underline"
                                 >
                                   {task.title}
@@ -3055,55 +4018,54 @@ export default function OperationsPage() {
                         )}
                       </div>
                     )}
-                    {task.kind === "cancelled-pickups" && task.operationId ? (
+                    {task.kind === "broken" &&
+                    task.operationId &&
+                    task.assetId &&
+                    task.returnToServiceEligible ? (
+                      <div className="flex shrink-0 items-center">
+                        <Form method="post">
+                          <input
+                            type="hidden"
+                            name="intent"
+                            value="return-to-service"
+                          />
+                          <input
+                            type="hidden"
+                            name="operationId"
+                            value={task.operationId}
+                          />
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
+                          >
+                            Return to service
+                          </button>
+                        </Form>
+                      </div>
+                    ) : task.kind === "cancelled-pickups" &&
+                      task.operationId ? (
                       <CancelledPickupActions task={task} />
+                    ) : task.kind === "returns" &&
+                      task.returnCheckEligible &&
+                      task.operationId ? (
+                      <ReturnTaskActions task={task} />
                     ) : (task.kind === "returns" ||
                         task.kind === "returned-with-issues") &&
                       task.operationId ? (
                       <div className="flex shrink-0 items-center gap-2">
-                        {task.kind === "returns" && task.returnCheckEligible ? (
-                          <Form method="post">
-                            <input
-                              type="hidden"
-                              name="intent"
-                              value="complete-return"
-                            />
-                            <input
-                              type="hidden"
-                              name="operationId"
-                              value={task.operationId}
-                            />
-                            <button
-                              type="submit"
-                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
-                            >
-                              Mark checked
-                            </button>
-                          </Form>
-                        ) : (
-                          <Link
-                            to={task.href}
-                            className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-950 hover:bg-amber-100"
-                          >
-                            Review return
-                          </Link>
-                        )}
-                      </div>
-                    ) : task.kind === "to-prepare" && task.operationId ? (
-                      task.bulkReadyEligible ? (
-                        <PreparationTaskActions
-                          task={task}
-                          className="col-start-2 row-start-5 justify-self-end md:col-start-4 md:row-span-2 md:row-start-1 xl:col-start-6 xl:row-span-1 xl:row-start-1"
-                        />
-                      ) : (
-                        <p
-                          className="col-start-2 row-start-5 max-w-52 justify-self-end text-xs font-semibold text-amber-900 md:col-start-4 md:row-span-2 md:row-start-1 xl:col-start-6 xl:row-span-1 xl:row-start-1"
-                          title={task.preparationBlockedReason}
+                        <Link
+                          to={task.href}
+                          className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-950 hover:bg-amber-100"
                         >
-                          {task.preparationBlockedReason ??
-                            "This request cannot be prepared yet."}
-                        </p>
-                      )
+                          Review return
+                        </Link>
+                      </div>
+                    ) : task.kind === "broken" ? null : task.kind ===
+                        "to-prepare" && task.operationId ? (
+                      <PreparationTaskActions
+                        task={task}
+                        className="col-start-2 row-start-5 justify-self-end md:col-start-4 md:row-span-2 md:row-start-1 xl:col-start-6 xl:row-span-1 xl:row-start-1"
+                      />
                     ) : (
                       <Link
                         to={task.href}

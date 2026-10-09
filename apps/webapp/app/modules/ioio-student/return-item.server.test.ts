@@ -172,6 +172,41 @@ describe("IOIO return_item", () => {
     );
   });
 
+  it("routes configured Return section items to Returns Area instead of normal storage", async () => {
+    dbMock.booking.findFirst.mockResolvedValue({
+      ...booking,
+      bookingAssets: [
+        {
+          ...bookingAsset,
+          asset: {
+            ...bookingAsset.asset,
+            returnHandling: "RETURN_TO_RETURN_ZONE",
+          },
+        },
+      ],
+    });
+    dbMock.location.findMany.mockResolvedValue([
+      { id: "storage", name: "Container X" },
+      { id: "returns-area", name: "Returns Area" },
+    ]);
+
+    await prepareReturnItem(
+      {
+        booking_id: booking.id,
+        booking_asset_id: bookingAsset.id,
+        asset_id: bookingAsset.assetId,
+        quantity: 1,
+      },
+      { context, request }
+    );
+
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ locationId: "returns-area" }),
+      })
+    );
+  });
+
   it("stores the one issue note and Broken Zone on the return proposal", async () => {
     await prepareReturnItem(
       {

@@ -315,6 +315,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       "Kit Return Zone",
       "IOIO Return Zone",
       "Return Zone",
+      "Return Section",
+      "Returns Area",
     ]);
     const problemZone = findDestinationLocation(resolvedLocations, [
       "Problem / Broken Zone",
@@ -656,7 +658,7 @@ export default function IoioReturn() {
                 {destinationIsProblem
                   ? "Take this item to the Problem / Broken Zone"
                   : destinationIsReturnZone
-                  ? "Take this item to the Return Zone"
+                  ? "Take this item to the Return section"
                   : "Return this item to its Inventory location"}
               </h3>
             </div>
@@ -665,7 +667,7 @@ export default function IoioReturn() {
                 destinationIsProblem
                   ? selectedDestination?.title ?? "Problem / Broken Zone"
                   : destinationIsReturnZone
-                  ? selectedDestination?.title ?? "Return Zone"
+                  ? selectedDestination?.title ?? "Return section"
                   : normalLocation.at(-1) ?? "Inventory location"
               }
               subtitle={

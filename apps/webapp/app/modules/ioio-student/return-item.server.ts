@@ -191,7 +191,13 @@ async function getReturnLocationId({
           "Problem Zone",
           "Repair Zone",
         ]
-      : ["Kit Return Zone", "IOIO Return Zone", "Return Zone"]
+      : [
+          "Kit Return Zone",
+          "IOIO Return Zone",
+          "Return Zone",
+          "Return Section",
+          "Returns Area",
+        ]
     ).map(normalizeLocationName)
   );
   return (

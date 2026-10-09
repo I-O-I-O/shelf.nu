@@ -140,8 +140,8 @@ export function AssetAdvancedFields({
       <FormRow
         rowLabel={
           <SettingHelpLabel
-            label="Return handling"
-            help="Choose where a working item should be placed after return. Items with a reported problem follow the configured problem-return workflow."
+            label="Return section"
+            help="Students return this equipment here for staff checking. Items with a reported problem follow the configured problem-return workflow."
           />
         }
         className="border-b-0 py-4"
@@ -173,7 +173,7 @@ export function AssetAdvancedFields({
               disabled={disabled}
               className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
             />
-            <span>Return Zone for staff check</span>
+            <span>Return section for staff check</span>
           </label>
         </div>
       </FormRow>

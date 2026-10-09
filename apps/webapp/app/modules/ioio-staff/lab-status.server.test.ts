@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const database = vi.hoisted(() => ({
+  $transaction: vi.fn(),
   booking: { count: vi.fn(), findMany: vi.fn() },
-  bookingAsset: { findMany: vi.fn() },
-  asset: { findMany: vi.fn() },
+  bookingAsset: { findMany: vi.fn(), findFirst: vi.fn() },
+  asset: { findMany: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
+  custody: { findFirst: vi.fn() },
   kit: { findMany: vi.fn() },
   location: { findMany: vi.fn() },
   user: { findMany: vi.fn() },
@@ -15,13 +17,21 @@ const database = vi.hoisted(() => ({
   },
   ioioArchivedItem: { findMany: vi.fn() },
   annualAccessApproval: { count: vi.fn() },
+  createNote: vi.fn(),
+  recordEvent: vi.fn(),
 }));
 
 // why: the status service test verifies classification and duplicate handling
 // without requiring a running local database.
 vi.mock("~/database/db.server", () => ({ db: database }));
+vi.mock("~/modules/note/service.server", () => ({
+  createNote: database.createNote,
+}));
+vi.mock("~/modules/activity-event/service.server", () => ({
+  recordEvent: database.recordEvent,
+}));
 
-import { getLabStatus } from "./lab-status.server";
+import { getLabStatus, returnBrokenAssetToService } from "./lab-status.server";
 
 describe("getLabStatus", () => {
   beforeEach(() => {
@@ -29,6 +39,7 @@ describe("getLabStatus", () => {
     database.booking.count.mockResolvedValue(0);
     database.booking.findMany.mockResolvedValue([]);
     database.bookingAsset.findMany.mockResolvedValue([]);
+    database.bookingAsset.findFirst.mockResolvedValue(null);
     database.asset.findMany.mockResolvedValue([]);
     database.kit.findMany.mockResolvedValue([]);
     database.location.findMany.mockResolvedValue([]);
@@ -39,6 +50,12 @@ describe("getLabStatus", () => {
     database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 0 });
     database.ioioArchivedItem.findMany.mockResolvedValue([]);
     database.annualAccessApproval.count.mockResolvedValue(0);
+    database.$transaction.mockImplementation((callback) => callback(database));
+    database.asset.findFirst.mockResolvedValue(null);
+    database.asset.update.mockResolvedValue({});
+    database.custody.findFirst.mockResolvedValue(null);
+    database.createNote.mockResolvedValue({});
+    database.recordEvent.mockResolvedValue({});
   });
 
   it("returns a healthy status when Shelf has no actionable records", async () => {
@@ -50,6 +67,35 @@ describe("getLabStatus", () => {
       overdueLoans: 0,
       issues: [],
     });
+  });
+
+  it("counts the preparation queue organization on Staff Dashboard", async () => {
+    database.ioioWriteOperation.count.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.organizationId === "team-1" &&
+          where.operationType === "IOIO_PREPARATION" &&
+          where.status === "PENDING_PREPARATION"
+          ? 1
+          : 0
+      )
+    );
+
+    const result = await getLabStatus({
+      organizationId: "personal-1",
+      preparationOrganizationId: "team-1",
+    });
+
+    expect(result.preparationTasks).toBe(1);
+    expect(database.ioioWriteOperation.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "team-1",
+          operationType: "IOIO_PREPARATION",
+          status: "PENDING_PREPARATION",
+          source: { in: ["IOIO_PREPARATION_REQUEST", "IOIO_ASSISTANT"] },
+        }),
+      })
+    );
   });
 
   it("keeps ready pickups as current activity, not as issues needing attention", async () => {
@@ -280,6 +326,124 @@ describe("getLabStatus", () => {
         title: "Makey Kit #001 needs to be put back",
         detail: expect.stringContaining("IOIO Student cancelled"),
         href: "/operations?view=cancelled-pickups",
+      })
+    );
+  });
+
+  it("counts a damaged return inspection in Broken items", async () => {
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "REPORT_PROBLEM"
+          ? [
+              {
+                id: "broken-return-1",
+                source: "IOIO_STAFF_RETURN_INSPECTION",
+                userId: "staff-1",
+                reportType: "ITEM_DAMAGED",
+                assetId: "unit-002",
+                kitId: null,
+                locationId: null,
+                bookingAssetId: null,
+              },
+            ]
+          : []
+      )
+    );
+
+    const status = await getLabStatus({ organizationId: "org-1" });
+
+    expect(status.unresolvedReports).toBe(1);
+    expect(status.issues).toContainEqual(
+      expect.objectContaining({
+        id: "report:broken-return-1",
+        kind: "report",
+        title: "Item damaged",
+      })
+    );
+  });
+});
+
+describe("returnBrokenAssetToService", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    database.$transaction.mockImplementation((callback) => callback(database));
+    database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-002",
+      title: "Makey Kit #002",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.asset.update.mockResolvedValue({});
+    database.custody.findFirst.mockResolvedValue(null);
+    database.bookingAsset.findFirst.mockResolvedValue(null);
+    database.createNote.mockResolvedValue({});
+    database.recordEvent.mockResolvedValue({});
+  });
+
+  it("resolves the broken report and makes the repaired asset available", async () => {
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id === "broken-report-1"
+          ? {
+              id: "broken-report-1",
+              assetId: "unit-002",
+              reportType: "ITEM_DAMAGED",
+            }
+          : null
+      )
+    );
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-002",
+      title: "Makey Kit #002",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      returnBrokenAssetToService({
+        organizationId: "org-1",
+        operationId: "broken-report-1",
+        staffUserId: "staff-1",
+      })
+    ).resolves.toEqual({
+      assetId: "unit-002",
+      title: "Makey Kit #002",
+      status: "AVAILABLE",
+    });
+
+    expect(database.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "org-1",
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+          reportType: "ITEM_DAMAGED",
+          assetId: "unit-002",
+        }),
+        data: expect.objectContaining({ status: "RESOLVED" }),
+      })
+    );
+    expect(database.asset.update).toHaveBeenCalledWith({
+      where: { id: "unit-002", organizationId: "org-1" },
+      data: { availableToBook: true },
+    });
+    expect(database.bookingAsset.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          assetId: "unit-002",
+          booking: expect.objectContaining({
+            OR: [
+              {
+                description: {
+                  not: "IOIO staff reservation",
+                },
+              },
+              { description: null },
+            ],
+          }),
+        }),
       })
     );
   });

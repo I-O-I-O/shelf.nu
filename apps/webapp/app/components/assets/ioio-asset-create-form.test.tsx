@@ -131,6 +131,23 @@ describe("IOIO asset creation form", () => {
     expect(screen.queryByText("Custom Fields")).not.toBeInTheDocument();
   });
 
+  it("reopens an individual product with its persisted Return section choice", () => {
+    render(
+      <IoioAssetCreateForm
+        id="unit-2"
+        title="Makey Kit #002"
+        type="INDIVIDUAL"
+        returnHandling="RETURN_TO_RETURN_ZONE"
+        showAssetModel={false}
+      />
+    );
+
+    expect(screen.getByText("Return section")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Return section for staff check")
+    ).toBeChecked();
+  });
+
   it("switches from quantity to individual physical-unit quantity", () => {
     render(<IoioAssetCreateForm showAssetModel={false} />);
 
@@ -142,6 +159,37 @@ describe("IOIO asset creation form", () => {
       screen.getByLabelText("Number of physical units")
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("Quantity")).not.toBeInTheDocument();
+  });
+
+  it("returns a direct edit to Inventory when Cancel has no referer", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Makey Kit"
+        showAssetModel={false}
+      />
+    );
+
+    expect(screen.getAllByRole("link", { name: "Cancel" })[0]).toHaveAttribute(
+      "href",
+      "/assets"
+    );
+  });
+
+  it("preserves the filtered Inventory context for Cancel", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Makey Kit"
+        referer="/assets?search=Makey"
+        showAssetModel={false}
+      />
+    );
+
+    expect(screen.getAllByRole("link", { name: "Cancel" })[0]).toHaveAttribute(
+      "href",
+      "/assets?search=Makey"
+    );
   });
 
   it("validates a name and preserves the selected tracking and quantity values", () => {

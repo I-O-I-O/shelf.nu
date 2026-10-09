@@ -11,6 +11,7 @@ import {
   cancelBooking,
   checkoutBooking,
   partialCheckoutBooking,
+  deleteBooking,
   reserveBooking,
   updateBookingAssets,
 } from "~/modules/booking/service.server";
@@ -29,8 +30,12 @@ import {
   getPreparationPickupDeadline,
 } from "~/modules/ioio-staff/preparation";
 import { assertAnnualAccessApproved } from "~/modules/ioio-student/annual-access.server";
-import { getIoioAvailability } from "~/modules/ioio-student/availability.server";
+import {
+  getIoioAvailability,
+  IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT,
+} from "~/modules/ioio-student/availability.server";
 import { getImmediateBorrowingWindow } from "~/modules/ioio-student/date-range";
+import { normalizeQrScanValue } from "~/modules/qr/normalize-scan-value";
 import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
 import { ShelfError } from "~/utils/error";
 import { QueueNames, scheduler } from "~/utils/scheduler.server";
@@ -82,6 +87,7 @@ export async function assignPreparationRequest({
       from: true,
       to: true,
       bookingId: true,
+      description: true,
     },
   });
   if (
@@ -103,6 +109,7 @@ export async function assignPreparationRequest({
       type: true,
       quantity: true,
       maxBorrowDays: true,
+      assetModel: { select: { name: true } },
       assetLocations: { select: { locationId: true }, take: 1 },
       assetKits: {
         select: { kit: { select: { maxBorrowDays: true } } },
@@ -113,6 +120,9 @@ export async function assignPreparationRequest({
   if (!product) throw new Error("The requested Shelf item no longer exists.");
 
   const candidateIds = getStoredAssetIds(operation.selectedAssetIds);
+  const acknowledgedStaffReservation =
+    operation.description?.includes(IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT) ??
+    false;
   const requestedIds = [...new Set(assignedAssetIds.filter(Boolean))];
   const existingBooking = operation.bookingId
     ? await db.booking.findFirst({
@@ -177,6 +187,7 @@ export async function assignPreparationRequest({
     role: "SELF_SERVICE",
   });
 
+  let reservationIgnoreBookingIds: string[] = [];
   if (!assignmentIsCommitted) {
     const availability = await getIoioAvailability({
       organizationId,
@@ -187,9 +198,17 @@ export async function assignPreparationRequest({
       to: operation.to,
       excludeBookingId: operation.bookingId ?? undefined,
     });
+    reservationIgnoreBookingIds = acknowledgedStaffReservation
+      ? availability.staffReservationBookingIds
+      : [];
     if (product.type === AssetType.INDIVIDUAL) {
+      // Only the explicitly acknowledged IOIO course reservations are soft.
+      // The inclusive set still excludes physical, loan, and other booking
+      // conflicts.
       const availableIds = new Set(
-        availability.availableUnitIdsWithoutStaffReservations
+        acknowledgedStaffReservation
+          ? availability.availableUnitIdsWithoutStaffReservations
+          : availability.availableUnitIds
       );
       const attachedAssignmentIsAvailable =
         selectedIds.length === operation.quantity &&
@@ -203,12 +222,15 @@ export async function assignPreparationRequest({
           .slice(0, operation.quantity);
       }
       if (selectedIds.length !== operation.quantity) {
+        const productName =
+          product.assetModel?.name ?? product.title.replace(/\s+#\d+\s*$/u, "");
+        if (selectedIds.length === 0) {
+          throw new Error(
+            `No ${productName} units are available for this booking period.`
+          );
+        }
         throw new Error(
-          `Only ${selectedIds.length} of ${
-            operation.quantity
-          } requested physical unit${
-            operation.quantity === 1 ? " is" : "s are"
-          } currently available.`
+          `Only ${selectedIds.length} of ${operation.quantity} ${productName} units are available for this booking period.`
         );
       }
       if (selectedIds.some((id) => !candidateIds.includes(id))) {
@@ -228,7 +250,10 @@ export async function assignPreparationRequest({
         );
       }
     } else if (
-      operation.quantity > availability.availableWithoutStaffReservations
+      operation.quantity >
+      (acknowledgedStaffReservation
+        ? availability.availableWithoutStaffReservations
+        : availability.availableCount)
     ) {
       throw new Error("The requested quantity is no longer available.");
     }
@@ -321,6 +346,7 @@ export async function assignPreparationRequest({
         isSelfServiceOrBase: true,
         tags: [],
         userId: staffUserId,
+        ignoreBookingIds: reservationIgnoreBookingIds,
         allowImmediateStart: true,
       });
     } else if (booking.status !== BookingStatus.RESERVED) {
@@ -738,13 +764,30 @@ export async function declinePreparation({
   const cancellationReason = reason || "Preparation request declined.";
 
   if (operation.bookingId) {
-    await cancelBooking({
-      id: operation.bookingId,
-      organizationId,
-      userId: staffUserId,
-      hints,
-      cancellationReason,
+    const booking = await db.booking.findFirst({
+      where: { id: operation.bookingId, organizationId },
+      select: { id: true, status: true },
     });
+    if (!booking)
+      throw new Error("The preparation request's booking was not found.");
+    if (booking.status === BookingStatus.DRAFT) {
+      await deleteBooking(
+        { id: booking.id, organizationId },
+        hints,
+        staffUserId
+      );
+    } else if (booking.status === BookingStatus.RESERVED) {
+      await cancelBooking({
+        id: booking.id,
+        organizationId,
+        userId: staffUserId,
+        hints,
+        expectedStatus: BookingStatus.RESERVED,
+        cancellationReason,
+      });
+    } else {
+      throw new Error("The preparation request's booking is no longer active.");
+    }
   }
 
   const now = new Date();
@@ -840,7 +883,33 @@ export async function cancelStudentPreparationRequest({
     );
   }
 
-  if (!operation.bookingId) {
+  // A failed or interrupted assignment can leave a native DRAFT booking
+  // linked to this still-pending request. Drafts are not cancellable through
+  // cancelBooking (which intentionally only handles active reservations),
+  // so find the request's idempotency-marker draft and delete it through the
+  // booking service. This also removes stale BookingAsset rows such as #001.
+  const requestBooking = operation.bookingId
+    ? await db.booking.findFirst({
+        where: { id: operation.bookingId, organizationId },
+        select: { id: true, status: true },
+      })
+    : isLogicalRequest
+    ? await db.booking.findFirst({
+        where: {
+          organizationId,
+          description: `IOIO_PREPARATION_REQUEST:${operation.id}`,
+          status: { in: [BookingStatus.DRAFT, BookingStatus.RESERVED] },
+        },
+        select: { id: true, status: true },
+      })
+    : null;
+  const bookingId = requestBooking?.id ?? operation.bookingId;
+
+  if (operation.bookingId && !requestBooking) {
+    throw new Error("The preparation request's booking could not be found.");
+  }
+
+  if (!bookingId) {
     const updated = await db.ioioWriteOperation.updateMany({
       where: {
         id: operation.id,
@@ -864,7 +933,7 @@ export async function cancelStudentPreparationRequest({
   const relatedOperations = await db.ioioWriteOperation.findMany({
     where: {
       organizationId,
-      bookingId: operation.bookingId,
+      OR: [{ id: operation.id }, { bookingId }],
       operationType: IOIO_PREPARATION_OPERATION,
       status: { in: activeStatuses },
     },
@@ -916,25 +985,37 @@ export async function cancelStudentPreparationRequest({
 
     return {
       operationId: operation.id,
-      bookingId: operation.bookingId,
+      bookingId,
       needsPutBack: true,
     };
   }
 
-  await cancelBooking({
-    id: operation.bookingId,
-    organizationId,
-    userId: borrowerUserId,
-    hints,
-    expectedStatus: BookingStatus.RESERVED,
-    cancellationReason: "Student cancelled the preparation request.",
-  });
+  if (requestBooking?.status === BookingStatus.DRAFT) {
+    await deleteBooking(
+      { id: requestBooking.id, organizationId },
+      hints,
+      borrowerUserId
+    );
+  } else if (requestBooking?.status === BookingStatus.RESERVED) {
+    await cancelBooking({
+      id: requestBooking.id,
+      organizationId,
+      userId: borrowerUserId,
+      hints,
+      expectedStatus: BookingStatus.RESERVED,
+      cancellationReason: "Student cancelled the preparation request.",
+    });
+  } else {
+    throw new Error(
+      "This preparation request can no longer be cancelled because its booking is no longer active."
+    );
+  }
 
   await db.ioioWriteOperation.updateMany({
     where: {
       organizationId,
       operationType: IOIO_PREPARATION_OPERATION,
-      bookingId: operation.bookingId,
+      OR: [{ id: operation.id }, { bookingId }],
       status: { in: activeStatuses },
     },
     data: {
@@ -945,7 +1026,7 @@ export async function cancelStudentPreparationRequest({
     },
   });
 
-  return { operationId: operation.id, bookingId: operation.bookingId };
+  return { operationId: operation.id, bookingId };
 }
 
 /**
@@ -1061,18 +1142,14 @@ export async function putBackCancelledPreparationPickup({
   };
 }
 
-export async function confirmStudentPreparationPickup({
+async function loadStudentPreparationPickup({
   organizationId,
   operationId,
   borrowerUserId,
-  hints,
-  verificationValue,
 }: {
   organizationId: string;
   operationId: string;
   borrowerUserId: string;
-  hints: Parameters<typeof checkoutBooking>[0]["hints"];
-  verificationValue?: string;
 }) {
   const operation = await db.ioioWriteOperation.findFirst({
     where: {
@@ -1126,7 +1203,9 @@ export async function confirmStudentPreparationPickup({
     select: {
       status: true,
       bookingAssets: {
-        where: { id: operation.bookingAssetId ?? undefined },
+        ...(operation.bookingAssetId
+          ? { where: { id: operation.bookingAssetId } }
+          : {}),
         select: {
           id: true,
           assetId: true,
@@ -1137,8 +1216,13 @@ export async function confirmStudentPreparationPickup({
               id: true,
               title: true,
               type: true,
+              assetModelId: true,
+              sequentialId: true,
+              assetModel: { select: { name: true } },
               maxBorrowDays: true,
               qrCodes: { select: { id: true } },
+              barcodes: { select: { value: true } },
+              organizationId: true,
               assetKits: {
                 select: { kit: { select: { maxBorrowDays: true } } },
               },
@@ -1151,7 +1235,13 @@ export async function confirmStudentPreparationPickup({
   if (!booking) {
     throw new Error("That pickup booking no longer exists.");
   }
-  const assignedSlice = booking.bookingAssets[0];
+  const assignedSlice = operation.bookingAssetId
+    ? booking.bookingAssets.find(
+        (slice) => slice.id === operation.bookingAssetId
+      )
+    : booking.bookingAssets.find(
+        (slice) => slice.assetId === operation.assetId
+      );
   const pickupAsset = assignedSlice?.asset;
   if (
     !assignedSlice ||
@@ -1161,22 +1251,238 @@ export async function confirmStudentPreparationPickup({
   ) {
     throw new Error("The pickup item could not be verified.");
   }
+  return { operation, booking, assignedSlice, pickupAsset };
+}
+
+type PickupVerification = {
+  valid: boolean;
+  status: "valid" | "wrong-unit" | "wrong-item" | "unresolved";
+  assignedUnitLabel: string;
+  scannedUnitLabel?: string;
+  error?: string;
+};
+
+async function verifyAssignedPickupUnit({
+  organizationId,
+  pickupAsset,
+  verificationValue,
+}: {
+  organizationId: string;
+  pickupAsset: {
+    id: string;
+    title: string;
+    type: AssetType;
+    assetModelId: string | null;
+    sequentialId: string | null;
+    assetModel: { name: string } | null;
+    qrCodes: Array<{ id: string }>;
+    barcodes: Array<{ value: string }>;
+    assetKits: Array<{ kit: { maxBorrowDays: number } }>;
+  };
+  verificationValue?: string;
+}): Promise<PickupVerification> {
+  const unitNumber = getPhysicalUnitNumberFromTitle(pickupAsset.title);
+  const assignedUnitLabel = unitNumber
+    ? `${
+        pickupAsset.assetModel?.name ??
+        pickupAsset.title.replace(/\s+#\d+\s*$/u, "")
+      } #${unitNumber}`
+    : pickupAsset.title;
+  const entered = verificationValue?.trim() ?? "";
+  const normalizedInput = normalizeQrScanValue(entered);
+  const normalizedUnit = normalizePhysicalUnitNumber(normalizedInput);
+
+  if (!normalizedInput) {
+    return {
+      valid: false,
+      status: "unresolved",
+      assignedUnitLabel,
+    };
+  }
+
+  if (pickupAsset.type !== AssetType.INDIVIDUAL) {
+    return { valid: true, status: "valid", assignedUnitLabel };
+  }
+
+  // First resolve QR IDs through the QR table to their linked physical Asset.
+  // This handles full URLs and relative /qr/{token} paths without comparing
+  // the URL itself to an Asset ID or unit number.
+  const qr = await db.qr.findFirst({
+    where: { id: normalizedInput, organizationId },
+    select: { id: true, assetId: true, kitId: true },
+  });
+  let scannedAsset: {
+    id: string;
+    title: string;
+    assetModelId: string | null;
+    type: AssetType;
+  } | null = qr?.assetId
+    ? await db.asset.findFirst({
+        where: {
+          id: qr.assetId,
+          organizationId,
+        },
+        select: { id: true, title: true, assetModelId: true, type: true },
+      })
+    : null;
+
+  if (!scannedAsset && !qr) {
+    const barcode = await db.barcode.findFirst({
+      where: { organizationId, value: entered },
+      select: { assetId: true },
+    });
+    if (barcode?.assetId) {
+      scannedAsset = await db.asset.findFirst({
+        where: {
+          id: barcode.assetId,
+          organizationId,
+        },
+        select: { id: true, title: true, assetModelId: true, type: true },
+      });
+    }
+  }
+
+  if (scannedAsset) {
+    if (scannedAsset.id === pickupAsset.id) {
+      return {
+        valid: true,
+        status: "valid",
+        assignedUnitLabel,
+        scannedUnitLabel: scannedAsset.title,
+      };
+    }
+    const sameEquipment = Boolean(
+      pickupAsset.assetModelId &&
+        scannedAsset.assetModelId === pickupAsset.assetModelId &&
+        scannedAsset.type === pickupAsset.type
+    );
+    return {
+      valid: false,
+      status: sameEquipment ? "wrong-unit" : "wrong-item",
+      assignedUnitLabel,
+      scannedUnitLabel: scannedAsset.title,
+      error: sameEquipment
+        ? `Wrong unit. This request is assigned to ${assignedUnitLabel}.`
+        : `Wrong equipment. This request is assigned to ${assignedUnitLabel}.`,
+    };
+  }
+
+  const enteredDigits = normalizedInput.replace(/^#/u, "");
+  if (enteredDigits.length >= 3 && normalizedUnit) {
+    if (unitNumber && normalizedUnit === unitNumber) {
+      return { valid: true, status: "valid", assignedUnitLabel };
+    }
+    const numberedAsset = await db.asset.findFirst({
+      where: {
+        organizationId,
+        type: AssetType.INDIVIDUAL,
+        OR: [
+          { title: { endsWith: `#${normalizedUnit}` } },
+          { sequentialId: normalizedUnit },
+        ],
+      },
+      select: {
+        id: true,
+        title: true,
+        assetModelId: true,
+        type: true,
+      },
+    });
+    if (numberedAsset) {
+      const sameEquipment = Boolean(
+        pickupAsset.assetModelId &&
+          numberedAsset.assetModelId === pickupAsset.assetModelId
+      );
+      return {
+        valid: false,
+        status: sameEquipment ? "wrong-unit" : "wrong-item",
+        assignedUnitLabel,
+        scannedUnitLabel: numberedAsset.title,
+        error: sameEquipment
+          ? `Wrong unit. This request is assigned to ${assignedUnitLabel}.`
+          : `Wrong equipment. This request is assigned to ${assignedUnitLabel}.`,
+      };
+    }
+  }
+
+  if (qr?.kitId) {
+    const kit = await db.kit.findFirst({
+      where: { id: qr.kitId, organizationId },
+      select: { name: true },
+    });
+    return {
+      valid: false,
+      status: "wrong-item",
+      assignedUnitLabel,
+      scannedUnitLabel: kit?.name,
+      error: `Wrong equipment. This request is assigned to ${assignedUnitLabel}.`,
+    };
+  }
+
+  return {
+    valid: false,
+    status: "unresolved",
+    assignedUnitLabel,
+    error:
+      "We couldn't find that unit. Scan its QR code or enter its unit number.",
+  };
+}
+
+export async function validateStudentPreparationPickup({
+  organizationId,
+  operationId,
+  borrowerUserId,
+  verificationValue,
+}: {
+  organizationId: string;
+  operationId: string;
+  borrowerUserId: string;
+  verificationValue?: string;
+}): Promise<PickupVerification> {
+  const { pickupAsset } = await loadStudentPreparationPickup({
+    organizationId,
+    operationId,
+    borrowerUserId,
+  });
+  return verifyAssignedPickupUnit({
+    organizationId,
+    pickupAsset,
+    verificationValue,
+  });
+}
+
+export async function confirmStudentPreparationPickup({
+  organizationId,
+  operationId,
+  borrowerUserId,
+  hints,
+  verificationValue,
+}: {
+  organizationId: string;
+  operationId: string;
+  borrowerUserId: string;
+  hints: Parameters<typeof checkoutBooking>[0]["hints"];
+  verificationValue?: string;
+}) {
+  const { operation, booking, assignedSlice, pickupAsset } =
+    await loadStudentPreparationPickup({
+      organizationId,
+      operationId,
+      borrowerUserId,
+    });
   if (pickupAsset.type === AssetType.INDIVIDUAL) {
-    const entered = verificationValue?.trim();
-    const expectedUnit = getPhysicalUnitNumberFromTitle(pickupAsset.title);
-    const enteredUnit = entered ? normalizePhysicalUnitNumber(entered) : null;
-    const scannedQr = entered
-      ? await db.qr.findFirst({
-          where: { id: entered, organizationId, assetId: pickupAsset.id },
-          select: { id: true },
-        })
-      : null;
-    if (!scannedQr && (!expectedUnit || enteredUnit !== expectedUnit)) {
+    const verification = await verifyAssignedPickupUnit({
+      organizationId,
+      pickupAsset,
+      verificationValue,
+    });
+    if (!verification.valid) {
       throw new ShelfError({
         cause: null,
         status: 400,
         label: "Booking",
-        message: "This isn't the kit assigned to your request.",
+        message:
+          verification.error ?? "That isn't the unit assigned to your request.",
         shouldBeCaptured: false,
       });
     }

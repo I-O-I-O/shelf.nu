@@ -676,7 +676,7 @@ export const IoioAssetCreateForm = ({
   const cancelTo = resolveCancelTo({
     referer: initialReferer,
     currentPathname: location.pathname,
-    fallback: isProductGroupEdit ? "/assets" : id ? `/assets/${id}` : "/assets",
+    fallback: "/assets",
   });
 
   /** Asset models from the loader, used to look up defaults on selection. */

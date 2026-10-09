@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setIndividualAssetAvailability } from "~/modules/asset/service.server";
 import { action } from "~/routes/_layout+/assets.$assetId_.edit";
 
 // why: the route's action delegates the guarded state transition to the asset
@@ -14,8 +15,6 @@ vi.mock("~/modules/asset/service.server", () => ({
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: vi.fn().mockResolvedValue({ organizationId: "org-1" }),
 }));
-
-import { setIndividualAssetAvailability } from "~/modules/asset/service.server";
 
 function buildArgs(availabilityAction: "available" | "unavailable") {
   const request = new Request("http://localhost/assets/unit-1/edit", {

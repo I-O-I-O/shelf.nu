@@ -159,9 +159,10 @@ export async function getIoioStaffReservationConflictSummary({
   const loanBookingIds = [
     ...new Set(conflicts.map((conflict) => conflict.bookingId)),
   ];
-  const softConflictBookingIds = [
-    ...new Set([...loanBookingIds, ...availability.staffReservationBookingIds]),
-  ];
+  // Only the explicitly marked IOIO Calendar/course reservations are soft.
+  // Active Student loans are reported separately and remain hard blockers;
+  // combining their IDs here would let the Calendar override bypass them.
+  const softConflictBookingIds = availability.staffReservationBookingIds;
   const availabilityWithoutSoftConflicts = softConflictBookingIds.length
     ? await getIoioAvailability({
         organizationId,

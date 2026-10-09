@@ -54,6 +54,15 @@ export function StaffItemDetail({
   physicalUnitsActionUrl,
 }: StaffItemDetailProps) {
   const available = availableQuantity > 0;
+  const availabilityUnitLabel =
+    availableQuantity === 1
+      ? (
+          { items: "item", units: "unit", kits: "kit" } as Record<
+            string,
+            string
+          >
+        )[unitLabel] ?? unitLabel
+      : unitLabel;
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-5 sm:px-6 lg:px-8">
@@ -99,10 +108,10 @@ export function StaffItemDetail({
           locations={locationPath.length ? [{ path: locationPath }] : []}
           availability={
             available
-              ? `${availableQuantity} available${
-                  unitLabel ? ` ${unitLabel}` : ""
-                }`
-              : "Unavailable"
+              ? `${availableQuantity} ${
+                  availabilityUnitLabel || "items"
+                } available now`
+              : "Unavailable now"
           }
           tracking={tracking}
           status={status}

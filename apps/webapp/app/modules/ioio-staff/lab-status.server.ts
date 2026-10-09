@@ -1,8 +1,10 @@
 import { AssetType } from "@prisma/client";
 import { db } from "~/database/db.server";
+import { recordEvent } from "~/modules/activity-event/service.server";
 import { deduplicateStaffInventoryRows } from "~/modules/asset/staff-inventory-view";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
+import { createNote } from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
 
 export type LabIssueSeverity = "critical" | "attention";
@@ -174,6 +176,176 @@ export async function resolveLabIssue({
   return { resolvedCount: result.count };
 }
 
+/** Return a repaired, report-backed asset to normal borrowing and inventory. */
+export async function returnBrokenAssetToService({
+  organizationId,
+  operationId,
+  staffUserId,
+}: {
+  organizationId: string;
+  operationId: string;
+  staffUserId: string;
+}) {
+  const brokenTypes = [
+    "ITEM_DAMAGED",
+    "ITEM_NOT_WORKING",
+    "PART_MISSING",
+    "KIT_INCOMPLETE",
+  ];
+
+  return db.$transaction(async (tx) => {
+    const operation = await tx.ioioWriteOperation.findFirst({
+      where: {
+        id: operationId,
+        organizationId,
+        operationType: "REPORT_PROBLEM",
+        status: "SUCCEEDED",
+        reportType: { in: brokenTypes },
+        assetId: { not: null },
+      },
+      select: { id: true, assetId: true, reportType: true },
+    });
+    if (!operation?.assetId || !operation.reportType) {
+      throw new ShelfError({
+        cause: null,
+        message: "This broken item is no longer waiting for repair.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const asset = await tx.asset.findFirst({
+      where: { id: operation.assetId, organizationId },
+      select: { id: true, title: true, status: true, availableToBook: true },
+    });
+    if (!asset) {
+      throw new ShelfError({
+        cause: null,
+        message: "The broken item could not be found in this workspace.",
+        label: "Operations",
+        status: 404,
+        shouldBeCaptured: false,
+      });
+    }
+    if (asset.status !== "AVAILABLE") {
+      throw new ShelfError({
+        cause: null,
+        message:
+          "This item is still checked out, reserved, or in custody and cannot return to service yet.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const [custody, activeBooking, preparationHold, otherOpenReport] =
+      await Promise.all([
+        tx.custody.findFirst({
+          where: { assetId: asset.id },
+          select: { id: true },
+        }),
+        tx.bookingAsset.findFirst({
+          where: {
+            assetId: asset.id,
+            checkedInAt: null,
+            booking: {
+              organizationId,
+              status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
+              OR: [
+                { description: { not: IOIO_STAFF_RESERVATION_DESCRIPTION } },
+                { description: null },
+              ],
+            },
+          },
+          select: { id: true },
+        }),
+        tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId,
+            assetId: asset.id,
+            operationType: "IOIO_PREPARATION",
+            status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
+          },
+          select: { id: true },
+        }),
+        tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId,
+            assetId: asset.id,
+            operationType: "REPORT_PROBLEM",
+            status: "SUCCEEDED",
+            id: { not: operation.id },
+            reportType: { not: operation.reportType },
+          },
+          select: { id: true },
+        }),
+      ]);
+    if (custody || activeBooking || preparationHold || otherOpenReport) {
+      throw new ShelfError({
+        cause: null,
+        message:
+          "Resolve the remaining hold or issue before returning this item to service.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const resolved = await tx.ioioWriteOperation.updateMany({
+      where: {
+        organizationId,
+        operationType: "REPORT_PROBLEM",
+        status: "SUCCEEDED",
+        reportType: operation.reportType,
+        assetId: asset.id,
+      },
+      data: { status: "RESOLVED", completedAt: new Date() },
+    });
+    if (!resolved.count) {
+      throw new ShelfError({
+        cause: null,
+        message: "This broken item is no longer waiting for repair.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    await tx.asset.update({
+      where: { id: asset.id, organizationId },
+      data: { availableToBook: true },
+    });
+    await createNote(
+      {
+        content: "Repaired and returned to service.",
+        type: "UPDATE",
+        userId: staffUserId,
+        assetId: asset.id,
+        organizationId,
+      },
+      tx
+    );
+    await recordEvent(
+      {
+        organizationId,
+        actorUserId: staffUserId,
+        action: "ASSET_STATUS_CHANGED",
+        entityType: "ASSET",
+        entityId: asset.id,
+        assetId: asset.id,
+        field: "availableToBook",
+        fromValue: asset.availableToBook,
+        toValue: true,
+        meta: { source: "IOIO_OPERATIONS_RETURN_TO_SERVICE" },
+      },
+      tx
+    );
+
+    return { assetId: asset.id, title: asset.title, status: "AVAILABLE" };
+  });
+}
+
 /**
  * Read-only operational summary for the IOIO staff surfaces.
  *
@@ -182,8 +354,10 @@ export async function resolveLabIssue({
  */
 export async function getLabStatus({
   organizationId,
+  preparationOrganizationId = organizationId,
 }: {
   organizationId: string;
+  preparationOrganizationId?: string;
 }): Promise<LabStatus> {
   const [
     overdueLoanCount,
@@ -300,9 +474,10 @@ export async function getLabStatus({
     }),
     db.ioioWriteOperation.count({
       where: {
-        organizationId,
+        organizationId: preparationOrganizationId,
         operationType: "IOIO_PREPARATION",
         status: "PENDING_PREPARATION",
+        source: { in: ["IOIO_PREPARATION_REQUEST", "IOIO_ASSISTANT"] },
       },
     }),
     db.ioioWriteOperation.findMany({

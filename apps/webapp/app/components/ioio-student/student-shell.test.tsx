@@ -68,11 +68,11 @@ vi.mock("react-router", () => ({
   useRouteLoaderData: () => undefined,
 }));
 
-import StudentShell from "./student-shell";
-import { StudentCheckoutProvider } from "./checkout-context";
-import { StudentCheckoutButton } from "./student-ui";
-import { StudentBorrowListIndicator } from "./student-shell";
 import type { StudentAsset } from "~/modules/ioio-student/service.server";
+import { StudentCheckoutProvider } from "./checkout-context";
+import StudentShell from "./student-shell";
+import { StudentBorrowListIndicator } from "./student-shell";
+import { StudentCheckoutButton } from "./student-ui";
 
 function checkoutAsset(): StudentAsset {
   return {
@@ -99,6 +99,41 @@ function checkoutAsset(): StudentAsset {
 }
 
 describe("StudentShell account controls", () => {
+  it("shows only the IOIO student destinations in its navigation", () => {
+    render(<StudentShell />);
+
+    const expectedLinks = [
+      ["Home", "/ioio"],
+      ["My Loans", "/ioio/loans"],
+      ["About the IOIO Lab", "/ioio/lab"],
+      ["Handbook", "/handbook"],
+      ["Report", "/ioio/report"],
+      ["Settings", "/ioio/settings"],
+    ] as const;
+
+    for (const [label, href] of expectedLinks) {
+      expect(screen.getAllByRole("link", { name: label })[0]).toHaveAttribute(
+        "href",
+        href
+      );
+    }
+
+    const visibleDestinations = screen
+      .getAllByRole("link")
+      .map((link) => link.getAttribute("href"));
+    for (const href of [
+      "/home",
+      "/assets",
+      "/bookings",
+      "/calendar",
+      "/reports",
+      "/settings",
+      "/account-details/workspace",
+    ]) {
+      expect(visibleDestinations).not.toContain(href);
+    }
+  });
+
   it("keeps logout available in the desktop sidebar and mobile drawer", async () => {
     const user = userEvent.setup();
 

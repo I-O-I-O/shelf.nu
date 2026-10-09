@@ -103,6 +103,8 @@ import { getRemindersForOverviewPage } from "~/modules/asset-reminder/service.se
 import { getCustodyCardHolderUserId } from "~/modules/custody/utils";
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { moveAssetKitUnits } from "~/modules/kit/service.server";
 import { generateQrObj } from "~/modules/qr/utils.server";
@@ -247,7 +249,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
                     },
                   },
                 },
-                select: { booking: { select: { status: true } } },
+                select: {
+                  booking: { select: { status: true, description: true } },
+                },
               },
               custody: { select: { id: true } },
               mainImage: true,
@@ -276,7 +280,13 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
                 { operationType: "REPORT_PROBLEM", status: "SUCCEEDED" },
                 {
                   operationType: "IOIO_PREPARATION",
-                  status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
+                  status: {
+                    in: [
+                      "PENDING_PREPARATION",
+                      "READY_FOR_PICKUP",
+                      "CANCELLED_PICKUP",
+                    ],
+                  },
                 },
               ],
             },
@@ -307,44 +317,35 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       asset.assetModel?.name ?? asset.title.replace(/\s+#\d+$/u, "");
     const physicalUnitRows = individualProductUnits.map((unit) => {
       const operations = operationsByPhysicalUnitId.get(unit.id) ?? [];
-      const issueReport = operations.find(
-        (operation) => operation.operationType === "REPORT_PROBLEM"
-      );
-      const hasBrokenReport =
-        issueReport?.reportType === "ITEM_DAMAGED" ||
-        issueReport?.reportType === "ITEM_NOT_WORKING" ||
-        issueReport?.reportType === "PART_MISSING" ||
-        issueReport?.reportType === "KIT_INCOMPLETE";
-      const preparationState = operations.find(
-        (operation) => operation.operationType === "IOIO_PREPARATION"
-      )?.status;
-      const bookingStatuses = unit.bookingAssets.map(
-        (bookingAsset) => bookingAsset.booking.status
-      );
-      const status = hasBrokenReport
-        ? "Broken"
-        : issueReport
-        ? "Issue reported"
-        : preparationState === "CANCELLED_PICKUP"
-        ? "Put back required"
-        : preparationState === "READY_FOR_PICKUP"
-        ? "Ready for pickup"
-        : unit.status === AssetStatus.IN_CUSTODY ||
-          unit.status === AssetStatus.CHECKED_OUT
-        ? "In use"
-        : bookingStatuses.includes(BookingStatus.RESERVED)
-        ? "Reserved"
-        : !unit.availableToBook
-        ? "Temporarily unavailable"
-        : availablePhysicalUnitIds.has(unit.id)
-        ? "Available"
-        : "Unavailable";
+      const issueReportTypes = operations
+        .filter((operation) => operation.operationType === "REPORT_PROBLEM")
+        .map((operation) => operation.reportType);
+      const preparationStates = operations
+        .filter((operation) => operation.operationType === "IOIO_PREPARATION")
+        .map((operation) => operation.status);
+      const hasIssueReport = issueReportTypes.length > 0;
+      const hasPreparationState = preparationStates.length > 0;
+      const status = getIoioPhysicalUnitState({
+        assetStatus: unit.status,
+        availableToBook: unit.availableToBook,
+        bookingStates: unit.bookingAssets.map((bookingAsset) => ({
+          status: bookingAsset.booking.status,
+          isSoftStaffReservation:
+            bookingAsset.booking.description ===
+            IOIO_STAFF_RESERVATION_DESCRIPTION,
+        })),
+        preparationStates,
+        issueReportTypes,
+        availableAccordingToIoioInventory: availablePhysicalUnitIds.has(
+          unit.id
+        ),
+      });
       const canChangeAvailability =
         unit.status === AssetStatus.AVAILABLE &&
         unit.custody.length === 0 &&
         unit.bookingAssets.length === 0 &&
-        !preparationState &&
-        !issueReport;
+        !hasPreparationState &&
+        !hasIssueReport;
 
       return {
         id: unit.id,
@@ -356,12 +357,14 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         status,
         canChangeAvailability,
         unavailableReason: !canChangeAvailability
-          ? issueReport
+          ? hasIssueReport
             ? "Resolve the issue report before making this unit available."
-            : preparationState === "CANCELLED_PICKUP"
+            : preparationStates.includes("CANCELLED_PICKUP")
             ? "Put this unit back before changing its availability."
-            : preparationState === "READY_FOR_PICKUP"
+            : preparationStates.includes("READY_FOR_PICKUP")
             ? "This unit is staged for pickup."
+            : preparationStates.includes("PENDING_PREPARATION")
+            ? "This unit is assigned to a preparation request."
             : unit.custody.length
             ? "Release this unit from custody first."
             : unit.bookingAssets.length
@@ -1080,7 +1083,7 @@ export default function AssetOverview() {
   const canEditAsset = canUpdateAvailability;
 
   const inventoryAvailableQuantity = individualProductSummary
-    ? individualProductSummary.available
+    ? physicalUnitRows.filter((unit) => unit.status === "Available").length
     : isQuantityTracked(asset)
     ? Math.max(0, quantityData?.available ?? asset.quantity ?? 0)
     : physicalUnitRows.length > 0
@@ -1151,6 +1154,9 @@ export default function AssetOverview() {
         status={
           individualProductSummary
             ? undefined
+            : asset.type === AssetType.INDIVIDUAL
+            ? physicalUnitRows.find((unit) => unit.id === asset.id)?.status ??
+              "Unavailable"
             : asset.status === AssetStatus.AVAILABLE && asset.availableToBook
             ? "Available"
             : "Unavailable"
@@ -1177,7 +1183,7 @@ export default function AssetOverview() {
             label: "Returns",
             value: `${
               asset.returnHandling === "RETURN_TO_RETURN_ZONE"
-                ? "Return Zone for TA check"
+                ? "Return section for TA check"
                 : "Assigned storage location"
             }${asset.requiresReturnPhoto ? "; photo required" : ""}`,
           },
