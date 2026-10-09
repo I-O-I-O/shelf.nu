@@ -40,13 +40,79 @@ import {
   parseData,
   safeRedirect,
 } from "~/utils/http.server";
+import {
+  resolveIoioAccountDestination,
+  resolveIoioAccountMembership,
+} from "~/utils/ioio-role-routing";
 import { validEmail } from "~/utils/misc";
 
-export function loader({ context }: LoaderFunctionArgs) {
+async function getAuthenticatedLanding({
+  userId,
+  request,
+  requestedDestination,
+}: {
+  userId: string;
+  request: Request;
+  requestedDestination?: string | null;
+}) {
+  const selected = await getSelectedOrganization({ userId, request });
+  if (selected.noVisibleOrganizations) {
+    return {
+      destination: "/sso-pending-assignment",
+      organizationId: null,
+    };
+  }
+
+  const membership = resolveIoioAccountMembership(
+    selected.userOrganizations,
+    selected.organizationId,
+    selected.currentOrganization.type
+  );
+  const organizationId = membership?.organizationId ?? selected.organizationId;
+  const roles = membership?.roles;
+  const defaultDestination = resolveIoioAccountDestination(roles);
+  if (!defaultDestination) {
+    throw new ShelfError({
+      cause: null,
+      title: "Account role could not be resolved",
+      message: "Your account role could not be verified. Please contact Staff.",
+      status: 403,
+      label: "Permission",
+      shouldBeCaptured: false,
+    });
+  }
+
+  const safeDestination = safeRedirect(
+    requestedDestination || defaultDestination,
+    defaultDestination
+  );
+
+  return {
+    destination:
+      resolveIoioAccountDestination(roles, safeDestination) ??
+      defaultDestination,
+    organizationId,
+  };
+}
+
+export async function loader({ context, request }: LoaderFunctionArgs) {
   const title = "Welcome back";
 
   if (context.isAuthenticated) {
-    return redirect("/assets");
+    const { userId } = context.getSession();
+    const landing = await getAuthenticatedLanding({
+      userId,
+      request,
+      requestedDestination: new URL(request.url).searchParams.get("redirectTo"),
+    });
+    const headers = landing.organizationId
+      ? [
+          setCookie(
+            await setSelectedOrganizationIdCookie(landing.organizationId)
+          ),
+        ]
+      : [];
+    return redirect(landing.destination, { headers });
   }
 
   return data(payload({ title }));
@@ -147,19 +213,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
          * Theoretically, the user should always have a selected organization cookie as soon as they login for the first time
          * However we do this check to make sure they are still part of that organization
          */
-        const { organizationId } = await getSelectedOrganization({
+        const landing = await getAuthenticatedLanding({
           userId,
           request,
+          requestedDestination: redirectTo,
         });
 
-        // Set the auth session and redirect to the assets page
+        // Set the Shelf session, retain the selected-workspace cookie, and
+        // land on the authenticated IOIO surface for this membership.
         context.setSession(authSession);
 
-        return redirect(safeRedirect(redirectTo || "/assets"), {
-          headers: [
-            setCookie(await setSelectedOrganizationIdCookie(organizationId)),
-          ],
-        });
+        const headers = landing.organizationId
+          ? [
+              setCookie(
+                await setSelectedOrganizationIdCookie(landing.organizationId)
+              ),
+            ]
+          : [];
+        return redirect(landing.destination, { headers });
       }
     }
 

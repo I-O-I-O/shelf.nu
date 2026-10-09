@@ -3,6 +3,8 @@ import { db } from "~/database/db.server";
 import {
   DEFAULT_LAB_INFORMATION,
   createCustomLabInfoSection,
+  deleteCustomLabInfoSection,
+  getLabInformation,
   reorderLabInfoSections,
   updateLabInfoSectionImages,
   updateLabInformationField,
@@ -13,17 +15,28 @@ const imageDb = vi.hoisted(() => ({
   update: vi.fn(),
 }));
 
+const sectionDb = vi.hoisted(() => ({
+  findFirst: vi.fn(),
+  delete: vi.fn(),
+}));
+
 // @vitest-environment node
 vi.mock("~/database/db.server", () => ({
   db: {
     ioioLabInformation: {
+      findUnique: vi.fn(),
       upsert: vi.fn(),
     },
     ioioLabInformationSection: {
       findMany: vi.fn(),
+      findFirst: sectionDb.findFirst,
       upsert: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      delete: sectionDb.delete,
+    },
+    ioioLabTA: {
+      findMany: vi.fn(),
     },
     ioioLabInformationImage: {
       findMany: imageDb.findMany,
@@ -122,6 +135,107 @@ describe("updateLabInformationField", () => {
       })
     ).rejects.toThrow("The Lab Info section order is invalid.");
     expect(db.ioioLabInformationSection.upsert).not.toHaveBeenCalled();
+  });
+
+  it("persists the requested order while keeping About first and moving custom sections", async () => {
+    vi.mocked(db.ioioLabInformationSection.findMany).mockResolvedValueOnce([
+      { key: "custom_safety" },
+    ] as never);
+
+    await reorderLabInfoSections({
+      organizationId: "org-1",
+      orderedKeys: [
+        "about",
+        "custom_safety",
+        "borrowing",
+        "rules",
+        "returns",
+        "help",
+        "opening-hours",
+        "lab-tas",
+      ],
+    });
+
+    expect(db.ioioLabInformationSection.update).toHaveBeenCalledWith({
+      where: {
+        organizationId_key: { organizationId: "org-1", key: "custom_safety" },
+      },
+      data: { position: 1 },
+    });
+    expect(db.$transaction).toHaveBeenCalledOnce();
+  });
+
+  it("deletes a custom section by organization and key", async () => {
+    sectionDb.findFirst.mockResolvedValueOnce({ id: "section-1", images: [] });
+    sectionDb.delete.mockResolvedValueOnce({});
+
+    await deleteCustomLabInfoSection({
+      organizationId: "org-1",
+      key: "custom_safety",
+    });
+
+    expect(sectionDb.findFirst).toHaveBeenCalledWith({
+      where: { organizationId: "org-1", key: "custom_safety", isCustom: true },
+      select: { id: true, images: { select: { storagePath: true } } },
+    });
+    expect(sectionDb.delete).toHaveBeenCalledWith({
+      where: {
+        organizationId_key: { organizationId: "org-1", key: "custom_safety" },
+      },
+    });
+  });
+
+  it("serves Student Lab Information in the saved section order", async () => {
+    vi.mocked(db.ioioLabInformation.findUnique).mockResolvedValueOnce(
+      null as never
+    );
+    vi.mocked(db.ioioLabTA.findMany).mockResolvedValueOnce([] as never);
+    vi.mocked(db.ioioLabInformationSection.findMany).mockResolvedValueOnce([
+      {
+        id: "borrowing",
+        key: "borrowing",
+        title: null,
+        content: null,
+        position: 3,
+        isCustom: false,
+        images: [],
+      },
+      {
+        id: "rules",
+        key: "rules",
+        title: null,
+        content: null,
+        position: 2,
+        isCustom: false,
+        images: [],
+      },
+      {
+        id: "about",
+        key: "about",
+        title: null,
+        content: null,
+        position: 7,
+        isCustom: false,
+        images: [],
+      },
+      {
+        id: "custom",
+        key: "custom_safety",
+        title: "Safety",
+        content: "Use care.",
+        position: 1,
+        isCustom: true,
+        images: [],
+      },
+    ] as never);
+
+    const information = await getLabInformation("org-1");
+
+    expect(information.sections.map(({ key }) => key).slice(0, 3)).toEqual([
+      "about",
+      "custom_safety",
+      "rules",
+    ]);
   });
 });
 

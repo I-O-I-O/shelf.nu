@@ -26,6 +26,7 @@ import {
   bulkInviteUsers,
   checkUserAndInviteMatch,
   createInvite,
+  getPaginatedAndFilterableSettingInvites,
   updateInviteStatus,
 } from "./service.server";
 import { createTeamMember } from "../team-member/service.server";
@@ -37,6 +38,7 @@ const dbMock = vi.hoisted(() => ({
   invite: {
     findFirst: vi.fn(),
     findMany: vi.fn(),
+    groupBy: vi.fn(),
     create: vi.fn(),
     createManyAndReturn: vi.fn(),
     update: vi.fn(),
@@ -660,5 +662,54 @@ describe("createInvite — SCIM-managed domains", () => {
     await expect(createInvite(invitePayload("org-other"))).rejects.toThrow(
       "The user needs to sign up via SSO"
     );
+  });
+});
+
+describe("getPaginatedAndFilterableSettingInvites", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMock.invite.findMany.mockResolvedValue([
+      {
+        id: "invite-student",
+        teamMemberId: "team-member-student",
+        inviteeEmail: "ioio-student@example.test",
+        status: InviteStatuses.PENDING,
+        inviteeTeamMember: { name: "ioio-student" },
+        roles: [OrganizationRoles.SELF_SERVICE],
+        inviteMessage: null,
+      },
+    ]);
+    dbMock.invite.groupBy.mockResolvedValue([
+      { inviteeEmail: "ioio-student@example.test" },
+    ]);
+  });
+
+  it("finds a pending invite by recipient email", async () => {
+    const result = await getPaginatedAndFilterableSettingInvites({
+      organizationId: "ioio-team",
+      request: new Request(
+        "http://localhost/settings/team/invites?s=ioio-student%40example.test"
+      ),
+    });
+
+    expect(dbMock.invite.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "ioio-team",
+          status: InviteStatuses.PENDING,
+          OR: expect.arrayContaining([
+            {
+              inviteeEmail: {
+                contains: "ioio-student@example.test",
+                mode: "insensitive",
+              },
+            },
+          ]),
+        }),
+      })
+    );
+    expect(result.items.map((item) => item.email)).toEqual([
+      "ioio-student@example.test",
+    ]);
   });
 });

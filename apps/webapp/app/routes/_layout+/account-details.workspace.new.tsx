@@ -21,6 +21,7 @@ import {
 import { sendEmail } from "~/emails/mail.server";
 import { linkAuditAddonToOrganization } from "~/modules/audit/addon.server";
 import { linkBarcodeAddonToOrganization } from "~/modules/barcode/addon.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   getSelectedOrganization,
   setSelectedOrganizationIdCookie,
@@ -44,6 +45,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = authSession;
 
   try {
+    await requireIoioStaffAccess({ context, request });
     const { organizationId } = await getSelectedOrganization({
       userId,
       request,
@@ -76,6 +78,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
   try {
     assertIsPost(request);
+
+    await requireIoioStaffAccess({ context, request });
 
     await assertUserCanCreateMoreOrganizations(userId);
 

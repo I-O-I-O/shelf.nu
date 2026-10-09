@@ -679,8 +679,11 @@ export async function getPaginatedAndFilterableSettingInvites({
     };
 
     if (search) {
-      /** Or search the input against input user/teamMember */
+      /** Search the recipient email, linked team member, or accepted user. */
       inviteWhere.OR = [
+        {
+          inviteeEmail: { contains: search, mode: "insensitive" },
+        },
         {
           inviteeTeamMember: {
             name: { contains: search, mode: "insensitive" },

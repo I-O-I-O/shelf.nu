@@ -20,7 +20,7 @@ import { requirePermission } from "~/utils/roles.server";
 import { premiumIsEnabled } from "~/utils/subscription.server";
 import { resolveTeamUpgradeCta } from "~/utils/team-upgrade-cta";
 
-export const meta = () => [{ title: appendToMetaTitle("Team settings") }];
+export const meta = () => [{ title: appendToMetaTitle("IOIO Users") }];
 
 export const loader = async ({ request, context }: LoaderFunctionArgs) => {
   const authSession = context.getSession();
@@ -114,9 +114,7 @@ export default function TeamSettings() {
     <>
       <When truthy={!params.userId}>
         <div className="rounded border bg-white p-4 md:px-10 md:py-8">
-          <h1 className="text-[18px] font-semibold">
-            {isPersonalOrg ? "Team" : `${orgName}’s team`}
-          </h1>
+          <h1 className="text-[18px] font-semibold">IOIO Users</h1>
           {/*
             A Personal workspace has no team to manage, so the standard line
             promises something the banner below it immediately withdraws. It
@@ -124,8 +122,8 @@ export default function TeamSettings() {
           */}
           <p className="mb-6 text-sm text-gray-600">
             {isPersonalOrg
-              ? "Track who has custody of your assets."
-              : "Manage your existing team and give team members custody to certain assets."}
+              ? "Manage the people and access connected to this workspace."
+              : `Manage Staff and Students in ${orgName}.`}
           </p>
           {isPersonalOrg ? (
             <TeamUpgradeBanner

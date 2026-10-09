@@ -40,6 +40,7 @@ import { getLegacyLoginDecisionForUser } from "~/modules/auth/sso-enforcement.se
 import { getBookingSettingsForOrganization } from "~/modules/booking-settings/service.server";
 import { getLabStatus } from "~/modules/ioio-staff/lab-status.server";
 import { getAssignedOpenLabTaskCount } from "~/modules/ioio-staff/lab-tasks.server";
+import { getStaffPreparationQueueOrganizationId } from "~/modules/ioio-staff/preparation-queue.server";
 import { getStudentAnnualAccessApproval } from "~/modules/ioio-student/annual-access.server";
 import { isStudentLabIntroductionRequired } from "~/modules/ioio-student/lab-introduction.shared";
 import {
@@ -226,6 +227,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       organizationId,
       organizations,
       currentOrganization,
+      userOrganizations,
       cookieRefreshNeeded,
       noVisibleOrganizations,
     } = await withIoioStudentLoadStage(
@@ -360,6 +362,17 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       });
     }
 
+    const preparationQueueOrganizationId =
+      isIoioStaff &&
+      pathname === "/home" &&
+      currentOrganization.type === "PERSONAL"
+        ? await getStaffPreparationQueueOrganizationId({
+            organizationId: currentOrganization.id,
+            organizationType: currentOrganization.type,
+            userOrganizations,
+          })
+        : currentOrganization.id;
+
     // Run booking settings, working hours, and unread count in parallel —
     // all only depend on organizationId/userId which are available now.
     const [
@@ -392,7 +405,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           )
         : Promise.resolve(0),
       isIoioStaff
-        ? getLabStatus({ organizationId: currentOrganization.id })
+        ? getLabStatus({
+            organizationId: currentOrganization.id,
+            preparationOrganizationId: preparationQueueOrganizationId,
+          })
         : Promise.resolve(null),
       isIoioStaff || isIoioTA
         ? getAssignedOpenLabTaskCount({

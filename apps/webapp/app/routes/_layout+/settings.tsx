@@ -3,11 +3,9 @@ import { data, Link, Outlet, useLoaderData, useMatches } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
 import HorizontalTabs from "~/components/layout/horizontal-tabs";
-import When from "~/components/when/when";
-import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import type { RouteHandleWithName } from "~/modules/types";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import { isPersonalOrg } from "~/utils/organization";
 import {
@@ -25,12 +23,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = authSession;
 
   try {
-    const { currentOrganization } = await requirePermission({
+    const { currentOrganization, role } = await requirePermission({
       userId: authSession.userId,
       request,
       entity: PermissionEntity.generalSettings,
       action: PermissionAction.read,
     });
+
+    if (role !== "OWNER" && role !== "ADMIN") {
+      throw new ShelfError({
+        cause: null,
+        message: "Staff Settings are available to Owners and Admins only.",
+        label: "Permission",
+        status: 403,
+        shouldBeCaptured: false,
+      });
+    }
 
     const title = "Settings";
     const subHeading = "Manage your preferences here.";
@@ -55,47 +63,34 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 
 export const shouldRevalidate = () => false;
 
+export function getIoioSettingsTabs(isPersonal: boolean) {
+  return isPersonal
+    ? [{ to: "backup", content: "Backup" }]
+    : [
+        { to: "emails", content: "Emails" },
+        { to: "lab-information", content: "Lab information" },
+        { to: "access-approval", content: "Access approval" },
+        { to: "ai", content: "AI" },
+        { to: "backup", content: "Backup" },
+        { to: "card-access", content: "IOIO Lab Access" },
+        { to: "team", content: "IOIO Users" },
+      ];
+}
+
 export default function SettingsPage() {
   const { _isPersonalOrg } = useLoaderData<typeof loader>();
-  let items = [
-    { to: "general", content: "General" },
-    ...(!_isPersonalOrg ? [{ to: "bookings", content: "Bookings" }] : []),
-    ...(!_isPersonalOrg ? [{ to: "emails", content: "Emails" }] : []),
-    { to: "custom-fields", content: "Custom fields" },
-    { to: "asset-models", content: "Asset models" },
-    { to: "team", content: "Team" },
-  ];
-
-  const { isBaseOrSelfService } = useUserRoleHelper();
-  /** If user is self service, remove the extra items */
-  if (isBaseOrSelfService) {
-    items = items.filter(
-      (item) =>
-        ![
-          "custom-fields",
-          "team",
-          "general",
-          "bookings",
-          "emails",
-          "asset-models",
-        ].includes(item.to)
-    );
-  }
+  const items = getIoioSettingsTabs(_isPersonalOrg);
 
   const matches = useMatches();
   const currentRoute: RouteHandleWithName = matches[matches.length - 1];
   return (
     <>
       <Header hidePageDescription />
-      <When
-        truthy={
-          !["$userId.assets", "$userId.bookings", "$userId.notes"].includes(
-            currentRoute?.handle?.name
-          )
-        }
-      >
+      {!["$userId.assets", "$userId.bookings", "$userId.notes"].includes(
+        currentRoute?.handle?.name
+      ) ? (
         <HorizontalTabs items={items} />
-      </When>
+      ) : null}
       <Outlet />
     </>
   );

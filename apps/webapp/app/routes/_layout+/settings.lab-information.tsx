@@ -616,7 +616,10 @@ export default function LabInformationSettingsPage() {
         </button>
       </div>
 
-      <details className="mb-4 rounded-lg border border-gray-200 bg-white px-3 py-2">
+      <details
+        open
+        className="mb-4 rounded-lg border border-gray-200 bg-white px-3 py-2"
+      >
         <summary className="cursor-pointer text-sm font-medium text-gray-700">
           Arrange sections
         </summary>

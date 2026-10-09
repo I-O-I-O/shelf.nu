@@ -21,6 +21,7 @@ import {
   WorkspaceEditForms,
 } from "~/components/workspace/edit-form";
 import { db } from "~/database/db.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   getOrganizationAdmins,
   updateOrganization,
@@ -67,6 +68,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
   );
 
   try {
+    await requireIoioStaffAccess({ context, request });
     // Judged by the role held in the workspace being edited, which need not be
     // the one selected.
     const { organizations } = await requirePermissionInOrganization({
@@ -189,6 +191,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
   try {
     assertIsPost(request);
+
+    await requireIoioStaffAccess({ context, request });
 
     const { organizations, userOrganizations } =
       await requirePermissionInOrganization({
