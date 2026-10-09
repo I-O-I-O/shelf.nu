@@ -139,71 +139,68 @@ function colorForName(value: string) {
   return IOIO_LOCATION_COLORS[hash % IOIO_LOCATION_COLORS.length];
 }
 
-function getOwnLocationColor(location: IoioLocationNode) {
-  return getIoioLocationColor({
-    name: location.name,
-    isRoom: !location.parentId,
-    color: location.color,
-  });
-}
-
-function findSectionAncestor(
-  parentId: string | null | undefined,
-  locationsById: Map<string, IoioLocationNode>
-) {
-  let current = parentId ? locationsById.get(parentId) : undefined;
-  const visited = new Set<string>();
-
-  while (current && !visited.has(current.id)) {
-    visited.add(current.id);
-    const parent = current.parentId
-      ? locationsById.get(current.parentId)
-      : undefined;
-
-    // In the IOIO hierarchy a section is the level directly below a room.
-    // This uses the stored parent chain, never a location name.
-    if (parent && parent.parentId === null) return current;
-    current = parent;
-  }
-
-  return undefined;
-}
-
 /**
- * Resolves the color that should be presented for a canonical location.
- * Rooms and sections use their own stored color. Shelves and containers use
- * the nearest section color, so a section edit is reflected everywhere
- * without mutating every descendant record.
+ * Resolves the room theme for a location. Child-level stored colors are
+ * intentionally ignored so changing a room updates its whole hierarchy.
  */
 export function getEffectiveIoioLocationColor({
   location,
   locations,
   parentId,
-  locationType,
 }: {
   location?: IoioLocationNode;
   locations: IoioLocationNode[];
   parentId?: string | null;
-  locationType?: IoioLocationType;
 }) {
   const locationsById = new Map(locations.map((entry) => [entry.id, entry]));
   const resolvedLocation =
     location ?? (parentId ? locationsById.get(parentId) : undefined);
+  if (!resolvedLocation) return ROOM_COLOR;
 
-  if (locationType === "room" || resolvedLocation?.parentId === null) {
-    return resolvedLocation
-      ? getOwnLocationColor(resolvedLocation)
-      : ROOM_COLOR;
+  let room = resolvedLocation;
+  const visited = new Set<string>();
+  while (room.parentId && !visited.has(room.id)) {
+    visited.add(room.id);
+    const parent = locationsById.get(room.parentId);
+    if (!parent) break;
+    room = parent;
   }
 
-  const section = findSectionAncestor(
-    location ? location.parentId : parentId,
-    locationsById
-  );
-  if (section) return getOwnLocationColor(section);
+  return room.parentId
+    ? ROOM_COLOR
+    : getIoioLocationColorByHex(room.color ?? ROOM_COLOR.color);
+}
 
-  if (location) return getOwnLocationColor(location);
-  return ROOM_COLOR;
+/**
+ * Resolves a new or edited location's effective room theme. Only rooms store a
+ * chosen color; child locations inherit the top-level room color at render time.
+ */
+export function getDerivedIoioLocationColor({
+  locations,
+  parentId,
+  locationType,
+}: {
+  name: string;
+  locations: IoioLocationNode[];
+  parentId?: string | null;
+  locationType: IoioLocationType;
+}) {
+  if (locationType === "room") {
+    return ROOM_COLOR;
+  }
+
+  const locationsById = new Map(locations.map((entry) => [entry.id, entry]));
+  const visited = new Set<string>();
+  let room = parentId ? locationsById.get(parentId) : undefined;
+
+  while (room?.parentId && !visited.has(room.id)) {
+    visited.add(room.id);
+    room = locationsById.get(room.parentId);
+  }
+
+  return room && !room.parentId
+    ? getIoioLocationColorByHex(room.color ?? ROOM_COLOR.color)
+    : ROOM_COLOR;
 }
 
 /**

@@ -6,6 +6,7 @@ import type {
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import Header from "~/components/layout/header";
+import { IOIO_LOCATION_COLOR_VALUES } from "~/components/location/ioio-location-colors";
 import { IoioLocationCreationForm } from "~/components/location/ioio-location-creation-form";
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
@@ -35,7 +36,11 @@ const IoioLocationCreationSchema = z.object({
   color: z
     .string()
     .optional()
-    .transform((value) => (value === undefined ? undefined : value || null)),
+    .transform((value) => (value === undefined ? undefined : value || null))
+    .refine(
+      (value) => !value || IOIO_LOCATION_COLOR_VALUES.includes(value),
+      "Choose a supported room color."
+    ),
 });
 
 function throwLocationValidationError(message: string): never {
@@ -109,7 +114,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         additionalData: { userId, organizationId },
       }
     );
-    const { locationType, name, parentId, color } = parsedData;
+    const { locationType, name, parentId, color: submittedColor } = parsedData;
     const finalName = name?.trim() ?? "";
 
     if (!finalName) throwLocationValidationError("A name is required.");
@@ -174,6 +179,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       );
     }
 
+    const color = locationType === "room" ? submittedColor ?? "#455A64" : null;
+
     const location = await createLocation({
       name: finalName,
       description: "",
@@ -181,7 +188,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       userId,
       organizationId,
       parentId,
-      color: color ?? null,
+      color,
     });
 
     await updateLocationImage({

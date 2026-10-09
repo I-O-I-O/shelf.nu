@@ -23,6 +23,7 @@ import {
   type IoioLocationCreationType,
 } from "./ioio-location-cascade-select";
 import { IoioLocationColorPicker } from "./ioio-location-color-picker";
+import { IOIO_LOCATION_COLOR_VALUES } from "./ioio-location-colors";
 import { LocationImageField } from "./location-image-field";
 import { LocationSelect } from "./location-select";
 import { Form } from "../custom-form";
@@ -78,11 +79,11 @@ interface Props {
   name?: Location["name"];
   address?: Location["address"];
   description?: Location["description"];
+  color?: Location["color"];
   /** Saved image of the location being edited, shown next to the file input. */
   imageUrl?: Location["imageUrl"];
   /** Saved thumbnail of the location being edited. */
   thumbnailUrl?: Location["thumbnailUrl"];
-  color?: Location["color"];
   apiUrl?: string;
   /** Callback function to handle cancel action when form is used inline (e.g., in a dialog). When provided, Cancel button will call this instead of navigating. */
   onCancel?: () => void;
@@ -109,9 +110,9 @@ export const LocationForm = ({
   name,
   address,
   description,
+  color,
   imageUrl,
   thumbnailUrl,
-  color,
   apiUrl,
   onSuccess,
   parentId,
@@ -143,7 +144,9 @@ export const LocationForm = ({
   const validateFile = ioioMode ? validateAssetImage : validateDefaultFile;
   const [clearImage, setClearImage] = useState(false);
   const [selectedParentId, setSelectedParentId] = useState(parentId);
-  const [locationColor, setLocationColor] = useState(color);
+  const [selectedColor, setSelectedColor] = useState(
+    color && IOIO_LOCATION_COLOR_VALUES.includes(color) ? color : "#455A64"
+  );
   const [, updateName] = useAtom(updateDynamicTitleAtom);
 
   // Focus the name input on mount. Replaces `autoFocus` to satisfy
@@ -155,10 +158,6 @@ export const LocationForm = ({
   useEffect(() => {
     setSelectedParentId(parentId);
   }, [parentId]);
-
-  useEffect(() => {
-    setLocationColor(color);
-  }, [color]);
 
   useEffect(() => {
     if (!hasOnSuccessFunc) return;
@@ -277,6 +276,19 @@ export const LocationForm = ({
               value={selectedParentId ?? ""}
               readOnly
             />
+            {locationType === "room" ? (
+              <FormRow rowLabel="Room color">
+                <IoioLocationColorPicker
+                  locations={locations ?? []}
+                  currentLocationId={excludeLocationId}
+                  value={selectedColor}
+                  locationType="room"
+                  onChange={setSelectedColor}
+                />
+              </FormRow>
+            ) : (
+              <input type="hidden" name="color" value="" readOnly />
+            )}
             {locationType === "room" ? null : (
               <FormRow
                 rowLabel="Location"
@@ -295,6 +307,7 @@ export const LocationForm = ({
                   type={locationType as IoioLocationCreationType}
                   value={selectedParentId}
                   disabled={disabled}
+                  hideParentInput
                   onChange={setSelectedParentId}
                   excludeIds={excludeLocationIds ?? []}
                 />
@@ -304,18 +317,6 @@ export const LocationForm = ({
                 >
                   Create location
                 </Link>
-              </FormRow>
-            )}
-            {!locations ? null : (
-              <FormRow rowLabel="Location color">
-                <IoioLocationColorPicker
-                  locations={locations}
-                  parentId={selectedParentId}
-                  currentLocationId={excludeLocationId}
-                  value={locationColor}
-                  locationType={locationType}
-                  onChange={setLocationColor}
-                />
               </FormRow>
             )}
           </>

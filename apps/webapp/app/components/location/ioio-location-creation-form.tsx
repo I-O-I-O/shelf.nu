@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { Location } from "@prisma/client";
 import { useAtom, useAtomValue } from "jotai";
 import { useActionData, useNavigation } from "react-router";
@@ -10,14 +10,10 @@ import {
   IoioLocationParentPicker,
   IoioLocationPlacementPicker,
 } from "~/components/location/ioio-location-cascade-select";
+import { IoioLocationColorPicker } from "~/components/location/ioio-location-color-picker";
 import {
-  getFirstAvailableLocationColor,
-  getUsedSiblingColors,
-  IoioLocationColorPicker,
-} from "~/components/location/ioio-location-color-picker";
-import {
+  getDerivedIoioLocationColor,
   getEffectiveIoioLocationColor,
-  getIoioLocationColor,
 } from "~/components/location/ioio-location-colors";
 import { IoioLocationOverview } from "~/components/location/ioio-location-overview";
 import { Button } from "~/components/shared/button";
@@ -74,13 +70,7 @@ export function IoioLocationCreationForm({ locations }: Props) {
   const [parentId, setParentId] = useState<string>();
   const [itemLocationId, setItemLocationId] = useState<string>();
   const [locationName, setLocationName] = useState("");
-  const [locationColor, setLocationColor] = useState(
-    getFirstAvailableLocationColor({
-      locations,
-      parentId: null,
-      locationType: "room",
-    })
-  );
+  const [roomColor, setRoomColor] = useState("#455A64");
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [isChoosingRoom, setIsChoosingRoom] = useState(false);
   const navigation = useNavigation();
@@ -92,12 +82,8 @@ export function IoioLocationCreationForm({ locations }: Props) {
     () => locations.find((location) => location.id === roomId),
     [locations, roomId]
   );
-  const roomColor = room
-    ? getIoioLocationColor({
-        name: room.name,
-        isRoom: true,
-        color: room.color,
-      })
+  const selectedRoomColor = room
+    ? getEffectiveIoioLocationColor({ location: room, locations })
     : null;
   const selectedChildType = CHILD_TYPES.find(
     (option) => option.value === creationType
@@ -109,40 +95,12 @@ export function IoioLocationCreationForm({ locations }: Props) {
       : activeCreationType === "shelf" || activeCreationType === "container"
       ? parentId
       : null;
-  const inheritedColor = getEffectiveIoioLocationColor({
+  const derivedColor = getDerivedIoioLocationColor({
+    name: locationName,
     locations,
     parentId: colorParentId,
-    locationType: activeCreationType,
+    locationType: activeCreationType ?? "section",
   });
-
-  useEffect(() => {
-    const usedSiblingColors = getUsedSiblingColors({
-      locations,
-      parentId: colorParentId,
-      locationType: activeCreationType,
-    });
-    if (
-      activeCreationType === "section" &&
-      usedSiblingColors.has(locationColor.toLocaleLowerCase())
-    ) {
-      setLocationColor(
-        getFirstAvailableLocationColor({
-          locations,
-          parentId: colorParentId,
-          locationType: activeCreationType,
-        })
-      );
-    }
-    if (activeCreationType && activeCreationType !== "section") {
-      setLocationColor(inheritedColor.color);
-    }
-  }, [
-    activeCreationType,
-    colorParentId,
-    inheritedColor.color,
-    locationColor,
-    locations,
-  ]);
 
   const selectRoom = (nextRoomId?: string) => {
     if (!nextRoomId) return;
@@ -151,13 +109,6 @@ export function IoioLocationCreationForm({ locations }: Props) {
     // old descendants, but it should not make staff choose the operation again.
     setParentId(undefined);
     setItemLocationId(nextRoomId);
-    setLocationColor(
-      getFirstAvailableLocationColor({
-        locations,
-        parentId: null,
-        locationType: "room",
-      })
-    );
     setIsChoosingRoom(false);
   };
 
@@ -199,7 +150,6 @@ export function IoioLocationCreationForm({ locations }: Props) {
             className="space-y-6"
           >
             <input type="hidden" name="locationType" value="room" />
-            <input type="hidden" name="color" value={locationColor} />
             <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-4 sm:p-5">
               <div className="mb-4">
                 <h2 className="text-base font-semibold text-gray-950">
@@ -219,11 +169,9 @@ export function IoioLocationCreationForm({ locations }: Props) {
               <div className="mt-4">
                 <IoioLocationColorPicker
                   locations={locations}
-                  parentId={null}
-                  value={locationColor}
+                  value={roomColor}
                   locationType="room"
-                  name="roomColorPicker"
-                  onChange={setLocationColor}
+                  onChange={setRoomColor}
                 />
               </div>
               <div className="mt-4">
@@ -265,7 +213,7 @@ export function IoioLocationCreationForm({ locations }: Props) {
               name="locationType"
               value={activeCreationType ?? ""}
             />
-            <input type="hidden" name="color" value={locationColor} />
+            <input type="hidden" name="color" value={derivedColor.color} />
 
             {!room ? (
               <div>
@@ -320,14 +268,14 @@ export function IoioLocationCreationForm({ locations }: Props) {
                     <div
                       className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2"
                       style={{
-                        backgroundColor: roomColor?.softBackground,
-                        borderColor: roomColor?.softBorder,
+                        backgroundColor: selectedRoomColor?.softBackground,
+                        borderColor: selectedRoomColor?.softBorder,
                       }}
                     >
                       <div>
                         <p
                           className="text-xs font-semibold uppercase tracking-wide"
-                          style={{ color: roomColor?.text }}
+                          style={{ color: selectedRoomColor?.text }}
                         >
                           Selected room
                         </p>
@@ -415,21 +363,6 @@ export function IoioLocationCreationForm({ locations }: Props) {
                       required
                       disabled={disabled}
                     />
-
-                    <div>
-                      <IoioLocationColorPicker
-                        locations={locations}
-                        parentId={colorParentId}
-                        value={locationColor}
-                        locationType={activeCreationType}
-                        name="locationColorPicker"
-                        onChange={
-                          activeCreationType === "section"
-                            ? setLocationColor
-                            : undefined
-                        }
-                      />
-                    </div>
 
                     <div>
                       <p className="mb-2 text-sm font-semibold text-gray-900">

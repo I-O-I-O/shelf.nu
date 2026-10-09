@@ -86,4 +86,36 @@ describe("IOIO Locations hierarchy UI", () => {
 
     expect(screen.getByText("No rooms found.")).toBeInTheDocument();
   });
+
+  it("keeps long location names and parent information readable", async () => {
+    const user = userEvent.setup();
+    const locations = locationTree();
+    locations.push({
+      ...locations[1],
+      id: "section-long",
+      name: "Storage Room - B423",
+      parentId: "room-1",
+      parent: {
+        ...locations[0],
+        _count: { children: 2 },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <IoioLocationHierarchy locations={locations} />
+      </MemoryRouter>
+    );
+
+    await user.click(screen.getByRole("button", { name: "IOIO Lab - B477" }));
+    const longName = screen.getByRole("button", {
+      name: "Storage Room - B423",
+    });
+    expect(longName).toHaveClass("whitespace-normal");
+    expect(longName).not.toHaveClass("truncate");
+    expect(screen.getAllByText("Parent: IOIO Lab - B477")).toHaveLength(2);
+    expect(
+      screen.getAllByRole("button", { name: "Location actions" })
+    ).toHaveLength(3);
+  });
 });

@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import type { Location } from "@prisma/client";
-import { MapIcon, PencilIcon, QrCodeIcon, Trash2Icon } from "lucide-react";
+import { PencilIcon, PrinterIcon, Trash2Icon } from "lucide-react";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import {
   PermissionAction,
@@ -37,7 +37,7 @@ export default function LocationQuickActions({
     action: PermissionAction.delete,
   });
 
-  const canManageAssets = userHasPermission({
+  const canPrintLabel = userHasPermission({
     roles,
     entity: PermissionEntity.location,
     action: PermissionAction.update,
@@ -58,29 +58,16 @@ export default function LocationQuickActions({
         </Button>
       </When>
 
-      <When truthy={canManageAssets}>
+      <When truthy={canPrintLabel}>
         <Button
           size="sm"
           variant="secondary"
-          className="p-2"
-          to={`/locations/${location.id}/assets/manage-assets`}
-          aria-label="Manage location assets"
-          tooltip="Manage location assets"
+          className="size-8 shrink-0 rounded-lg p-1.5"
+          to={`/labels?locationId=${encodeURIComponent(location.id)}`}
+          aria-label="Print location label"
+          tooltip="Print label"
         >
-          <MapIcon className="size-4" />
-        </Button>
-      </When>
-
-      <When truthy={canManageAssets}>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="p-2"
-          to={`/locations/${location.id}/scan-assets-kits`}
-          aria-label="Scan assets or kits"
-          tooltip="Scan assets or kits"
-        >
-          <QrCodeIcon className="size-4" />
+          <PrinterIcon className="size-4" />
         </Button>
       </When>
 

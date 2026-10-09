@@ -339,13 +339,19 @@ export function IoioLocationParentPicker({
   const sections = roomChildren.filter(
     (location) => inferLocationKind(location, locationsById) === "section"
   );
+  const selectedSection = sections.find(
+    (section) => section.id === selection.sectionId
+  );
   const directShelves = roomChildren.filter(
     (location) => inferLocationKind(location, locationsById) === "shelf"
   );
   const allowsDirectShelf =
     type === "shelf" || (type === "container" && directShelves.length > 0);
-  const shelves = selection.sectionId
-    ? childrenByParentId.get(selection.sectionId) ?? []
+  const shelves = selectedSection
+    ? // In this hierarchy a Section's direct children are its shelves. Keep this
+      // relationship-based so shelf names do not control whether the selector is
+      // enabled or which records are offered.
+      childrenByParentId.get(selectedSection.id) ?? []
     : type === "container" && roomId
     ? directShelves
     : [];
@@ -398,7 +404,11 @@ export function IoioLocationParentPicker({
           renderItem={renderLocation}
           disabled={disabled}
           onChange={(nextRoomId) =>
-            updateSelection({ roomId: nextRoomId || undefined })
+            updateSelection({
+              roomId: rooms.some((room) => room.id === nextRoomId)
+                ? nextRoomId
+                : undefined,
+            })
           }
         />
       )}
@@ -443,7 +453,11 @@ export function IoioLocationParentPicker({
             updateSelection({
               roomId,
               sectionId:
-                sectionId && sectionId !== "no-section" ? sectionId : undefined,
+                sectionId &&
+                sectionId !== "no-section" &&
+                sections.some((section) => section.id === sectionId)
+                  ? sectionId
+                  : undefined,
               shelfId: undefined,
             })
           }
@@ -451,31 +465,46 @@ export function IoioLocationParentPicker({
       ) : null}
 
       {type === "container" ? (
-        <DynamicSelect
-          key={`ioio-create-shelf-${selection.sectionId ?? roomId ?? "empty"}`}
-          fieldName="ioioParentShelfId"
-          model={{ name: "location", queryKey: "name" }}
-          contentLabel="Shelves"
-          label="Pick a shelf"
-          triggerWrapperClassName={cascadeTriggerClassName}
-          defaultValue={selection.shelfId}
-          initialDataKey="locations"
-          countKey="totalLocations"
-          selectionMode="none"
-          closeOnSelect
-          resetSearchOnClose
-          hideShowAll={false}
-          excludeItems={excludedIds(shelves)}
-          renderItem={renderLocation}
-          disabled={disabled || shelves.length === 0}
-          onChange={(shelfId) =>
-            updateSelection({
-              roomId,
-              sectionId: selection.sectionId,
-              shelfId: shelfId || undefined,
-            })
-          }
-        />
+        <>
+          <DynamicSelect
+            key={`ioio-create-shelf-${
+              selection.sectionId ?? roomId ?? "empty"
+            }`}
+            fieldName="ioioParentShelfId"
+            model={{ name: "location", queryKey: "name" }}
+            contentLabel="Shelves"
+            label="Pick a shelf"
+            triggerWrapperClassName={cascadeTriggerClassName}
+            defaultValue={
+              shelves.some((shelf) => shelf.id === selection.shelfId)
+                ? selection.shelfId
+                : undefined
+            }
+            initialDataKey="locations"
+            countKey="totalLocations"
+            selectionMode="none"
+            closeOnSelect
+            resetSearchOnClose
+            hideShowAll={false}
+            excludeItems={excludedIds(shelves)}
+            renderItem={renderLocation}
+            disabled={disabled || shelves.length === 0}
+            onChange={(shelfId) =>
+              updateSelection({
+                roomId,
+                sectionId: selectedSection?.id,
+                shelfId: shelves.some((shelf) => shelf.id === shelfId)
+                  ? shelfId
+                  : undefined,
+              })
+            }
+          />
+          {selection.sectionId && shelves.length === 0 ? (
+            <p role="status" className="text-sm text-gray-600">
+              No shelves in this section.
+            </p>
+          ) : null}
+        </>
       ) : null}
 
       {hideParentInput ? null : (

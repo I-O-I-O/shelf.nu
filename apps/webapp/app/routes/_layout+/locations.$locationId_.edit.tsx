@@ -11,6 +11,7 @@ import {
   LocationForm,
   NewLocationFormSchema,
 } from "~/components/location/form";
+import { IOIO_LOCATION_COLOR_VALUES } from "~/components/location/ioio-location-colors";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
   getLocation,
@@ -263,12 +264,37 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       defaultLocation: location.parentId,
     });
     const locationType = getLocationFormType(id, locations);
-    const { name, description, address, parentId, color } = parsedData;
+    const { name, description, address, parentId } = parsedData;
     validateParentForLocationType({
       locationType,
       parentId,
       locations,
     });
+    const submittedColor = formData.get("color");
+    if (
+      locationType === "room" &&
+      typeof submittedColor === "string" &&
+      submittedColor.length > 0 &&
+      !IOIO_LOCATION_COLOR_VALUES.includes(submittedColor)
+    ) {
+      throw new ShelfError({
+        cause: null,
+        message: "Choose a supported room color.",
+        label: "Location",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+    const color =
+      locationType === "room"
+        ? typeof submittedColor === "string" &&
+          IOIO_LOCATION_COLOR_VALUES.includes(submittedColor)
+          ? submittedColor
+          : location.color &&
+            IOIO_LOCATION_COLOR_VALUES.includes(location.color)
+          ? location.color
+          : "#455A64"
+        : null;
 
     const updatedLocation = await updateLocation({
       id,
@@ -328,10 +354,10 @@ export default function LocationEditPage() {
         <LocationForm
           name={location.name}
           description={location.description}
+          color={location.color}
           address={location.address}
           imageUrl={location.imageUrl}
           thumbnailUrl={location.thumbnailUrl}
-          color={location.color}
           parentId={location.parentId}
           referer={referer}
           excludeLocationId={location.id}

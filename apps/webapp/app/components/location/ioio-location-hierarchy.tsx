@@ -127,7 +127,7 @@ function LocationCard({
   return (
     <article
       className={tw(
-        "rounded-xl border border-l-4 bg-white p-4",
+        "flex h-full flex-col rounded-xl border border-l-4 bg-white p-4",
         selected ? "ring-2" : ""
       )}
       style={{
@@ -137,52 +137,54 @@ function LocationCard({
           : {}),
       }}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-start gap-2">
-          <ImageWithPreview
-            className="size-12 shrink-0 rounded-lg"
-            imageUrl={location.imageUrl ?? undefined}
-            thumbnailUrl={location.thumbnailUrl}
-            alt={location.name}
-            withPreview
-          />
-          <div className="min-w-0">
-            {onSelect ? (
-              <button
-                type="button"
-                onClick={onSelect}
-                aria-pressed={selected}
-                className="block max-w-full truncate text-left text-sm font-bold text-gray-950 hover:text-red-800"
-              >
-                {display.label}
-              </button>
-            ) : (
-              <Button
-                to={`/assets?location=${encodeURIComponent(location.id)}`}
-                variant="link"
-                className="block max-w-full truncate p-0 text-left text-sm font-bold text-gray-950 hover:text-red-800"
-              >
-                {display.label}
-              </Button>
-            )}
-            {display.code ? (
-              <p
-                className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide"
-                style={{ color: locationColor.text }}
-              >
-                {display.code}
-              </p>
-            ) : null}
-            {parent ? (
-              <p className="mt-1 text-xs text-gray-600">Parent: {parent}</p>
-            ) : null}
-          </div>
+      <div className="flex min-w-0 items-start gap-3">
+        <ImageWithPreview
+          className="size-12 shrink-0 rounded-lg"
+          imageUrl={location.imageUrl ?? undefined}
+          thumbnailUrl={location.thumbnailUrl}
+          alt={location.name}
+          withPreview
+        />
+        <div className="min-w-0 flex-1">
+          {onSelect ? (
+            <button
+              type="button"
+              onClick={onSelect}
+              aria-pressed={selected}
+              className="block w-full overflow-hidden whitespace-normal break-words text-left text-sm font-bold leading-5 text-gray-950 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [display:-webkit-box] hover:text-red-800"
+            >
+              {display.label}
+            </button>
+          ) : (
+            <Button
+              to={`/assets?location=${encodeURIComponent(location.id)}`}
+              variant="link"
+              className="block w-full overflow-hidden whitespace-normal break-words p-0 text-left text-sm font-bold leading-5 text-gray-950 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [display:-webkit-box] hover:text-red-800"
+            >
+              {display.label}
+            </Button>
+          )}
+          {display.code ? (
+            <p
+              className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide"
+              style={{ color: locationColor.text }}
+            >
+              {display.code}
+            </p>
+          ) : null}
+          {parent ? (
+            <p className="mt-1 overflow-hidden break-words text-xs leading-4 text-gray-600 [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [display:-webkit-box]">
+              Parent: {parent}
+            </p>
+          ) : null}
         </div>
-        <LocationActions location={location} />
       </div>
-      <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-gray-100 pt-3 text-[11px] text-gray-500">
+      <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-gray-100 pt-3 text-[11px] text-gray-500">
         <span>{location._count.assetLocations} assets</span>
         <span>{location._count.kits} kits</span>
+      </div>
+      <div className="mt-3 flex min-h-9 justify-end">
+        <LocationActions location={location} />
       </div>
     </article>
   );

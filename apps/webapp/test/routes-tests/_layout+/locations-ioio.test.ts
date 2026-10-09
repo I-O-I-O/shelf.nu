@@ -1,5 +1,11 @@
+import { createElement } from "react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { db } from "~/database/db.server";
+import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
   createLocation,
   getLocationDescendantsTree,
@@ -9,23 +15,22 @@ import {
   updateLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
-import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
-import { requirePermission } from "~/utils/roles.server";
-import { db } from "~/database/db.server";
+import { loader as locationDetailLoader } from "~/routes/_layout+/locations.$locationId";
+import {
+  action as editLocationAction,
+  loader as editLocationLoader,
+} from "~/routes/_layout+/locations.$locationId_.edit";
 import { loader as locationsIndexLoader } from "~/routes/_layout+/locations._index";
 import {
   action as newLocationAction,
   loader as newLocationLoader,
 } from "~/routes/_layout+/locations.new";
-import {
-  action as editLocationAction,
-  loader as editLocationLoader,
-} from "~/routes/_layout+/locations.$locationId_.edit";
-import { loader as locationDetailLoader } from "~/routes/_layout+/locations.$locationId";
+import NewLocationPage from "~/routes/_layout+/locations.new";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
+import { requirePermission } from "~/utils/roles.server";
 
 // why: route tests need deterministic organization-scoped permission results.
 vi.mock("~/utils/roles.server", () => ({ requirePermission: vi.fn() }));
@@ -80,10 +85,14 @@ function loaderArgs(url: string): LoaderFunctionArgs {
   } as LoaderFunctionArgs;
 }
 
-function actionArgs(url: string, formData: FormData): ActionFunctionArgs {
+function actionArgs(
+  url: string,
+  formData: FormData,
+  locationId = "section-1"
+): ActionFunctionArgs {
   return {
     context: { getSession: () => ({ userId: "staff-1" }) },
-    params: { locationId: "section-1" },
+    params: { locationId },
     request: new Request(url, { method: "POST", body: formData }),
   } as ActionFunctionArgs;
 }
@@ -161,7 +170,80 @@ describe("IOIO Locations routes", () => {
     expect(result).toMatchObject({ locations: [], totalLocations: 0 });
   });
 
-  it("creates a location with the selected IOIO level and color", async () => {
+  it("passes the full organization hierarchy from the loader into Container creation", async () => {
+    const creationLocations = [
+      {
+        id: "room-1",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        color: "#455A64",
+      },
+      {
+        id: "section-a",
+        name: "Section A",
+        parentId: "room-1",
+        color: null,
+      },
+      {
+        id: "shelf-a1",
+        name: "Shelf A1",
+        parentId: "section-a",
+        color: null,
+      },
+    ];
+    getLocationsForCreateAndEditMock.mockResolvedValue({
+      locations: creationLocations,
+      totalLocations: creationLocations.length,
+    } as never);
+
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/locations/new",
+          loader: async () => {
+            const result = await newLocationLoader(
+              loaderArgs("https://example.com/locations/new")
+            );
+            return result;
+          },
+          element: createElement(NewLocationPage),
+        },
+      ],
+      { initialEntries: ["/locations/new"] }
+    );
+    const user = userEvent.setup();
+    render(createElement(RouterProvider, { router }));
+
+    await user.click(
+      await screen.findByRole("button", { name: /Pick a room/ })
+    );
+    expect(getLocationsForCreateAndEditMock).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      request: expect.objectContaining({
+        url: expect.stringContaining("getAll=location"),
+      }),
+    });
+    await user.click(
+      await screen.findByRole("option", { name: "IOIO Lab - B477" })
+    );
+    await user.click(screen.getByRole("button", { name: /Box \/ Container/ }));
+    await user.click(screen.getByRole("button", { name: /Pick a section/ }));
+    await user.click(await screen.findByRole("option", { name: "Section A" }));
+
+    const shelfTrigger = screen.getByRole("button", { name: /Pick a shelf/ });
+    expect(shelfTrigger).toBeEnabled();
+    expect(screen.queryByText("No shelves in this section.")).toBeNull();
+    await user.click(shelfTrigger);
+    await user.click(await screen.findByRole("option", { name: "Shelf A1" }));
+
+    const form = screen.getByLabelText("Box / Container name").closest("form");
+    expect(form).not.toBeNull();
+    expect(new FormData(form as HTMLFormElement).get("parentId")).toBe(
+      "shelf-a1"
+    );
+  });
+
+  it("creates a child location without persisting a separate color", async () => {
     findFirstLocationMock.mockResolvedValue({
       id: "room-1",
       name: "IOIO Lab",
@@ -191,12 +273,100 @@ describe("IOIO Locations routes", () => {
       userId: "staff-1",
       organizationId: "org-1",
       parentId: "room-1",
-      color: "#1565C0",
+      color: null,
     });
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(302);
     expect((result as Response).headers.get("Location")).toBe(
       "/locations?selectedLocation=section-new&created=1"
+    );
+  });
+
+  it("preserves the selected Section as the parent when creating a Shelf", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "section-a",
+      name: "Section A",
+      parentId: "room-1",
+      parent: { parentId: null },
+    } as never);
+    findManyLocationsMock.mockResolvedValue([] as never);
+    createLocationMock.mockResolvedValue({
+      id: "shelf-new",
+      imageUrl: null,
+      thumbnailUrl: null,
+    } as never);
+
+    const formData = new FormData();
+    formData.set("locationType", "shelf");
+    formData.set("name", "Shelf A2");
+    formData.set("parentId", "section-a");
+
+    await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+
+    expect(createLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Shelf A2",
+        organizationId: "org-1",
+        parentId: "section-a",
+      })
+    );
+  });
+
+  it("creates a Container under the selected Room → Section → Shelf", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "shelf-1",
+      name: "Shelf A1",
+      parentId: "section-1",
+      parent: { parentId: "room-1" },
+    } as never);
+    findManyLocationsMock.mockResolvedValue([] as never);
+    createLocationMock.mockResolvedValue({
+      id: "container-new",
+      imageUrl: null,
+      thumbnailUrl: null,
+    } as never);
+
+    const formData = new FormData();
+    formData.set("locationType", "container");
+    formData.set("name", "Container A1-2");
+    formData.set("parentId", "shelf-1");
+    formData.set("color", "#C62828");
+
+    const result = await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+
+    expect(createLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Container A1-2",
+        parentId: "shelf-1",
+        color: null,
+      })
+    );
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(302);
+  });
+
+  it("stores a selected color for a new Room", async () => {
+    findManyLocationsMock.mockResolvedValue([] as never);
+    createLocationMock.mockResolvedValue({
+      id: "room-new",
+      imageUrl: null,
+      thumbnailUrl: null,
+    } as never);
+    const formData = new FormData();
+    formData.set("locationType", "room");
+    formData.set("name", "IOIO Lab - B477");
+    formData.set("color", "#1565C0");
+
+    await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+
+    expect(createLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ parentId: null, color: "#1565C0" })
     );
   });
 
@@ -296,7 +466,7 @@ describe("IOIO Locations routes", () => {
         id: "section-1",
         organizationId: "org-1",
         parentId: "room-1",
-        color: "#2E7D32",
+        color: null,
         name: "Section A updated",
       })
     );
@@ -304,6 +474,51 @@ describe("IOIO Locations routes", () => {
       expect.objectContaining({
         locationId: "section-1",
         organizationId: "org-1",
+      })
+    );
+  });
+
+  it("updates the selected Room theme color", async () => {
+    getLocationMock.mockResolvedValue({
+      location: {
+        id: "room-1",
+        name: "IOIO Lab",
+        parentId: null,
+        color: "#455A64",
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+    } as never);
+    getLocationsForCreateAndEditMock.mockResolvedValue({
+      locations: locationTree,
+      totalLocations: locationTree.length,
+    } as never);
+    updateLocationMock.mockResolvedValue({
+      id: "room-1",
+      imageUrl: null,
+      thumbnailUrl: null,
+    } as never);
+
+    const formData = new FormData();
+    formData.set("name", "IOIO Lab");
+    formData.set("description", "IOIO Lab room");
+    formData.set("address", "");
+    formData.set("parentId", "");
+    formData.set("color", "#C62828");
+
+    await editLocationAction(
+      actionArgs(
+        "https://example.com/locations/room-1/edit",
+        formData,
+        "room-1"
+      )
+    );
+
+    expect(updateLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "room-1",
+        parentId: null,
+        color: "#C62828",
       })
     );
   });
