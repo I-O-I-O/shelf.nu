@@ -2,8 +2,8 @@ import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Link, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
+import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import { getPublishedHandbookArticle } from "~/modules/ioio-handbook/service.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -11,7 +11,7 @@ import { error, payload } from "~/utils/http.server";
 export async function loader({ context, request, params }: LoaderFunctionArgs) {
   const { userId } = context.getSession();
   try {
-    const auth = await requireStudentRead({ context, request });
+    const auth = await requireIoioHandbookRead({ context, request });
     const slug = params.slug ?? "";
     const versionId =
       new URL(request.url).searchParams.get("version") ?? undefined;
@@ -31,8 +31,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     }
     return payload({
       article,
-      canEdit: auth.role === "ADMIN" || auth.role === "OWNER",
-      isStudent: auth.role === "SELF_SERVICE",
+      canEdit: auth.canEdit,
+      isStudent: auth.isStudent,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });

@@ -73,25 +73,10 @@ export async function requireTAHoursAccess({
   const isStaff = Boolean(
     membership?.roles.some((role) => role === "ADMIN" || role === "OWNER")
   );
-  const isTA = Boolean(
-    selected.organizationId &&
-      (await db.ioioLabTA.findUnique({
-        where: {
-          organizationId_userId: {
-            organizationId: selected.organizationId,
-            userId,
-          },
-        },
-        select: { id: true },
-      }))
-  );
-  if (!selected.organizationId || (!isStaff && !isTA)) {
-    throw taHoursError(
-      "TA Hours is available to Staff and listed TAs only.",
-      403
-    );
+  if (!selected.organizationId || !isStaff) {
+    throw taHoursError("TA Hours is available to IOIO Staff only.", 403);
   }
-  return { organizationId: selected.organizationId, isStaff, isTA };
+  return { organizationId: selected.organizationId, isStaff, isTA: false };
 }
 
 export function parseTAHoursAcademicYear(value: string | null) {

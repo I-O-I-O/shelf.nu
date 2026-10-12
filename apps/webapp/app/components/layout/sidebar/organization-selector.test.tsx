@@ -46,7 +46,7 @@ function renderSelector() {
         children: [
           {
             path: "ioio",
-            Component: () => <OrganizationSelector variant="ioio" />,
+            Component: () => <OrganizationSelector />,
           },
         ],
       },
@@ -67,12 +67,12 @@ function renderSelector() {
   return render(<RouterProvider router={router} />);
 }
 
-describe("IOIO workspace selector", () => {
+describe("Shelf OrganizationSelector", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("shows the current workspace and only workspaces supplied by the loader", async () => {
+  it("keeps the current workspace, available workspaces, and management links", async () => {
     const user = userEvent.setup();
     renderSelector();
 
@@ -94,6 +94,12 @@ describe("IOIO workspace selector", () => {
     expect(
       screen.getByRole("menuitem", { name: "Personal workspace" })
     ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Manage workspaces" })
+    ).toHaveAttribute("href", "/account-details/workspace");
+    expect(
+      screen.getByRole("link", { name: "Invite your team" })
+    ).toHaveAttribute("href", "/settings/team");
     expect(
       screen.queryByRole("menuitem", { name: "Other user's workspace" })
     ).toBeNull();

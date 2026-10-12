@@ -9,6 +9,7 @@ import type {
 import {
   data,
   redirect,
+  redirectDocument,
   Outlet,
   useLocation,
   useLoaderData,
@@ -40,7 +41,6 @@ import { getLegacyLoginDecisionForUser } from "~/modules/auth/sso-enforcement.se
 import { getBookingSettingsForOrganization } from "~/modules/booking-settings/service.server";
 import { getLabStatus } from "~/modules/ioio-staff/lab-status.server";
 import { getAssignedOpenLabTaskCount } from "~/modules/ioio-staff/lab-tasks.server";
-import { getStaffPreparationQueueOrganizationId } from "~/modules/ioio-staff/preparation-queue.server";
 import { getStudentAnnualAccessApproval } from "~/modules/ioio-student/annual-access.server";
 import { isStudentLabIntroductionRequired } from "~/modules/ioio-student/lab-introduction.shared";
 import {
@@ -69,7 +69,8 @@ import { isLikeShelfError, makeShelfError, ShelfError } from "~/utils/error";
 import { isRouteError } from "~/utils/http";
 import { payload, error } from "~/utils/http.server";
 import {
-  isIoioStaffRoute,
+  isIoioStudentRoute,
+  resolveIoioAccountMembership,
   resolveIoioAccountSurface,
 } from "~/utils/ioio-role-routing";
 import { skipRevalidationOnClientViewChange } from "~/utils/list-view-params";
@@ -245,6 +246,38 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       return redirect("/sso-pending-assignment");
     }
 
+    const lastSelectedOrganizationId =
+      userOrganizations[0]?.user.lastSelectedOrganizationId;
+    const ioioMembership = resolveIoioAccountMembership(
+      userOrganizations,
+      organizationId,
+      currentOrganization.type,
+      lastSelectedOrganizationId
+    );
+
+    if (!ioioMembership) {
+      throw new ShelfError({
+        cause: null,
+        title: "IOIO Team organization required",
+        message:
+          "Your account must belong to one authorized IOIO Team workspace. Please contact IOIO Staff to resolve workspace access.",
+        status: 403,
+        label: "Organization",
+        shouldBeCaptured: false,
+      });
+    }
+
+    if (ioioMembership.organizationId !== organizationId) {
+      const url = new URL(request.url);
+      return redirectDocument(`${url.pathname}${url.search}`, {
+        headers: [
+          setCookie(
+            await setSelectedOrganizationIdCookie(ioioMembership.organizationId)
+          ),
+        ],
+      });
+    }
+
     const isAdmin = user?.roles.some((role) => role.name === Roles["ADMIN"]);
 
     // Get current user's organization role for updates filtering
@@ -292,19 +325,25 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         shouldBeCaptured: false,
       });
     }
+    if (accountSurface === "student" && !isIoioStudentRoute(pathname)) {
+      return redirect("/ioio");
+    }
     if (
       accountSurface === "staff" &&
       (pathname === "/ioio" || pathname.startsWith("/ioio/"))
     ) {
       return redirect("/home");
     }
-    const isLabToolsRoute =
-      pathname === "/operations/tasks" ||
-      pathname === "/purchasing" ||
-      pathname === "/ta-hours";
+    if (
+      accountSurface === "staff" &&
+      (pathname === "/account-details/workspace" ||
+        pathname.startsWith("/account-details/workspace/"))
+    ) {
+      return redirect("/home");
+    }
     // Keep TA membership stable across client-side navigation. The shared
-    // layout uses this value to decide whether a SELF_SERVICE user may render
-    // Lab Tools routes, so it must not depend on which route loaded first.
+    // student interface uses this value for student-side access and booking
+    // behavior; it no longer grants access to the staff shell or its routes.
     const isIoioTA = Boolean(
       await withIoioStudentLoadStage(
         "5 TA membership query (ioioLabTA.findUnique)",
@@ -322,9 +361,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       )
     );
 
-    const isStudentOnly =
-      currentOrganizationUserRoles.includes(OrganizationRoles.SELF_SERVICE) &&
-      !isIoioStaff;
     const isLabIntroductionRoute = pathname === "/ioio/introduction";
     const needsLabIntroduction = isStudentLabIntroductionRequired({
       roles: currentOrganizationUserRoles,
@@ -339,14 +375,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     ) {
       return redirect("/ioio");
     }
-    if (
-      isStudentOnly &&
-      isIoioStaffRoute(pathname) &&
-      !(isLabToolsRoute && isIoioTA)
-    ) {
-      return redirect("/ioio");
-    }
-
     // Check if sequential ID migration is needed
     const needsSequentialIdMigration =
       (isOwner || isOrgAdmin) && !currentOrganization.hasSequentialIdsMigrated;
@@ -361,17 +389,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         label: "Organization",
       });
     }
-
-    const preparationQueueOrganizationId =
-      isIoioStaff &&
-      pathname === "/home" &&
-      currentOrganization.type === "PERSONAL"
-        ? await getStaffPreparationQueueOrganizationId({
-            organizationId: currentOrganization.id,
-            organizationType: currentOrganization.type,
-            userOrganizations,
-          })
-        : currentOrganization.id;
 
     // Run booking settings, working hours, and unread count in parallel —
     // all only depend on organizationId/userId which are available now.
@@ -407,10 +424,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       isIoioStaff
         ? getLabStatus({
             organizationId: currentOrganization.id,
-            preparationOrganizationId: preparationQueueOrganizationId,
+            preparationOrganizationId: currentOrganization.id,
           })
         : Promise.resolve(null),
-      isIoioStaff || isIoioTA
+      isIoioStaff
         ? getAssignedOpenLabTaskCount({
             organizationId: currentOrganization.id,
             userId: authSession.userId,
@@ -549,15 +566,10 @@ export default function App() {
     currentOrganizationId,
     currentOrganizationUserRoles,
     isIoioStaff,
-    isIoioTA,
   } = useLoaderData<typeof loader>();
   const isHydrated = useHydrated();
   const location = useLocation();
-  const isIoioStudentSurface =
-    location.pathname === "/ioio" ||
-    location.pathname.startsWith("/ioio/") ||
-    location.pathname === "/handbook" ||
-    location.pathname.startsWith("/handbook/");
+  const isIoioStudentSurface = isIoioStudentRoute(location.pathname);
   // Several authenticated routes (assets._index, kits._index, locations.*, …)
   // call `userHasPermission` from `permission.validator.client` during their
   // component render. That module is `.client.ts`, so RR7's vite plugin
@@ -579,15 +591,8 @@ export default function App() {
   const isStudentOnly =
     currentOrganizationUserRoles?.includes(OrganizationRoles.SELF_SERVICE) &&
     !isIoioStaff;
-  const isLabToolsRoute =
-    location.pathname === "/operations/tasks" ||
-    location.pathname === "/purchasing" ||
-    location.pathname === "/ta-hours";
-  const isBlockedStudentStaffRoute =
-    isStudentOnly &&
-    isIoioStaffRoute(location.pathname) &&
-    !(isLabToolsRoute && isIoioTA);
-  const toolsOnlyTAView = isStudentOnly && isIoioTA && isLabToolsRoute;
+  const isBlockedStudentRoute =
+    isStudentOnly && !isIoioStudentRoute(location.pathname);
   const [feedbackModalOpen, setFeedbackModalOpen] = useAtom(
     feedbackModalOpenAtom
   );
@@ -602,9 +607,7 @@ export default function App() {
           {hasUnpaidInvoice ? <UnpaidInvoiceBanner /> : null}
           {disabledTeamOrg ? (
             <NoSubscription />
-          ) : workspaceSwitching ||
-            !roleResolved ||
-            isBlockedStudentStaffRoute ? (
+          ) : workspaceSwitching || !roleResolved || isBlockedStudentRoute ? (
             <div className="flex size-full flex-col items-center justify-center text-center">
               <Spinner />
               <p className="mt-2">Activating workspace...</p>
@@ -612,7 +615,7 @@ export default function App() {
           ) : isIoioStudentSurface && !isIoioStaff ? (
             <Outlet />
           ) : (
-            <StaffShell toolsOnly={toolsOnlyTAView} />
+            <StaffShell />
           )}
           <Toaster />
 

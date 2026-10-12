@@ -1,16 +1,47 @@
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import userEvent from "@testing-library/user-event";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
-import { StaffNavigation } from "./staff-shell";
+import StaffShell, { StaffNavigation } from "./staff-shell";
 
-function renderNavigation(initialEntry: string) {
+function renderStaffShell() {
+  const layoutData = {
+    isIoioStaff: true,
+    isIoioTA: false,
+    labStatus: null,
+    assignedLabTaskCount: 0,
+  };
+  const router = createMemoryRouter(
+    [
+      {
+        id: "routes/_layout+/_layout",
+        path: "/",
+        Component: StaffShell,
+        loader: () => layoutData,
+        children: [{ path: "home", Component: () => null }],
+      },
+    ],
+    {
+      initialEntries: ["/home"],
+      hydrationData: {
+        loaderData: { "routes/_layout+/_layout": layoutData },
+      },
+    }
+  );
+
+  return render(<RouterProvider router={router} />);
+}
+
+function renderNavigation(
+  initialEntry: string,
+  navigationOrder: readonly string[] = ["/bookings"]
+) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <StaffNavigation
-        navigationOrder={["/bookings"]}
+        navigationOrder={navigationOrder}
         onReorder={() => undefined}
-        canViewLabTasks={false}
-        toolsOnly={false}
+        canViewLabTasks
       />
     </MemoryRouter>
   );
@@ -59,5 +90,58 @@ describe("IOIO staff Loans navigation active state", () => {
     expect(
       screen.getByRole("button", { name: "Collapse Loans" })
     ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("exposes the existing Operations and staff tool destinations", () => {
+    renderNavigation("/operations/tasks", [
+      "/operations",
+      "/operations/tasks",
+      "/purchasing",
+      "/ta-hours",
+    ]);
+
+    expect(screen.getByRole("link", { name: "Operations" })).toHaveAttribute(
+      "href",
+      "/operations"
+    );
+    expect(screen.getByRole("link", { name: "Lab Tasks" })).toHaveAttribute(
+      "href",
+      "/operations/tasks"
+    );
+    expect(screen.getByRole("link", { name: "Purchasing" })).toHaveAttribute(
+      "href",
+      "/purchasing"
+    );
+    expect(screen.getByRole("link", { name: "TA Hours" })).toHaveAttribute(
+      "href",
+      "/ta-hours"
+    );
+  });
+});
+
+describe("StaffShell account controls", () => {
+  it("does not expose workspace switching or workspace management", async () => {
+    const user = userEvent.setup();
+    renderStaffShell();
+
+    await screen.findByRole("region", { name: "Staff account" });
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Manage workspaces" })
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Invite your team" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Menu" }));
+
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Manage workspaces" })
+    ).toBeNull();
   });
 });

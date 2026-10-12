@@ -29,7 +29,6 @@ import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
 import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
-import OrganizationSelector from "~/components/layout/sidebar/organization-selector";
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
@@ -43,6 +42,7 @@ const navigation = [
   { to: "/categories", label: "Categories", Icon: Tags, end: false },
   { to: "/locations", label: "Locations", Icon: MapPin, end: false },
   { to: "/bookings", label: "Loans", Icon: ClipboardList, end: false },
+  { to: "/operations", label: "Operations", Icon: ClipboardList, end: false },
   {
     to: "/operations/tasks",
     label: "Lab Tasks",
@@ -100,13 +100,11 @@ export function StaffNavigation({
   navigationOrder,
   onReorder,
   canViewLabTasks,
-  toolsOnly,
 }: {
   onNavigate?: () => void;
   navigationOrder: readonly string[];
   onReorder: (dragged: string, target: string) => void;
   canViewLabTasks: boolean;
-  toolsOnly: boolean;
 }) {
   const location = useLocation();
   const [draggedPath, setDraggedPath] = useState<string | null>(null);
@@ -126,14 +124,6 @@ export function StaffNavigation({
   const orderedNavigation = navigationOrder
     .map((to) => navigation.find((item) => item.to === to))
     .filter((item): item is NavigationItem => Boolean(item))
-    .filter((item) => {
-      const isLabTool = [
-        "/operations/tasks",
-        "/purchasing",
-        "/ta-hours",
-      ].includes(item.to);
-      return toolsOnly ? isLabTool : !isLabTool;
-    })
     .filter((item) => item.to !== "/operations/tasks" || canViewLabTasks);
   const activePath = navigation
     .filter(({ to, end }) => {
@@ -279,28 +269,16 @@ export function StaffNavigation({
   );
 }
 
-function StaffAccountControls({
-  onNavigate,
-  accountLabel = "Staff",
-}: {
-  onNavigate?: () => void;
-  accountLabel?: string;
-}) {
+function StaffAccountControls({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <section
       aria-label="Staff account"
       className="mt-3 border-t border-gray-100 pt-3"
     >
       <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
-        Workspace
-      </p>
-      <OrganizationSelector variant="ioio" />
-      <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
         Signed in
       </p>
-      <p className="px-3 pt-1 text-sm font-semibold text-gray-700">
-        {accountLabel}
-      </p>
+      <p className="px-3 pt-1 text-sm font-semibold text-gray-700">Staff</p>
       <Form
         method="post"
         action="/logout"
@@ -319,11 +297,7 @@ function StaffAccountControls({
   );
 }
 
-export default function StaffShell({
-  toolsOnly = false,
-}: {
-  toolsOnly?: boolean;
-}) {
+export default function StaffShell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [navigationOrder, setNavigationOrder] = useState<readonly string[]>(
     defaultNavigationOrder
@@ -331,20 +305,6 @@ export default function StaffShell({
   const navigationLoaded = useRef(false);
   const location = useLocation();
   const isLabelGeneratorRoute = location.pathname === "/labels";
-  const homeHref = toolsOnly
-    ? location.pathname === "/purchasing"
-      ? "/purchasing"
-      : location.pathname === "/ta-hours"
-      ? "/ta-hours"
-      : "/operations/tasks"
-    : "/home";
-  const shellTitle = toolsOnly
-    ? location.pathname === "/purchasing"
-      ? "Purchasing"
-      : location.pathname === "/ta-hours"
-      ? "TA Hours"
-      : "Lab tasks"
-    : "Staff desk";
 
   useEffect(() => {
     setNavigationOrder(readSavedNavigationOrder());
@@ -374,9 +334,7 @@ export default function StaffShell({
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
-  const canViewLabTasks = Boolean(
-    layoutData?.isIoioStaff || layoutData?.isIoioTA
-  );
+  const canViewLabTasks = Boolean(layoutData?.isIoioStaff);
   const labStatus = layoutData?.labStatus ?? null;
   const assignedLabTaskCount = layoutData?.assignedLabTaskCount ?? 0;
   const askMatch = matches.find((match) => match.pathname === "/staff/ask");
@@ -393,41 +351,32 @@ export default function StaffShell({
         <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r border-red-100 bg-white p-3 md:flex">
           <div className="flex items-center gap-2">
             <Link
-              to={homeHref}
-              aria-label={
-                toolsOnly
-                  ? `IOIO Lab ${shellTitle.toLowerCase()}`
-                  : "IOIO Lab staff dashboard"
-              }
+              to="/home"
+              aria-label="IOIO Lab staff dashboard"
               className="flex min-w-0 flex-1 items-center justify-center rounded-xl bg-red-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
             >
               <StaffLogo />
             </Link>
           </div>
           <p className="px-2 py-3 text-xs font-bold uppercase tracking-[0.16em] text-gray-400">
-            {toolsOnly ? "Lab tools" : "Staff desk"}
+            Staff desk
           </p>
           <div className="flex-1 overflow-y-auto">
             <StaffNavigation
               navigationOrder={navigationOrder}
               onReorder={reorderNavigation}
               canViewLabTasks={canViewLabTasks}
-              toolsOnly={toolsOnly}
             />
           </div>
-          <StaffAccountControls accountLabel={toolsOnly ? "Lab TA" : "Staff"} />
+          <StaffAccountControls />
         </aside>
 
         <div className="md:pl-60">
           <header className="sticky top-0 z-20 border-b border-red-100 bg-white">
             <div className="flex items-center justify-between gap-3 p-4">
               <Link
-                to={homeHref}
-                aria-label={
-                  toolsOnly
-                    ? `IOIO Lab ${shellTitle.toLowerCase()}`
-                    : "IOIO Lab staff dashboard"
-                }
+                to="/home"
+                aria-label="IOIO Lab staff dashboard"
                 className="flex items-center justify-center rounded-lg bg-red-800 p-2 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 md:hidden"
               >
                 <StaffLogo compact />
@@ -437,7 +386,7 @@ export default function StaffShell({
                   status={labStatus}
                   assignedTaskCount={assignedLabTaskCount}
                 />
-                {!toolsOnly ? <StudentBorrowListIndicator /> : null}
+                <StudentBorrowListIndicator />
                 <button
                   type="button"
                   aria-expanded={mobileMenuOpen}
@@ -473,7 +422,7 @@ export default function StaffShell({
                   <StaffLogo compact />
                 </div>
                 <span className="text-xs font-bold uppercase tracking-[0.16em] text-gray-400">
-                  {toolsOnly ? "Lab tools" : "Staff desk"}
+                  Staff desk
                 </span>
               </div>
               <StaffNavigation
@@ -481,19 +430,15 @@ export default function StaffShell({
                 onReorder={reorderNavigation}
                 onNavigate={() => setMobileMenuOpen(false)}
                 canViewLabTasks={canViewLabTasks}
-                toolsOnly={toolsOnly}
               />
-              {!toolsOnly ? (
-                <ChatHistoryMenu
-                  namespace="staff"
-                  scope={chatScope}
-                  to="/staff/ask"
-                  onNavigate={() => setMobileMenuOpen(false)}
-                />
-              ) : null}
+              <ChatHistoryMenu
+                namespace="staff"
+                scope={chatScope}
+                to="/staff/ask"
+                onNavigate={() => setMobileMenuOpen(false)}
+              />
               <StaffAccountControls
                 onNavigate={() => setMobileMenuOpen(false)}
-                accountLabel={toolsOnly ? "Lab TA" : "Staff"}
               />
             </aside>
           </div>

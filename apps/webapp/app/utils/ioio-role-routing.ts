@@ -24,6 +24,7 @@ const staffRoutePrefixes = [
   "/kits",
   "/audits",
   "/admin-dashboard",
+  "/account-details/workspace",
 ];
 
 export function resolveIoioAccountSurface(
@@ -36,41 +37,62 @@ export function resolveIoioAccountSurface(
 }
 
 /**
- * A new Shelf account has a Personal workspace. When it also has one IOIO
- * Student membership, use that organization for the Student app instead of
- * landing it in the Personal workspace's staff surface. Existing team
- * selections and accounts with a staff Team membership stay unchanged.
+ * Resolve an IOIO Team membership without treating Shelf's Personal workspace
+ * as the IOIO organization. Shelf's current Team selection wins; if Personal
+ * is selected, its cross-device last selection disambiguates multiple Team
+ * memberships, and a sole eligible Team membership is otherwise safe to use.
+ * Ambiguous or non-IOIO memberships fail closed.
  */
 export function resolveIoioAccountMembership(
   memberships: readonly IoioOrganizationMembership[],
   selectedOrganizationId: string,
-  selectedOrganizationType: string
+  selectedOrganizationType: string,
+  lastSelectedOrganizationId?: string | null
 ) {
   const selected = memberships.find(
     (membership) => membership.organizationId === selectedOrganizationId
   );
-  if (!selected || selectedOrganizationType !== "PERSONAL") return selected;
+  const isIoioTeamMembership = (membership: IoioOrganizationMembership) =>
+    membership.organization.type === "TEAM" &&
+    resolveIoioAccountSurface(membership.roles) !== null;
 
-  const staffTeamMembershipExists = memberships.some(
-    (membership) =>
-      membership.organization.type !== "PERSONAL" &&
-      (membership.roles.includes("OWNER") || membership.roles.includes("ADMIN"))
-  );
-  if (staffTeamMembershipExists) return selected;
+  if (
+    selected &&
+    selectedOrganizationType === "TEAM" &&
+    isIoioTeamMembership(selected)
+  ) {
+    return selected;
+  }
 
-  const studentMemberships = memberships.filter(
-    (membership) =>
-      membership.organization.type !== "PERSONAL" &&
-      membership.roles.includes("SELF_SERVICE") &&
-      !membership.roles.includes("OWNER") &&
-      !membership.roles.includes("ADMIN")
+  const teamMemberships = memberships.filter(isIoioTeamMembership);
+  const lastSelectedTeam = teamMemberships.find(
+    (membership) => membership.organizationId === lastSelectedOrganizationId
   );
-  return studentMemberships.length === 1 ? studentMemberships[0] : selected;
+  if (lastSelectedTeam) return lastSelectedTeam;
+
+  return teamMemberships.length === 1 ? teamMemberships[0] : null;
 }
 
 export function isIoioStaffRoute(pathname: string) {
   return staffRoutePrefixes.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
+}
+
+export function isIoioStudentRoute(pathname: string) {
+  if (
+    pathname === "/handbook/new" ||
+    pathname.startsWith("/handbook/new/") ||
+    /^\/handbook\/[^/]+\/edit(?:\/|$)/.test(pathname)
+  ) {
+    return false;
+  }
+
+  return (
+    pathname === "/ioio" ||
+    pathname.startsWith("/ioio/") ||
+    pathname === "/handbook" ||
+    pathname.startsWith("/handbook/")
   );
 }
 
@@ -86,7 +108,7 @@ export function enforceIoioRoleDestination(
   ) {
     return "/home";
   }
-  if (surface === "student" && isIoioStaffRoute(pathname)) {
+  if (surface === "student" && !isIoioStudentRoute(pathname)) {
     return "/ioio";
   }
   return destination;

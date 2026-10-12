@@ -68,16 +68,6 @@ vi.mock("react-router", () => ({
   useRouteLoaderData: () => undefined,
 }));
 
-// why: the selector's loader, available-workspace, and switch behavior have
-// focused coverage of their own; these shell tests only verify its placement.
-vi.mock("~/components/layout/sidebar/organization-selector", () => ({
-  default: () => (
-    <button type="button" aria-label="Current workspace: IOIO Lab Dev">
-      IOIO Lab Dev
-    </button>
-  ),
-}));
-
 import type { StudentAsset } from "~/modules/ioio-student/service.server";
 import { StudentCheckoutProvider } from "./checkout-context";
 import StudentShell from "./student-shell";
@@ -142,6 +132,10 @@ describe("StudentShell account controls", () => {
     ]) {
       expect(visibleDestinations).not.toContain(href);
     }
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
   });
 
   it("keeps logout available in the desktop sidebar and mobile drawer", async () => {
@@ -152,11 +146,10 @@ describe("StudentShell account controls", () => {
     expect(
       screen.getAllByRole("region", { name: "Student account" })
     ).toHaveLength(1);
+    expect(screen.queryByText("Workspace")).toBeNull();
     expect(
-      screen.getAllByRole("button", {
-        name: "Current workspace: IOIO Lab Dev",
-      })
-    ).toHaveLength(1);
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
     expect(screen.getAllByRole("button", { name: /log out/i })).toHaveLength(1);
     expect(
       screen.getByRole("button", { name: /log out/i }).closest("form")
@@ -170,11 +163,10 @@ describe("StudentShell account controls", () => {
     expect(
       screen.getAllByRole("region", { name: "Student account" })
     ).toHaveLength(2);
+    expect(screen.queryByText("Workspace")).toBeNull();
     expect(
-      screen.getAllByRole("button", {
-        name: "Current workspace: IOIO Lab Dev",
-      })
-    ).toHaveLength(2);
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
     expect(screen.getAllByRole("button", { name: /log out/i })).toHaveLength(2);
   });
 });

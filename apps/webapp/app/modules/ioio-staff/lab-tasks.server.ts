@@ -82,27 +82,15 @@ export async function requireLabTaskAccess({
   const isAdmin = Boolean(
     membership?.roles.some((role) => role === "ADMIN" || role === "OWNER")
   );
-  const isIoioTA = Boolean(
-    selected.organizationId &&
-      (await db.ioioLabTA.findUnique({
-        where: {
-          organizationId_userId: {
-            organizationId: selected.organizationId,
-            userId,
-          },
-        },
-        select: { id: true },
-      }))
-  );
 
-  if (!selected.organizationId || (!isAdmin && !isIoioTA)) {
+  if (!selected.organizationId || !isAdmin) {
     throw taskError("You do not have permission to access Lab Tasks.", 403);
   }
 
   return {
     organizationId: selected.organizationId,
     isAdmin,
-    isIoioTA,
+    isIoioTA: false,
   };
 }
 

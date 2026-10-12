@@ -23,16 +23,12 @@ import {
   useSidebar,
 } from "./sidebar";
 
-export default function OrganizationSelector({
-  variant = "shelf",
-}: {
-  variant?: "shelf" | "ioio";
-}) {
+export default function OrganizationSelector() {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isSwitchingOrg, setIsSwitchingOrg] = useState(false);
 
   const { open, openMobile, isMobile } = useSidebar();
-  const showOrganizationName = variant === "ioio" || open || openMobile;
+  const showOrganizationName = open || openMobile;
 
   const layoutData = useRouteLoaderData<typeof loader>(
     "routes/_layout+/_layout"
@@ -104,10 +100,8 @@ export default function OrganizationSelector({
           <DropdownMenuTrigger disabled={isSwitchingOrg} asChild>
             <SidebarMenuButton
               className={tw(
-                variant === "ioio"
-                  ? "size-full min-h-10 truncate !p-2 text-gray-700 data-[state=open]:bg-red-50 data-[state=open]:text-red-900 hover:bg-red-50 hover:text-red-900"
-                  : "size-full truncate !p-1 data-[state=open]:bg-gray-50 data-[state=open]:text-sidebar-accent-foreground hover:bg-gray-50",
-                variant === "shelf" && (open || openMobile) ? "border" : ""
+                "size-full truncate !p-1 data-[state=open]:bg-gray-50 data-[state=open]:text-sidebar-accent-foreground hover:bg-gray-50",
+                open || openMobile ? "border" : ""
               )}
               aria-label={`Current workspace: ${currentOrganization.name}. Switch workspace`}
               title={currentOrganization.name}

@@ -1,8 +1,8 @@
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Form, Link, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import { listPublishedHandbookArticles } from "~/modules/ioio-handbook/service.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -10,7 +10,7 @@ import { error, payload } from "~/utils/http.server";
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId } = context.getSession();
   try {
-    const auth = await requireStudentRead({ context, request });
+    const auth = await requireIoioHandbookRead({ context, request });
     const url = new URL(request.url);
     const query = url.searchParams.get("q")?.trim().slice(0, 120) ?? "";
     const section =
@@ -30,7 +30,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       sections,
       query,
       section: section ?? "",
-      canEdit: auth.role === "ADMIN" || auth.role === "OWNER",
+      canEdit: auth.canEdit,
+      isStudent: auth.isStudent,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -44,7 +45,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Handbook" };
 
 export default function HandbookIndexPage() {
-  const { articles, sections, query, section, canEdit } =
+  const { articles, sections, query, section, canEdit, isStudent } =
     useLoaderData<typeof loader>();
   return (
     <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
@@ -63,12 +64,14 @@ export default function HandbookIndexPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Link
-            to="/handbook/contribute"
-            className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
-          >
-            Contribute knowledge
-          </Link>
+          {isStudent ? (
+            <Link
+              to="/handbook/contribute"
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+            >
+              Contribute knowledge
+            </Link>
+          ) : null}
           {canEdit ? (
             <>
               <Link

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("~/database/db.server", () => ({ db: {} }));
+vi.mock("~/database/db.server", () => ({
+  db: { ioioLabTA: { findUnique: vi.fn() } },
+}));
 vi.mock("~/modules/ioio-lab-information/service.server", () => ({
   getAcademicYear: () => "2026-2027",
 }));
@@ -11,7 +13,12 @@ vi.mock("~/modules/working-hours/service.server", () => ({
   getWorkingHoursForOrganization: vi.fn(),
 }));
 
-import { calculateTAHoursBudgetValues } from "./ta-hours.server";
+import { db } from "~/database/db.server";
+import { getSelectedOrganization } from "~/modules/organization/context.server";
+import {
+  calculateTAHoursBudgetValues,
+  requireTAHoursAccess,
+} from "./ta-hours.server";
 
 describe("TA Hours budget conversion", () => {
   it("converts SEK to hours with two-decimal Decimal rounding", () => {
@@ -61,5 +68,27 @@ describe("TA Hours budget conversion", () => {
     ).toThrow(
       "Calculated budget must be a valid SEK amount with up to two decimals."
     );
+  });
+});
+
+describe("TA Hours access", () => {
+  it("does not let a SELF_SERVICE TA read or change staff TA Hours", async () => {
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "ioio-team-1",
+      userOrganizations: [
+        {
+          organization: { id: "ioio-team-1" },
+          roles: ["SELF_SERVICE"],
+        },
+      ],
+    } as never);
+
+    await expect(
+      requireTAHoursAccess({
+        userId: "student-1",
+        request: new Request("http://localhost/ta-hours"),
+      })
+    ).rejects.toMatchObject({ status: 403 });
+    expect(db.ioioLabTA.findUnique).not.toHaveBeenCalled();
   });
 });

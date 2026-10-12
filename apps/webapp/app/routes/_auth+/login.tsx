@@ -66,10 +66,23 @@ async function getAuthenticatedLanding({
   const membership = resolveIoioAccountMembership(
     selected.userOrganizations,
     selected.organizationId,
-    selected.currentOrganization.type
+    selected.currentOrganization.type,
+    selected.userOrganizations?.[0]?.user?.lastSelectedOrganizationId
   );
-  const organizationId = membership?.organizationId ?? selected.organizationId;
-  const roles = membership?.roles;
+  if (!membership) {
+    throw new ShelfError({
+      cause: null,
+      title: "IOIO Team organization required",
+      message:
+        "Your account must belong to one authorized IOIO Team workspace. Please contact IOIO Staff to resolve workspace access.",
+      status: 403,
+      label: "Organization",
+      shouldBeCaptured: false,
+    });
+  }
+
+  const organizationId = membership.organizationId;
+  const roles = membership.roles;
   const defaultDestination = resolveIoioAccountDestination(roles);
   if (!defaultDestination) {
     throw new ShelfError({

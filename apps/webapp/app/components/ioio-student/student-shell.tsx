@@ -11,7 +11,6 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { Form } from "~/components/custom-form";
-import OrganizationSelector from "~/components/layout/sidebar/organization-selector";
 import { getAnnualAccessNoticeEventKey } from "~/modules/ioio-student/annual-access";
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
@@ -284,10 +283,6 @@ function StudentAccountControls({ onNavigate }: { onNavigate?: () => void }) {
       aria-label="Student account"
       className="mt-6 border-t border-gray-100 pt-4"
     >
-      <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.16em] text-gray-400">
-        Workspace
-      </p>
-      <OrganizationSelector variant="ioio" />
       <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
         Signed in
       </p>
