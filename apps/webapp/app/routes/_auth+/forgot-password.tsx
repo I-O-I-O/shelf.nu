@@ -10,6 +10,7 @@ import { Form } from "~/components/custom-form";
 import Input from "~/components/forms/input";
 import { ShelfOTP } from "~/components/forms/otp-input";
 import PasswordInput from "~/components/forms/password-input";
+import { IoioAuthPrimaryButton } from "~/components/ioio/auth-primary-button";
 import { Button } from "~/components/shared/button";
 import { useSearchParams } from "~/hooks/search-params";
 import { useDisabled } from "~/hooks/use-disabled";
@@ -290,20 +291,19 @@ export default function ForgotPassword() {
                   type="email"
                   autoComplete="email"
                   inputClassName="w-full"
-                  placeholder="zaans@huisje.com"
+                  placeholder="student@example.com"
                   disabled={disabled}
                   error={emailError}
                 />
               </div>
 
-              <Button
+              <IoioAuthPrimaryButton
                 data-test-id="send-password-reset-link"
-                width="full"
                 type="submit"
                 disabled={disabled}
               >
                 {!disabled ? "Reset password" : "Sending code..."}
-              </Button>
+              </IoioAuthPrimaryButton>
             </Form>
             <p className="mt-2 text-center text-gray-500">
               Tip: Check your spam folder if you don't see the email within a
@@ -394,14 +394,13 @@ function PasswordResetForm({ email }: { email: string }) {
       <input type="hidden" name="email" value={email} />
       <input type="hidden" name="intent" value="confirm-otp" />
 
-      <Button
+      <IoioAuthPrimaryButton
         data-test-id="create-account"
         type="submit"
-        className="w-full "
         disabled={disabled}
       >
         Confirm password reset
-      </Button>
+      </IoioAuthPrimaryButton>
     </Form>
   );
 }

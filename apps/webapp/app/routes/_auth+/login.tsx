@@ -10,6 +10,7 @@ import { z } from "zod";
 import { Form } from "~/components/custom-form";
 
 import Input from "~/components/forms/input";
+import { IoioAuthPrimaryButton } from "~/components/ioio/auth-primary-button";
 import { Button } from "~/components/shared/button";
 import { useSearchParams } from "~/hooks/search-params";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
@@ -18,6 +19,7 @@ import {
   signInWithEmail,
 } from "~/modules/auth/service.server";
 import { isSsoDomainEmail } from "~/modules/auth/sso-enforcement.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 
 import {
   getSelectedOrganization,
@@ -55,6 +57,11 @@ async function getAuthenticatedLanding({
   request: Request;
   requestedDestination?: string | null;
 }) {
+  // A verified login is also the recovery boundary for an interrupted
+  // one-user setup. Existing Team installations return immediately without
+  // writing anything.
+  const initializedTeam = await ensureInitialIoioTeamForUser({ userId });
+
   const selected = await getSelectedOrganization({ userId, request });
   if (selected.noVisibleOrganizations) {
     return {
@@ -96,7 +103,9 @@ async function getAuthenticatedLanding({
   }
 
   const safeDestination = safeRedirect(
-    requestedDestination || defaultDestination,
+    initializedTeam
+      ? defaultDestination
+      : requestedDestination || defaultDestination,
     defaultDestination
   );
 
@@ -282,8 +291,7 @@ export default function IndexLoginForm() {
     <div className="w-full max-w-md">
       {acceptedInvite ? (
         <div className="mb-8 text-center text-success-600">
-          Successfully accepted workspace invite. Please login to see your new
-          workspace.
+          Your IOIO access has been updated. Log in to continue.
         </div>
       ) : null}
 
@@ -299,7 +307,7 @@ export default function IndexLoginForm() {
             ref={emailInputRef}
             data-test-id="email"
             label="Email"
-            placeholder="you@example.com"
+            placeholder="student@example.com"
             required
             name={zo.fields.email()}
             type="email"
@@ -321,16 +329,15 @@ export default function IndexLoginForm() {
           error={zo.errors.password()?.message || data?.error.message}
         />
         <input type="hidden" name={zo.fields.redirectTo()} value={redirectTo} />
-        <Button
-          className="min-h-11 w-full rounded-xl border-red-700 bg-red-700 text-center text-white focus:ring-2 focus:ring-red-600 enabled:hover:border-red-800 enabled:hover:bg-red-800 disabled:border-red-300 disabled:bg-red-300"
+        <IoioAuthPrimaryButton
           type="submit"
           data-test-id="login"
           disabled={disabled}
         >
           {disabled ? "Logging in..." : "Log in"}
-        </Button>
+        </IoioAuthPrimaryButton>
       </Form>
-      <div className="mt-5 text-center text-sm text-gray-500">
+      <div className="mt-5 flex flex-col items-center gap-2 text-center text-sm text-gray-500">
         <Button
           variant="link"
           className="text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
@@ -341,6 +348,19 @@ export default function IndexLoginForm() {
         >
           Forgot password?
         </Button>
+        <p>
+          Don&apos;t have an account?{" "}
+          <Button
+            variant="link"
+            className="font-semibold text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
+            to={{
+              pathname: "/join",
+              search: searchParams.toString(),
+            }}
+          >
+            Sign up
+          </Button>
+        </p>
       </div>
     </div>
   );

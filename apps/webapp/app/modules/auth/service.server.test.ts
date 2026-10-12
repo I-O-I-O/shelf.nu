@@ -25,6 +25,7 @@ import {
   revokeAllSessions,
   sendOTP,
   sendResetPasswordLink,
+  signUpWithEmailPass,
   signInWithEmail,
   verifyOtpAndSignin,
 } from "./service.server";
@@ -53,6 +54,7 @@ vi.mock("~/database/db.server", () => ({ db: {} }));
 // why: every guarded path ends in a Supabase Auth network call; the spies let
 // the tests assert whether it was made, and whether a session was revoked.
 const supabaseMocks = vi.hoisted(() => ({
+  signUp: vi.fn(),
   signInWithPassword: vi.fn(),
   signInWithOtp: vi.fn(),
   resetPasswordForEmail: vi.fn(),
@@ -96,6 +98,10 @@ async function rejectionOf(promise: Promise<unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  supabaseMocks.signUp.mockResolvedValue({
+    data: { user: { id: "user-1" } },
+    error: null,
+  });
   vi.mocked(getLegacyLoginDecision).mockResolvedValue({ allowed: true });
   vi.mocked(getLegacyLoginDecisionForUser).mockResolvedValue({ allowed: true });
   supabaseMocks.signInWithPassword.mockResolvedValue({
@@ -109,6 +115,27 @@ beforeEach(() => {
     error: null,
   });
   supabaseMocks.admin.signOut.mockResolvedValue({ data: null, error: null });
+});
+
+describe("signUpWithEmailPass", () => {
+  it("uses Shelf Supabase signup and carries the IOIO signup names as auth metadata", async () => {
+    await signUpWithEmailPass(EMAIL, "password123", {
+      firstName: "Jane",
+      lastName: "Doe",
+    });
+
+    expect(supabaseMocks.signUp).toHaveBeenCalledWith({
+      email: EMAIL,
+      password: "password123",
+      options: {
+        data: {
+          signup_method: "email-password",
+          firstName: "Jane",
+          lastName: "Doe",
+        },
+      },
+    });
+  });
 });
 
 describe("signInWithEmail", () => {
@@ -272,6 +299,30 @@ describe("verifyOtpAndSignin", () => {
     );
     expect(supabaseMocks.admin.signOut).not.toHaveBeenCalled();
     expect(session).toMatchObject({ userId: "user-1", email: EMAIL });
+  });
+
+  it("returns signup names from the verified Supabase session metadata", async () => {
+    supabaseMocks.verifyOtp.mockResolvedValueOnce({
+      data: {
+        session: {
+          ...SUPABASE_SESSION,
+          user: {
+            ...SUPABASE_SESSION.user,
+            user_metadata: { firstName: "Jane", lastName: "Doe" },
+          },
+        },
+      },
+      error: null,
+    } as never);
+
+    await expect(verifyOtpAndSignin(EMAIL, "123456")).resolves.toMatchObject({
+      signupProfile: { firstName: "Jane", lastName: "Doe" },
+    });
+    expect(supabaseMocks.verifyOtp).toHaveBeenCalledWith({
+      email: EMAIL,
+      token: "123456",
+      type: "email",
+    });
   });
 });
 

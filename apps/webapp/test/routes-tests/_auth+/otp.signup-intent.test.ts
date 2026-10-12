@@ -2,9 +2,9 @@
 
 /**
  * Code confirmation: a new account records the signup link's intent on its
- * signup event, and the cookie is handed on to onboarding. `redirectTo` only
- * decides where an onboarded account lands; every other account lands on
- * `/assets`, whose layout sends it to onboarding. A login ignores the intent.
+ * signup event. IOIO profiles resolve directly to their Team surface, while
+ * incomplete legacy Shelf signups continue through onboarding. A login ignores
+ * the signup intent.
  *
  * @see {@link file://./../../../app/routes/_auth+/otp.tsx}
  * @see {@link file://./../../../app/modules/signup-intent/cookie.server.ts}
@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { USER_EMAIL, USER_ID, ORGANIZATION_ID } from "@mocks/user";
 
 import { verifyOtpAndSignin } from "~/modules/auth/service.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 import {
   getSelectedOrganization,
   setSelectedOrganizationIdCookie,
@@ -41,6 +42,11 @@ vi.mock("~/modules/user/service.server", () => ({
 // why: username generation queries the database for collisions
 vi.mock("~/modules/user/utils.server", () => ({
   generateUniqueUsername: vi.fn(),
+}));
+// why: initialization policy and its transaction lock are tested in the
+// helper suite; these tests verify the OTP auth boundary invokes the helper.
+vi.mock("~/modules/ioio/initial-team.server", () => ({
+  ensureInitialIoioTeamForUser: vi.fn(),
 }));
 // why: the workspace cookie is a fixed string here so the intent cookie can
 // be told apart from it in the response headers
@@ -105,6 +111,7 @@ describe("otp action — confirming the code", () => {
     vi.mocked(findUserById).mockResolvedValue(null);
     vi.mocked(generateUniqueUsername).mockResolvedValue("new-person");
     vi.mocked(createUser).mockResolvedValue({ id: USER_ID } as never);
+    vi.mocked(ensureInitialIoioTeamForUser).mockResolvedValue(null);
     vi.mocked(getSelectedOrganization).mockResolvedValue({
       organizationId: ORGANIZATION_ID,
     } as never);
@@ -127,6 +134,49 @@ describe("otp action — confirming the code", () => {
         bootstrapIoioTeamOnFreshSignup: true,
       })
     );
+    expect(ensureInitialIoioTeamForUser).toHaveBeenCalledWith({
+      userId: USER_ID,
+    });
+  });
+
+  it("verifies an IOIO signup, creates the Student profile, and selects the Team", async () => {
+    vi.mocked(verifyOtpAndSignin).mockResolvedValue({
+      userId: USER_ID,
+      email: USER_EMAIL,
+      signupProfile: { firstName: "Jane", lastName: "Student" },
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          roles: ["OWNER"],
+          organization: { type: "PERSONAL" },
+          user: { lastSelectedOrganizationId: "ioio-team-1" },
+        },
+        {
+          organizationId: "ioio-team-1",
+          roles: ["SELF_SERVICE"],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as never);
+    vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+      "selected-organization-id=ioio-team-1"
+    );
+
+    const response = (await action(confirmArgs())) as Response;
+
+    expect(response.headers.get("Location")).toBe("/ioio");
+    expect(createUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        firstName: "Jane",
+        lastName: "Student",
+        ioioSignup: true,
+      })
+    );
+    expect(setSelectedOrganizationIdCookie).toHaveBeenCalledWith("ioio-team-1");
   });
 
   it("hands the intent on to onboarding with a fresh window", async () => {
@@ -195,6 +245,20 @@ describe("otp action — confirming the code", () => {
       id: USER_ID,
       onboarded: true,
     } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: ORGANIZATION_ID,
+      currentOrganization: { type: "TEAM" },
+      userOrganizations: [
+        {
+          organizationId: ORGANIZATION_ID,
+          roles: ["SELF_SERVICE"],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as never);
+    vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+      `selected-organization-id=${ORGANIZATION_ID}`
+    );
 
     const response = (await action(
       confirmArgs(
@@ -203,10 +267,84 @@ describe("otp action — confirming the code", () => {
       )
     )) as Response;
 
-    expect(response.headers.get("Location")).toBe("/assets");
+    expect(response.headers.get("Location")).toBe("/ioio");
     expect(response.headers.getSetCookie()).toEqual([
-      "selected-organization-id=org",
+      `selected-organization-id=${ORGANIZATION_ID}`,
     ]);
+    expect(ensureInitialIoioTeamForUser).toHaveBeenCalledWith({
+      userId: USER_ID,
+    });
+  });
+
+  it("recovers a sole existing OTP user, selects the Team, and lands in Staff Desk", async () => {
+    vi.mocked(findUserById).mockResolvedValue({
+      id: USER_ID,
+      onboarded: true,
+    } as never);
+    vi.mocked(ensureInitialIoioTeamForUser).mockResolvedValue({
+      id: "ioio-team-1",
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          roles: ["OWNER"],
+          organization: { type: "PERSONAL" },
+          user: { lastSelectedOrganizationId: "ioio-team-1" },
+        },
+        {
+          organizationId: "ioio-team-1",
+          roles: ["OWNER"],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as never);
+    vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+      "selected-organization-id=ioio-team-1"
+    );
+
+    const response = (await action(
+      confirmArgs(undefined, "login")
+    )) as Response;
+
+    expect(response.headers.get("Location")).toBe("/home");
+    expect(setSelectedOrganizationIdCookie).toHaveBeenCalledWith("ioio-team-1");
+    expect(response.headers.getSetCookie()).toContain(
+      "selected-organization-id=ioio-team-1"
+    );
+  });
+
+  it("keeps an OTP login with no Team membership blocked", async () => {
+    vi.mocked(findUserById).mockResolvedValue({
+      id: USER_ID,
+      onboarded: true,
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          roles: ["OWNER"],
+          organization: { type: "PERSONAL" },
+        },
+      ],
+    } as never);
+
+    const response = (await action(
+      confirmArgs(undefined, "login")
+    )) as Response;
+
+    expect((response as unknown as { init?: ResponseInit }).init?.status).toBe(
+      403
+    );
+    expect(
+      (response as unknown as { data?: { error?: { title?: string } } }).data
+        ?.error?.title
+    ).toBe("IOIO Team organization required");
+    expect(setSelectedOrganizationIdCookie).not.toHaveBeenCalled();
   });
 
   it("never follows a redirectTo off our origin", async () => {

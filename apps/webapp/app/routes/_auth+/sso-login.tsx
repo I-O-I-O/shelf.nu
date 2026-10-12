@@ -13,6 +13,7 @@ import {
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import Input from "~/components/forms/input";
+import { IoioAuthPrimaryButton } from "~/components/ioio/auth-primary-button";
 import { Button } from "~/components/shared/button";
 import { config } from "~/config/shelf.config";
 import { useSearchParams } from "~/hooks/search-params";
@@ -185,15 +186,13 @@ export default function SSOLogin() {
               inputClassName="w-full"
               error={zo.errors.domain()?.message}
             />
-            <Button
-              className="text-center"
+            <IoioAuthPrimaryButton
               type="submit"
               data-test-id="login"
               disabled={disabled}
-              width="full"
             >
               Log In
-            </Button>
+            </IoioAuthPrimaryButton>
           </div>
         </Form>
         {data?.error?.message && (

@@ -19,6 +19,7 @@ import {
   Prisma,
   Roles,
   OrganizationRoles,
+  OrganizationType,
   AssetIndexMode,
 } from "@prisma/client";
 import type { ITXClientDenyList } from "@prisma/client/runtime/library";
@@ -74,10 +75,7 @@ import {
   caseInsensitiveEmailFilter,
   normalizeInviteEmail,
 } from "../invite/helpers";
-import {
-  createInitialIoioTeam,
-  isFreshIoioInstanceForSignup,
-} from "../ioio/initial-team.server";
+import { ensureInitialIoioTeamForUser } from "../ioio/initial-team.server";
 import { getOrganizationsBySsoDomain } from "../organization/service.server";
 import { USER_CONTACT_SELECT } from "../user-contact/constants";
 import {
@@ -1013,11 +1011,13 @@ export async function createUser(
     formatPrefs?: DetectedFormatPrefs;
     skipPersonalOrg?: boolean;
     /**
-     * OTP self-signup only: initialize IOIO's first Team when the persistent
-     * Shelf database is genuinely empty. Other account-creation flows never
-     * request bootstrap ownership.
+     * OTP self-signup only: try the one-time IOIO Team initialization after
+     * inserting this Shelf user. The helper only initializes when this is the
+     * sole user and there is no existing Team.
      */
     bootstrapIoioTeamOnFreshSignup?: boolean;
+    /** Email/password IOIO signup that finishes account setup as a Student. */
+    ioioSignup?: boolean;
     /**
      * What the signup link asked for (plan, trial, campaign), carried by the
      * signup flow. Recorded on the `signup_completed` event only; the
@@ -1039,6 +1039,7 @@ export async function createUser(
     formatPrefs,
     skipPersonalOrg,
     bootstrapIoioTeamOnFreshSignup,
+    ioioSignup,
     signupIntent,
   } = payload;
 
@@ -1047,14 +1048,11 @@ export async function createUser(
    * and the caller hasn't opted out (e.g. SCIM provisioning)
    */
   const shouldCreatePersonalOrg = !skipPersonalOrg && !config.disableSignup;
+  let ioioStudentOrganizationId: Organization["id"] | null = null;
 
   try {
     const createdUser = await db.$transaction(
       async (tx) => {
-        const shouldBootstrapIoioTeam = bootstrapIoioTeamOnFreshSignup
-          ? await isFreshIoioInstanceForSignup(tx)
-          : false;
-
         const user = await tx.user.create({
           data: {
             email,
@@ -1150,14 +1148,58 @@ export async function createUser(
             }),
         ]);
 
-        if (shouldBootstrapIoioTeam) {
-          await createInitialIoioTeam({ tx, userId: user.id });
+        const initialIoioTeam = bootstrapIoioTeamOnFreshSignup
+          ? await ensureInitialIoioTeamForUser({ tx, userId: user.id })
+          : null;
+
+        if (ioioSignup) {
+          if (initialIoioTeam) {
+            // The first verified IOIO account already has OWNER membership
+            // from Shelf's createOrganization service and selected Team.
+            await tx.user.update({
+              where: { id: user.id },
+              data: { onboarded: true },
+            });
+          } else {
+            // A new IOIO account on an initialized instance joins its sole
+            // Team as a Student through Shelf's normal membership association.
+            // Multiple Teams are ambiguous, so signup stays unassigned.
+            const teams = await tx.organization.findMany({
+              where: { type: OrganizationType.TEAM },
+              select: { id: true },
+              take: 2,
+            });
+            if (teams.length === 1) {
+              const [team] = teams;
+              await createUserOrgAssociation(tx, {
+                userId: user.id,
+                organizationIds: [team.id],
+                roles: [OrganizationRoles.SELF_SERVICE],
+              });
+              ioioStudentOrganizationId = team.id;
+              await tx.user.update({
+                where: { id: user.id },
+                data: {
+                  lastSelectedOrganizationId: team.id,
+                  onboarded: true,
+                },
+              });
+            }
+          }
         }
 
         return user;
       },
       { maxWait: 6000, timeout: 10000 }
     );
+
+    if (ioioStudentOrganizationId) {
+      await ensureAssetIndexModeForRole({
+        userId,
+        organizationId: ioioStudentOrganizationId,
+        role: OrganizationRoles.SELF_SERVICE,
+      });
+    }
 
     /**
      * Best-effort funnel analytics: a brand-new account was created. Fire-and-

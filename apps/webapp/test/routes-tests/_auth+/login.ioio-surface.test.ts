@@ -4,6 +4,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { signInWithEmail } from "~/modules/auth/service.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 import {
   getSelectedOrganization,
   setSelectedOrganizationIdCookie,
@@ -22,6 +23,12 @@ vi.mock("~/modules/auth/service.server", () => ({
 vi.mock("~/modules/organization/context.server", () => ({
   getSelectedOrganization: vi.fn(),
   setSelectedOrganizationIdCookie: vi.fn(),
+}));
+
+// why: initialization policy and its transaction lock are tested in the
+// helper suite; this route test verifies login calls it before resolving IOIO.
+vi.mock("~/modules/ioio/initial-team.server", () => ({
+  ensureInitialIoioTeamForUser: vi.fn(),
 }));
 
 // why: importing the route otherwise initializes Prisma in this route-only
@@ -82,6 +89,9 @@ describe("login redirects to the authenticated IOIO surface", () => {
     expect(response.headers.getSetCookie()).toContain(
       "selected-organization-id=org-1"
     );
+    expect(ensureInitialIoioTeamForUser).toHaveBeenCalledWith({
+      userId: "user-1",
+    });
   });
 
   it("preserves a Student deep link inside the Student surface", async () => {
@@ -157,5 +167,40 @@ describe("login redirects to the authenticated IOIO surface", () => {
         ?.error?.title
     ).toBe("IOIO Team organization required");
     expect(setSelectedOrganizationIdCookie).not.toHaveBeenCalled();
+  });
+
+  it("recovers the sole existing user into the Team and lands in Staff Desk", async () => {
+    vi.mocked(signInWithEmail).mockResolvedValue({
+      userId: "user-1",
+      email: "staff@example.test",
+    } as never);
+    vi.mocked(ensureInitialIoioTeamForUser).mockResolvedValue({
+      id: "ioio-team-1",
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          roles: [OrganizationRoles.OWNER],
+          organization: { type: "PERSONAL" },
+          user: { lastSelectedOrganizationId: "ioio-team-1" },
+        },
+        {
+          organizationId: "ioio-team-1",
+          roles: [OrganizationRoles.OWNER],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as never);
+    vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+      "selected-organization-id=ioio-team-1"
+    );
+
+    const response = (await action(loginArgs("/assets"))) as Response;
+
+    expect(response.headers.get("Location")).toBe("/home");
+    expect(setSelectedOrganizationIdCookie).toHaveBeenCalledWith("ioio-team-1");
   });
 });

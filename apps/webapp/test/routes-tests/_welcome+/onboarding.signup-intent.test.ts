@@ -33,8 +33,8 @@ import { createStripeCustomer } from "~/utils/stripe.server";
 vi.mock("~/database/db.server", () => ({ db: {} }));
 
 // why: mocking Remix's data() so error results are readable Responses
-const createDataMock = vi.hoisted(() => {
-  return () =>
+const createDataMock = vi.hoisted(
+  () => () =>
     vi.fn((body: unknown, init?: ResponseInit) => {
       // `Headers` accepts every HeadersInit shape, including the
       // `[name, value][]` the loader passes for its Set-Cookie.
@@ -44,8 +44,8 @@ const createDataMock = vi.hoisted(() => {
         status: init?.status || 200,
         headers,
       });
-    });
-});
+    })
+);
 
 vi.mock("react-router", async () => {
   const actual = await vi.importActual("react-router");
@@ -98,7 +98,13 @@ const USER = {
   lastName: "Doe",
   createdWithInvite: false,
   onboarded: false,
-  userOrganizations: [],
+  userOrganizations: [
+    {
+      organizationId: "ioio-team-1",
+      roles: ["OWNER"],
+      organization: { type: "TEAM" },
+    },
+  ],
 };
 
 const context = {
@@ -184,15 +190,13 @@ describe("onboarding action — consuming the signup intent", () => {
     vi.mocked(signInWithEmail).mockResolvedValue(null);
   });
 
-  it("skips the Personal/Team question for a Team trial and clears the cookie", async () => {
+  it("clears the signup intent and continues into Staff Desk", async () => {
     const response = await submit(
       onboardingRequest({ cookie: await intentCookie(TEAM_TRIAL_INTENT) })
     );
 
     expect(response.status).toBe(302);
-    expect(response.headers.get("Location")).toBe(
-      "/select-plan?plan=team&trial=true"
-    );
+    expect(response.headers.get("Location")).toBe("/home");
     expect(signupIntentCookieSetBy(response)).toContain("Max-Age=0");
   });
 
@@ -215,19 +219,19 @@ describe("onboarding action — consuming the signup intent", () => {
     );
   });
 
-  it("leads with subscribing for a Team intent without a trial", async () => {
+  it("continues into Staff Desk for a Team intent without a trial", async () => {
     const response = await submit(
       onboardingRequest({ cookie: await intentCookie({ plan: "team" }) })
     );
 
-    expect(response.headers.get("Location")).toBe("/select-plan?plan=team");
+    expect(response.headers.get("Location")).toBe("/home");
   });
 
-  it("keeps the Personal/Team question, and stores nothing extra, without an intent", async () => {
+  it("continues into Staff Desk and stores no plan data without an intent", async () => {
     const response = await submit(onboardingRequest());
 
     expect(response.status).toBe(302);
-    expect(response.headers.get("Location")).toBe("/welcome");
+    expect(response.headers.get("Location")).toBe("/home");
     expect(signupIntentCookieSetBy(response)).toBeUndefined();
     expect(upsertBusinessIntel).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -238,14 +242,14 @@ describe("onboarding action — consuming the signup intent", () => {
     );
   });
 
-  it("keeps the Personal/Team question for a campaign-only intent, but records the campaign", async () => {
+  it("continues into Staff Desk for campaign-only intent and records the campaign", async () => {
     const response = await submit(
       onboardingRequest({
         cookie: await intentCookie({ utmSource: "newsletter" }),
       })
     );
 
-    expect(response.headers.get("Location")).toBe("/welcome");
+    expect(response.headers.get("Location")).toBe("/home");
     expect(signupIntentCookieSetBy(response)).toContain("Max-Age=0");
     expect(upsertBusinessIntel).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -259,7 +263,13 @@ describe("onboarding action — consuming the signup intent", () => {
     vi.mocked(getUserByID).mockResolvedValue({
       ...USER,
       createdWithInvite: true,
-      userOrganizations: [{ organizationId: "org-123" }],
+      userOrganizations: [
+        {
+          organizationId: "org-123",
+          roles: ["OWNER"],
+          organization: { type: "TEAM" },
+        },
+      ],
     } as never);
 
     const response = await submit(
@@ -275,7 +285,7 @@ describe("onboarding action — consuming the signup intent", () => {
     );
 
     expect(response.status).toBe(302);
-    expect(response.headers.get("Location")).toBe("/assets");
+    expect(response.headers.get("Location")).toBe("/home");
     expect(response.headers.getSetCookie()).toContain(
       "selected-organization-id=org-123"
     );

@@ -1,102 +1,183 @@
 import { describe, expect, it, vi } from "vitest";
 
 const createOrganizationMock = vi.hoisted(() => vi.fn());
+const databaseTransactionMock = vi.hoisted(() => vi.fn());
 
-// why: Shelf organization creation is the boundary under test; the database
-// and its nested writes are covered by the organization service tests.
+// why: Shelf organization creation is the boundary under test; its nested
+// OWNER membership writes are covered by the organization service tests.
 vi.mock("~/modules/organization/service.server", () => ({
   createOrganization: createOrganizationMock,
+}));
+
+// why: login recovery exercises the transaction wrapper with an in-memory
+// transaction; avoid constructing the application Prisma client in tests.
+vi.mock("~/database/db.server", () => ({
+  db: { $transaction: databaseTransactionMock },
 }));
 
 // why: pin instance configuration so the initial Team name is deterministic.
 vi.mock("~/utils/env", () => ({ INSTANCE_NAME: "  IOIO Self-Hosted  " }));
 
-import {
-  createInitialIoioTeam,
-  isFreshIoioInstanceForSignup,
-} from "./initial-team.server";
+import { ensureInitialIoioTeamForUser } from "./initial-team.server";
 
-function transaction(overrides?: {
-  team?: { id: string } | null;
-  user?: { id: string } | null;
-}) {
+type InitializationTransaction = NonNullable<
+  Parameters<typeof ensureInitialIoioTeamForUser>[0]["tx"]
+>;
+
+function transaction({
+  teamCount = 0,
+  userCount = 1,
+  currentUser = true,
+}: {
+  teamCount?: number;
+  userCount?: number;
+  currentUser?: boolean;
+} = {}) {
   return {
     $executeRaw: vi.fn().mockResolvedValue(1),
     organization: {
-      findFirst: vi.fn().mockResolvedValue(overrides?.team ?? null),
+      count: vi.fn().mockResolvedValue(teamCount),
     },
     user: {
-      findFirst: vi.fn().mockResolvedValue(overrides?.user ?? null),
+      count: vi.fn().mockResolvedValue(userCount),
+      findUnique: vi
+        .fn()
+        .mockResolvedValue(currentUser ? { id: "user-1" } : null),
       update: vi.fn().mockResolvedValue({}),
     },
-  } as unknown as Parameters<typeof isFreshIoioInstanceForSignup>[0];
+  } as unknown as InitializationTransaction;
 }
 
-describe("initial IOIO Team bootstrap", () => {
-  it("recognizes an empty Shelf database after a serialized state recheck", async () => {
+describe("initial IOIO Team initialization", () => {
+  it("uses a Shelf transaction for login recovery", async () => {
+    const tx = transaction();
+    databaseTransactionMock.mockImplementationOnce(
+      (
+        callback: (transaction: InitializationTransaction) => Promise<unknown>
+      ) => callback(tx)
+    );
+    vi.mocked(createOrganizationMock).mockResolvedValue({ id: "team-1" });
+
+    await expect(
+      ensureInitialIoioTeamForUser({ userId: "user-1" })
+    ).resolves.toEqual({ id: "team-1" });
+
+    expect(databaseTransactionMock).toHaveBeenCalledWith(expect.any(Function), {
+      maxWait: 6000,
+      timeout: 10000,
+    });
+    expect(tx.$executeRaw).toHaveBeenCalledOnce();
+  });
+
+  it("creates a Team for the sole pre-existing Shelf user and selects it", async () => {
     const events: string[] = [];
     const tx = transaction();
+    vi.mocked(tx.organization.count).mockImplementation(() => {
+      events.push("team-count");
+      return Promise.resolve(0 as never);
+    });
+    vi.mocked(tx.user.count).mockImplementation(() => {
+      events.push("user-count");
+      return Promise.resolve(1 as never);
+    });
+    vi.mocked(tx.user.findUnique).mockImplementation(() => {
+      events.push("current-user");
+      return Promise.resolve({ id: "user-1" } as never);
+    });
     vi.mocked(tx.$executeRaw).mockImplementation(() => {
       events.push("lock");
       return Promise.resolve(1);
     });
-    let teamReads = 0;
-    let userReads = 0;
-    vi.mocked(tx.organization.findFirst).mockImplementation(() => {
-      events.push(`team-${++teamReads}`);
-      return Promise.resolve(null as never);
-    });
-    vi.mocked(tx.user.findFirst).mockImplementation(() => {
-      events.push(`user-${++userReads}`);
-      return Promise.resolve(null as never);
-    });
+    vi.mocked(createOrganizationMock).mockResolvedValue({ id: "team-1" });
 
-    await expect(isFreshIoioInstanceForSignup(tx)).resolves.toBe(true);
+    await expect(
+      ensureInitialIoioTeamForUser({ tx, userId: "user-1" })
+    ).resolves.toEqual({ id: "team-1" });
 
-    expect(events).toEqual(["team-1", "user-1", "lock", "team-2", "user-2"]);
+    expect(events).toEqual([
+      "team-count",
+      "lock",
+      "team-count",
+      "user-count",
+      "current-user",
+    ]);
     const [query, lockId] = vi.mocked(tx.$executeRaw).mock.calls[0];
     expect(query.join(" ")).toContain("pg_advisory_xact_lock");
     expect(lockId).toBe(0x494f494f);
-  });
-
-  it.each([
-    ["an existing Team", { team: { id: "team-1" } }],
-    ["an existing Shelf user", { user: { id: "user-1" } }],
-  ])("does not bootstrap when %s exists", async (_description, state) => {
-    const tx = transaction(state);
-
-    await expect(isFreshIoioInstanceForSignup(tx)).resolves.toBe(false);
-    expect(tx.$executeRaw).not.toHaveBeenCalled();
-  });
-
-  it("creates through Shelf and persists the initial Team as selected", async () => {
-    const tx = transaction();
-    vi.mocked(createOrganizationMock).mockResolvedValue({ id: "team-1" });
-
-    await createInitialIoioTeam({ tx, userId: "first-user" });
-
     expect(createOrganizationMock).toHaveBeenCalledWith({
       name: "IOIO Self-Hosted",
-      userId: "first-user",
+      userId: "user-1",
       image: null,
       currency: "USD",
       tx,
     });
     expect(tx.user.update).toHaveBeenCalledWith({
-      where: { id: "first-user" },
+      where: { id: "user-1" },
       data: { lastSelectedOrganizationId: "team-1" },
     });
   });
 
-  it("allows only one of two concurrent empty-instance signups to claim bootstrap", async () => {
+  it("fails closed when more than one Shelf user exists and there is no Team", async () => {
+    const tx = transaction({ userCount: 2 });
+
+    await expect(
+      ensureInitialIoioTeamForUser({ tx, userId: "user-1" })
+    ).resolves.toBeNull();
+
+    expect(tx.$executeRaw).toHaveBeenCalledOnce();
+    expect(createOrganizationMock).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+  });
+
+  it("fails closed if the current authenticated user is not in Shelf", async () => {
+    const tx = transaction({ currentUser: false });
+
+    await expect(
+      ensureInitialIoioTeamForUser({ tx, userId: "missing-user" })
+    ).resolves.toBeNull();
+
+    expect(createOrganizationMock).not.toHaveBeenCalled();
+  });
+
+  it("does not bootstrap or write when a Team already exists", async () => {
+    const tx = transaction({ teamCount: 1 });
+
+    await expect(
+      ensureInitialIoioTeamForUser({ tx, userId: "user-1" })
+    ).resolves.toBeNull();
+
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(createOrganizationMock).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+  });
+
+  it("is idempotent across repeated recovery attempts", async () => {
+    let teamCount = 0;
+    const tx = transaction();
+    vi.mocked(tx.organization.count).mockImplementation(() =>
+      Promise.resolve(teamCount as never)
+    );
+    vi.mocked(createOrganizationMock).mockImplementation(() => {
+      teamCount = 1;
+      return Promise.resolve({ id: "team-1" } as never);
+    });
+
+    await ensureInitialIoioTeamForUser({ tx, userId: "user-1" });
+    await expect(
+      ensureInitialIoioTeamForUser({ tx, userId: "user-1" })
+    ).resolves.toBeNull();
+
+    expect(createOrganizationMock).toHaveBeenCalledOnce();
+    expect(tx.user.update).toHaveBeenCalledOnce();
+  });
+
+  it("allows only one of two concurrent signup transactions to initialize", async () => {
     let lockTail = Promise.resolve();
     let teamExists = false;
-    let userCount = 0;
+    let committedUsers = 0;
 
-    async function signup() {
+    async function signup(userId: string) {
       let releaseLock: (() => void) | undefined;
-      let stagedTeam = false;
-      let stagedUser = false;
       const tx = {
         $executeRaw: vi.fn(async () => {
           const previous = lockTail;
@@ -109,38 +190,34 @@ describe("initial IOIO Team bootstrap", () => {
           return 1;
         }),
         organization: {
-          findFirst: vi.fn(() =>
-            Promise.resolve(teamExists || stagedTeam ? { id: "team-1" } : null)
-          ),
+          count: vi.fn(() => Promise.resolve(teamExists ? 1 : 0)),
         },
         user: {
-          findFirst: vi.fn(() =>
-            Promise.resolve(
-              userCount > 0 || stagedUser ? { id: "user-1" } : null
-            )
-          ),
+          count: vi.fn(() => Promise.resolve(committedUsers + 1)),
+          findUnique: vi.fn(() => Promise.resolve({ id: userId })),
           update: vi.fn(),
         },
-      } as unknown as Parameters<typeof isFreshIoioInstanceForSignup>[0];
+      } as unknown as InitializationTransaction;
 
       try {
-        const fresh = await isFreshIoioInstanceForSignup(tx);
-        if (fresh) {
-          stagedUser = true;
-          stagedTeam = true;
-        }
-        return fresh;
+        const createdTeam = await ensureInitialIoioTeamForUser({ tx, userId });
+        if (createdTeam) teamExists = true;
+        return createdTeam;
       } finally {
-        if (stagedUser) userCount += 1;
-        if (stagedTeam) teamExists = true;
+        committedUsers += 1;
         releaseLock?.();
       }
     }
 
-    const results = await Promise.all([signup(), signup()]);
+    vi.mocked(createOrganizationMock).mockImplementation(() =>
+      Promise.resolve({ id: "team-1" })
+    );
+
+    const results = await Promise.all([signup("user-1"), signup("user-2")]);
 
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(teamExists).toBe(true);
-    expect(userCount).toBe(1);
+    expect(committedUsers).toBe(2);
+    expect(createOrganizationMock).toHaveBeenCalledOnce();
   });
 });

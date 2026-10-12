@@ -17,11 +17,11 @@ import { Form } from "~/components/custom-form";
 
 import Input from "~/components/forms/input";
 import PasswordInput from "~/components/forms/password-input";
+import { IoioAuthPrimaryButton } from "~/components/ioio/auth-primary-button";
 import { Button } from "~/components/shared/button";
 import { config } from "~/config/shelf.config";
 import { useSearchParams } from "~/hooks/search-params";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
-import { ContinueWithEmailForm } from "~/modules/auth/components/continue-with-email-form";
 import { signUpWithEmailPass } from "~/modules/auth/service.server";
 import {
   clearSignupIntentHeaders,
@@ -56,7 +56,7 @@ import { passwordSchema } from "~/utils/zod";
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const title = "Create an account";
-  const subHeading = "Start your journey with Shelf";
+  const subHeading = "Create your IOIO account";
   const { disableSignup } = config;
 
   try {
@@ -77,8 +77,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     // What the signup link asked for (`?plan=team&trial=true&utm_*=…`). From
     // here on it travels in a signed cookie, so both signup paths and the
-    // email-code confirmation carry it to onboarding. The page itself only
-    // uses it for the confirmation line under the heading.
+    // email-code confirmation carry it into the IOIO destination or Shelf
+    // onboarding when that flow still applies. The page itself only uses it
+    // for the confirmation line under the heading.
     const signupIntent = parseSignupIntentFromSearchParams(
       getCurrentSearchParams(request)
     );
@@ -103,6 +104,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
 const JoinFormSchema = z
   .object({
+    firstName: z.string().trim().min(1, "First name is required"),
+    lastName: z.string().trim().min(1, "Last name is required"),
     email: z
       .string()
       .transform((email) => email.toLowerCase())
@@ -129,7 +132,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     switch (getActionMethod(request)) {
       case "POST": {
-        const { email, password } = parseData(
+        const { firstName, lastName, email, password } = parseData(
           await request.formData(),
           JoinFormSchema,
           { shouldBeCaptured: false }
@@ -153,7 +156,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         // Sign up with the provided email and password
-        await signUpWithEmailPass(email, password);
+        await signUpWithEmailPass(email, password, { firstName, lastName });
 
         return redirect(
           `/otp?email=${encodeURIComponent(email)}&mode=confirm_signup`,
@@ -190,8 +193,8 @@ export default function Join() {
   const disabled = isFormProcessing(navigation.state);
   const data = useActionData<typeof action>();
 
-  /** Focus the email field on mount (intentional first-field focus on auth pages). */
-  const emailInputRef = useAutoFocus<HTMLInputElement>();
+  /** Focus the first field on mount (intentional first-field focus on auth pages). */
+  const firstNameInputRef = useAutoFocus<HTMLInputElement>();
 
   const intentNotice = signupIntentNotice({
     intent: signupIntent,
@@ -210,18 +213,44 @@ export default function Join() {
           </p>
         ) : null}
         <Form ref={zo.ref} method="post" className="space-y-6" replace>
+          <div className="flex flex-col gap-5 sm:flex-row">
+            <Input
+              ref={firstNameInputRef}
+              data-test-id="firstName"
+              label="First name"
+              placeholder="First name"
+              required
+              name={zo.fields.firstName()}
+              type="text"
+              autoComplete="given-name"
+              disabled={disabled}
+              inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
+              error={zo.errors.firstName()?.message}
+            />
+            <Input
+              data-test-id="lastName"
+              label="Last name"
+              placeholder="Last name"
+              required
+              name={zo.fields.lastName()}
+              type="text"
+              autoComplete="family-name"
+              disabled={disabled}
+              inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
+              error={zo.errors.lastName()?.message}
+            />
+          </div>
           <div>
             <Input
-              ref={emailInputRef}
               data-test-id="email"
               label="Email address"
-              placeholder="zaans@huisje.com"
+              placeholder="student@example.com"
               required
               name={zo.fields.email()}
               type="email"
               autoComplete="email"
               disabled={disabled}
-              inputClassName="w-full"
+              inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
               error={zo.errors.email()?.message || data?.error.message}
             />
           </div>
@@ -234,7 +263,7 @@ export default function Join() {
             name={zo.fields.password()}
             autoComplete="new-password"
             disabled={disabled}
-            inputClassName="w-full"
+            inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
             error={
               getValidationErrors<typeof JoinFormSchema>(data?.error)?.password
                 ?.message || zo.errors.password()?.message
@@ -248,7 +277,7 @@ export default function Join() {
             name={zo.fields.confirmPassword()}
             autoComplete="new-password"
             disabled={disabled}
-            inputClassName="w-full"
+            inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
             error={
               getValidationErrors<typeof JoinFormSchema>(data?.error)
                 ?.confirmPassword?.message ||
@@ -261,36 +290,20 @@ export default function Join() {
             name={zo.fields.redirectTo()}
             value={redirectTo}
           />
-          <Button
-            className="text-center"
+          <IoioAuthPrimaryButton
             type="submit"
-            data-test-id="login"
+            data-test-id="create-account"
             disabled={disabled}
-            width="full"
           >
-            Get Started
-          </Button>
+            {disabled ? "Creating account..." : "Create account"}
+          </IoioAuthPrimaryButton>
         </Form>
-        <div className="mt-6">
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300" />
-            </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="bg-white px-2 text-gray-500">
-                {"Or use a One Time Password"}
-              </span>
-            </div>
-          </div>
-          <div className="mt-6">
-            <ContinueWithEmailForm mode="signup" />
-          </div>
-        </div>
         <div className="flex items-center justify-center pt-5">
           <div className="text-center text-sm text-gray-500">
             {"Already have an account? "}
             <Button
               variant="link"
+              className="font-semibold text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
               to={{
                 pathname: "/",
                 search: searchParams.toString(),

@@ -236,7 +236,11 @@ export async function confirmExistingAuthAccount(
   }
 }
 
-export async function signUpWithEmailPass(email: string, password: string) {
+export async function signUpWithEmailPass(
+  email: string,
+  password: string,
+  profile?: { firstName: string; lastName: string }
+) {
   try {
     const { data, error } = await getSupabaseAdmin().auth.signUp({
       email: email,
@@ -244,6 +248,10 @@ export async function signUpWithEmailPass(email: string, password: string) {
       options: {
         data: {
           signup_method: "email-password",
+          ...(profile && {
+            firstName: profile.firstName,
+            lastName: profile.lastName,
+          }),
         },
       },
     });
@@ -824,6 +832,7 @@ export async function verifyAuthSession(authSession: AuthSession) {
  */
 export async function verifyOtpAndSignin(email: string, otp: string) {
   let authSession: AuthSession;
+  let signupProfile: { firstName?: string; lastName?: string } = {};
   try {
     const { data, error } = await getSupabaseAdmin().auth.verifyOtp({
       email,
@@ -846,6 +855,13 @@ export async function verifyOtpAndSignin(email: string, otp: string) {
     }
 
     authSession = mapAuthSession(session);
+    const metadata = session.user.user_metadata ?? {};
+    signupProfile = {
+      firstName:
+        typeof metadata.firstName === "string" ? metadata.firstName : undefined,
+      lastName:
+        typeof metadata.lastName === "string" ? metadata.lastName : undefined,
+    };
   } catch (cause) {
     if (isAuthApiError(cause) && cause.code === "otp_expired") {
       throw createInvalidOtpError(cause, email);
@@ -874,5 +890,5 @@ export async function verifyOtpAndSignin(email: string, otp: string) {
     throw createInvalidOtpError(null, email);
   }
 
-  return authSession;
+  return { ...authSession, signupProfile };
 }
