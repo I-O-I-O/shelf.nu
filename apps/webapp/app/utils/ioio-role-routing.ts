@@ -25,6 +25,7 @@ const staffRoutePrefixes = [
   "/audits",
   "/admin-dashboard",
   "/account-details/workspace",
+  "/ioio-migration-pilot-review",
 ];
 
 export function resolveIoioAccountSurface(

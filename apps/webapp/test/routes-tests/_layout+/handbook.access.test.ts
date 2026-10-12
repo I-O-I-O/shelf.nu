@@ -35,11 +35,26 @@ function loaderArgs(path: string, params: Record<string, string> = {}) {
   } as never;
 }
 
+function handbookPermission(role: string) {
+  return {
+    organizationId: "ioio-team-1",
+    currentOrganization: { id: "ioio-team-1", type: "TEAM" },
+    userOrganizations: [
+      {
+        organizationId: "ioio-team-1",
+        organization: { id: "ioio-team-1", type: "TEAM" },
+        roles: [role],
+      },
+    ],
+    role,
+  };
+}
+
 describe("IOIO Handbook read access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requirePermission.mockImplementation(() =>
-      Promise.resolve({ organizationId: "ioio-team-1", role: "ADMIN" })
+      Promise.resolve(handbookPermission("ADMIN"))
     );
     mocks.listPublishedHandbookArticles.mockResolvedValue([]);
     mocks.getPublishedHandbookArticle.mockResolvedValue({
@@ -57,7 +72,7 @@ describe("IOIO Handbook read access", () => {
     "allows %s to read the Handbook index and article",
     async (role, canEdit, isStudent) => {
       mocks.requirePermission.mockImplementation(() =>
-        Promise.resolve({ organizationId: "ioio-team-1", role })
+        Promise.resolve(handbookPermission(role))
       );
 
       const index = (await handbookIndexLoader(loaderArgs("/handbook"))) as {
@@ -84,10 +99,7 @@ describe("IOIO Handbook read access", () => {
   );
 
   it("keeps Handbook access unavailable to non-staff and non-student roles", async () => {
-    mocks.requirePermission.mockResolvedValue({
-      organizationId: "ioio-team-1",
-      role: "BASE",
-    });
+    mocks.requirePermission.mockResolvedValue(handbookPermission("BASE"));
 
     const result = await handbookIndexLoader(loaderArgs("/handbook")).catch(
       (reason: unknown) => reason

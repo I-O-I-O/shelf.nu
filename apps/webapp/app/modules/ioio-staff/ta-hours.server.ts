@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma, TAShiftStatus } from "@prisma/client";
 import { db } from "~/database/db.server";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import { getAcademicYear } from "~/modules/ioio-lab-information/service.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
@@ -70,6 +71,12 @@ export async function requireTAHoursAccess({
   const membership = selected.userOrganizations.find(
     (entry) => entry.organization.id === selected.organizationId
   );
+  await ensureIoioTeamOrganizationForRequest({
+    request,
+    organizationId: selected.organizationId,
+    currentOrganizationType: selected.currentOrganization?.type,
+    userOrganizations: selected.userOrganizations,
+  });
   const isStaff = Boolean(
     membership?.roles.some((role) => role === "ADMIN" || role === "OWNER")
   );

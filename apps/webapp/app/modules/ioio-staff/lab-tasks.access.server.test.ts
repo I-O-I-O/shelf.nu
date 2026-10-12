@@ -19,16 +19,20 @@ vi.mock("~/database/db.server", () => ({
 
 import { requireLabTaskAccess } from "./lab-tasks.server";
 
-const request = new Request("http://localhost/operations/tasks");
+const request = new Request("http://localhost/operations/tasks", {
+  method: "POST",
+});
 
 describe("Lab Tasks access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getSelectedOrganization.mockResolvedValue({
       organizationId: "ioio-team-1",
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
       userOrganizations: [
         {
-          organization: { id: "ioio-team-1" },
+          organizationId: "ioio-team-1",
+          organization: { id: "ioio-team-1", type: "TEAM" },
           roles: ["SELF_SERVICE"],
         },
       ],
@@ -46,13 +50,36 @@ describe("Lab Tasks access", () => {
   it("keeps access for an ADMIN membership", async () => {
     mocks.getSelectedOrganization.mockResolvedValue({
       organizationId: "ioio-team-1",
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
       userOrganizations: [
-        { organization: { id: "ioio-team-1" }, roles: ["ADMIN"] },
+        {
+          organizationId: "ioio-team-1",
+          organization: { id: "ioio-team-1", type: "TEAM" },
+          roles: ["ADMIN"],
+        },
       ],
     });
 
     await expect(
       requireLabTaskAccess({ userId: "staff-1", request })
     ).resolves.toMatchObject({ organizationId: "ioio-team-1", isAdmin: true });
+  });
+
+  it("rejects Lab Task writes when a PERSONAL workspace is selected", async () => {
+    mocks.getSelectedOrganization.mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { id: "personal-1", type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          organization: { id: "personal-1", type: "PERSONAL" },
+          roles: ["OWNER"],
+        },
+      ],
+    });
+
+    await expect(
+      requireLabTaskAccess({ userId: "staff-1", request })
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

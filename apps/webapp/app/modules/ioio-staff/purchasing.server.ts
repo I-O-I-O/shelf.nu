@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import { getAcademicYear } from "~/modules/ioio-lab-information/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
@@ -49,6 +50,12 @@ export async function requirePurchasingAccess({
   const membership = selected.userOrganizations.find(
     (entry) => entry.organization.id === selected.organizationId
   );
+  await ensureIoioTeamOrganizationForRequest({
+    request,
+    organizationId: selected.organizationId,
+    currentOrganizationType: selected.currentOrganization?.type,
+    userOrganizations: selected.userOrganizations,
+  });
   const isAdmin = Boolean(
     membership?.roles.some((role) => role === "ADMIN" || role === "OWNER")
   );

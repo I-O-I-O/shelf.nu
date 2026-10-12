@@ -1,4 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import { ShelfError } from "~/utils/error";
 import {
   PermissionAction,
@@ -22,6 +23,12 @@ export async function requireIoioStaffAccess({
     request,
     entity: PermissionEntity.dashboard,
     action: PermissionAction.read,
+  });
+  await ensureIoioTeamOrganizationForRequest({
+    request,
+    organizationId: permission.organizationId,
+    currentOrganizationType: permission.currentOrganization.type,
+    userOrganizations: permission.userOrganizations,
   });
 
   if (permission.role !== "ADMIN" && permission.role !== "OWNER") {

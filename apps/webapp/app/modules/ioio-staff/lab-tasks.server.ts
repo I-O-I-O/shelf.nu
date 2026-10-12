@@ -1,4 +1,5 @@
 import { db } from "~/database/db.server";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import {
   compareLabTaskSortOrder,
   compareOpenLabTaskOrder,
@@ -79,6 +80,12 @@ export async function requireLabTaskAccess({
   const membership = selected.userOrganizations.find(
     (entry) => entry.organization.id === selected.organizationId
   );
+  await ensureIoioTeamOrganizationForRequest({
+    request,
+    organizationId: selected.organizationId,
+    currentOrganizationType: selected.currentOrganization?.type,
+    userOrganizations: selected.userOrganizations,
+  });
   const isAdmin = Boolean(
     membership?.roles.some((role) => role === "ADMIN" || role === "OWNER")
   );

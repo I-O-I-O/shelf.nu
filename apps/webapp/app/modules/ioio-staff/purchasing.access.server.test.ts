@@ -19,16 +19,18 @@ vi.mock("~/database/db.server", () => ({
 
 import { requirePurchasingAccess } from "./purchasing.server";
 
-const request = new Request("http://localhost/purchasing");
+const request = new Request("http://localhost/purchasing", { method: "POST" });
 
 describe("Purchasing access", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getSelectedOrganization.mockResolvedValue({
       organizationId: "ioio-team-1",
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
       userOrganizations: [
         {
-          organization: { id: "ioio-team-1" },
+          organizationId: "ioio-team-1",
+          organization: { id: "ioio-team-1", type: "TEAM" },
           roles: ["SELF_SERVICE"],
         },
       ],
@@ -46,13 +48,36 @@ describe("Purchasing access", () => {
   it("keeps access for an OWNER membership", async () => {
     mocks.getSelectedOrganization.mockResolvedValue({
       organizationId: "ioio-team-1",
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
       userOrganizations: [
-        { organization: { id: "ioio-team-1" }, roles: ["OWNER"] },
+        {
+          organizationId: "ioio-team-1",
+          organization: { id: "ioio-team-1", type: "TEAM" },
+          roles: ["OWNER"],
+        },
       ],
     });
 
     await expect(
       requirePurchasingAccess({ userId: "staff-1", request })
     ).resolves.toMatchObject({ organizationId: "ioio-team-1", isAdmin: true });
+  });
+
+  it("rejects Purchasing writes when a PERSONAL workspace is selected", async () => {
+    mocks.getSelectedOrganization.mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { id: "personal-1", type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          organization: { id: "personal-1", type: "PERSONAL" },
+          roles: ["OWNER"],
+        },
+      ],
+    });
+
+    await expect(
+      requirePurchasingAccess({ userId: "staff-1", request })
+    ).rejects.toMatchObject({ status: 403 });
   });
 });

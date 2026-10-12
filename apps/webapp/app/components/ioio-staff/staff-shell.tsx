@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ClipboardList,
   CalendarDays,
-  Clock3,
   GripVertical,
   Home,
   MapPin,
@@ -14,7 +13,6 @@ import {
   Settings,
   Tags,
   Trash2,
-  ShoppingCart,
 } from "lucide-react";
 import {
   Form,
@@ -42,15 +40,6 @@ const navigation = [
   { to: "/categories", label: "Categories", Icon: Tags, end: false },
   { to: "/locations", label: "Locations", Icon: MapPin, end: false },
   { to: "/bookings", label: "Loans", Icon: ClipboardList, end: false },
-  { to: "/operations", label: "Operations", Icon: ClipboardList, end: false },
-  {
-    to: "/operations/tasks",
-    label: "Lab Tasks",
-    Icon: ClipboardList,
-    end: false,
-  },
-  { to: "/purchasing", label: "Purchasing", Icon: ShoppingCart, end: false },
-  { to: "/ta-hours", label: "TA Hours", Icon: Clock3, end: false },
   { to: "/calendar", label: "Calendar", Icon: CalendarDays, end: true },
   { to: "/reports", label: "Analytics", Icon: BarChart3, end: false },
   { to: "/settings", label: "Settings", Icon: Settings, end: false },

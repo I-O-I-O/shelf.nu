@@ -187,6 +187,7 @@ describe("IOIO account surface routing", () => {
       "/operations",
       "/staff/ask",
       "/account-details/workspace",
+      "/ioio-migration-pilot-review",
     ]) {
       expect(isIoioStaffRoute(pathname)).toBe(true);
       expect(enforceIoioRoleDestination(pathname, "student", pathname)).toBe(

@@ -92,30 +92,45 @@ describe("IOIO staff Loans navigation active state", () => {
     ).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("exposes the existing Operations and staff tool destinations", () => {
-    renderNavigation("/operations/tasks", [
-      "/operations",
-      "/operations/tasks",
-      "/purchasing",
-      "/ta-hours",
+  it("keeps the staff navigation and hides the four removed sidebar entries", () => {
+    renderNavigation("/bookings", [
+      "/home",
+      "/staff/ask",
+      "/handbook",
+      "/assets",
+      "/staff/archived",
+      "/staff/trash",
+      "/categories",
+      "/locations",
+      "/bookings",
+      "/calendar",
+      "/reports",
+      "/settings",
     ]);
 
-    expect(screen.getByRole("link", { name: "Operations" })).toHaveAttribute(
-      "href",
-      "/operations"
-    );
-    expect(screen.getByRole("link", { name: "Lab Tasks" })).toHaveAttribute(
-      "href",
-      "/operations/tasks"
-    );
-    expect(screen.getByRole("link", { name: "Purchasing" })).toHaveAttribute(
-      "href",
-      "/purchasing"
-    );
-    expect(screen.getByRole("link", { name: "TA Hours" })).toHaveAttribute(
-      "href",
-      "/ta-hours"
-    );
+    for (const label of [
+      "Dashboard",
+      "Ask IOIO",
+      "Handbook",
+      "Inventory",
+      "Archive",
+      "Trash",
+      "Categories",
+      "Locations",
+      "Loans",
+      "My Loans",
+      "Calendar",
+      "Analytics",
+      "Settings",
+    ]) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+
+    for (const label of ["Operations", "Lab Tasks", "Purchasing", "TA Hours"]) {
+      expect(
+        screen.queryByRole("link", { name: label })
+      ).not.toBeInTheDocument();
+    }
   });
 });
 

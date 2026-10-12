@@ -91,4 +91,46 @@ describe("TA Hours access", () => {
     ).rejects.toMatchObject({ status: 403 });
     expect(db.ioioLabTA.findUnique).not.toHaveBeenCalled();
   });
+
+  it("rejects TA Hours writes when a PERSONAL workspace is selected", async () => {
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      currentOrganization: { id: "personal-1", type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          organization: { id: "personal-1", type: "PERSONAL" },
+          roles: ["OWNER"],
+        },
+      ],
+    } as never);
+
+    await expect(
+      requireTAHoursAccess({
+        userId: "staff-1",
+        request: new Request("http://localhost/ta-hours", { method: "POST" }),
+      })
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("allows TA Hours writes in the selected TEAM workspace", async () => {
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "ioio-team-1",
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
+      userOrganizations: [
+        {
+          organizationId: "ioio-team-1",
+          organization: { id: "ioio-team-1", type: "TEAM" },
+          roles: ["ADMIN"],
+        },
+      ],
+    } as never);
+
+    await expect(
+      requireTAHoursAccess({
+        userId: "staff-1",
+        request: new Request("http://localhost/ta-hours", { method: "POST" }),
+      })
+    ).resolves.toMatchObject({ organizationId: "ioio-team-1", isStaff: true });
+  });
 });

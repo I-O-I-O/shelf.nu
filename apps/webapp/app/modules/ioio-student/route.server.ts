@@ -1,5 +1,6 @@
 import { OrganizationRoles } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import { ShelfError } from "~/utils/error";
 import {
   PermissionAction,
@@ -22,7 +23,14 @@ export function requireStudentRead({
     request,
     entity: PermissionEntity.asset,
     action: PermissionAction.read,
-  }).then((permission) => {
+  }).then(async (permission) => {
+    await ensureIoioTeamOrganizationForRequest({
+      request,
+      organizationId: permission.organizationId,
+      currentOrganizationType: permission.currentOrganization.type,
+      userOrganizations: permission.userOrganizations,
+    });
+
     if (permission.role !== OrganizationRoles.SELF_SERVICE) {
       throw new ShelfError({
         cause: null,
