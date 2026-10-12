@@ -12,6 +12,27 @@ export type StudentInventoryItem = StudentAsset & {
   sourceAssetIds: string[];
 };
 
+/** Keep the student home page focused while prioritizing items that can be borrowed now. */
+export function selectStudentInventoryPreview(
+  assets: StudentInventoryItem[],
+  limit = 6
+): StudentInventoryItem[] {
+  return [...assets]
+    .sort((left, right) => {
+      const leftAvailable = Boolean(
+        left.availableToBook && left.availableQuantity
+      );
+      const rightAvailable = Boolean(
+        right.availableToBook && right.availableQuantity
+      );
+      return (
+        Number(rightAvailable) - Number(leftAvailable) ||
+        left.title.localeCompare(right.title)
+      );
+    })
+    .slice(0, limit);
+}
+
 export type StudentLabAreaFilter = {
   key: string;
   label: string;
@@ -187,7 +208,9 @@ export function groupStudentAssets(
       quantity: totalQuantity,
       availableQuantity: row.isExpandable
         ? physicalUnits.reduce(
-            (total, asset) => total + (asset.availableQuantity ?? 0),
+            (total, asset) =>
+              total +
+              (asset.availableToBook ? asset.availableQuantity ?? 0 : 0),
             0
           )
         : canonical.availableQuantity,
@@ -240,10 +263,13 @@ export function filterStudentInventory(
     if (filters.categoryId && asset.category?.id !== filters.categoryId) {
       return false;
     }
-    if (filters.availability === "available" && !asset.availableQuantity) {
+    const availableNow = Boolean(
+      asset.availableToBook && asset.availableQuantity
+    );
+    if (filters.availability === "available" && !availableNow) {
       return false;
     }
-    if (filters.availability === "unavailable" && asset.availableQuantity) {
+    if (filters.availability === "unavailable" && availableNow) {
       return false;
     }
     if (filters.itemType === "quantity" && asset.type !== "QUANTITY_TRACKED") {

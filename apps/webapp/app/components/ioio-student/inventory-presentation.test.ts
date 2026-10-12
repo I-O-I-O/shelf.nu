@@ -7,6 +7,7 @@ import {
   getStudentLabAreaFilters,
   requestsStudentAssistantAssetCards,
   selectStudentAssistantDisplayAssets,
+  selectStudentInventoryPreview,
 } from "./inventory-presentation";
 
 function asset(overrides: Partial<StudentAsset>): StudentAsset {
@@ -35,6 +36,83 @@ function asset(overrides: Partial<StudentAsset>): StudentAsset {
 }
 
 describe("student inventory presentation", () => {
+  it("prioritizes borrowable equipment in the short home preview", () => {
+    const items = groupStudentAssets([
+      asset({
+        id: "unavailable",
+        title: "A unavailable",
+        availableQuantity: 0,
+      }),
+      asset({ id: "ready-b", title: "B ready" }),
+      asset({ id: "ready-a", title: "A ready" }),
+    ]);
+
+    expect(selectStudentInventoryPreview(items, 2).map(({ id }) => id)).toEqual(
+      ["ready-a", "ready-b"]
+    );
+  });
+
+  it("filters availability using both quantity and IOIO borrowability", () => {
+    const items = groupStudentAssets([
+      asset({ id: "ready", title: "Ready" }),
+      asset({
+        id: "out-of-service",
+        title: "Out of service",
+        availableToBook: false,
+      }),
+      asset({ id: "none-left", title: "None left", availableQuantity: 0 }),
+    ]);
+
+    expect(
+      filterStudentInventory(items, { availability: "available" }).map(
+        ({ id }) => id
+      )
+    ).toEqual(["ready"]);
+    expect(
+      filterStudentInventory(items, { availability: "unavailable" }).map(
+        ({ id }) => id
+      )
+    ).toEqual(["out-of-service", "none-left"]);
+  });
+
+  it("does not count out-of-service units as borrowable in a grouped product", () => {
+    const grouped = groupStudentAssets([
+      asset({
+        id: "unit-ready",
+        title: "Sensor Kit #001",
+        type: "INDIVIDUAL",
+        quantity: null,
+        assetModelId: "sensor-kit",
+        assetModel: {
+          id: "sensor-kit",
+          name: "Sensor Kit",
+          image: null,
+          thumbnailImage: null,
+        },
+        availableQuantity: 1,
+      }),
+      asset({
+        id: "unit-reported",
+        title: "Sensor Kit #002",
+        type: "INDIVIDUAL",
+        quantity: null,
+        assetModelId: "sensor-kit",
+        assetModel: {
+          id: "sensor-kit",
+          name: "Sensor Kit",
+          image: null,
+          thumbnailImage: null,
+        },
+        availableQuantity: 1,
+        availableToBook: false,
+      }),
+    ]);
+
+    expect(grouped).toMatchObject([
+      { title: "Sensor Kit", quantity: 2, availableQuantity: 1 },
+    ]);
+  });
+
   it("shows product summaries for general inventory questions without unit requests", () => {
     expect(
       requestsStudentAssistantAssetCards("What kind of kits do we have?")

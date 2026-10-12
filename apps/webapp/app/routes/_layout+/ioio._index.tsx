@@ -2,19 +2,16 @@ import { Clock3, MapPin } from "lucide-react";
 import { useRouteLoaderData, Link, useLoaderData } from "react-router";
 import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
+import { ErrorContent } from "~/components/errors";
 import {
-  filterStudentInventory,
-  getStudentLabAreaFilters,
   groupStudentAssets,
-  type StudentInventoryItem,
+  selectStudentInventoryPreview,
 } from "~/components/ioio-student/inventory-presentation";
 import {
+  AssetCard,
   formatStudentDateOnly,
   formatStudentLabel,
   formatStudentTitle,
-  InventoryFilterControls,
-  StudentAssetPlaceholder,
-  StudentCheckoutButton,
 } from "~/components/ioio-student/student-ui";
 import { db } from "~/database/db.server";
 import type { ResolvableAssetModelImage } from "~/modules/asset/image-resolution";
@@ -30,15 +27,8 @@ import {
   withIoioStudentLoadStage,
 } from "~/modules/ioio-student/load-diagnostics.server";
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
-import type {
-  StudentAsset,
-  StudentLocation,
-} from "~/modules/ioio-student/service.server";
-import {
-  getStudentAssets,
-  getStudentCategories,
-  getStudentLocations,
-} from "~/modules/ioio-student/service.server";
+import type { StudentAsset } from "~/modules/ioio-student/service.server";
+import { getStudentAssets } from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { makeShelfError } from "~/utils/error";
@@ -61,25 +51,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     () => requireStudentRead({ context, request })
   );
   const params = new URL(request.url).searchParams;
-  const requestedCategory = params.get("category");
   const returnSubmitted = params.get("return") === "submitted";
-  const requestedItemType = params.get("itemType");
-  const itemType =
-    requestedItemType === "quantity" || requestedItemType === "individual"
-      ? requestedItemType
-      : null;
   try {
-    const [categories, locations, preparationOperations] = await Promise.all([
-      withIoioStudentLoadStage(
-        "4 home categories (category/archive queries)",
-        diagnosticRequest,
-        () => getStudentCategories({ organizationId })
-      ),
-      withIoioStudentLoadStage(
-        "4 home locations (location/archive/placement queries)",
-        diagnosticRequest,
-        () => getStudentLocations({ organizationId })
-      ),
+    const [preparationOperations, allAssets] = await Promise.all([
       withIoioStudentLoadStage(
         "4 home active preparation statuses",
         diagnosticRequest,
@@ -106,37 +80,16 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             },
           })
       ),
+      withIoioStudentLoadStage(
+        "4 home inventory preview (archive, asset, and availability queries)",
+        diagnosticRequest,
+        () => getStudentAssets({ organizationId })
+      ),
     ]);
-    const selectedCategory = categories.some(
-      (category) => category.id === requestedCategory
-    )
-      ? requestedCategory
-      : null;
-    const requestedLocation = params.get("location");
-    const selectedLocation = getStudentLabAreaFilters(locations).some(
-      (area) => area.locationId === requestedLocation
-    )
-      ? requestedLocation
-      : null;
-    const allAssets = await withIoioStudentLoadStage(
-      "4 home inventory (archive, asset, and availability queries)",
-      diagnosticRequest,
-      () =>
-        getStudentAssets({
-          organizationId,
-          query: params.get("q"),
-          categoryId: selectedCategory,
-          locationId: selectedLocation,
-        })
-    );
     const assets = await withIoioStudentLoadStage(
-      "4 home inventory presentation",
+      "4 home inventory preview presentation",
       diagnosticRequest,
-      () =>
-        filterStudentInventory(groupStudentAssets(allAssets), {
-          categoryId: selectedCategory,
-          itemType,
-        })
+      () => selectStudentInventoryPreview(groupStudentAssets(allAssets))
     );
     const studentTeamMembers = await db.teamMember.findMany({
       where: { organizationId, userId, deletedAt: null },
@@ -409,12 +362,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           (item): item is NonNullable<typeof item> => item !== null
         ),
         preparing,
-        categories,
-        categoryId: selectedCategory,
-        itemType,
-        locationId: selectedLocation,
-        locations,
-        query: params.get("q") ?? "",
         returnSubmitted,
       })
     );
@@ -429,73 +376,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
-function locationPaths(
-  locations: StudentLocation[],
-  parentPath: string[] = [],
-  paths = new Map<string, string[]>()
-) {
-  for (const location of locations) {
-    const path = [...parentPath, location.name];
-    paths.set(location.id, path);
-    locationPaths(location.children, path, paths);
-  }
-  return paths;
-}
-
-function availabilityLabel(asset: StudentAsset) {
-  if (!asset.availableQuantity) return "Unavailable";
-  return `Available · ${asset.availableQuantity}`;
-}
-
-function InventoryCard({
-  asset,
-  paths,
-}: {
-  asset: StudentInventoryItem;
-  paths: Map<string, string[]>;
-}) {
-  const locationLabels = asset.locations.map((location) => {
-    const path = paths.get(location.id) ?? [location.name];
-    return path.map(formatStudentLabel).join(" / ");
-  });
-
-  return (
-    <article className="group flex h-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-red-300 hover:shadow-md">
-      <StudentAssetPlaceholder asset={asset} className="w-full shrink-0" />
-      <div className="flex min-h-36 flex-1 flex-col p-4">
-        <div className="min-h-[4.25rem]">
-          <Link
-            to={`/ioio/browse/${asset.id}`}
-            className="line-clamp-2 min-h-10 font-bold leading-5 text-gray-950 group-hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-          >
-            {formatStudentTitle(asset.title, asset.type)}
-          </Link>
-          <span className="mt-1 inline-flex rounded-full bg-red-50 px-2 py-1 text-[11px] font-bold text-red-800">
-            {availabilityLabel(asset)}
-          </span>
-        </div>
-        {locationLabels.length ? (
-          <p
-            className="mt-3 line-clamp-2 min-h-10 text-xs leading-5 text-gray-500"
-            title={locationLabels.join(" · ")}
-          >
-            {locationLabels.slice(0, 2).join(" · ")}
-            {locationLabels.length > 2
-              ? ` · +${locationLabels.length - 2} more locations`
-              : ""}
-          </p>
-        ) : (
-          <p className="mt-3 min-h-10 text-xs leading-5 text-gray-500">
-            Location not recorded
-          </p>
-        )}
-        <div className="mt-auto flex justify-end pt-3">
-          <StudentCheckoutButton asset={asset} compact />
-        </div>
-      </div>
-    </article>
-  );
-}
+export const ErrorBoundary = () => <ErrorContent />;
 
 function AssistantMark() {
   return (
@@ -547,23 +428,11 @@ type PreparingItem = {
 };
 
 export default function IoioHome() {
-  const {
-    assets,
-    readyForPickup,
-    preparing,
-    categories,
-    categoryId,
-    itemType,
-    locationId,
-    locations,
-    query,
-    returnSubmitted,
-  } = useLoaderData<typeof loader>();
+  const { assets, readyForPickup, preparing, returnSubmitted } =
+    useLoaderData<typeof loader>();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
-  const paths = locationPaths(locations);
-
   return (
     <div className="space-y-8 sm:space-y-10">
       {returnSubmitted ? (
@@ -619,48 +488,41 @@ export default function IoioHome() {
         workingHours={layoutData?.workingHours}
       />
 
-      <section aria-labelledby="inventory-heading" className="space-y-5">
+      <section aria-labelledby="inventory-heading" className="space-y-4">
         <div>
           <h2
             id="inventory-heading"
             className="text-2xl font-black tracking-tight text-gray-950 sm:text-3xl"
           >
-            Inventory
+            Equipment to explore
           </h2>
           <p className="mt-1 text-sm text-gray-600">
-            Browse equipment directly, without needing to ask first.
+            A few items to get you started. Browse the full list to find more.
           </p>
         </div>
 
-        <InventoryFilterControls
-          basePath="/ioio"
-          categories={categories}
-          locations={locations}
-          query={query}
-          locationId={locationId}
-          categoryId={categoryId}
-          itemType={itemType}
-        />
-
         {assets.length ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {assets.map((asset) => (
-              <InventoryCard key={asset.id} asset={asset} paths={paths} />
+              <AssetCard key={asset.id} asset={asset} compact />
             ))}
           </div>
         ) : (
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-6 text-center">
             <p className="font-semibold text-gray-950">
-              No equipment matches these filters yet.
+              No equipment is listed yet.
             </p>
-            <Link
-              to="/ioio"
-              className="mt-3 inline-block text-sm font-bold text-red-800 hover:text-red-900"
-            >
-              Show all inventory
-            </Link>
+            <p className="mt-2 text-sm text-gray-600">
+              Ask a lab assistant if you need help finding what you need.
+            </p>
           </div>
         )}
+        <Link
+          to="/ioio/browse"
+          className="inline-flex min-h-11 items-center rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+        >
+          Browse all equipment
+        </Link>
       </section>
     </div>
   );

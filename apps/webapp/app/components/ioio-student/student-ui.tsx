@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Form, Link, useRouteLoaderData } from "react-router";
+import { Form, Link, useNavigation, useRouteLoaderData } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
 import {
   ASSET_IMAGE_FRAME_CLASSES,
@@ -145,6 +145,7 @@ export function InventoryFilterControls({
   locationId,
   categoryId,
   itemType,
+  availability,
 }: {
   basePath: string;
   categories: StudentCategory[];
@@ -153,11 +154,73 @@ export function InventoryFilterControls({
   locationId: string | null;
   categoryId: string | null;
   itemType: string | null;
+  availability: string | null;
 }) {
+  const navigation = useNavigation();
+  const searching = navigation.state !== "idle";
   const areaFilters = getStudentLabAreaFilters(locations);
-  const activeFilterCount = [categoryId, itemType, locationId].filter(
-    Boolean
-  ).length;
+  const activeFilterCount = [
+    categoryId,
+    itemType,
+    locationId,
+    availability,
+  ].filter(Boolean).length;
+  const activeFilters = [
+    query.trim() ? { key: "q", label: `Search: ${query.trim()}` } : null,
+    categoryId
+      ? {
+          key: "category",
+          label: `Category: ${
+            categories.find((category) => category.id === categoryId)?.name ??
+            "Selected"
+          }`,
+        }
+      : null,
+    itemType
+      ? {
+          key: "itemType",
+          label:
+            itemType === "individual"
+              ? "Item type: Kits"
+              : "Item type: Normal items",
+        }
+      : null,
+    locationId
+      ? {
+          key: "location",
+          label: `Lab area: ${
+            areaFilters.find((area) => area.locationId === locationId)?.label ??
+            "Selected"
+          }`,
+        }
+      : null,
+    availability
+      ? {
+          key: "availability",
+          label:
+            availability === "available"
+              ? "Availability: Ready to borrow"
+              : "Availability: Not ready to borrow",
+        }
+      : null,
+  ].filter(
+    (filter): filter is { key: string; label: string } => filter !== null
+  );
+  const removeFilterHref = (removedKey: string) => {
+    const params = new URLSearchParams();
+    const values = [
+      { key: "q", value: query },
+      { key: "category", value: categoryId ?? "" },
+      { key: "itemType", value: itemType ?? "" },
+      { key: "location", value: locationId ?? "" },
+      { key: "availability", value: availability ?? "" },
+    ];
+    for (const { key, value } of values) {
+      if (key !== removedKey && value) params.set(key, value);
+    }
+    const search = params.toString();
+    return search ? `${basePath}?${search}` : basePath;
+  };
   const hiddenFilters = (
     includeSearch = true
   ): Array<{ name: string; value: string }> => [
@@ -165,6 +228,7 @@ export function InventoryFilterControls({
     { name: "location", value: locationId ?? "" },
     { name: "category", value: categoryId ?? "" },
     { name: "itemType", value: itemType ?? "" },
+    { name: "availability", value: availability ?? "" },
   ];
 
   return (
@@ -178,10 +242,11 @@ export function InventoryFilterControls({
             Search inventory
           </label>
           <input
+            key={query}
             id={`${basePath.replaceAll("/", "-")}-search`}
             name="q"
             defaultValue={query}
-            placeholder="Search inventory..."
+            placeholder="Search by item name or description"
             className="min-h-11 min-w-0 flex-1 rounded-xl border border-gray-300 bg-white px-3 text-sm focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
           />
           {hiddenFilters(false)
@@ -191,16 +256,14 @@ export function InventoryFilterControls({
             ))}
           <button
             type="submit"
+            disabled={searching}
             className="min-h-11 rounded-xl border border-gray-300 bg-white px-4 text-sm font-bold text-gray-800 hover:border-red-200 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-600"
           >
-            Search
+            {searching ? "Searching…" : "Search"}
           </button>
         </Form>
 
-        <details
-          open={activeFilterCount > 0}
-          className="relative rounded-xl border border-gray-200 bg-white"
-        >
+        <details className="relative rounded-xl border border-gray-200 bg-white">
           <summary className="flex min-h-11 cursor-pointer list-none items-center justify-center gap-2 px-4 text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-red-600">
             Filters
             {activeFilterCount ? (
@@ -210,6 +273,9 @@ export function InventoryFilterControls({
             ) : null}
           </summary>
           <Form
+            key={`${categoryId ?? ""}-${itemType ?? ""}-${locationId ?? ""}-${
+              availability ?? ""
+            }`}
             method="get"
             action={basePath}
             className="absolute right-0 z-10 mt-2 grid w-[min(22rem,calc(100vw-2rem))] gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-xl sm:right-0"
@@ -230,6 +296,38 @@ export function InventoryFilterControls({
                 ))}
               </select>
             </label>
+            <fieldset className="min-w-0">
+              <legend className="text-sm font-semibold text-gray-800">
+                Availability
+              </legend>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {[
+                  { value: "", label: "Any availability" },
+                  { value: "available", label: "Ready to borrow" },
+                  { value: "unavailable", label: "Not ready to borrow" },
+                ].map((option, index) => {
+                  const id = `${basePath.replaceAll(
+                    "/",
+                    "-"
+                  )}-availability-${index}`;
+                  return (
+                    <label key={option.value || "any"}>
+                      <input
+                        id={id}
+                        className="peer sr-only"
+                        type="radio"
+                        name="availability"
+                        value={option.value}
+                        defaultChecked={(availability ?? "") === option.value}
+                      />
+                      <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
+                        {option.label}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
             <fieldset className="min-w-0">
               <legend className="text-sm font-semibold text-gray-800">
                 Item type
@@ -309,6 +407,37 @@ export function InventoryFilterControls({
           </Form>
         </details>
       </div>
+
+      {activeFilters.length ? (
+        <div
+          role="group"
+          aria-label="Active inventory filters"
+          className="flex flex-wrap items-center gap-2"
+        >
+          <span className="text-xs font-semibold text-gray-600">Showing:</span>
+          {activeFilters.map((filter) => (
+            <Link
+              key={filter.key}
+              to={removeFilterHref(filter.key)}
+              aria-label={`Remove ${filter.label} filter`}
+              className="inline-flex min-h-9 max-w-full items-center gap-2 rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold text-red-900 hover:border-red-400 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+            >
+              <span className="max-w-[min(18rem,calc(100vw-7rem))] truncate">
+                {filter.label}
+              </span>
+              <span aria-hidden="true" className="text-sm leading-none">
+                ×
+              </span>
+            </Link>
+          ))}
+          <Link
+            to={basePath}
+            className="inline-flex min-h-9 items-center px-2 text-xs font-bold text-gray-700 underline-offset-2 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+          >
+            Clear all
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -316,13 +445,24 @@ export function InventoryFilterControls({
 export function AssetCard({
   asset,
   variant = "inventory",
+  compact = false,
 }: {
   asset: StudentAsset | StudentInventoryItem;
   variant?: "inventory" | "assistant";
+  compact?: boolean;
 }) {
-  const availability = asset.availableQuantity
-    ? `Available · ${asset.availableQuantity}`
-    : "Unavailable";
+  const availableNow = Boolean(
+    asset.availableToBook && asset.availableQuantity
+  );
+  const availability = availableNow
+    ? asset.availableQuantity === 1
+      ? "1 ready to borrow"
+      : `${asset.availableQuantity} ready to borrow`
+    : asset.status === "IN_CUSTODY" || asset.status === "CHECKED_OUT"
+    ? "Currently on loan"
+    : asset.availableToBook
+    ? "None ready to borrow"
+    : "Temporarily unavailable";
   const totalQuantity = asset.quantity ?? (asset.type === "INDIVIDUAL" ? 1 : 0);
   const locationSummary = asset.locations.length
     ? asset.locations
@@ -334,7 +474,7 @@ export function AssetCard({
     : "Location not recorded";
 
   return (
-    <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm">
+    <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm">
       <Link
         to={`/ioio/browse/${asset.id}`}
         aria-label={`View ${formatStudentTitle(asset.title, asset.type)}`}
@@ -342,7 +482,9 @@ export function AssetCard({
       >
         <StudentAssetPlaceholder asset={asset} />
       </Link>
-      <div className="flex flex-1 flex-col p-3">
+      <div
+        className={`flex min-w-0 flex-1 flex-col ${compact ? "p-3" : "p-4"}`}
+      >
         <div className="min-h-10">
           <Link
             to={`/ioio/browse/${asset.id}`}
@@ -377,15 +519,15 @@ export function AssetCard({
             <p className="mt-3 line-clamp-2 min-h-10 text-xs leading-4 text-gray-500">
               {locationSummary}
             </p>
-            <div className="mt-auto flex items-end justify-between gap-3 pt-3">
+            <div className="mt-auto flex flex-col items-start gap-2 pt-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
               <p
                 className={`text-sm font-bold ${
-                  asset.availableQuantity ? "text-red-800" : "text-gray-600"
+                  availableNow ? "text-green-800" : "text-gray-600"
                 }`}
               >
                 {availability}
               </p>
-              <StudentCheckoutButton asset={asset} compact />
+              <StudentCheckoutButton asset={asset} compact={compact} />
             </div>
           </>
         )}
@@ -427,7 +569,9 @@ export function StudentCheckoutButton({
   if (!available && !inCheckout) {
     return (
       <span className="shrink-0 rounded-full bg-gray-100 px-2.5 py-1.5 text-xs font-bold text-gray-500">
-        Unavailable
+        {asset.status === "IN_CUSTODY" || asset.status === "CHECKED_OUT"
+          ? "On loan"
+          : "Unavailable"}
       </span>
     );
   }
@@ -436,7 +580,9 @@ export function StudentCheckoutButton({
     return (
       <Link
         to="/ioio/settings/access-approval"
-        className="shrink-0 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-800 hover:border-red-400 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+        className={`max-w-full rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-center text-xs font-bold text-red-800 hover:border-red-400 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+          compact ? "whitespace-normal" : "shrink-0"
+        }`}
       >
         Approval required
       </Link>
@@ -457,11 +603,13 @@ export function StudentCheckoutButton({
           setJustAdded(true);
         }
       }}
-      className={`shrink-0 rounded-xl border px-3 py-2 text-xs font-bold transition focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+      className={`min-h-10 max-w-full rounded-xl border px-3 py-2 text-xs font-bold transition focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
         inCheckout
           ? "border-red-700 bg-red-700 text-white hover:bg-red-800"
           : "border-red-200 bg-red-50 text-red-800 hover:border-red-400 hover:bg-red-100"
-      } ${compact ? "px-2.5" : ""}`}
+      } ${
+        compact ? "shrink-0 whitespace-normal px-2.5 text-left" : "shrink-0"
+      }`}
     >
       {inCheckout ? (
         <span className="inline-flex items-center gap-1.5">
