@@ -410,4 +410,27 @@ describe("createOrganization logo validation", () => {
     expect(dbMock.organization.create).toHaveBeenCalledOnce();
     expect(dbMock.image.create).not.toHaveBeenCalled();
   });
+
+  it("keeps owner and membership creation inside the supplied Shelf transaction", async () => {
+    await createOrganization({
+      ...args(null),
+      tx: dbMock as never,
+    });
+
+    expect(dbMock.user.findFirstOrThrow).toHaveBeenCalledOnce();
+    expect(dbMock.organization.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: OrganizationType.TEAM,
+          owner: { connect: { id: OWNER_ID } },
+          userOrganizations: {
+            create: {
+              userId: OWNER_ID,
+              roles: [OrganizationRoles.OWNER],
+            },
+          },
+        }),
+      })
+    );
+  });
 });

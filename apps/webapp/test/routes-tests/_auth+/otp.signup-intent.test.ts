@@ -122,7 +122,10 @@ describe("otp action — confirming the code", () => {
       "selected-organization-id=org",
     ]);
     expect(createUser).toHaveBeenCalledWith(
-      expect.objectContaining({ signupIntent: null })
+      expect.objectContaining({
+        signupIntent: null,
+        bootstrapIoioTeamOnFreshSignup: true,
+      })
     );
   });
 

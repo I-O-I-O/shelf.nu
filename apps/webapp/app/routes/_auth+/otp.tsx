@@ -116,13 +116,16 @@ export async function action({ context, request }: ActionFunctionArgs) {
         const existingUser = await findUserById(authSession.userId);
         const userExists = Boolean(existingUser);
 
+        // A login is not an initialization attempt. Only a verified signup
+        // that creates a Shelf user may claim the first-Team bootstrap slot.
+        const isLogin =
+          new URL(request.url).searchParams.get("mode") === "login";
+
         // What the signup link asked for, carried by cookie. A new account
         // records it on its signup event; the cookie then travels on for
         // onboarding to store and act on. A login is not a signup: the form
         // posts back to this page's URL, so `mode` is on the request, and a
         // login ignores whatever intent an earlier `/join` visit left behind.
-        const isLogin =
-          new URL(request.url).searchParams.get("mode") === "login";
         const signupIntent = isLogin ? null : await readSignupIntent(request);
 
         if (!userExists) {
@@ -140,6 +143,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
               username,
               formatPrefs,
               signupIntent,
+              bootstrapIoioTeamOnFreshSignup: !isLogin,
             });
           } catch (createError) {
             // Two sign-ins for the same person can run at once: if the other

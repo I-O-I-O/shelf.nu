@@ -21,6 +21,10 @@ import {
 } from "@mocks/user";
 import { db, type ExtendedPrismaClient } from "~/database/db.server";
 import { captureServerEvent } from "~/integrations/posthog/client.server";
+import {
+  createInitialIoioTeam,
+  isFreshIoioInstanceForSignup,
+} from "~/modules/ioio/initial-team.server";
 
 import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import {
@@ -71,6 +75,15 @@ vitest.mock("~/modules/asset-index-settings/service.server", () => ({
 }));
 
 const username = `test-user-${USER_ID}`;
+
+const ioioInitialTeamMocks = vitest.hoisted(() => ({
+  createInitialIoioTeam: vitest.fn(),
+  isFreshIoioInstanceForSignup: vitest.fn(),
+}));
+
+// why: these tests verify when signup enters the IOIO bootstrap boundary; the
+// boundary's lock and persistent-state decisions are tested in its own suite.
+vitest.mock("~/modules/ioio/initial-team.server", () => ioioInitialTeamMocks);
 
 describe(createUserAccountForTesting.name, () => {
   it("should return null if no auth account created", async () => {
@@ -608,6 +621,10 @@ describe(createUser.name, () => {
   beforeEach(() => {
     vitest.clearAllMocks();
     // @ts-expect-error missing vitest type
+    isFreshIoioInstanceForSignup.mockResolvedValue(false);
+    // @ts-expect-error missing vitest type
+    createInitialIoioTeam.mockResolvedValue({ id: "team-initial" });
+    // @ts-expect-error missing vitest type
     db.user.create.mockResolvedValue(newUserMock);
     // why: the mocked $transaction just invokes the callback with the mocked db,
     // so the callback's `tx.user.create` resolves to whatever db.user.create does
@@ -650,6 +667,50 @@ describe(createUser.name, () => {
     const createArg = db.user.create.mock.calls[0][0];
     expect(createArg.data.dateFormat).toBeUndefined();
     expect(createArg.data.timeZone).toBeUndefined();
+  });
+
+  it("creates the initial Team only when the fresh-signup check succeeds", async () => {
+    const events: string[] = [];
+    // @ts-expect-error missing vitest type
+    isFreshIoioInstanceForSignup.mockImplementation(() => {
+      events.push("fresh-state-check");
+      return Promise.resolve(true);
+    });
+    // @ts-expect-error missing vitest type
+    db.user.create.mockImplementationOnce(() => {
+      events.push("user-create");
+      return Promise.resolve(newUserMock);
+    });
+    // @ts-expect-error missing vitest type
+    createInitialIoioTeam.mockImplementationOnce(() => {
+      events.push("team-create");
+      return Promise.resolve({ id: "team-initial" });
+    });
+
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      bootstrapIoioTeamOnFreshSignup: true,
+    });
+
+    expect(events).toEqual(["fresh-state-check", "user-create", "team-create"]);
+    expect(createInitialIoioTeam).toHaveBeenCalledWith({
+      tx: db,
+      userId: USER_ID,
+    });
+  });
+
+  it("does not assign bootstrap ownership when an existing Team is found", async () => {
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      bootstrapIoioTeamOnFreshSignup: true,
+    });
+
+    expect(isFreshIoioInstanceForSignup).toHaveBeenCalledOnce();
+    expect(createInitialIoioTeam).not.toHaveBeenCalled();
   });
 
   it("returns the existing user when create throws a P2002 unique violation on id", async () => {

@@ -185,12 +185,16 @@ export async function createOrganization({
   userId,
   image,
   currency,
+  tx,
 }: Pick<Organization, "name" | "currency"> & {
   userId: User["id"];
   image: File | null;
+  /** Existing Shelf organization creation can participate in a caller transaction. */
+  tx?: Prisma.TransactionClient;
 }) {
   try {
-    const owner = await db.user.findFirstOrThrow({
+    const client = tx ?? db;
+    const owner = await client.user.findFirstOrThrow({
       where: { id: userId },
       select: {
         id: true,
@@ -266,10 +270,10 @@ export async function createOrganization({
       },
     } satisfies Prisma.OrganizationCreateInput;
 
-    const org = await db.organization.create({ data });
+    const org = await client.organization.create({ data });
 
     if (logo) {
-      await db.image.create({
+      await client.image.create({
         data: {
           blob: logo.blob,
           contentType: logo.contentType,

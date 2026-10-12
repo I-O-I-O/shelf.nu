@@ -49,11 +49,10 @@ import {
   readSignupIntent,
   refreshSignupIntentHeaders,
 } from "~/modules/signup-intent/cookie.server";
-import { resolveOnboardingDestination } from "~/modules/signup-intent/schema";
 import { getUserByID, updateUser } from "~/modules/user/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { setCookie } from "~/utils/cookies.server";
-import { ENABLE_PREMIUM_FEATURES, SMTP_FROM } from "~/utils/env";
+import { SMTP_FROM } from "~/utils/env";
 import { isZodValidationError, makeShelfError } from "~/utils/error";
 import { isFormProcessing } from "~/utils/form";
 import { getValidationErrors } from "~/utils/http";
@@ -64,6 +63,7 @@ import {
   getCurrentSearchParams,
   parseData,
 } from "~/utils/http.server";
+import { resolveIoioAccountDestination } from "~/utils/ioio-role-routing";
 import { createStripeCustomer } from "~/utils/stripe.server";
 import { tw } from "~/utils/tw";
 import { resolveUserGreetingName } from "~/utils/user";
@@ -436,7 +436,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
 
     /** Update the user */
-    const user = await updateUser(userUpdatePayload);
+    const user = await updateUser(userUpdatePayload, {
+      userOrganizations: {
+        select: {
+          roles: true,
+          organization: { select: { type: true } },
+        },
+      },
+    });
 
     /** Save business intelligence data separately */
     if (config.collectBusinessIntel) {
@@ -497,10 +504,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    const redirectViaInvite = Boolean(
-      verifiedOrganizationId || user.createdWithInvite
-    );
-
     const headers = [];
 
     if (verifiedOrganizationId) {
@@ -513,12 +516,19 @@ export async function action({ context, request }: ActionFunctionArgs) {
       headers.push(...(await clearSignupIntentHeaders()));
     }
 
+    const ioioDestination = user.userOrganizations?.find(
+      (membership) =>
+        membership.organization.type === "TEAM" &&
+        resolveIoioAccountDestination(membership.roles)
+    );
+
+    // Every IOIO user must resolve through an authorized Team membership.
+    // Sending an unassigned account to Shelf's welcome flow would expose the
+    // Team creation path and let a later signup grant itself OWNER access.
     return redirect(
-      resolveOnboardingDestination({
-        redirectViaInvite,
-        signupIntent,
-        premiumFeaturesEnabled: ENABLE_PREMIUM_FEATURES,
-      }),
+      ioioDestination
+        ? resolveIoioAccountDestination(ioioDestination.roles) ?? "/login"
+        : "/login",
       { headers }
     );
   } catch (cause) {

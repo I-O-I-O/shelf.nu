@@ -3,8 +3,8 @@
 import type { ActionFunctionArgs } from "react-router";
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { createActionArgs } from "@mocks/remix";
 import { locationDescendantsMock } from "@mocks/location-descendants";
+import { createActionArgs } from "@mocks/remix";
 
 // why: mocking location descendants to avoid database queries during tests
 vi.mock("~/modules/location/descendants.server", () => locationDescendantsMock);
@@ -13,18 +13,19 @@ vi.mock("~/modules/location/descendants.server", () => locationDescendantsMock);
 vi.mock("~/database/db.server", () => ({ db: {} }));
 
 // why: mocking Remix's data() function to return Response objects for React Router v7 single fetch
-const createDataMock = vi.hoisted(() => {
-  return () =>
-    vi.fn((data: unknown, init?: ResponseInit) => {
-      return new Response(JSON.stringify(data), {
-        status: init?.status || 200,
-        headers: {
-          "Content-Type": "application/json",
-          ...(init?.headers || {}),
-        },
-      });
-    });
-});
+const createDataMock = vi.hoisted(
+  () => () =>
+    vi.fn(
+      (data: unknown, init?: ResponseInit) =>
+        new Response(JSON.stringify(data), {
+          status: init?.status || 200,
+          headers: {
+            "Content-Type": "application/json",
+            ...(init?.headers || {}),
+          },
+        })
+    )
+);
 
 vi.mock("react-router", async () => {
   const actual = await vi.importActual("react-router");
@@ -226,6 +227,19 @@ describe("onboarding action validation", () => {
     expect(updateUser).toHaveBeenCalled();
   });
 
+  it("keeps an unassigned signup out of Shelf's workspace setup flow", async () => {
+    const response = (await action(
+      createActionArgs({
+        context,
+        request: buildRequest({}),
+        params: {},
+      })
+    )) as Response;
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("/login");
+  });
+
   it("requires teamSize and companyName for non-Personal use roles", async () => {
     const request = buildRequest({
       jobTitle: "IT Administrator",
@@ -277,5 +291,57 @@ describe("onboarding action validation", () => {
 
     expect(response.status).toBe(302);
     expect(updateUser).toHaveBeenCalled();
+  });
+
+  it("sends an IOIO OWNER to the Staff Desk after Shelf onboarding", async () => {
+    vi.mocked(updateUser).mockResolvedValue({
+      ...baseUser,
+      customerId: "cust_123",
+      userOrganizations: [
+        {
+          roles: ["OWNER"],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as any);
+
+    const response = (await action(
+      createActionArgs({
+        context,
+        request: buildRequest({}),
+        params: {},
+      })
+    )) as Response;
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("/home");
+    expect(updateUser).toHaveBeenCalledWith(
+      expect.objectContaining({ onboarded: true }),
+      expect.objectContaining({ userOrganizations: expect.any(Object) })
+    );
+  });
+
+  it("keeps a SELF_SERVICE Team member on the Student surface after onboarding", async () => {
+    vi.mocked(updateUser).mockResolvedValue({
+      ...baseUser,
+      customerId: "cust_123",
+      userOrganizations: [
+        {
+          roles: ["SELF_SERVICE"],
+          organization: { type: "TEAM" },
+        },
+      ],
+    } as any);
+
+    const response = (await action(
+      createActionArgs({
+        context,
+        request: buildRequest({}),
+        params: {},
+      })
+    )) as Response;
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("/ioio");
   });
 });

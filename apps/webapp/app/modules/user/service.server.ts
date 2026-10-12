@@ -74,6 +74,10 @@ import {
   caseInsensitiveEmailFilter,
   normalizeInviteEmail,
 } from "../invite/helpers";
+import {
+  createInitialIoioTeam,
+  isFreshIoioInstanceForSignup,
+} from "../ioio/initial-team.server";
 import { getOrganizationsBySsoDomain } from "../organization/service.server";
 import { USER_CONTACT_SELECT } from "../user-contact/constants";
 import {
@@ -1009,6 +1013,12 @@ export async function createUser(
     formatPrefs?: DetectedFormatPrefs;
     skipPersonalOrg?: boolean;
     /**
+     * OTP self-signup only: initialize IOIO's first Team when the persistent
+     * Shelf database is genuinely empty. Other account-creation flows never
+     * request bootstrap ownership.
+     */
+    bootstrapIoioTeamOnFreshSignup?: boolean;
+    /**
      * What the signup link asked for (plan, trial, campaign), carried by the
      * signup flow. Recorded on the `signup_completed` event only; the
      * business-intel record is written at onboarding, which owns the cookie.
@@ -1028,6 +1038,7 @@ export async function createUser(
     createdWithInvite,
     formatPrefs,
     skipPersonalOrg,
+    bootstrapIoioTeamOnFreshSignup,
     signupIntent,
   } = payload;
 
@@ -1040,6 +1051,10 @@ export async function createUser(
   try {
     const createdUser = await db.$transaction(
       async (tx) => {
+        const shouldBootstrapIoioTeam = bootstrapIoioTeamOnFreshSignup
+          ? await isFreshIoioInstanceForSignup(tx)
+          : false;
+
         const user = await tx.user.create({
           data: {
             email,
@@ -1134,6 +1149,10 @@ export async function createUser(
               roles,
             }),
         ]);
+
+        if (shouldBootstrapIoioTeam) {
+          await createInitialIoioTeam({ tx, userId: user.id });
+        }
 
         return user;
       },

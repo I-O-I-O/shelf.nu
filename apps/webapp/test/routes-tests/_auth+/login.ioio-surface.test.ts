@@ -129,4 +129,33 @@ describe("login redirects to the authenticated IOIO surface", () => {
 
     expect(response.headers.get("Location")).toBe("/home");
   });
+
+  it("blocks a later signup that has only a Personal membership", async () => {
+    vi.mocked(signInWithEmail).mockResolvedValue({
+      userId: "user-unassigned",
+      email: "unassigned@example.edu",
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-2",
+      currentOrganization: { type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-2",
+          roles: [OrganizationRoles.OWNER],
+          organization: { type: "PERSONAL" },
+        },
+      ],
+    } as never);
+
+    const response = (await action(loginArgs("/assets"))) as Response;
+
+    expect((response as unknown as { init?: ResponseInit }).init?.status).toBe(
+      403
+    );
+    expect(
+      (response as unknown as { data?: { error?: { title?: string } } }).data
+        ?.error?.title
+    ).toBe("IOIO Team organization required");
+    expect(setSelectedOrganizationIdCookie).not.toHaveBeenCalled();
+  });
 });
