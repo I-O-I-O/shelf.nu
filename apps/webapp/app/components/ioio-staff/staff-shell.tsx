@@ -29,6 +29,7 @@ import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
 import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
+import OrganizationSelector from "~/components/layout/sidebar/organization-selector";
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
@@ -290,6 +291,10 @@ function StaffAccountControls({
       aria-label="Staff account"
       className="mt-3 border-t border-gray-100 pt-3"
     >
+      <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
+        Workspace
+      </p>
+      <OrganizationSelector variant="ioio" />
       <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
         Signed in
       </p>
