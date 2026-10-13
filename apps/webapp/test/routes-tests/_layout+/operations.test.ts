@@ -32,11 +32,19 @@ const mocks = vi.hoisted(() => {
       weeklySchedule: {},
       overrides: [],
     }),
+    getBrokenSection: vi.fn().mockResolvedValue({
+      id: "broken-location",
+      name: "Shelf B",
+      path: "Room 5 · Equipment area · Shelf B",
+      imageUrl: "https://images.example.test/broken.jpg",
+      thumbnailUrl: "https://images.example.test/broken-thumb.jpg",
+    }),
     getLabStatus: vi.fn().mockResolvedValue({
       overdueLoans: 0,
       returnChecks: 0,
       returnedWithIssues: 0,
       unresolvedReports: 0,
+      generalReports: 0,
       preparationTasks: 0,
       cancelledPickups: 0,
       readyForPickup: 0,
@@ -49,6 +57,8 @@ const mocks = vi.hoisted(() => {
       title: "Makey Kit #002",
       status: "AVAILABLE",
     }),
+    resolveBrokenAssetOutOfService: vi.fn(),
+    resolveLabIssue: vi.fn().mockResolvedValue({ resolvedCount: 1 }),
     completeSubmittedReturn: vi.fn().mockResolvedValue({ ok: true }),
     disableReturnedAssetFromUse: vi.fn().mockResolvedValue(undefined),
     getIoioAvailability: vi.fn().mockResolvedValue({
@@ -64,9 +74,12 @@ const mocks = vi.hoisted(() => {
       availableWithoutStaffReservations: 1,
     }),
     getApprovals: vi.fn().mockResolvedValue([]),
+    declineApproval: vi.fn().mockResolvedValue({ declined: true }),
+    reviewApprovals: vi.fn().mockResolvedValue({ approvedCount: 0 }),
     useLoaderData: vi.fn(),
     useActionData: vi.fn().mockReturnValue(undefined),
     revalidate: vi.fn(),
+    submit: vi.fn(),
   };
 });
 
@@ -82,11 +95,20 @@ vi.mock("react-router", async () => {
       createElement("form", props, children),
     useLoaderData: mocks.useLoaderData,
     useActionData: mocks.useActionData,
-    useFetcher: () => ({ state: "idle", data: null }),
+    useFetcher: () => ({
+      state: "idle",
+      data: null,
+      submit: mocks.submit,
+      Form: ({ children, ...props }: ComponentProps<"form">) =>
+        createElement("form", props, children),
+    }),
     useRevalidator: () => ({ revalidate: mocks.revalidate }),
   };
 });
 vi.mock("~/components/layout/header", () => ({ default: () => null }));
+vi.mock("~/modules/ioio-lab-information/broken-section.server", () => ({
+  getConfiguredBrokenSection: mocks.getBrokenSection,
+}));
 vi.mock("~/components/layout/dialog", () => ({
   Dialog: ({ children, open }: { children: ReactNode; open?: boolean }) =>
     open ? children : null,
@@ -152,7 +174,9 @@ vi.mock("~/modules/working-hours/service.server", () => ({
 }));
 vi.mock("~/modules/ioio-staff/lab-status.server", () => ({
   getLabStatus: mocks.getLabStatus,
+  resolveBrokenAssetOutOfService: mocks.resolveBrokenAssetOutOfService,
   returnBrokenAssetToService: mocks.returnBrokenAssetToService,
+  resolveLabIssue: mocks.resolveLabIssue,
 }));
 vi.mock("~/modules/ioio-student/return-item.server", () => ({
   completeSubmittedReturn: mocks.completeSubmittedReturn,
@@ -167,8 +191,8 @@ vi.mock("~/modules/ioio-student/availability.server", () => ({
 vi.mock("~/modules/ioio-student/annual-access.server", () => ({
   formatApprovalDate: (date: Date) => date.toISOString(),
   getStaffAnnualAccessApprovals: mocks.getApprovals,
-  reviewAnnualAccessApprovals: vi.fn(),
-  declineAnnualAccessApproval: vi.fn(),
+  reviewAnnualAccessApprovals: mocks.reviewApprovals,
+  declineAnnualAccessApproval: mocks.declineApproval,
   reapproveAnnualAccessApproval: vi.fn(),
   revokeAnnualAccessApproval: vi.fn(),
 }));
@@ -179,6 +203,7 @@ const views = [
   "returns",
   "returned-with-issues",
   "broken",
+  "general",
   "to-prepare",
   "cancelled-pickups",
   "ready-for-pickup",
@@ -517,7 +542,7 @@ describe("Operations loader", () => {
     );
   });
 
-  it("renders all intended views and an empty Operations state", () => {
+  it("renders Lab status without the Operations heading or subtitle", () => {
     mocks.useLoaderData.mockReturnValue({
       header: { title: "Operations" },
       view: "all",
@@ -526,6 +551,7 @@ describe("Operations loader", () => {
         returns: 0,
         "returned-with-issues": 0,
         broken: 0,
+        general: 0,
         "to-prepare": 0,
         "cancelled-pickups": 0,
         "ready-for-pickup": 0,
@@ -537,25 +563,38 @@ describe("Operations loader", () => {
 
     render(createElement(OperationsPage));
 
+    expect(
+      screen.getByRole("heading", { name: "Lab status", level: 1 })
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Operations" })).toBeNull();
+    expect(screen.queryByText("Current lab operations and tasks.")).toBeNull();
+
     const filters = within(screen.getByLabelText("Operations filters"));
-    for (const label of [
+    expect(
+      filters.getAllByRole("link").map((link) => link.textContent)
+    ).toEqual([
+      "All",
       "Overdue loans",
       "Returns to check",
       "Returned with issues",
       "Broken items",
+      "General",
       "Items to prepare",
       "Cancelled pickups",
       "Ready for pickup",
       "Student access approvals",
-      "All",
-    ]) {
-      expect(filters.getByRole("link", { name: label })).toBeTruthy();
-    }
+    ]);
+    expect(
+      filters.getByRole("link", { name: "All" }).getAttribute("aria-current")
+    ).toBe("page");
+    expect(filters.getByRole("link", { name: "All" }).className).toContain(
+      "bg-red-700"
+    );
     expect(filters.queryByRole("link", { name: "Requests" })).toBeNull();
     expect(screen.getByText("No items need attention.")).toBeTruthy();
   });
 
-  it("renders a broken row with its concrete destination", () => {
+  it("renders a general report with human-readable details and no broken status", () => {
     const destination = getBrokenItemDestination(
       { assetId: "asset-1", kitId: null, locationId: null },
       new Map([["asset-1", {}]]),
@@ -564,12 +603,13 @@ describe("Operations loader", () => {
     );
     mocks.useLoaderData.mockReturnValue({
       header: { title: "Operations" },
-      view: "broken",
+      view: "all",
       summary: {
         overdue: 0,
         returns: 0,
         "returned-with-issues": 0,
-        broken: 1,
+        broken: 0,
+        general: 1,
         "to-prepare": 0,
         "cancelled-pickups": 0,
         "ready-for-pickup": 0,
@@ -578,10 +618,13 @@ describe("Operations loader", () => {
       tasks: [
         {
           id: "report-1",
-          kind: "broken",
+          kind: "general",
           title: "Makey Kit #002",
-          detail:
-            "Broken after return inspection — Disabled after return inspection.",
+          detail: "The unit is on Shelf A1, not the listed location.",
+          reportLabel: "Wrong location",
+          reporterName: "Michael Jordan",
+          reportDescription:
+            "The unit is on Shelf A1, not the listed location.",
           createdAt: new Date("2026-10-07T10:00:00Z"),
           assetId: "asset-1",
           physicalUnit: true,
@@ -591,8 +634,8 @@ describe("Operations loader", () => {
             assetModel: null,
           },
           operationId: "broken-report-1",
-          returnToServiceEligible: true,
-          locationName: "IOIO Lab - B477 · Shelf A1",
+          returnToServiceEligible: false,
+          reportedLocation: "IOIO Lab - B477 · Shelf A1",
           href: destination.href,
           actionLabel: destination.actionLabel,
         },
@@ -601,6 +644,12 @@ describe("Operations loader", () => {
     });
 
     render(createElement(OperationsPage));
+
+    const selectedFilter = screen.getByRole("link", {
+      name: "All",
+    });
+    expect(selectedFilter.getAttribute("aria-current")).toBe("page");
+    expect(selectedFilter.className).toContain("bg-red-700");
 
     expect(
       screen
@@ -612,21 +661,272 @@ describe("Operations loader", () => {
     const titleLink = screen.getByRole("link", { name: "Makey Kit #002" });
     expect(titleLink.getAttribute("href")).toBe("/assets/asset-1");
     expect(titleLink.className).not.toContain("truncate");
-    expect(screen.getByText("Out of service")).toBeTruthy();
-    expect(screen.getByText("Broken after return inspection")).toBeTruthy();
-    expect(screen.queryByText("Disabled after return inspection.")).toBeNull();
+    expect(screen.queryByText("Out of service")).toBeNull();
+    expect(screen.getByText("Wrong location")).toBeTruthy();
+    expect(screen.getByLabelText("Select Makey Kit #002 general")).toBeTruthy();
+    expect(screen.getByText("Reported by Michael Jordan")).toBeTruthy();
+    expect(
+      screen.getByText("“The unit is on Shelf A1, not the listed location.”")
+    ).toBeTruthy();
     expect(screen.getByText("IOIO Lab - B477 · Shelf A1")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Open unit" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Open asset" })).toBeNull();
     expect(screen.queryByText("BROKEN ITEMS")).toBeNull();
     expect(
-      screen.getByRole("checkbox", {
-        name: "Select Makey Kit #002 for return to service",
-      })
-    ).toBeTruthy();
+      screen.queryByRole("button", { name: "Return to service" })
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Resolve report" })).toBeTruthy();
+    const reportGrid = titleLink.closest("div.grid");
+    expect(reportGrid?.className).toContain("minmax(0,1fr)");
+    expect(reportGrid?.className).not.toContain("minmax(240px");
+    expect(reportGrid?.className).not.toContain("minmax(180px");
+  });
+
+  it("selects only visible General reports and exposes a matching bulk resolve action", () => {
+    const generalData = {
+      header: { title: "Operations" },
+      view: "general",
+      summary: {
+        overdue: 0,
+        returns: 0,
+        "returned-with-issues": 0,
+        broken: 0,
+        general: 2,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: ["one", "two"].map((id) => ({
+        id,
+        kind: "general",
+        title: `Report ${id}`,
+        detail: "Needs review",
+        reportLabel: "Wrong location",
+        reportDescription: "Needs review",
+        reporterName: "Student",
+        createdAt: new Date("2026-10-07T10:00:00Z"),
+        operationId: `op-${id}`,
+        href: "/operations?view=general",
+        actionLabel: "Resolve report",
+      })),
+      annualAccessApprovals: { pending: [], access: [] },
+    };
+    mocks.useLoaderData.mockReturnValue(generalData);
+
+    const { rerender } = render(createElement(OperationsPage));
+    fireEvent.click(screen.getByLabelText("Select Report one general report"));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    fireEvent.click(
+      screen.getByLabelText("Select all visible general reports")
+    );
+
+    expect(screen.getByText("2 selected")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "Return to service" })
+      screen.getByRole("button", { name: "Resolve selected" })
     ).toBeTruthy();
+    const form = screen
+      .getByRole("button", { name: "Resolve selected" })
+      .closest("form");
+    expect(
+      Array.from(form!.querySelectorAll('[name="operationIds"]')).map(
+        (input) => (input as HTMLInputElement).value
+      )
+    ).toEqual(["op-one", "op-two"]);
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.queryByText("2 selected")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Select Report one general report"));
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    mocks.useLoaderData.mockReturnValue({
+      ...generalData,
+      view: "broken",
+      summary: { ...generalData.summary, general: 0 },
+      tasks: [],
+    });
+    rerender(createElement(OperationsPage));
+    expect(screen.queryByText("1 selected")).toBeNull();
+  });
+
+  it("selects actionable All rows and resolves mixed operational reports safely", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "all",
+      summary: {
+        overdue: 0,
+        returns: 1,
+        "returned-with-issues": 0,
+        broken: 1,
+        general: 2,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 1,
+      },
+      tasks: [
+        {
+          id: "general-row",
+          kind: "general",
+          title: "General report",
+          detail: "Needs review",
+          reportLabel: "Wrong location",
+          reportDescription: "It is in the wrong room.",
+          operationId: "same-id",
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          href: "/operations?view=general",
+          actionLabel: "Resolve report",
+        },
+        {
+          id: "general-row-2",
+          kind: "general",
+          title: "Location full report",
+          detail: "Shelf B is full.",
+          reportLabel: "Location full",
+          reportDescription: "Shelf B is full.",
+          operationId: "general-report-2",
+          createdAt: new Date("2026-10-07T10:01:00Z"),
+          href: "/operations?view=general",
+          actionLabel: "Resolve report",
+        },
+        {
+          id: "broken-row",
+          kind: "broken",
+          title: "Makey Kit #003",
+          detail: "Item damaged",
+          reportLabel: "Item damaged",
+          operationId: "damage-report-3",
+          assetId: "same-id",
+          physicalUnit: true,
+          returnToServiceEligible: true,
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          href: "/assets/same-id",
+          actionLabel: "Return to service",
+        },
+        {
+          id: "return-row",
+          kind: "returns",
+          title: "Camera #001",
+          detail: "Returned item",
+          operationId: "return-operation-1",
+          returnCheckEligible: true,
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          href: "/operations?view=returns",
+          actionLabel: "Mark checked",
+        },
+      ],
+      annualAccessApprovals: {
+        pending: [
+          {
+            id: "approval-1",
+            requestedAt: new Date("2026-10-07T10:00:00Z"),
+            student: {
+              displayName: "Taylor Student",
+              firstName: "Taylor",
+              lastName: "Student",
+              email: "taylor@example.test",
+            },
+          },
+        ],
+        access: [],
+      },
+    });
+
+    render(createElement(OperationsPage));
+    expect(screen.getByLabelText("Select General report general")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Select Location full report general")
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Select Makey Kit #003 broken")).toBeTruthy();
+    expect(screen.getByLabelText("Select Camera #001 returns")).toBeTruthy();
+    expect(
+      screen.getByLabelText("Select Taylor Student access-approvals")
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("Select General report general"));
+    const bulkBar = screen
+      .getByLabelText("Select all visible Operations rows")
+      .closest("label")!.parentElement!.parentElement!;
+    expect(bulkBar.className).toContain("justify-between");
+    expect(
+      screen.getByRole("button", { name: "Resolve selected" }).parentElement
+        ?.parentElement?.className
+    ).toContain("ml-auto");
+    expect(
+      screen.getByRole("button", { name: "Resolve selected" })
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByLabelText("Select Location full report general")
+    );
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    const resolveForm = screen
+      .getByRole("button", { name: "Resolve selected" })
+      .closest("form");
+    expect(
+      Array.from(resolveForm!.querySelectorAll('[name="operationIds"]')).map(
+        (input) => (input as HTMLInputElement).value
+      )
+    ).toEqual(["same-id", "general-report-2"]);
+    fireEvent.click(screen.getByLabelText("Select Makey Kit #003 broken"));
+    expect(screen.getByText("3 selected")).toBeTruthy();
+    expect(screen.queryByText(/same workflow/i)).toBeNull();
+    const mixedReportResolveForm = screen
+      .getByRole("button", { name: "Resolve selected" })
+      .closest("form");
+    expect(
+      Array.from(
+        mixedReportResolveForm!.querySelectorAll('[name="operationIds"]')
+      ).map((input) => (input as HTMLInputElement).value)
+    ).toEqual(["same-id", "general-report-2", "damage-report-3"]);
+
+    fireEvent.click(
+      screen.getByLabelText("Select all visible Operations rows")
+    );
+    expect(screen.getByText("5 selected")).toBeTruthy();
+    expect(screen.queryByText(/same workflow/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.queryByText("5 selected")).toBeNull();
+
+    fireEvent.click(screen.getByLabelText("Select Makey Kit #003 broken"));
+    const brokenToolbar =
+      screen.getByText("1 selected").parentElement!.parentElement!;
+    const brokenBulkButton = within(brokenToolbar).getByRole("button", {
+      name: "Return to service",
+    });
+    expect(
+      Array.from(
+        brokenBulkButton.closest("form")!.querySelectorAll('[name="assetIds"]')
+      ).map((input) => (input as HTMLInputElement).value)
+    ).toEqual(["same-id"]);
+
+    fireEvent.click(
+      within(brokenToolbar).getByRole("button", { name: "Clear selection" })
+    );
+    fireEvent.click(screen.getByLabelText("Select Camera #001 returns"));
+    const returnToolbar =
+      screen.getByText("1 selected").parentElement!.parentElement!;
+    const markCheckedForm = within(returnToolbar)
+      .getByRole("button", { name: "Mark checked" })
+      .closest("form")!;
+    expect(
+      Array.from(markCheckedForm.querySelectorAll('[name="operationIds"]')).map(
+        (input) => (input as HTMLInputElement).value
+      )
+    ).toEqual(["return-operation-1"]);
+
+    fireEvent.click(
+      within(returnToolbar).getByRole("button", { name: "Clear selection" })
+    );
+    fireEvent.click(screen.getByLabelText("Select General report general"));
+    fireEvent.click(screen.getByLabelText("Select Camera #001 returns"));
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Resolve selected" })
+    ).toBeNull();
+    expect(
+      within(
+        screen.getByText("2 selected").parentElement!.parentElement!
+      ).queryByRole("button", { name: "Mark checked" })
+    ).toBeNull();
   });
 
   it("selects physical broken units and confirms one bulk return-to-service action", () => {
@@ -692,6 +992,110 @@ describe("Operations loader", () => {
     ).toEqual(["physical-2", "physical-4"]);
   });
 
+  it("shows Return to service for a blocking physical-unit report", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "broken",
+      summary: {
+        overdue: 0,
+        returns: 0,
+        "returned-with-issues": 0,
+        broken: 1,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: [
+        {
+          id: "report-1",
+          kind: "broken",
+          title: "Makey Kit #002",
+          detail: "ITEM_DAMAGED reported by Student",
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          operationId: "report-op-1",
+          assetId: "unit-2",
+          physicalUnit: true,
+          returnToServiceEligible: true,
+          brokenSectionRelevant: true,
+          brokenSection: {
+            name: "Shelf B",
+            path: "Room 5 · Equipment area · Shelf B",
+            imageUrl: "https://images.example.test/broken.jpg",
+            thumbnailUrl: "https://images.example.test/broken-thumb.jpg",
+          },
+        },
+      ],
+      annualAccessApprovals: { pending: [], access: [] },
+    });
+
+    render(createElement(OperationsPage));
+
+    expect(
+      screen.getByRole("button", { name: "Return to service" })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "More actions for Makey Kit #002" })
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Keep out of service" })
+    );
+    expect(mocks.submit).toHaveBeenCalledWith(
+      {
+        intent: "resolve-broken-report-out-of-service",
+        operationId: "report-op-1",
+      },
+      { method: "post" }
+    );
+    expect(screen.getByText("Room 5 · Equipment area · Shelf B")).toBeTruthy();
+    expect(
+      screen.queryByText(
+        /Not configured\. Ask Staff where to place this unit\./
+      )
+    ).toBeNull();
+  });
+
+  it("omits Broken section metadata when no location is configured", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "broken",
+      summary: {
+        overdue: 0,
+        returns: 0,
+        "returned-with-issues": 0,
+        broken: 1,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: [
+        {
+          id: "report-no-location",
+          kind: "broken",
+          title: "Camera #001",
+          detail: "Item damaged",
+          operationId: "report-op-no-location",
+          assetId: "camera-1",
+          physicalUnit: true,
+          returnToServiceEligible: true,
+          brokenSectionRelevant: true,
+          brokenSection: null,
+        },
+      ],
+      annualAccessApprovals: { pending: [], access: [] },
+    });
+
+    render(createElement(OperationsPage));
+
+    expect(screen.queryByText("Broken section")).toBeNull();
+    expect(
+      screen.queryByText(
+        /Not configured\. Ask Staff where to place this unit\./
+      )
+    ).toBeNull();
+  });
+
   it("offers direct Mark checked and Remove from service actions for a returned item", () => {
     mocks.useLoaderData.mockReturnValue({
       header: { title: "Operations" },
@@ -733,6 +1137,48 @@ describe("Operations loader", () => {
       screen.getAllByRole("button", { name: "Remove from service" })
     ).toHaveLength(1);
     expect(screen.queryByRole("link", { name: "Review return" })).toBeNull();
+  });
+
+  it("offers issue assessment and service removal for a returned issue", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "returned-with-issues",
+      summary: {
+        overdue: 0,
+        returns: 0,
+        "returned-with-issues": 1,
+        broken: 0,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: [
+        {
+          id: "return-issue-1",
+          kind: "returned-with-issues",
+          title: "Makey Kit #002",
+          detail: "Returned with issue · Student",
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          operationId: "return-op-1",
+          returnIssueOperationId: "report-op-1",
+          returnToServiceEligible: true,
+          assetId: "unit-2",
+          href: "/bookings/return-check/return-op-1",
+        },
+      ],
+      annualAccessApprovals: { pending: [], access: [] },
+    });
+
+    render(createElement(OperationsPage));
+
+    expect(screen.getByRole("link", { name: "Review return" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Return to service" })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove from service" })
+    ).toBeTruthy();
   });
 
   it("shows Mark checked and Remove from service in the bulk toolbar", () => {
@@ -954,6 +1400,114 @@ describe("Operations loader", () => {
     });
     expect(result).toMatchObject({
       data: { ok: true, intent: "return-to-service" },
+    });
+  });
+
+  it("resolves an operational report within the selected TEAM organization", async () => {
+    mocks.methods.findFirst.mockResolvedValueOnce({
+      id: "wrong-location-report",
+      reportType: "WRONG_LOCATION",
+    });
+    const result = await action(
+      createActionArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/operations?view=all", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "resolve-report",
+            operationId: "wrong-location-report",
+          }),
+        }),
+      })
+    );
+
+    expect(mocks.resolveLabIssue).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      operationId: "wrong-location-report",
+    });
+    expect(mocks.methods.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "wrong-location-report",
+          organizationId: "org-1",
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+        }),
+      })
+    );
+    expect(result).toMatchObject({
+      data: { ok: true, intent: "resolve-report" },
+    });
+  });
+
+  it("bulk resolves General and damaged reports without changing inventory status", async () => {
+    mocks.methods.findMany.mockResolvedValueOnce([
+      { id: "wrong-location", reportType: "WRONG_LOCATION" },
+      { id: "damaged", reportType: "ITEM_DAMAGED" },
+    ]);
+    const body = new FormData();
+    body.set("intent", "resolve-report-bulk");
+    body.append("operationIds", "wrong-location");
+    body.append("operationIds", "damaged");
+
+    const result = await action(
+      createActionArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/operations?view=general", {
+          method: "POST",
+          body,
+        }),
+      })
+    );
+
+    expect(mocks.resolveLabIssue).toHaveBeenCalledTimes(2);
+    expect(mocks.resolveLabIssue).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      operationId: "damaged",
+      resolveRelatedReports: false,
+    });
+    expect(mocks.returnBrokenAssetToService).not.toHaveBeenCalled();
+    expect(mocks.resolveBrokenAssetOutOfService).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      data: {
+        intent: "resolve-report-bulk",
+        succeeded: 2,
+        failed: 0,
+      },
+    });
+  });
+
+  it("rejects selected access requests through the organization-scoped approval service", async () => {
+    const body = new FormData();
+    body.set("intent", "decline-access-bulk");
+    body.append("requestIds", "request-1");
+    body.append("requestIds", "request-2");
+
+    const result = await action(
+      createActionArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request(
+          "http://localhost/operations?view=access-approvals",
+          {
+            method: "POST",
+            body,
+          }
+        ),
+      })
+    );
+
+    expect(mocks.declineApproval).toHaveBeenCalledTimes(2);
+    expect(mocks.declineApproval).toHaveBeenNthCalledWith(1, {
+      organizationId: "org-1",
+      staffUserId: "staff-1",
+      requestId: "request-1",
+      staffComment: "",
+    });
+    expect(result).toMatchObject({
+      data: {
+        intent: "decline-access-bulk",
+        result: { succeeded: 2, failed: 0 },
+      },
     });
   });
 
@@ -1262,6 +1816,7 @@ describe("Operations loader", () => {
       tasks: ["002", "003"].map((unitNumber) => ({
         id: `ready-${unitNumber}`,
         kind: "ready-for-pickup",
+        operationId: `ready-op-${unitNumber}`,
         title: `Makey Kit #${unitNumber}`,
         detail: "Waiting for Zans Zalik to collect.",
         createdAt: new Date("2026-10-09T08:00:00Z"),
@@ -1277,6 +1832,13 @@ describe("Operations loader", () => {
 
     expect(screen.getByText("Assigned: Makey Kit #002")).toBeTruthy();
     expect(screen.getByText("Assigned: Makey Kit #003")).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", { name: "Confirm pickup" })
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("button", { name: "Cancel pickup" })
+    ).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: "View loan" })).toHaveLength(2);
   });
 
   it("falls back to the broken-items queue when a report target is gone", () => {
@@ -1343,10 +1905,155 @@ describe("Operations loader", () => {
 
     render(createElement(LabStatusCard, { status }));
 
+    const dashboardSummary = screen
+      .getByText("Student access approvals")
+      .closest("a");
+    expect(dashboardSummary?.className).toContain("h-full");
+    expect(dashboardSummary?.className).toContain("min-w-0");
+
     expect(screen.getByText("Current activity")).toBeTruthy();
     expect(screen.getByText("2 items are ready for pickup.")).toBeTruthy();
     const attention = screen.getByRole("region", { name: "Needs attention" });
     const activity = screen.getByRole("region", { name: "Current activity" });
     expect(attention.contains(activity)).toBe(false);
+  });
+
+  it("keeps Dashboard Lab status compact and links General to Operations", () => {
+    const status = {
+      severity: "attention",
+      totalIssues: 5,
+      issues: Array.from({ length: 5 }, (_, index) => ({
+        id: `general-${index}`,
+        kind: "general-report" as const,
+        severity: "attention" as const,
+        title: `Report ${index}`,
+        detail: "Needs review",
+        href: "/operations?view=general",
+      })),
+      overdueLoans: 0,
+      returnChecks: 0,
+      returnedWithIssues: 0,
+      unresolvedReports: 0,
+      generalReports: 5,
+      preparationTasks: 0,
+      cancelledPickups: 0,
+      readyForPickup: 0,
+      annualAccessApprovals: 0,
+      pendingReservationRequests: 0,
+      incompleteKits: 0,
+      outOfStock: 0,
+      lowStock: 0,
+      importWarnings: 0,
+    } satisfies LabStatus;
+
+    render(createElement(LabStatusCard, { status }));
+
+    expect(screen.getByRole("heading", { name: "Lab status" })).toBeTruthy();
+    expect(screen.queryByText("Operations", { selector: "p" })).toBeNull();
+    expect(screen.getByText("5").closest("a")?.getAttribute("href")).toBe(
+      "/operations?view=general"
+    );
+    expect(
+      screen
+        .getByRole("list", { name: "Current lab issues" })
+        .querySelectorAll("li")
+    ).toHaveLength(3);
+    expect(screen.getByText("Showing 3 of 5 items.")).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "View all" }).getAttribute("href")
+    ).toBe("/operations");
+  });
+
+  it("routes Dashboard attention rows to Lab status queues without actions", () => {
+    const status = {
+      severity: "attention",
+      totalIssues: 4,
+      issues: [
+        {
+          id: "general-report",
+          kind: "general-report",
+          severity: "attention",
+          title: "Wrong location",
+          detail: "Staff review is required.",
+          href: "/operations?view=general",
+        },
+        {
+          id: "broken-report",
+          kind: "report",
+          severity: "critical",
+          title: "Item damaged",
+          detail: "Staff review is required.",
+          href: "/operations?view=broken",
+        },
+        {
+          id: "return-check",
+          kind: "return-check",
+          severity: "attention",
+          title: "Makey Kit #003",
+          detail: "Return waiting for inspection.",
+          href: "/operations?view=returns",
+        },
+        {
+          id: "access-approval",
+          kind: "annual-access",
+          severity: "attention",
+          title: "Student access approval",
+          detail: "Review access.",
+          href: "/operations?view=access-approvals",
+        },
+      ],
+      overdueLoans: 0,
+      lowStock: 0,
+      outOfStock: 0,
+      unresolvedReports: 1,
+      generalReports: 1,
+      incompleteKits: 0,
+      importWarnings: 0,
+      pendingReservationRequests: 0,
+      returnChecks: 1,
+      returnedWithIssues: 0,
+      preparationTasks: 0,
+      cancelledPickups: 0,
+      readyForPickup: 0,
+      annualAccessApprovals: 1,
+    } satisfies LabStatus;
+
+    const { rerender } = render(createElement(LabStatusCard, { status }));
+
+    const rows = screen.getByRole("list", { name: "Current lab issues" });
+    expect(
+      within(rows)
+        .getByRole("link", {
+          name: "Wrong location: Staff review is required.",
+        })
+        .getAttribute("href")
+    ).toBe("/operations?view=general");
+    expect(
+      within(rows)
+        .getByRole("link", { name: "Item damaged: Staff review is required." })
+        .getAttribute("href")
+    ).toBe("/operations?view=broken");
+    expect(
+      within(rows)
+        .getByRole("link", {
+          name: "Makey Kit #003: Return waiting for inspection.",
+        })
+        .getAttribute("href")
+    ).toBe("/operations?view=returns");
+    expect(within(rows).queryByRole("button")).toBeNull();
+    expect(within(rows).queryByText("Mark complete")).toBeNull();
+
+    rerender(
+      createElement(LabStatusCard, {
+        status: { ...status, totalIssues: 1, issues: [status.issues[3]] },
+      })
+    );
+    expect(
+      screen
+        .getByRole("link", {
+          name: "Student access approval: Review access.",
+        })
+        .getAttribute("href")
+    ).toBe("/operations?view=access-approvals");
   });
 });

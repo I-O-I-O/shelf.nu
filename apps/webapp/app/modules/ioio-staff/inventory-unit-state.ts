@@ -14,6 +14,7 @@ export type IoioPhysicalUnitStateInput = {
 
 const brokenIssueTypes = new Set([
   "ITEM_DAMAGED",
+  "ITEM_MISSING",
   "ITEM_NOT_WORKING",
   "PART_MISSING",
   "KIT_INCOMPLETE",

@@ -106,5 +106,18 @@ describe("IOIO physical inventory state", () => {
         issueReportTypes: ["ITEM_DAMAGED"],
       })
     ).toBe("Broken");
+
+    expect(
+      getIoioPhysicalUnitState({
+        ...available,
+        issueReportTypes: ["ITEM_MISSING"],
+      })
+    ).toBe("Broken");
+    expect(
+      getIoioPhysicalUnitState({
+        ...available,
+        issueReportTypes: ["WRONG_LOCATION"],
+      })
+    ).toBe("Issue reported");
   });
 });

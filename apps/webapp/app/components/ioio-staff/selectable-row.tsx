@@ -54,7 +54,7 @@ export function SelectableRow({
   return (
     <article
       onClick={onToggle ? handleClick : undefined}
-      className={`${surfaceClasses} ${className}`}
+      className={`w-full min-w-0 ${surfaceClasses} ${className}`}
     >
       {children}
     </article>

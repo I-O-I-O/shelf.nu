@@ -753,6 +753,63 @@ describe("confirmStudentPreparationPickup", () => {
     expect(checkoutBooking).not.toHaveBeenCalled();
   });
 
+  it("blocks pickup validation and checkout for a unit removed from service", async () => {
+    dbMock.booking.findFirst.mockResolvedValue({
+      status: "RESERVED",
+      bookingAssets: [
+        {
+          id: "booking-asset-1",
+          assetId: "unit-1",
+          checkedOutAt: null,
+          checkedInAt: null,
+          asset: {
+            id: "unit-1",
+            title: "Makey Kit #001",
+            type: "INDIVIDUAL",
+            status: "AVAILABLE",
+            availableToBook: false,
+            assetModelId: "model-1",
+            sequentialId: "001",
+            assetModel: { name: "Makey Kit" },
+            maxBorrowDays: 45,
+            qrCodes: [{ id: "qr-assigned-unit" }],
+            barcodes: [{ value: "MAKEY-001" }],
+            organizationId: "ioio-lab",
+            assetKits: [{ kit: { maxBorrowDays: 45 } }],
+          },
+        },
+      ],
+    });
+
+    await expect(
+      validateStudentPreparationPickup({
+        organizationId: "ioio-lab",
+        operationId: "preparation-1",
+        borrowerUserId: "student-1",
+        verificationValue: "http://localhost/qr/qr-assigned-unit",
+      })
+    ).resolves.toMatchObject({
+      valid: false,
+      status: "unavailable",
+      error: "This item is currently out of service and cannot be borrowed.",
+    });
+
+    await expect(
+      confirmStudentPreparationPickup({
+        organizationId: "ioio-lab",
+        operationId: "preparation-1",
+        borrowerUserId: "student-1",
+        hints: {} as never,
+        verificationValue: "#001",
+      })
+    ).rejects.toMatchObject({
+      message: "This item is currently out of service and cannot be borrowed.",
+      status: 400,
+    });
+    expect(checkoutBooking).not.toHaveBeenCalled();
+    expect(dbMock.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+  });
+
   it("expires a pickup at its deadline and refuses checkout", async () => {
     const readyAt = new Date("2026-09-20T10:00:00.000Z");
     dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
@@ -879,6 +936,30 @@ describe("confirmStudentPreparationPickup", () => {
     expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "PICKED_UP" }),
+      })
+    );
+  });
+
+  it("records the Staff actor when Staff confirms a ready pickup", async () => {
+    await confirmStudentPreparationPickup({
+      organizationId: "ioio-lab",
+      operationId: "preparation-1",
+      borrowerUserId: "student-1",
+      staffUserId: "staff-1",
+      hints: {} as never,
+      verificationValue: "#001",
+    });
+
+    expect(checkoutBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "staff-1" })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "PICKED_UP",
+          reviewedByUserId: "staff-1",
+          reviewComment: "Pickup confirmed by Staff.",
+        }),
       })
     );
   });
@@ -1115,6 +1196,45 @@ describe("cancelStudentPreparationRequest", () => {
           status: "READY_FOR_PICKUP",
         }),
         data: expect.objectContaining({ status: "CANCELLED_PICKUP" }),
+      })
+    );
+  });
+
+  it("records Staff as the actor when Staff cancels a ready pickup", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "preparation-task-1",
+      source: "IOIO_ASSISTANT",
+      status: "READY_FOR_PICKUP",
+      bookingId: "booking-1",
+    });
+    dbMock.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        id: "preparation-task-1",
+        status: "READY_FOR_PICKUP",
+        bookingAssetId: "booking-asset-1",
+        source: "IOIO_ASSISTANT",
+      },
+    ]);
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "booking-1",
+      status: "RESERVED",
+    });
+
+    await cancelStudentPreparationRequest({
+      organizationId: "ioio-lab",
+      operationId: "preparation-task-1",
+      borrowerUserId: "student-1",
+      staffUserId: "staff-1",
+      hints: {} as never,
+    });
+
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "CANCELLED_PICKUP",
+          reviewedByUserId: "staff-1",
+          reviewComment: "Cancelled by Staff.",
+        }),
       })
     );
   });

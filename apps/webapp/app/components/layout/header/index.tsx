@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { useLoaderData } from "react-router";
+import { useLoaderData, useRouteLoaderData } from "react-router";
 import Heading from "~/components/shared/heading";
 import SubHeading from "~/components/shared/sub-heading";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { tw } from "~/utils/tw";
 import { Breadcrumbs } from "../breadcrumbs";
 import { CommandPaletteButton } from "../command-palette";
@@ -38,6 +39,10 @@ export default function Header({
 }) {
   const data = useLoaderData<{ header?: HeaderData }>();
   const header = data?.header;
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+  const shouldHideQuickFind = hideQuickFind || Boolean(layoutData?.isIoioStaff);
 
   return header ? (
     <header className={tw("-mx-4 bg-white", classNames)}>
@@ -46,7 +51,7 @@ export default function Header({
           <div className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 md:min-h-[67px] md:py-3">
             <Breadcrumbs />
             <div className="hidden items-center gap-3 md:flex">
-              {!hideQuickFind ? (
+              {!shouldHideQuickFind ? (
                 <CommandPaletteButton className="w-auto md:w-auto" />
               ) : null}
               {children ? (

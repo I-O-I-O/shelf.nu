@@ -31,7 +31,12 @@ vi.mock("~/modules/activity-event/service.server", () => ({
   recordEvent: database.recordEvent,
 }));
 
-import { getLabStatus, returnBrokenAssetToService } from "./lab-status.server";
+import {
+  getLabIssueOperationsHref,
+  getLabStatus,
+  resolveBrokenAssetOutOfService,
+  returnBrokenAssetToService,
+} from "./lab-status.server";
 
 describe("getLabStatus", () => {
   beforeEach(() => {
@@ -180,6 +185,38 @@ describe("getLabStatus", () => {
     ]);
   });
 
+  it("classifies wrong-location reports as General instead of broken items", async () => {
+    database.ioioWriteOperation.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "wrong-location",
+          source: "IOIO_STUDENT_REPORT",
+          reportType: "WRONG_LOCATION",
+          assetId: null,
+          kitId: null,
+          locationId: "location-1",
+          bookingAssetId: null,
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    database.location.findMany.mockResolvedValue([
+      { id: "location-1", name: "Shelf B", parentId: null },
+    ]);
+
+    const result = await getLabStatus({ organizationId: "org-1" });
+
+    expect(result.unresolvedReports).toBe(0);
+    expect(result.generalReports).toBe(1);
+    expect(result.issues[0]).toMatchObject({
+      kind: "general-report",
+      title: "Wrong location: Shelf B",
+      severity: "attention",
+      href: "/operations?view=general",
+    });
+  });
+
   it("deduplicates low-stock logical items and separates incomplete kits", async () => {
     database.booking.count.mockResolvedValue(1);
     database.booking.findMany.mockResolvedValue([
@@ -290,6 +327,36 @@ describe("getLabStatus", () => {
     );
   });
 
+  it("resolves only the selected report when bulk resolution requests exact rows", async () => {
+    database.ioioWriteOperation.findFirst.mockResolvedValue({
+      reportType: "ITEM_DAMAGED",
+      assetId: "asset-1",
+      kitId: null,
+      locationId: null,
+    });
+    database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      (await import("./lab-status.server")).resolveLabIssue({
+        organizationId: "org-1",
+        operationId: "selected-report",
+        resolveRelatedReports: false,
+      })
+    ).resolves.toEqual({ resolvedCount: 1 });
+
+    expect(database.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "selected-report",
+          organizationId: "org-1",
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+        },
+        data: expect.objectContaining({ status: "RESOLVED" }),
+      })
+    );
+  });
+
   it("surfaces cancelled prepared pickups in Staff status notifications", async () => {
     database.ioioWriteOperation.findMany
       .mockResolvedValueOnce([])
@@ -358,7 +425,27 @@ describe("getLabStatus", () => {
         id: "report:broken-return-1",
         kind: "report",
         title: "Item damaged",
+        href: "/operations?view=broken",
       })
+    );
+  });
+
+  it("maps Lab status issue kinds to their Operations queues centrally", () => {
+    const cases = [
+      ["overdue-loan", "/operations?view=overdue"],
+      ["return-check", "/operations?view=returns"],
+      ["returned-with-issue", "/operations?view=returned-with-issues"],
+      ["report", "/operations?view=broken"],
+      ["incomplete-kit", "/operations?view=broken"],
+      ["general-report", "/operations?view=general"],
+      ["preparation", "/operations?view=to-prepare"],
+      ["cancelled-pickup", "/operations?view=cancelled-pickups"],
+      ["ready-for-pickup", "/operations?view=ready-for-pickup"],
+      ["annual-access", "/operations?view=access-approvals"],
+    ] as const;
+
+    expect(cases.map(([kind]) => getLabIssueOperationsHref(kind))).toEqual(
+      cases.map(([, href]) => href)
     );
   });
 });
@@ -446,5 +533,40 @@ describe("returnBrokenAssetToService", () => {
         }),
       })
     );
+  });
+
+  it("resolves a broken report while leaving its exact unit unavailable", async () => {
+    database.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "broken-report-1",
+      assetId: "unit-002",
+      reportType: "ITEM_DAMAGED",
+    });
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-002",
+      availableToBook: false,
+    });
+    database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      resolveBrokenAssetOutOfService({
+        organizationId: "org-1",
+        operationId: "broken-report-1",
+      })
+    ).resolves.toEqual({ assetId: "unit-002", status: "OUT_OF_SERVICE" });
+
+    expect(database.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "org-1",
+          assetId: "unit-002",
+          status: "SUCCEEDED",
+        }),
+        data: expect.objectContaining({ status: "RESOLVED" }),
+      })
+    );
+    expect(database.asset.update).toHaveBeenCalledWith({
+      where: { id: "unit-002", organizationId: "org-1" },
+      data: { availableToBook: false },
+    });
   });
 });

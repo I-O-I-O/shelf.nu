@@ -16,13 +16,13 @@ const teamOrganization = { id: "team-1", type: "TEAM", name: "IOIO" };
 describe("IOIO staff Settings shell", () => {
   it("shows the exact IOIO tab order for a Team workspace", () => {
     expect(getIoioSettingsTabs(false).map((item) => item.content)).toEqual([
-      "Emails",
       "Lab information",
       "Access approval",
+      "IOIO Users",
+      "Emails",
+      "IOIO Lab Access",
       "AI",
       "Backup",
-      "IOIO Lab Access",
-      "IOIO Users",
     ]);
   });
 
@@ -64,9 +64,11 @@ describe("IOIO staff Settings shell", () => {
     });
   });
 
-  it("redirects /settings to the existing Backup destination", () => {
+  it("redirects /settings to Lab information", () => {
     const result = settingsIndexLoader();
     expect(result).toBeInstanceOf(Response);
-    expect((result as Response).headers.get("Location")).toBe("backup");
+    expect((result as Response).headers.get("Location")).toBe(
+      "lab-information"
+    );
   });
 });

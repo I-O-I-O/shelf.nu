@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { CalendarDays, MapPin, MoreHorizontal, UserRound } from "lucide-react";
 import type {
   ActionFunctionArgs,
@@ -21,7 +21,6 @@ import {
   toggleSelectionId,
 } from "~/components/ioio-staff/selectable-row";
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
-import Header from "~/components/layout/header";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
 import {
   DropdownMenu,
@@ -39,8 +38,11 @@ import {
   buildOperationsReturnTo,
   withReturnTo,
 } from "~/modules/booking/return-review-navigation";
+import { getConfiguredBrokenSection } from "~/modules/ioio-lab-information/broken-section.server";
 import {
   getLabStatus,
+  resolveBrokenAssetOutOfService,
+  resolveLabIssue,
   returnBrokenAssetToService,
 } from "~/modules/ioio-staff/lab-status.server";
 import {
@@ -50,6 +52,8 @@ import {
 import { getStaffPreparationQueueOrganizationId } from "~/modules/ioio-staff/preparation-queue.server";
 import {
   confirmPreparationReady,
+  confirmStudentPreparationPickup,
+  cancelStudentPreparationRequest,
   declinePreparation,
   IOIO_PREPARATION_OPERATION,
   PREPARATION_CANCELLED_PICKUP,
@@ -70,6 +74,11 @@ import {
   IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT,
   IOIO_STAFF_RESERVATION_DESCRIPTION,
 } from "~/modules/ioio-student/availability.server";
+import {
+  classifyIoioReport,
+  IOIO_REPORT_LABELS,
+  isIoioPhysicalUnitBlockingReport,
+} from "~/modules/ioio-student/report-problem.shared";
 import { completeSubmittedReturn } from "~/modules/ioio-student/return-item.server";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
@@ -93,6 +102,7 @@ const VIEWS = [
   "returns",
   "returned-with-issues",
   "broken",
+  "general",
   "to-prepare",
   "cancelled-pickups",
   "ready-for-pickup",
@@ -104,6 +114,7 @@ const SUMMARY_KEYS = [
   "returns",
   "returned-with-issues",
   "broken",
+  "general",
   "to-prepare",
   "cancelled-pickups",
   "ready-for-pickup",
@@ -115,6 +126,7 @@ const NAVIGATION_VIEWS = [
   "returns",
   "returned-with-issues",
   "broken",
+  "general",
   "to-prepare",
   "cancelled-pickups",
   "ready-for-pickup",
@@ -123,7 +135,7 @@ const NAVIGATION_VIEWS = [
 
 type Task = {
   id: string;
-  kind: Exclude<OperationsView, "all" | "access-approvals">;
+  kind: Exclude<OperationsView, "all">;
   title: string;
   detail: string;
   createdAt: Date;
@@ -145,6 +157,13 @@ type Task = {
   locationName?: string;
   assetId?: string;
   assetImage?: AssetForThumbnail;
+  brokenSection?: {
+    name: string;
+    path: string;
+    imageUrl: string | null;
+    thumbnailUrl: string | null;
+  } | null;
+  brokenSectionRelevant?: boolean;
   borrowerId?: string;
   preparationRequest?: boolean;
   bulkReadyEligible?: boolean;
@@ -152,12 +171,80 @@ type Task = {
   softReservationOverlap?: boolean;
   returnCheckEligible?: boolean;
   returnIssue?: string;
+  reportLabel?: string;
+  reporterName?: string;
+  reportDescription?: string;
+  reportedLocation?: string;
   returnLocation?: string;
   returnIssueReportId?: string | null;
+  returnIssueOperationId?: string;
   returnToServiceEligible?: boolean;
   physicalUnit?: boolean;
   cancelledAt?: Date;
+  accessApprovalId?: string;
 };
+
+type AllBulkFamily = Exclude<OperationsView, "all">;
+type AllSelectionEntry = {
+  key: string;
+  family: AllBulkFamily;
+  id: string;
+  task: Task;
+  secondaryId?: string;
+  reportId?: string;
+};
+
+function getAllSelectionEntry(task: Task): AllSelectionEntry | null {
+  let family: AllBulkFamily | null = null;
+  let id: string | undefined;
+  let secondaryId: string | undefined;
+  let reportId: string | undefined;
+  switch (task.kind) {
+    case "general":
+      family = "general";
+      id = task.operationId;
+      reportId = task.operationId;
+      break;
+    case "broken":
+      if (!task.physicalUnit || !task.returnToServiceEligible) return null;
+      family = "broken";
+      id = task.assetId;
+      reportId = task.operationId;
+      break;
+    case "returns":
+      if (!task.returnCheckEligible) return null;
+      family = "returns";
+      id = task.operationId;
+      break;
+    case "returned-with-issues":
+      family = "returned-with-issues";
+      id = task.operationId;
+      secondaryId = task.returnIssueOperationId;
+      reportId = task.returnIssueOperationId;
+      break;
+    case "to-prepare":
+      family = "to-prepare";
+      id = task.operationId;
+      break;
+    case "cancelled-pickups":
+      family = "cancelled-pickups";
+      id = task.operationId;
+      break;
+    case "access-approvals":
+      family = "access-approvals";
+      id = task.accessApprovalId;
+      break;
+    case "overdue":
+    case "ready-for-pickup":
+      family = task.kind;
+      id = task.id;
+      break;
+  }
+  if (!family || !id || (family === "returned-with-issues" && !secondaryId)) {
+    return null;
+  }
+  return { family, id, secondaryId, reportId, task, key: `${family}:${id}` };
+}
 
 function readIdArray(value: unknown): string[] {
   return Array.isArray(value)
@@ -193,16 +280,59 @@ function formatRequestedPeriod(from: Date, to: Date) {
     : `${start}, ${startYear} – ${end}, ${endYear}`;
 }
 
-function getBrokenItemDescription(detail: string) {
-  const [summary, ...reasonParts] = detail.split(" — ");
-  const reason = reasonParts.join(" — ").trim();
-  return {
-    summary: summary.trim(),
-    reason:
-      reason && reason !== "Disabled after return inspection."
-        ? reason
-        : undefined,
-  };
+function BrokenSectionSummary({ task }: { task: Task }) {
+  if (!task.brokenSectionRelevant || !task.brokenSection) return null;
+  return (
+    <p className="break-words text-sm text-gray-600">
+      <span className="font-semibold text-gray-700">Broken section · </span>
+      {task.brokenSection.path}
+    </p>
+  );
+}
+
+function BrokenReportActions({ task }: { task: Task }) {
+  const fetcher = useFetcher();
+  if (!task.operationId) return null;
+  return (
+    <div className="flex shrink-0 items-center justify-end gap-2">
+      <Form method="post">
+        <input type="hidden" name="intent" value="return-to-service" />
+        <input type="hidden" name="operationId" value={task.operationId} />
+        <button
+          type="submit"
+          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+        >
+          Return to service
+        </button>
+      </Form>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`More actions for ${task.title}`}
+            className="inline-flex size-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-800 focus:outline-none focus:ring-2 focus:ring-red-300"
+          >
+            <MoreHorizontal className="size-4" aria-hidden="true" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48 p-1">
+          <DropdownMenuItem
+            onSelect={() =>
+              fetcher.submit(
+                {
+                  intent: "resolve-broken-report-out-of-service",
+                  operationId: task.operationId!,
+                },
+                { method: "post" }
+              )
+            }
+          >
+            Keep out of service
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
 }
 
 function formatOperationsLocationPath(
@@ -331,6 +461,7 @@ function isAnnualAccessAction(value: unknown): value is {
     | "approve-access"
     | "approve-access-bulk"
     | "decline-access"
+    | "decline-access-bulk"
     | "reapprove-access"
     | "revoke-access";
   result: {
@@ -339,7 +470,9 @@ function isAnnualAccessAction(value: unknown): value is {
     declined?: boolean;
     revoked?: boolean;
     reapproved?: boolean;
-    failed?: Array<{ id: string; name: string; reason: string }>;
+    failed?: number | Array<{ id: string; name: string; reason: string }>;
+    succeeded?: number;
+    failedCount?: number;
   };
 } {
   return (
@@ -351,6 +484,7 @@ function isAnnualAccessAction(value: unknown): value is {
     (value.intent === "approve-access" ||
       value.intent === "approve-access-bulk" ||
       value.intent === "decline-access" ||
+      value.intent === "decline-access-bulk" ||
       value.intent === "reapprove-access" ||
       value.intent === "revoke-access") &&
     "result" in value
@@ -380,7 +514,7 @@ function displayName(
 }
 
 export const meta: MetaFunction<typeof loader> = ({ data: loaderData }) => [
-  { title: appendToMetaTitle(loaderData?.header.title ?? "Operations") },
+  { title: appendToMetaTitle(loaderData?.header.title ?? "Lab status") },
 ];
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -427,6 +561,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       readyPickupOperations,
       workingHours,
       labStatus,
+      brokenSection,
     ] = await Promise.all([
       db.booking.findMany({
         where: {
@@ -547,6 +682,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       }),
       getWorkingHoursForOrganization(organizationId),
       getLabStatus({ organizationId }),
+      getConfiguredBrokenSection(organizationId),
     ]);
 
     const assignmentBookingIds = preparationOperations
@@ -733,6 +869,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         operation.bookingAssetId ? [operation.bookingAssetId] : []
       )
     );
+    const returnIssueByBookingAssetId = new Map(
+      reportOperations
+        .filter((operation) => operation.bookingAssetId)
+        .map((operation) => [operation.bookingAssetId!, operation])
+    );
     const assignmentBookingById = new Map(
       assignmentBookings.map((booking) => [booking.id, booking])
     );
@@ -744,12 +885,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           : undefined;
         const isBrokenPhysicalReport = Boolean(
           asset?.type === "INDIVIDUAL" &&
-            [
-              "ITEM_DAMAGED",
-              "ITEM_NOT_WORKING",
-              "PART_MISSING",
-              "KIT_INCOMPLETE",
-            ].includes(operation.reportType ?? "")
+            classifyIoioReport(operation.reportType) === "equipment-condition"
         );
         if (!isBrokenPhysicalReport || !operation.assetId) return true;
         if (reportedBrokenPhysicalAssetIds.has(operation.assetId)) return false;
@@ -934,6 +1070,18 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             formatOperationsLocationPath(operation.locationId, locationById) ??
             "Broken Zone",
           returnIssueReportId: operation.resultReportId,
+          returnIssueOperationId: operation.bookingAssetId
+            ? returnIssueByBookingAssetId.get(operation.bookingAssetId)?.id
+            : undefined,
+          returnToServiceEligible: Boolean(
+            operation.assetId &&
+              asset?.type === "INDIVIDUAL" &&
+              operation.bookingAssetId &&
+              isIoioPhysicalUnitBlockingReport(
+                returnIssueByBookingAssetId.get(operation.bookingAssetId)
+                  ?.reportType ?? null
+              )
+          ),
         };
       }),
       ...reportOperationsForQueue.map((operation) => {
@@ -965,38 +1113,42 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           kitById,
           locationById
         );
+        const classification = classifyIoioReport(operation.reportType);
+        const reportLabel =
+          IOIO_REPORT_LABELS[
+            operation.reportType as keyof typeof IOIO_REPORT_LABELS
+          ] ?? "Operational report";
+        const shouldShowBrokenSection = Boolean(
+          physicalUnit && classification === "equipment-condition"
+        );
         return {
           id: operation.id,
-          kind: "broken" as const,
+          kind:
+            classification === "equipment-condition"
+              ? ("broken" as const)
+              : ("general" as const),
           title: reference ?? "Operational report",
-          detail: [
-            operation.source === "IOIO_STAFF_RETURN_INSPECTION"
-              ? "Broken after return inspection"
-              : `${operation.reportType ?? "Problem"} reported by ${displayName(
-                  userById.get(operation.userId) ?? null
-                )}`,
-            operation.description?.trim(),
-          ]
-            .filter(Boolean)
-            .join(" — "),
+          detail: operation.description?.trim() ?? "",
+          reportLabel,
+          reporterName: displayName(userById.get(operation.userId) ?? null),
+          reportDescription: operation.description?.trim() ?? undefined,
+          reportedLocation: operation.locationId
+            ? formatOperationsLocationPath(operation.locationId, locationById)
+            : undefined,
           createdAt: operation.createdAt,
           operationId: operation.id,
           assetId: operation.assetId ?? undefined,
           assetImage: asset,
           physicalUnit,
-          locationName: formatOperationsLocationPath(
-            asset?.assetLocations[0]?.locationId ?? operation.locationId,
-            locationById
-          ),
+          brokenSection: shouldShowBrokenSection ? brokenSection : null,
+          brokenSectionRelevant: shouldShowBrokenSection,
+          locationName: operation.locationId
+            ? formatOperationsLocationPath(operation.locationId, locationById)
+            : undefined,
           returnToServiceEligible: Boolean(
             operation.assetId &&
               physicalUnit &&
-              [
-                "ITEM_DAMAGED",
-                "ITEM_NOT_WORKING",
-                "PART_MISSING",
-                "KIT_INCOMPLETE",
-              ].includes(operation.reportType)
+              classification === "equipment-condition"
           ),
           ...destination,
         };
@@ -1247,6 +1399,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         return {
           id: operation.id,
           kind: "ready-for-pickup" as const,
+          operationId: operation.id,
           title,
           detail: `Waiting for ${displayName(borrower)} to collect from ${
             locationName || "the Pickup Zone"
@@ -1282,20 +1435,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
     return data(
       payload({
-        header: {
-          title: "Operations",
-          subHeading:
-            getView(new URL(request.url).searchParams.get("view")) ===
-            "to-prepare"
-              ? "Equipment that must be checked or prepared before pickup."
-              : getView(new URL(request.url).searchParams.get("view")) ===
-                "cancelled-pickups"
-              ? "Prepared pickups that need to be returned from the Pickup Zone."
-              : getView(new URL(request.url).searchParams.get("view")) ===
-                "ready-for-pickup"
-              ? "Prepared items waiting for Students to collect them."
-              : "Current lab operations and tasks.",
-        },
+        header: { title: "Lab status" },
         view: getView(new URL(request.url).searchParams.get("view")),
         summary: {
           overdue: labStatus.overdueLoans,
@@ -1315,6 +1455,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           // Derive the Operations counter from the same pending rows rendered
           // below so the count and Items to prepare list cannot drift apart.
           "to-prepare": preparationOperations.length,
+          general: tasks.filter((task) => task.kind === "general").length,
           "cancelled-pickups": labStatus.cancelledPickups,
           "ready-for-pickup": labStatus.readyForPickup,
           "access-approvals": labStatus.annualAccessApprovals,
@@ -1348,6 +1489,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "complete-return-bulk",
         "disable-return",
         "disable-return-bulk",
+        "return-issue-to-service",
+        "remove-return-issue-from-service",
+        "return-issue-to-service-bulk",
+        "remove-return-issue-from-service-bulk",
       ].includes(String(intent)) &&
       permission.role !== "ADMIN" &&
       permission.role !== "OWNER"
@@ -1362,6 +1507,327 @@ export async function action({ context, request }: ActionFunctionArgs) {
         organizationId,
         operationId: String(formData.get("operationId") ?? ""),
         staffUserId: userId,
+      });
+      return data({ ok: true as const, intent, result });
+    }
+    if (intent === "resolve-broken-report-out-of-service") {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const result = await resolveBrokenAssetOutOfService({
+        organizationId,
+        operationId: String(formData.get("operationId") ?? ""),
+      });
+      return data({ ok: true as const, intent, result });
+    }
+    if (intent === "resolve-report-bulk") {
+      const operationIds = [
+        ...new Set(formData.getAll("operationIds").map(String).filter(Boolean)),
+      ];
+      const openReports = operationIds.length
+        ? await db.ioioWriteOperation.findMany({
+            where: {
+              id: { in: operationIds },
+              organizationId,
+              operationType: "REPORT_PROBLEM",
+              status: "SUCCEEDED",
+            },
+            select: { id: true, reportType: true },
+          })
+        : [];
+      const reportById = new Map(
+        openReports.map((operation) => [operation.id, operation])
+      );
+      const results = [];
+      for (const operationId of operationIds) {
+        const report = reportById.get(operationId);
+        if (!report) {
+          results.push({
+            operationId,
+            ok: false as const,
+            error: "This report is no longer open.",
+          });
+          continue;
+        }
+        try {
+          const result = await resolveLabIssue({
+            organizationId,
+            operationId,
+            resolveRelatedReports: false,
+          });
+          results.push({ operationId, ok: true as const, result });
+        } catch (cause) {
+          results.push({
+            operationId,
+            ok: false as const,
+            error:
+              cause instanceof Error
+                ? cause.message
+                : "Could not resolve this report.",
+          });
+        }
+      }
+      return data({
+        ok: true as const,
+        intent,
+        results,
+        succeeded: results.filter((item) => item.ok).length,
+        failed: results.filter((item) => !item.ok).length,
+      });
+    }
+    if (intent === "resolve-report") {
+      const operationId = String(formData.get("operationId") ?? "");
+      const report = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: operationId,
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+        },
+        select: { id: true, reportType: true },
+      });
+      if (!report || classifyIoioReport(report.reportType) !== "general") {
+        return data({
+          ok: false as const,
+          intent,
+          error: "This report is no longer open in General.",
+        });
+      }
+      const result = await resolveLabIssue({
+        organizationId,
+        operationId,
+      });
+      return data({ ok: true as const, intent, result });
+    }
+    if (
+      intent === "return-issue-to-service-bulk" ||
+      intent === "remove-return-issue-from-service-bulk"
+    ) {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const operationIds = formData.getAll("operationIds").map(String);
+      const reportOperationIds = formData
+        .getAll("reportOperationIds")
+        .map(String);
+      const results = [];
+      for (const [index, operationId] of operationIds.entries()) {
+        const reportOperationId = reportOperationIds[index];
+        const operation = await db.ioioWriteOperation.findFirst({
+          where: {
+            id: operationId,
+            organizationId,
+            operationType: "RETURN_ITEM",
+            status: "SUBMITTED",
+          },
+          select: { id: true, assetId: true, bookingAssetId: true },
+        });
+        const issueReport = reportOperationId
+          ? await db.ioioWriteOperation.findFirst({
+              where: {
+                id: reportOperationId,
+                organizationId,
+                operationType: "REPORT_PROBLEM",
+                source: "IOIO_STUDENT_RETURN",
+                status: "SUCCEEDED",
+              },
+              select: {
+                id: true,
+                assetId: true,
+                reportType: true,
+                bookingAssetId: true,
+              },
+            })
+          : null;
+        if (
+          !operation?.assetId ||
+          !operation.bookingAssetId ||
+          !issueReport ||
+          issueReport.assetId !== operation.assetId ||
+          issueReport.bookingAssetId !== operation.bookingAssetId
+        ) {
+          results.push({
+            operationId,
+            ok: false as const,
+            error: "This returned issue is no longer waiting for review.",
+          });
+          continue;
+        }
+        try {
+          await completeSubmittedReturn(
+            { operationId },
+            { context, request, auth: staffAuth }
+          );
+          if (intent === "return-issue-to-service-bulk") {
+            if (isIoioPhysicalUnitBlockingReport(issueReport.reportType)) {
+              await returnBrokenAssetToService({
+                organizationId,
+                operationId: issueReport.id,
+                staffUserId: userId,
+              });
+            } else {
+              await resolveLabIssue({
+                organizationId,
+                operationId: issueReport.id,
+              });
+            }
+          } else {
+            await disableReturnedAssetFromUse({
+              assetId: operation.assetId,
+              organizationId,
+              userId,
+              note: "Staff removed this reported unit from service.",
+            });
+          }
+          results.push({ operationId, ok: true as const });
+        } catch (cause) {
+          results.push({
+            operationId,
+            ok: false as const,
+            error:
+              cause instanceof Error
+                ? cause.message
+                : "Could not resolve this returned issue.",
+          });
+        }
+      }
+      return data({
+        ok: true as const,
+        intent,
+        results,
+        succeeded: results.filter((item) => item.ok).length,
+        failed: results.filter((item) => !item.ok).length,
+      });
+    }
+    if (
+      intent === "return-issue-to-service" ||
+      intent === "remove-return-issue-from-service"
+    ) {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const operationId = String(formData.get("operationId") ?? "");
+      const reportOperationId = String(formData.get("reportOperationId") ?? "");
+      const operation = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: operationId,
+          organizationId,
+          operationType: "RETURN_ITEM",
+          status: "SUBMITTED",
+        },
+        select: { id: true, assetId: true },
+      });
+      const issueReport = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: reportOperationId,
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          source: "IOIO_STUDENT_RETURN",
+          status: "SUCCEEDED",
+        },
+        select: { id: true, assetId: true, reportType: true },
+      });
+      if (
+        !operation?.assetId ||
+        !issueReport ||
+        issueReport.assetId !== operation.assetId
+      ) {
+        return data({
+          ok: false as const,
+          intent,
+          error: "This returned issue is no longer waiting for review.",
+        });
+      }
+      await completeSubmittedReturn(
+        { operationId },
+        { context, request, auth: staffAuth }
+      );
+      if (intent === "return-issue-to-service") {
+        if (isIoioPhysicalUnitBlockingReport(issueReport.reportType)) {
+          await returnBrokenAssetToService({
+            organizationId,
+            operationId: issueReport.id,
+            staffUserId: userId,
+          });
+        } else {
+          await resolveLabIssue({
+            organizationId,
+            operationId: issueReport.id,
+          });
+        }
+      } else {
+        await disableReturnedAssetFromUse({
+          assetId: operation.assetId,
+          organizationId,
+          userId,
+          note: String(formData.get("note") ?? ""),
+        });
+      }
+      return data({ ok: true as const, intent, operationId });
+    }
+    if (intent === "confirm-pickup") {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const operation = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: String(formData.get("operationId") ?? ""),
+          organizationId,
+          operationType: IOIO_PREPARATION_OPERATION,
+          status: "READY_FOR_PICKUP",
+        },
+        select: {
+          id: true,
+          userId: true,
+          asset: { select: { title: true, sequentialId: true } },
+        },
+      });
+      if (!operation) {
+        return data({
+          ok: false as const,
+          intent,
+          error: "This pickup is no longer ready for collection.",
+        });
+      }
+      const result = await confirmStudentPreparationPickup({
+        organizationId,
+        operationId: operation.id,
+        borrowerUserId: operation.userId,
+        staffUserId: userId,
+        hints: getClientHint(request),
+        verificationValue:
+          getPhysicalUnitNumberFromTitle(operation.asset?.title ?? "") ??
+          operation.asset?.sequentialId ??
+          operation.asset?.title,
+      });
+      return data({ ok: true as const, intent, result });
+    }
+    if (intent === "cancel-ready-pickup") {
+      if (permission.role !== "ADMIN" && permission.role !== "OWNER") {
+        throw new Response("Staff access required", { status: 403 });
+      }
+      const operation = await db.ioioWriteOperation.findFirst({
+        where: {
+          id: String(formData.get("operationId") ?? ""),
+          organizationId,
+          operationType: IOIO_PREPARATION_OPERATION,
+          status: "READY_FOR_PICKUP",
+        },
+        select: { id: true, userId: true },
+      });
+      if (!operation) {
+        return data({
+          ok: false as const,
+          intent,
+          error: "This pickup is no longer ready for collection.",
+        });
+      }
+      const result = await cancelStudentPreparationRequest({
+        organizationId,
+        operationId: operation.id,
+        borrowerUserId: operation.userId,
+        staffUserId: userId,
+        hints: getClientHint(request),
       });
       return data({ ok: true as const, intent, result });
     }
@@ -1398,6 +1864,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
               reportType: {
                 in: [
                   "ITEM_DAMAGED",
+                  "ITEM_MISSING",
                   "ITEM_NOT_WORKING",
                   "PART_MISSING",
                   "KIT_INCOMPLETE",
@@ -1723,6 +2190,41 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
       return data({ ok: true as const, result, intent });
     }
+    if (intent === "decline-access-bulk") {
+      const requestIds = [
+        ...new Set(formData.getAll("requestIds").map(String).filter(Boolean)),
+      ];
+      const results = [];
+      for (const requestId of requestIds) {
+        try {
+          const result = await declineAnnualAccessApproval({
+            organizationId,
+            staffUserId: userId,
+            requestId,
+            staffComment: "",
+          });
+          results.push({ requestId, ok: true as const, result });
+        } catch (cause) {
+          results.push({
+            requestId,
+            ok: false as const,
+            error:
+              cause instanceof Error
+                ? cause.message
+                : "Could not reject this request.",
+          });
+        }
+      }
+      return data({
+        ok: true as const,
+        result: {
+          results,
+          succeeded: results.filter((item) => item.ok).length,
+          failed: results.filter((item) => !item.ok).length,
+        },
+        intent,
+      });
+    }
     if (intent === "revoke-access") {
       const result = await revokeAnnualAccessApproval({
         organizationId,
@@ -1779,6 +2281,42 @@ export async function action({ context, request }: ActionFunctionArgs) {
         failed: results.filter((item) => !item.ok).length,
       };
       return data({ ok: true as const, result, intent });
+    }
+    if (intent === "decline-preparation-bulk") {
+      const operationIds = [
+        ...new Set(formData.getAll("operationIds").map(String).filter(Boolean)),
+      ];
+      const results: BulkPreparationItemResult[] = [];
+      for (const operationId of operationIds) {
+        try {
+          const result = await declinePreparation({
+            organizationId,
+            operationId,
+            staffUserId: userId,
+            hints: getClientHint(request),
+            staffComment: "",
+          });
+          results.push({ operationId, ok: true, result });
+        } catch (cause) {
+          results.push({
+            operationId,
+            ok: false,
+            error:
+              cause instanceof Error
+                ? cause.message
+                : "Could not decline this preparation request.",
+          });
+        }
+      }
+      return data({
+        ok: true as const,
+        result: {
+          results,
+          succeeded: results.filter((item) => item.ok).length,
+          failed: results.filter((item) => !item.ok).length,
+        } satisfies BulkPreparationResult,
+        intent,
+      });
     }
     if (intent === "put-back-cancelled-pickup") {
       const result = await putBackCancelledPreparationPickup({
@@ -1855,6 +2393,7 @@ const VIEW_LABELS: Record<OperationsView, string> = {
   returns: "Returns to check",
   "returned-with-issues": "Returned with issues",
   broken: "Broken items",
+  general: "General",
   "to-prepare": "Items to prepare",
   "cancelled-pickups": "Cancelled pickups",
   "ready-for-pickup": "Ready for pickup",
@@ -2148,6 +2687,230 @@ function PreparationTaskActions({
   );
 }
 
+function ReturnedIssueActions({ task }: { task: Task }) {
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const fetcher = useFetcher<{
+    ok?: boolean;
+    error?: string | { message?: string };
+  }>();
+  const errorMessage =
+    fetcher.data && !fetcher.data.ok
+      ? typeof fetcher.data.error === "string"
+        ? fetcher.data.error
+        : fetcher.data.error?.message ?? "Could not resolve this return issue."
+      : null;
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <Link
+        to={task.href}
+        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
+      >
+        Review return
+      </Link>
+      <fetcher.Form method="post">
+        <input type="hidden" name="intent" value="return-issue-to-service" />
+        <input type="hidden" name="operationId" value={task.operationId} />
+        <input
+          type="hidden"
+          name="reportOperationId"
+          value={task.returnIssueOperationId}
+        />
+        <button
+          type="submit"
+          disabled={fetcher.state !== "idle"}
+          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
+        >
+          Return to service
+        </button>
+      </fetcher.Form>
+      {task.assetId ? (
+        <button
+          type="button"
+          onClick={() => setRemoveOpen(true)}
+          className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+        >
+          Remove from service
+        </button>
+      ) : null}
+      {errorMessage ? (
+        <p role="alert" className="w-full text-right text-sm text-red-700">
+          {errorMessage}
+        </p>
+      ) : null}
+      <DialogPortal>
+        <Dialog
+          open={removeOpen}
+          onClose={() => setRemoveOpen(false)}
+          title={
+            <span className="text-base font-semibold text-gray-900">
+              Remove {task.title} from service?
+            </span>
+          }
+          headerClassName="items-center py-2"
+          className="w-[min(32rem,calc(100vw-2rem))]"
+        >
+          <fetcher.Form
+            method="post"
+            className="space-y-4 px-6 pb-4 pt-1"
+            onSubmit={() => setRemoveOpen(false)}
+          >
+            <input
+              type="hidden"
+              name="intent"
+              value="remove-return-issue-from-service"
+            />
+            <input type="hidden" name="operationId" value={task.operationId} />
+            <input
+              type="hidden"
+              name="reportOperationId"
+              value={task.returnIssueOperationId}
+            />
+            <p className="text-sm text-gray-700">
+              The returned unit will stay unavailable and appear under Broken
+              items until it is repaired and returned to service.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRemoveOpen(false)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={fetcher.state !== "idle"}
+                className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                Remove from service
+              </button>
+            </div>
+          </fetcher.Form>
+        </Dialog>
+      </DialogPortal>
+    </div>
+  );
+}
+
+function ReadyPickupActions({ task }: { task: Task }) {
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const fetcher = useFetcher<{
+    ok?: boolean;
+    error?: string | { message?: string };
+  }>();
+  const errorMessage =
+    fetcher.data && !fetcher.data.ok
+      ? typeof fetcher.data.error === "string"
+        ? fetcher.data.error
+        : fetcher.data.error?.message ?? "Could not confirm this pickup."
+      : null;
+  const cancelFetcher = useFetcher<{
+    ok?: boolean;
+    error?: string | { message?: string };
+  }>();
+  const cancelError =
+    cancelFetcher.data && !cancelFetcher.data.ok
+      ? typeof cancelFetcher.data.error === "string"
+        ? cancelFetcher.data.error
+        : cancelFetcher.data.error?.message ?? "Could not cancel this pickup."
+      : null;
+  useEffect(() => {
+    if (cancelFetcher.data?.ok) setCancelOpen(false);
+  }, [cancelFetcher.data]);
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      {task.operationId ? (
+        <fetcher.Form method="post">
+          <input type="hidden" name="intent" value="confirm-pickup" />
+          <input type="hidden" name="operationId" value={task.operationId} />
+          <button
+            type="submit"
+            disabled={fetcher.state !== "idle"}
+            className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
+          >
+            {fetcher.state === "submitting" ? "Confirming…" : "Confirm pickup"}
+          </button>
+        </fetcher.Form>
+      ) : null}
+      <Link
+        to={task.href}
+        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
+      >
+        View loan
+      </Link>
+      {task.operationId ? (
+        <button
+          type="button"
+          onClick={() => setCancelOpen(true)}
+          className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+        >
+          Cancel pickup
+        </button>
+      ) : null}
+      {errorMessage ? (
+        <p role="alert" className="w-full text-right text-sm text-red-700">
+          {errorMessage}
+        </p>
+      ) : null}
+      {cancelError ? (
+        <p role="alert" className="w-full text-right text-sm text-red-700">
+          {cancelError}
+        </p>
+      ) : null}
+      <DialogPortal>
+        <Dialog
+          open={cancelOpen}
+          onClose={() => setCancelOpen(false)}
+          title={
+            <span className="text-base font-semibold text-gray-900">
+              Cancel this pickup?
+            </span>
+          }
+          headerClassName="items-center py-2"
+          className="w-[min(32rem,calc(100vw-2rem))]"
+        >
+          <cancelFetcher.Form
+            method="post"
+            className="space-y-4 px-6 pb-4 pt-1"
+          >
+            <input type="hidden" name="intent" value="cancel-ready-pickup" />
+            <input type="hidden" name="operationId" value={task.operationId} />
+            <p className="text-sm text-gray-700">
+              This pickup will move to Cancelled pickups. A Staff member must
+              put the assigned unit back before it becomes available again.
+            </p>
+            {cancelError ? (
+              <p role="alert" className="text-sm font-semibold text-red-700">
+                {cancelError}
+              </p>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setCancelOpen(false)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+              >
+                Keep pickup
+              </button>
+              <button
+                type="submit"
+                disabled={cancelFetcher.state !== "idle"}
+                className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                {cancelFetcher.state === "submitting"
+                  ? "Cancelling…"
+                  : "Cancel pickup"}
+              </button>
+            </div>
+          </cancelFetcher.Form>
+        </Dialog>
+      </DialogPortal>
+    </div>
+  );
+}
+
 function CancelledPickupActions({ task }: { task: Task }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const fetcher = useFetcher<{ ok?: boolean; error?: { message?: string } }>();
@@ -2328,6 +3091,8 @@ export default function OperationsPage() {
   const selectAllPreparationsRef = useRef<HTMLInputElement>(null);
   const [selectedReturnIds, setSelectedReturnIds] = useState<string[]>([]);
   const [bulkDisableReturnsOpen, setBulkDisableReturnsOpen] = useState(false);
+  const [bulkRemoveReturnedIssuesOpen, setBulkRemoveReturnedIssuesOpen] =
+    useState(false);
   const selectAllReturnsRef = useRef<HTMLInputElement>(null);
   const [selectedBrokenAssetIds, setSelectedBrokenAssetIds] = useState<
     string[]
@@ -2340,10 +3105,43 @@ export default function OperationsPage() {
   >([]);
   const [bulkPutBackOpen, setBulkPutBackOpen] = useState(false);
   const [selectedApprovalIds, setSelectedApprovalIds] = useState<string[]>([]);
+  const [selectedGeneralReportIds, setSelectedGeneralReportIds] = useState<
+    string[]
+  >([]);
+  const [selectedReturnedIssueIds, setSelectedReturnedIssueIds] = useState<
+    string[]
+  >([]);
+  const [selectedManagementIds, setSelectedManagementIds] = useState<string[]>(
+    []
+  );
+  const [selectedAllRowKeys, setSelectedAllRowKeys] = useState<string[]>([]);
+  const [allConfirmAction, setAllConfirmAction] = useState<
+    | "remove-returns"
+    | "remove-returned-issues"
+    | "release-cancelled-pickups"
+    | null
+  >(null);
   const selectAllApprovalsRef = useRef<HTMLInputElement>(null);
   const [approvalView, setApprovalView] = useState<"pending" | "access">(
     "pending"
   );
+  useEffect(() => {
+    setSelectedPreparationIds([]);
+    setSelectedReturnIds([]);
+    setSelectedBrokenAssetIds([]);
+    setSelectedCancelledPickupIds([]);
+    setSelectedApprovalIds([]);
+    setSelectedGeneralReportIds([]);
+    setSelectedReturnedIssueIds([]);
+    setSelectedManagementIds([]);
+    setSelectedAllRowKeys([]);
+    setAllConfirmAction(null);
+    setApprovalView("pending");
+    setBulkDisableReturnsOpen(false);
+    setBulkRemoveReturnedIssuesOpen(false);
+    setBulkReturnToServiceOpen(false);
+    setBulkPutBackOpen(false);
+  }, [view]);
   useEffect(() => {
     if (isSuccessfulAction(actionResult)) {
       if (
@@ -2392,10 +3190,24 @@ export default function OperationsPage() {
       )
       .map((task) => task.bookingId)
   );
+  const allViewAccessTasks: Task[] = annualAccessApprovals.pending.map(
+    (approval) => ({
+      id: `access-approval:${approval.id}`,
+      kind: "access-approvals",
+      title: displayName(approval.student),
+      detail: approval.student.email,
+      createdAt: approval.requestedAt,
+      href: "/operations?view=access-approvals",
+      actionLabel: "Review request",
+      accessApprovalId: approval.id,
+    })
+  );
+  const tasksForView =
+    view === "all" ? [...tasks, ...allViewAccessTasks] : tasks;
   const visibleTasks =
     view === "all" || view === "access-approvals"
       ? view === "all"
-        ? tasks.filter(
+        ? tasksForView.filter(
             (task) =>
               !(
                 task.kind === "to-prepare" &&
@@ -2405,9 +3217,10 @@ export default function OperationsPage() {
               )
           )
         : []
-      : tasks.filter(
+      : tasksForView.filter(
           (task) =>
             task.kind === view &&
+            (view !== "broken" || task.kind === "broken") &&
             !(
               task.kind === "to-prepare" &&
               !task.preparationRequest &&
@@ -2415,6 +3228,48 @@ export default function OperationsPage() {
               preparationRequestBookingIds.has(task.bookingId)
             )
         );
+  const allSelectionEntries =
+    view === "all"
+      ? visibleTasks.flatMap((task) => {
+          const entry = getAllSelectionEntry(task);
+          return entry ? [entry] : [];
+        })
+      : [];
+  const visibleAllSelectionKeys = allSelectionEntries.map((entry) => entry.key);
+  const visibleAllSelectionKey = JSON.stringify(visibleAllSelectionKeys);
+  const selectedAllEntries = allSelectionEntries.filter((entry) =>
+    selectedAllRowKeys.includes(entry.key)
+  );
+  const selectedAllFamilies = [
+    ...new Set(selectedAllEntries.map((entry) => entry.family)),
+  ];
+  const compatibleAllFamily =
+    selectedAllFamilies.length === 1 ? selectedAllFamilies[0] : null;
+  const selectedOperationalReportIds = selectedAllEntries.flatMap((entry) =>
+    entry.reportId ? [entry.reportId] : []
+  );
+  const canResolveSelectedReports =
+    selectedAllEntries.length > 0 &&
+    selectedOperationalReportIds.length === selectedAllEntries.length;
+  const allVisibleAllRowsSelected =
+    allSelectionEntries.length > 0 &&
+    allSelectionEntries.every((entry) =>
+      selectedAllRowKeys.includes(entry.key)
+    );
+  const selectAllAllRowsRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAllAllRowsRef.current) {
+      selectAllAllRowsRef.current.indeterminate =
+        selectedAllEntries.length > 0 && !allVisibleAllRowsSelected;
+    }
+  }, [allVisibleAllRowsSelected, selectedAllEntries.length]);
+  useEffect(() => {
+    const visibleKeys = new Set<string>(JSON.parse(visibleAllSelectionKey));
+    setSelectedAllRowKeys((current) => {
+      const next = current.filter((key) => visibleKeys.has(key));
+      return next.length === current.length ? current : next;
+    });
+  }, [visibleAllSelectionKey]);
   const visibleBulkReadyIds = visibleTasks.flatMap((task) =>
     task.kind === "to-prepare" && task.bulkReadyEligible && task.operationId
       ? [task.operationId]
@@ -2436,6 +3291,22 @@ export default function OperationsPage() {
       ? [task.operationId]
       : []
   );
+  const visibleReturnedIssueIds = visibleTasks.flatMap((task) =>
+    task.kind === "returned-with-issues" &&
+    task.operationId &&
+    task.returnIssueOperationId
+      ? [task.operationId]
+      : []
+  );
+  const visibleGeneralReportIds = visibleTasks.flatMap((task) =>
+    task.kind === "general" && task.operationId ? [task.operationId] : []
+  );
+  const visibleManagementIds = visibleTasks.flatMap((task) =>
+    task.kind === "overdue" || task.kind === "ready-for-pickup" ? [task.id] : []
+  );
+  const allVisibleManagementSelected =
+    visibleManagementIds.length > 0 &&
+    visibleManagementIds.every((id) => selectedManagementIds.includes(id));
   const visibleBrokenAssetIds = visibleTasks.flatMap((task) =>
     task.kind === "broken" &&
     task.returnToServiceEligible &&
@@ -2463,6 +3334,22 @@ export default function OperationsPage() {
   const allVisibleReturnsSelected =
     visibleReturnIds.length > 0 &&
     visibleReturnIds.every((id) => selectedReturnIds.includes(id));
+  const selectedVisibleGeneralReportIds = selectedGeneralReportIds.filter(
+    (id) => visibleGeneralReportIds.includes(id)
+  );
+  const allVisibleGeneralReportsSelected =
+    visibleGeneralReportIds.length > 0 &&
+    visibleGeneralReportIds.every((id) =>
+      selectedVisibleGeneralReportIds.includes(id)
+    );
+  const selectedVisibleReturnedIssueIds = selectedReturnedIssueIds.filter(
+    (id) => visibleReturnedIssueIds.includes(id)
+  );
+  const allVisibleReturnedIssuesSelected =
+    visibleReturnedIssueIds.length > 0 &&
+    visibleReturnedIssueIds.every((id) =>
+      selectedVisibleReturnedIssueIds.includes(id)
+    );
   useEffect(() => {
     if (selectAllReturnsRef.current) {
       selectAllReturnsRef.current.indeterminate =
@@ -2664,41 +3551,62 @@ export default function OperationsPage() {
     });
   }, [visiblePendingApprovalKey]);
 
+  function toggleAllSelection(entry: AllSelectionEntry) {
+    setSelectedAllRowKeys((current) => toggleSelectionId(current, entry.key));
+  }
+
+  function allViewCheckbox(task: Task) {
+    const entry = getAllSelectionEntry(task);
+    if (!entry) return <span aria-hidden="true" className="size-4 shrink-0" />;
+    return (
+      <input
+        type="checkbox"
+        aria-label={`Select ${task.title} ${entry.family}`}
+        checked={selectedAllRowKeys.includes(entry.key)}
+        onChange={() => toggleAllSelection(entry)}
+        className="size-4 shrink-0 rounded border-gray-300 text-red-700 focus:ring-red-700"
+      />
+    );
+  }
+
   return (
     <>
-      <Header />
       <ListContentWrapper>
         <div className="space-y-5">
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <h1 className="text-2xl font-black tracking-tight text-gray-950">
+            Lab status
+          </h1>
+          <div className="grid auto-rows-fr grid-cols-2 items-stretch gap-3 lg:grid-cols-4">
             {SUMMARY_KEYS.map((item) => (
               <Link
                 key={item}
                 to={`/operations?view=${item}`}
-                className={`rounded-2xl border p-4 transition ${
+                className={`flex h-full min-w-0 flex-col rounded-2xl border p-4 transition ${
                   view === item
                     ? "border-red-300 bg-red-50"
                     : "border-gray-200 bg-white hover:border-red-200"
                 }`}
               >
-                <p className="text-xs font-bold uppercase tracking-wide text-gray-500">
+                <p className="break-words text-xs font-bold uppercase tracking-wide text-gray-500">
                   {VIEW_LABELS[item]}
                 </p>
                 <p className="mt-1 text-2xl font-black text-gray-950">
-                  {summary[item]}
+                  {summary[item] ?? 0}
                 </p>
               </Link>
             ))}
           </div>
 
           <div
-            className="flex flex-wrap items-center gap-2"
+            className="flex flex-wrap items-stretch gap-2"
             aria-label="Operations filters"
           >
             {NAVIGATION_VIEWS.map((item) => (
               <Link
                 key={item}
                 to={item === "all" ? "/operations" : `/operations?view=${item}`}
-                className={`rounded-full border px-3 py-1.5 text-sm font-semibold transition ${
+                aria-current={view === item ? "page" : undefined}
+                className={`inline-flex min-h-10 items-center whitespace-nowrap rounded-full border px-4 py-2 text-sm font-semibold transition ${
                   view === item
                     ? "border-red-700 bg-red-700 text-white"
                     : "border-gray-300 bg-white text-gray-700 hover:border-red-300 hover:text-red-800"
@@ -2863,7 +3771,16 @@ export default function OperationsPage() {
                   role="status"
                   className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-900"
                 >
-                  {approvalResult.declined
+                  {actionResult?.intent === "decline-access-bulk"
+                    ? `${approvalResult.succeeded ?? 0} access request${
+                        approvalResult.succeeded === 1 ? "" : "s"
+                      } rejected.${
+                        typeof approvalResult.failed === "number" &&
+                        approvalResult.failed
+                          ? ` ${approvalResult.failed} could not be rejected.`
+                          : ""
+                      }`
+                    : approvalResult.declined
                     ? "Access request declined."
                     : approvalResult.revoked
                     ? "Student access approval revoked."
@@ -2876,7 +3793,8 @@ export default function OperationsPage() {
                           ? ` ${approvalResult.failedCount} could not be approved.`
                           : ""
                       }`}
-                  {approvalResult.failed?.length ? (
+                  {Array.isArray(approvalResult.failed) &&
+                  approvalResult.failed.length ? (
                     <ul className="mt-2 list-disc pl-5 text-xs font-medium">
                       {approvalResult.failed.map((failure) => (
                         <li key={failure.id}>
@@ -2889,58 +3807,89 @@ export default function OperationsPage() {
               ) : null}
 
               {approvalView === "pending" && visibleApprovals.length ? (
-                <Form
-                  method="post"
-                  className="flex flex-wrap items-center gap-3 rounded-2xl border border-red-100 bg-red-50 p-4"
-                >
-                  <input
-                    type="hidden"
-                    name="intent"
-                    value="approve-access-bulk"
-                  />
-                  <label className="inline-flex items-center gap-2 text-sm font-semibold text-gray-800">
+                <div className="space-y-2">
+                  <Form
+                    method="post"
+                    className="flex flex-wrap items-center gap-3 rounded-2xl border border-red-100 bg-red-50 p-4"
+                  >
                     <input
-                      ref={selectAllApprovalsRef}
-                      type="checkbox"
-                      aria-label="Select all visible Student approval requests"
-                      checked={allVisibleApprovalsSelected}
-                      onChange={(event) =>
-                        setSelectedApprovalIds(
-                          event.currentTarget.checked
-                            ? visiblePendingApprovalIds
-                            : []
-                        )
-                      }
-                      className="size-4 rounded border-gray-300 text-red-700 focus:ring-red-700"
-                    />
-                    Select all
-                  </label>
-                  {selectedVisibleApprovalIds.map((requestId) => (
-                    <input
-                      key={requestId}
                       type="hidden"
-                      name="requestIds"
-                      value={requestId}
+                      name="intent"
+                      value="approve-access-bulk"
                     />
-                  ))}
-                  <span className="text-sm font-bold text-gray-950">
-                    {selectedVisibleApprovalIds.length} selected
-                  </span>
-                  <button
-                    type="submit"
-                    disabled={!selectedVisibleApprovalIds.length}
-                    className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Approve selected
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedApprovalIds([])}
-                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300"
-                  >
-                    Clear
-                  </button>
-                </Form>
+                    <label className="inline-flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <input
+                        ref={selectAllApprovalsRef}
+                        type="checkbox"
+                        aria-label="Select all visible Student approval requests"
+                        checked={allVisibleApprovalsSelected}
+                        onChange={(event) =>
+                          setSelectedApprovalIds(
+                            event.currentTarget.checked
+                              ? visiblePendingApprovalIds
+                              : []
+                          )
+                        }
+                        className="size-4 rounded border-gray-300 text-red-700 focus:ring-red-700"
+                      />
+                      Select all
+                    </label>
+                    {selectedVisibleApprovalIds.map((requestId) => (
+                      <input
+                        key={requestId}
+                        type="hidden"
+                        name="requestIds"
+                        value={requestId}
+                      />
+                    ))}
+                    <span className="text-sm font-bold text-gray-950">
+                      {selectedVisibleApprovalIds.length} selected
+                    </span>
+                    <button
+                      type="submit"
+                      disabled={!selectedVisibleApprovalIds.length}
+                      className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Approve selected
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedApprovalIds([])}
+                      className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300"
+                    >
+                      Clear
+                    </button>
+                  </Form>
+                  {selectedVisibleApprovalIds.length ? (
+                    <Form
+                      method="post"
+                      className="flex items-center gap-3 rounded-2xl border border-gray-200 bg-white p-3"
+                    >
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="decline-access-bulk"
+                      />
+                      {selectedVisibleApprovalIds.map((requestId) => (
+                        <input
+                          key={requestId}
+                          type="hidden"
+                          name="requestIds"
+                          value={requestId}
+                        />
+                      ))}
+                      <span className="text-sm font-bold text-gray-950">
+                        {selectedVisibleApprovalIds.length} selected
+                      </span>
+                      <button
+                        type="submit"
+                        className="rounded-xl border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                      >
+                        Reject selected
+                      </button>
+                    </Form>
+                  ) : null}
+                </div>
               ) : null}
 
               {visibleApprovals.length ? (
@@ -3128,6 +4077,363 @@ export default function OperationsPage() {
             </section>
           ) : visibleTasks.length ? (
             <>
+              {view === "all" && allSelectionEntries.length > 0 ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white p-3">
+                  <div className="flex min-w-0 flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <input
+                        ref={selectAllAllRowsRef}
+                        type="checkbox"
+                        aria-label="Select all visible Operations rows"
+                        checked={allVisibleAllRowsSelected}
+                        onChange={(event) =>
+                          setSelectedAllRowKeys(
+                            event.currentTarget.checked
+                              ? visibleAllSelectionKeys
+                              : []
+                          )
+                        }
+                        className="size-4 rounded border-gray-300 text-red-700 focus:ring-red-700"
+                      />
+                      Select all visible
+                    </label>
+                    {selectedAllEntries.length > 0 ? (
+                      <span className="text-sm font-bold text-gray-950">
+                        {selectedAllEntries.length} selected
+                      </span>
+                    ) : null}
+                  </div>
+                  {selectedAllEntries.length > 0 ? (
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                      {canResolveSelectedReports ? (
+                        <Form method="post">
+                          <input
+                            type="hidden"
+                            name="intent"
+                            value="resolve-report-bulk"
+                          />
+                          {selectedOperationalReportIds.map((reportId) => (
+                            <input
+                              key={reportId}
+                              type="hidden"
+                              name="operationIds"
+                              value={reportId}
+                            />
+                          ))}
+                          <button
+                            type="submit"
+                            className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                          >
+                            Resolve selected
+                          </button>
+                        </Form>
+                      ) : null}
+                      {compatibleAllFamily === "broken" ? (
+                        <Form method="post">
+                          <input
+                            type="hidden"
+                            name="intent"
+                            value="return-to-service-bulk"
+                          />
+                          {selectedAllEntries.map((entry) => (
+                            <input
+                              key={entry.key}
+                              type="hidden"
+                              name="assetIds"
+                              value={entry.id}
+                            />
+                          ))}
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
+                          >
+                            Return to service
+                          </button>
+                        </Form>
+                      ) : null}
+                      {compatibleAllFamily === "returns" ? (
+                        <>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="complete-return-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="operationIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                            >
+                              Mark checked
+                            </button>
+                          </Form>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAllConfirmAction("remove-returns")
+                            }
+                            className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                          >
+                            Remove from service
+                          </button>
+                        </>
+                      ) : null}
+                      {compatibleAllFamily === "returned-with-issues" ? (
+                        <>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="return-issue-to-service-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <Fragment key={entry.key}>
+                                <input
+                                  type="hidden"
+                                  name="operationIds"
+                                  value={entry.id}
+                                />
+                                <input
+                                  type="hidden"
+                                  name="reportOperationIds"
+                                  value={entry.secondaryId}
+                                />
+                              </Fragment>
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                            >
+                              Return to service
+                            </button>
+                          </Form>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAllConfirmAction("remove-returned-issues")
+                            }
+                            className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                          >
+                            Remove from service
+                          </button>
+                        </>
+                      ) : null}
+                      {compatibleAllFamily === "to-prepare" ? (
+                        <>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="confirm-prepared-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="operationIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                            >
+                              Mark prepared
+                            </button>
+                          </Form>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="decline-preparation-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="operationIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                            >
+                              Decline selected
+                            </button>
+                          </Form>
+                        </>
+                      ) : null}
+                      {compatibleAllFamily === "cancelled-pickups" ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setAllConfirmAction("release-cancelled-pickups")
+                          }
+                          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                        >
+                          Release selected units
+                        </button>
+                      ) : null}
+                      {compatibleAllFamily === "access-approvals" ? (
+                        <>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="approve-access-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="requestIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                            >
+                              Approve selected
+                            </button>
+                          </Form>
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="decline-access-bulk"
+                            />
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="requestIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                            >
+                              Reject selected
+                            </button>
+                          </Form>
+                        </>
+                      ) : null}
+                      {compatibleAllFamily === "overdue" ? (
+                        <span className="text-sm text-gray-600">
+                          Open each loan to manage it safely.
+                        </span>
+                      ) : null}
+                      {compatibleAllFamily === "ready-for-pickup" ? (
+                        <span className="text-sm text-gray-600">
+                          Confirm pickup individually so each unit can be
+                          verified.
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedAllRowKeys([]);
+                          setAllConfirmAction(null);
+                        }}
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-red-300"
+                      >
+                        Clear selection
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {view === "all" && allConfirmAction ? (
+                <DialogPortal>
+                  <Dialog
+                    open
+                    onClose={() => setAllConfirmAction(null)}
+                    title={
+                      <span className="text-base font-semibold text-gray-900">
+                        {allConfirmAction === "remove-returns"
+                          ? `Remove ${selectedAllEntries.length} returned items from service?`
+                          : allConfirmAction === "remove-returned-issues"
+                          ? `Remove ${selectedAllEntries.length} reported units from service?`
+                          : `Release ${selectedAllEntries.length} cancelled pickups?`}
+                      </span>
+                    }
+                    headerClassName="items-center py-2"
+                    className="w-[min(32rem,calc(100vw-2rem))]"
+                  >
+                    <Form
+                      method="post"
+                      className="space-y-4 px-6 pb-4 pt-1"
+                      onSubmit={() => setAllConfirmAction(null)}
+                    >
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value={
+                          allConfirmAction === "remove-returns"
+                            ? "disable-return-bulk"
+                            : allConfirmAction === "remove-returned-issues"
+                            ? "remove-return-issue-from-service-bulk"
+                            : "put-back-cancelled-pickup-bulk"
+                        }
+                      />
+                      {selectedAllEntries.map((entry) => (
+                        <Fragment key={entry.key}>
+                          <input
+                            type="hidden"
+                            name="operationIds"
+                            value={entry.id}
+                          />
+                          {entry.secondaryId ? (
+                            <input
+                              type="hidden"
+                              name="reportOperationIds"
+                              value={entry.secondaryId}
+                            />
+                          ) : null}
+                        </Fragment>
+                      ))}
+                      <p className="text-sm text-gray-700">
+                        {allConfirmAction === "remove-returns" ||
+                        allConfirmAction === "remove-returned-issues"
+                          ? "These exact units will remain unavailable until they are returned to service."
+                          : "Confirm that these exact items have been collected from the Pickup Zone and returned to their normal storage locations."}
+                      </p>
+                      <ul className="list-disc space-y-1 pl-5 text-sm font-semibold text-gray-900">
+                        {selectedAllEntries.map((entry) => (
+                          <li key={entry.key}>{entry.task.title}</li>
+                        ))}
+                      </ul>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAllConfirmAction(null)}
+                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
+                        >
+                          {allConfirmAction === "release-cancelled-pickups"
+                            ? "Release selected units"
+                            : "Remove from service"}
+                        </button>
+                      </div>
+                    </Form>
+                  </Dialog>
+                </DialogPortal>
+              ) : null}
               {view === "returns" ? (
                 <Form
                   method="post"
@@ -3185,6 +4491,244 @@ export default function OperationsPage() {
                     </>
                   ) : null}
                 </Form>
+              ) : null}
+              {(view === "overdue" || view === "ready-for-pickup") &&
+              visibleManagementIds.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3">
+                  <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible loans and pickups"
+                      checked={allVisibleManagementSelected}
+                      onChange={(event) =>
+                        setSelectedManagementIds(
+                          event.currentTarget.checked
+                            ? visibleManagementIds
+                            : []
+                        )
+                      }
+                      className="size-4 rounded border-gray-300 text-red-700"
+                    />
+                    Select all visible
+                  </label>
+                  {selectedManagementIds.length > 0 ? (
+                    <>
+                      <span className="text-sm font-bold text-gray-950">
+                        {selectedManagementIds.length} selected
+                      </span>
+                      <span className="text-xs text-gray-600">
+                        {view === "ready-for-pickup"
+                          ? "Confirm pickup individually so each unit can be verified."
+                          : "Use each loan row to open and manage that loan."}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedManagementIds([])}
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                      >
+                        Clear selection
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+              {view === "general" && visibleGeneralReportIds.length > 0 ? (
+                <Form
+                  method="post"
+                  className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
+                >
+                  <input
+                    type="hidden"
+                    name="intent"
+                    value="resolve-report-bulk"
+                  />
+                  {selectedVisibleGeneralReportIds.map((operationId) => (
+                    <input
+                      key={operationId}
+                      type="hidden"
+                      name="operationIds"
+                      value={operationId}
+                    />
+                  ))}
+                  <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible general reports"
+                      checked={allVisibleGeneralReportsSelected}
+                      onChange={(event) =>
+                        setSelectedGeneralReportIds(
+                          event.currentTarget.checked
+                            ? visibleGeneralReportIds
+                            : []
+                        )
+                      }
+                      className="size-4 rounded border-gray-300 text-red-700"
+                    />
+                    Select all
+                  </label>
+                  {selectedVisibleGeneralReportIds.length ? (
+                    <>
+                      <span className="text-sm font-bold text-gray-950">
+                        {selectedVisibleGeneralReportIds.length} selected
+                      </span>
+                      <button
+                        type="submit"
+                        className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                      >
+                        Resolve selected
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedGeneralReportIds([])}
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                      >
+                        Clear selection
+                      </button>
+                    </>
+                  ) : null}
+                </Form>
+              ) : null}
+              {view === "returned-with-issues" &&
+              visibleReturnedIssueIds.length > 0 ? (
+                <Form
+                  method="post"
+                  className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
+                >
+                  <input
+                    type="hidden"
+                    name="intent"
+                    value="return-issue-to-service-bulk"
+                  />
+                  {selectedVisibleReturnedIssueIds.map((operationId) => (
+                    <input
+                      key={operationId}
+                      type="hidden"
+                      name="operationIds"
+                      value={operationId}
+                    />
+                  ))}
+                  {selectedVisibleReturnedIssueIds.map((operationId) => {
+                    const reportId = visibleTasks.find(
+                      (task) => task.operationId === operationId
+                    )?.returnIssueOperationId;
+                    return reportId ? (
+                      <input
+                        key={reportId}
+                        type="hidden"
+                        name="reportOperationIds"
+                        value={reportId}
+                      />
+                    ) : null;
+                  })}
+                  <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible returned issues"
+                      checked={allVisibleReturnedIssuesSelected}
+                      onChange={(event) =>
+                        setSelectedReturnedIssueIds(
+                          event.currentTarget.checked
+                            ? visibleReturnedIssueIds
+                            : []
+                        )
+                      }
+                      className="size-4 rounded border-gray-300 text-red-700"
+                    />
+                    Select all
+                  </label>
+                  {selectedVisibleReturnedIssueIds.length ? (
+                    <>
+                      <span className="text-sm font-bold text-gray-950">
+                        {selectedVisibleReturnedIssueIds.length} selected
+                      </span>
+                      <button
+                        type="submit"
+                        className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                      >
+                        Return to service
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBulkRemoveReturnedIssuesOpen(true)}
+                        className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+                      >
+                        Remove from service
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedReturnedIssueIds([])}
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                      >
+                        Clear selection
+                      </button>
+                    </>
+                  ) : null}
+                </Form>
+              ) : null}
+              {view === "returned-with-issues" &&
+              selectedVisibleReturnedIssueIds.length ? (
+                <DialogPortal>
+                  <Dialog
+                    open={bulkRemoveReturnedIssuesOpen}
+                    onClose={() => setBulkRemoveReturnedIssuesOpen(false)}
+                    title={
+                      <span className="text-base font-semibold text-gray-900">
+                        Remove {selectedVisibleReturnedIssueIds.length} returned
+                        units from service?
+                      </span>
+                    }
+                    headerClassName="items-center py-2"
+                    className="w-[min(32rem,calc(100vw-2rem))]"
+                  >
+                    <Form method="post" className="space-y-4 px-6 pb-4 pt-1">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="remove-return-issue-from-service-bulk"
+                      />
+                      {selectedVisibleReturnedIssueIds.map((operationId) => (
+                        <input
+                          key={operationId}
+                          type="hidden"
+                          name="operationIds"
+                          value={operationId}
+                        />
+                      ))}
+                      {selectedVisibleReturnedIssueIds.map((operationId) => {
+                        const reportId = visibleTasks.find(
+                          (task) => task.operationId === operationId
+                        )?.returnIssueOperationId;
+                        return reportId ? (
+                          <input
+                            key={reportId}
+                            type="hidden"
+                            name="reportOperationIds"
+                            value={reportId}
+                          />
+                        ) : null;
+                      })}
+                      <p className="text-sm text-gray-700">
+                        These exact units will remain unavailable until repaired
+                        and returned to service.
+                      </p>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setBulkRemoveReturnedIssuesOpen(false)}
+                          className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
+                        >
+                          Remove from service
+                        </button>
+                      </div>
+                    </Form>
+                  </Dialog>
+                </DialogPortal>
               ) : null}
               {view === "broken" && visibleBrokenAssetIds.length > 0 ? (
                 <>
@@ -3346,78 +4890,108 @@ export default function OperationsPage() {
                   </Dialog>
                 </DialogPortal>
               ) : null}
-              {(view === "to-prepare" || view === "all") &&
+              {view === "to-prepare" &&
               visibleTasks.some((task) => task.kind === "to-prepare") ? (
-                <Form
-                  method="post"
-                  className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
-                >
-                  <input
-                    type="hidden"
-                    name="intent"
-                    value="confirm-prepared-bulk"
-                  />
-                  {selectedBulkReadyIds.map((operationId) => (
+                <>
+                  <Form
+                    method="post"
+                    className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
+                  >
                     <input
-                      key={operationId}
                       type="hidden"
-                      name="operationIds"
-                      value={operationId}
+                      name="intent"
+                      value="confirm-prepared-bulk"
                     />
-                  ))}
-                  <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-                    <input
-                      ref={selectAllPreparationsRef}
-                      type="checkbox"
-                      checked={allVisiblePreparationsSelected}
-                      disabled={visibleBulkReadyIds.length === 0}
-                      onChange={toggleAllVisiblePreparations}
-                      className="size-4 rounded border-gray-300 text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                    />
-                    {view === "all"
-                      ? "Select all eligible preparation items"
-                      : "Select all available for preparation"}
-                  </label>
-                  {selectedPreparationIds.length > 0 ? (
-                    <>
-                      <span className="text-sm font-bold text-gray-950">
-                        {selectedPreparationIds.length} selected
-                      </span>
-                      {selectedBulkReadyIds.length ? (
-                        <>
-                          {selectedBulkReadyIds.length <
-                          selectedPreparationIds.length ? (
-                            <span className="text-xs text-gray-600">
-                              Unavailable tasks are excluded from bulk
-                              preparation.
-                            </span>
-                          ) : null}
-                          <button
-                            type="submit"
-                            className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            Mark prepared
-                          </button>
-                        </>
-                      ) : (
-                        <span className="text-xs text-gray-600">
-                          No selected tasks are available for preparation.
+                    {selectedBulkReadyIds.map((operationId) => (
+                      <input
+                        key={operationId}
+                        type="hidden"
+                        name="operationIds"
+                        value={operationId}
+                      />
+                    ))}
+                    <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <input
+                        ref={selectAllPreparationsRef}
+                        type="checkbox"
+                        checked={allVisiblePreparationsSelected}
+                        disabled={visibleBulkReadyIds.length === 0}
+                        onChange={toggleAllVisiblePreparations}
+                        className="size-4 rounded border-gray-300 text-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                      Select all available for preparation
+                    </label>
+                    {selectedPreparationIds.length > 0 ? (
+                      <>
+                        <span className="text-sm font-bold text-gray-950">
+                          {selectedPreparationIds.length} selected
                         </span>
-                      )}
+                        {selectedBulkReadyIds.length ? (
+                          <>
+                            {selectedBulkReadyIds.length <
+                            selectedPreparationIds.length ? (
+                              <span className="text-xs text-gray-600">
+                                Unavailable tasks are excluded from bulk
+                                preparation.
+                              </span>
+                            ) : null}
+                            <button
+                              type="submit"
+                              className="rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Mark prepared
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-xs text-gray-600">
+                            No selected tasks are available for preparation.
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedPreparationIds([]);
+                          }}
+                          className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
+                  </Form>
+                  {selectedPreparationIds.some((id) =>
+                    visiblePreparationIds.includes(id)
+                  ) ? (
+                    <Form
+                      method="post"
+                      className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3"
+                    >
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="decline-preparation-bulk"
+                      />
+                      {selectedPreparationIds
+                        .filter((id) => visiblePreparationIds.includes(id))
+                        .map((operationId) => (
+                          <input
+                            key={operationId}
+                            type="hidden"
+                            name="operationIds"
+                            value={operationId}
+                          />
+                        ))}
                       <button
-                        type="button"
-                        onClick={() => {
-                          setSelectedPreparationIds([]);
-                        }}
-                        className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
+                        type="submit"
+                        className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
                       >
-                        Clear
+                        Decline selected
                       </button>
-                    </>
+                    </Form>
                   ) : null}
-                </Form>
+                </>
               ) : null}
-              {(view === "cancelled-pickups" || view === "all") &&
+              {view === "cancelled-pickups" &&
               visibleCancelledPickupIds.length ? (
                 <>
                   <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3">
@@ -3429,9 +5003,7 @@ export default function OperationsPage() {
                         onChange={toggleAllVisibleCancelledPickups}
                         className="size-4 rounded border-gray-300 text-red-700"
                       />
-                      {view === "all"
-                        ? "Select all cancelled pickups"
-                        : "Select all"}
+                      Select all
                     </label>
                     {selectedCancelledPickupIds.length ? (
                       <>
@@ -3525,25 +5097,62 @@ export default function OperationsPage() {
                 {visibleTasks.map((task) => (
                   <SelectableRow
                     key={task.id}
-                    selected={Boolean(
-                      (task.kind === "broken" &&
-                        task.assetId &&
-                        selectedBrokenAssetIds.includes(task.assetId)) ||
-                        (task.operationId &&
-                          ((task.kind === "to-prepare" &&
-                            selectedPreparationIds.includes(
-                              task.operationId
-                            )) ||
-                            selectedReturnIds.includes(task.operationId)))
-                    )}
+                    selected={
+                      view === "all"
+                        ? Boolean(
+                            getAllSelectionEntry(task) &&
+                              selectedAllRowKeys.includes(
+                                getAllSelectionEntry(task)!.key
+                              )
+                          )
+                        : Boolean(
+                            (task.kind === "broken" &&
+                              task.assetId &&
+                              selectedBrokenAssetIds.includes(task.assetId)) ||
+                              (task.kind === "general" &&
+                                view === "general" &&
+                                task.operationId &&
+                                selectedGeneralReportIds.includes(
+                                  task.operationId
+                                )) ||
+                              (task.operationId &&
+                                ((task.kind === "to-prepare" &&
+                                  selectedPreparationIds.includes(
+                                    task.operationId
+                                  )) ||
+                                  selectedReturnIds.includes(
+                                    task.operationId
+                                  ) ||
+                                  (task.kind === "returned-with-issues" &&
+                                    selectedReturnedIssueIds.includes(
+                                      task.operationId
+                                    )))) ||
+                              ((task.kind === "overdue" ||
+                                task.kind === "ready-for-pickup") &&
+                                selectedManagementIds.includes(task.id))
+                          )
+                    }
                     onToggle={
-                      task.kind === "broken" &&
-                      task.assetId &&
-                      task.returnToServiceEligible &&
-                      task.physicalUnit
+                      view === "all" && getAllSelectionEntry(task)
+                        ? () => toggleAllSelection(getAllSelectionEntry(task)!)
+                        : view !== "all" &&
+                          task.kind === "broken" &&
+                          task.assetId &&
+                          task.returnToServiceEligible &&
+                          task.physicalUnit
                         ? () => toggleBrokenAssetSelection(task.assetId!)
+                        : (task.kind === "overdue" ||
+                            task.kind === "ready-for-pickup") &&
+                          (view === "overdue" || view === "ready-for-pickup")
+                        ? () =>
+                            setSelectedManagementIds((current) =>
+                              toggleSelectionId(current, task.id)
+                            )
                         : task.operationId &&
-                          (task.kind === "to-prepare" ||
+                          ((task.kind === "general" && view === "general") ||
+                            (task.kind === "returned-with-issues" &&
+                              view === "returned-with-issues") ||
+                            task.kind === "to-prepare" ||
                             (task.kind === "returns" &&
                               view === "returns" &&
                               task.returnCheckEligible) ||
@@ -3551,6 +5160,14 @@ export default function OperationsPage() {
                         ? () =>
                             task.kind === "returns"
                               ? toggleReturnSelection(task.operationId!)
+                              : task.kind === "general"
+                              ? setSelectedGeneralReportIds((current) =>
+                                  toggleSelectionId(current, task.operationId!)
+                                )
+                              : task.kind === "returned-with-issues"
+                              ? setSelectedReturnedIssueIds((current) =>
+                                  toggleSelectionId(current, task.operationId!)
+                                )
                               : task.kind === "cancelled-pickups"
                               ? setSelectedCancelledPickupIds((current) =>
                                   toggleSelectionId(current, task.operationId!)
@@ -3559,7 +5176,9 @@ export default function OperationsPage() {
                         : undefined
                     }
                     className={
-                      task.kind === "to-prepare" && task.operationId
+                      view === "all" && task.kind === "ready-for-pickup"
+                        ? "flex min-w-0 flex-1 flex-wrap items-center gap-3 p-3"
+                        : task.kind === "to-prepare" && task.operationId
                         ? "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 md:grid-cols-[auto_minmax(160px,1fr)_minmax(160px,1fr)_auto] md:gap-x-4 xl:grid-cols-[auto_minmax(220px,1.2fr)_minmax(200px,1.1fr)_minmax(140px,0.75fr)_minmax(112px,0.6fr)_auto] xl:gap-x-5 xl:gap-y-0"
                         : task.kind === "ready-for-pickup"
                         ? "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 md:grid-cols-[minmax(160px,1fr)_minmax(140px,0.85fr)_minmax(160px,1fr)_minmax(220px,1.2fr)_auto] md:gap-x-4"
@@ -3568,19 +5187,23 @@ export default function OperationsPage() {
                   >
                     {task.kind === "cancelled-pickups" && task.operationId ? (
                       <>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${task.title} to put back`}
-                          checked={selectedCancelledPickupIds.includes(
-                            task.operationId
-                          )}
-                          onChange={() =>
-                            setSelectedCancelledPickupIds((current) =>
-                              toggleSelectionId(current, task.operationId!)
-                            )
-                          }
-                          className="size-4 shrink-0 rounded border-gray-300 text-red-700"
-                        />
+                        {view === "all" ? (
+                          allViewCheckbox(task)
+                        ) : (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${task.title} to put back`}
+                            checked={selectedCancelledPickupIds.includes(
+                              task.operationId
+                            )}
+                            onChange={() =>
+                              setSelectedCancelledPickupIds((current) =>
+                                toggleSelectionId(current, task.operationId!)
+                              )
+                            }
+                            className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                          />
+                        )}
                         {task.assetImage && task.assetId ? (
                           <Link
                             to={`/assets/${task.assetId}`}
@@ -3635,22 +5258,26 @@ export default function OperationsPage() {
                       </>
                     ) : task.kind === "to-prepare" && task.operationId ? (
                       <>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${task.title} for bulk ready`}
-                          title={
-                            task.bulkReadyEligible
-                              ? undefined
-                              : task.preparationBlockedReason
-                          }
-                          checked={selectedPreparationIds.includes(
-                            task.operationId
-                          )}
-                          onChange={() =>
-                            togglePreparationSelection(task.operationId!)
-                          }
-                          className="col-start-1 row-start-1 size-4 shrink-0 rounded border-gray-300 text-red-700"
-                        />
+                        {view === "all" ? (
+                          allViewCheckbox(task)
+                        ) : (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${task.title} for bulk ready`}
+                            title={
+                              task.bulkReadyEligible
+                                ? undefined
+                                : task.preparationBlockedReason
+                            }
+                            checked={selectedPreparationIds.includes(
+                              task.operationId
+                            )}
+                            onChange={() =>
+                              togglePreparationSelection(task.operationId!)
+                            }
+                            className="col-start-1 row-start-1 size-4 shrink-0 rounded border-gray-300 text-red-700"
+                          />
+                        )}
                         <PreparationItemIdentity
                           task={task}
                           className="col-start-2 row-start-1 md:col-start-2 md:row-start-1 xl:col-auto xl:row-auto"
@@ -3725,6 +5352,21 @@ export default function OperationsPage() {
                       </>
                     ) : task.kind === "ready-for-pickup" ? (
                       <>
+                        {view === "all" ? (
+                          allViewCheckbox(task)
+                        ) : view === "ready-for-pickup" ? (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${task.title} pickup for management`}
+                            checked={selectedManagementIds.includes(task.id)}
+                            onChange={() =>
+                              setSelectedManagementIds((current) =>
+                                toggleSelectionId(current, task.id)
+                              )
+                            }
+                            className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                          />
+                        ) : null}
                         <PreparationItemIdentity
                           task={task}
                           className="col-span-2 md:col-span-1"
@@ -3772,14 +5414,18 @@ export default function OperationsPage() {
                     ) : (
                       <div
                         className={
-                          task.kind === "broken"
-                            ? "grid min-w-0 flex-1 grid-cols-[auto_3rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 md:grid-cols-[auto_3.5rem_minmax(240px,1.5fr)_minmax(180px,1fr)] md:gap-x-4"
+                          task.kind === "broken" || task.kind === "general"
+                            ? "grid min-w-0 flex-1 grid-cols-[auto_3rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 lg:grid-cols-[auto_3.5rem_minmax(0,1.35fr)_minmax(0,0.9fr)] lg:gap-x-4"
                             : "flex min-w-0 flex-1 items-center gap-3"
                         }
                       >
-                        {task.kind === "broken" ? (
+                        {task.kind === "broken" || task.kind === "general" ? (
                           <>
-                            {task.assetId && task.physicalUnit ? (
+                            {view === "all" ? (
+                              allViewCheckbox(task)
+                            ) : task.kind === "broken" &&
+                              task.assetId &&
+                              task.physicalUnit ? (
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${task.title} for return to service`}
@@ -3791,7 +5437,28 @@ export default function OperationsPage() {
                                 }
                                 className="size-4 shrink-0 rounded border-gray-300 text-red-700"
                               />
-                            ) : null}
+                            ) : task.kind === "general" &&
+                              view === "general" &&
+                              task.operationId ? (
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${task.title} general report`}
+                                checked={selectedGeneralReportIds.includes(
+                                  task.operationId
+                                )}
+                                onChange={() =>
+                                  setSelectedGeneralReportIds((current) =>
+                                    toggleSelectionId(
+                                      current,
+                                      task.operationId!
+                                    )
+                                  )
+                                }
+                                className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                              />
+                            ) : (
+                              <span aria-hidden="true" className="size-4" />
+                            )}
                             {task.assetId && task.assetImage ? (
                               <Link
                                 to={`/assets/${task.assetId}`}
@@ -3820,35 +5487,40 @@ export default function OperationsPage() {
                                   task.title
                                 )}
                               </h2>
-                              {(() => {
-                                const description = getBrokenItemDescription(
-                                  task.detail
-                                );
-                                return (
-                                  <>
-                                    <p className="mt-1 break-words text-sm text-gray-600">
-                                      {description.summary}
-                                    </p>
-                                    {description.reason ? (
-                                      <p className="mt-1 break-words text-xs text-gray-500">
-                                        {description.reason}
-                                      </p>
-                                    ) : null}
-                                  </>
-                                );
-                              })()}
+                              <p className="mt-1 break-words text-sm font-semibold text-gray-800">
+                                {task.reportLabel}
+                              </p>
+                              {task.reporterName ? (
+                                <p className="mt-1 text-sm text-gray-500">
+                                  Reported by {task.reporterName}
+                                </p>
+                              ) : null}
+                              {task.reportDescription ? (
+                                <p className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-700">
+                                  “{task.reportDescription}”
+                                </p>
+                              ) : null}
                             </div>
-                            <div className="col-span-3 flex min-w-0 flex-col gap-1 pl-7 md:col-span-1 md:pl-0">
-                              {task.returnToServiceEligible ? (
+                            <div className="col-span-3 flex min-w-0 flex-col gap-1 pl-7 lg:col-span-1 lg:pl-0">
+                              {task.kind === "broken" &&
+                              task.returnToServiceEligible ? (
                                 <span className="w-fit rounded-full bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-800">
                                   Out of service
                                 </span>
                               ) : null}
-                              {task.locationName ? (
+                              {task.reportedLocation ? (
+                                <span className="break-words text-sm text-gray-600">
+                                  <span className="font-semibold text-gray-700">
+                                    Reported location:
+                                  </span>
+                                  {task.reportedLocation}
+                                </span>
+                              ) : task.locationName ? (
                                 <span className="break-words text-sm text-gray-600">
                                   {task.locationName}
                                 </span>
                               ) : null}
+                              <BrokenSectionSummary task={task} />
                               {brokenActionResult?.results
                                 ?.filter(
                                   (result) =>
@@ -3870,6 +5542,27 @@ export default function OperationsPage() {
                             task.kind === "returned-with-issues") &&
                           task.operationId ? (
                           <>
+                            {view === "all" ? (
+                              allViewCheckbox(task)
+                            ) : task.kind === "returned-with-issues" &&
+                              view === "returned-with-issues" ? (
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${task.title} returned issue`}
+                                checked={selectedReturnedIssueIds.includes(
+                                  task.operationId
+                                )}
+                                onChange={() =>
+                                  setSelectedReturnedIssueIds((current) =>
+                                    toggleSelectionId(
+                                      current,
+                                      task.operationId!
+                                    )
+                                  )
+                                }
+                                className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                              />
+                            ) : null}
                             {view === "returns" &&
                             task.kind === "returns" &&
                             task.returnCheckEligible ? (
@@ -3978,6 +5671,24 @@ export default function OperationsPage() {
                           </>
                         ) : (
                           <>
+                            {view === "all" ? (
+                              allViewCheckbox(task)
+                            ) : task.kind === "overdue" &&
+                              view === "overdue" ? (
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${task.title} loan for management`}
+                                checked={selectedManagementIds.includes(
+                                  task.id
+                                )}
+                                onChange={() =>
+                                  setSelectedManagementIds((current) =>
+                                    toggleSelectionId(current, task.id)
+                                  )
+                                }
+                                className="size-4 shrink-0 rounded border-gray-300 text-red-700"
+                              />
+                            ) : null}
                             {task.assetImage &&
                             task.assetId &&
                             task.kind !== "returns" &&
@@ -3994,11 +5705,9 @@ export default function OperationsPage() {
                                 />
                               </Link>
                             ) : null}
-                            {task.kind !== "broken" ? (
-                              <p className="text-xs font-bold uppercase tracking-wide text-red-700">
-                                {VIEW_LABELS[task.kind]}
-                              </p>
-                            ) : null}
+                            <p className="text-xs font-bold uppercase tracking-wide text-red-700">
+                              {VIEW_LABELS[task.kind]}
+                            </p>
                             <h2 className="mt-1 truncate font-bold text-gray-950">
                               {task.assetId ? (
                                 <Link
@@ -4018,30 +5727,10 @@ export default function OperationsPage() {
                         )}
                       </div>
                     )}
-                    {task.kind === "broken" &&
+                    {task.kind === "returned-with-issues" &&
                     task.operationId &&
-                    task.assetId &&
-                    task.returnToServiceEligible ? (
-                      <div className="flex shrink-0 items-center">
-                        <Form method="post">
-                          <input
-                            type="hidden"
-                            name="intent"
-                            value="return-to-service"
-                          />
-                          <input
-                            type="hidden"
-                            name="operationId"
-                            value={task.operationId}
-                          />
-                          <button
-                            type="submit"
-                            className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
-                          >
-                            Return to service
-                          </button>
-                        </Form>
-                      </div>
+                    task.returnIssueOperationId ? (
+                      <ReturnedIssueActions task={task} />
                     ) : task.kind === "cancelled-pickups" &&
                       task.operationId ? (
                       <CancelledPickupActions task={task} />
@@ -4060,20 +5749,45 @@ export default function OperationsPage() {
                           Review return
                         </Link>
                       </div>
-                    ) : task.kind === "broken" ? null : task.kind ===
-                        "to-prepare" && task.operationId ? (
+                    ) : (task.kind === "broken" || task.kind === "general") &&
+                      task.operationId ? (
+                      task.kind === "broken" &&
+                      task.returnToServiceEligible &&
+                      task.assetId ? (
+                        <BrokenReportActions task={task} />
+                      ) : (
+                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="resolve-report"
+                            />
+                            <input
+                              type="hidden"
+                              name="operationId"
+                              value={task.operationId}
+                            />
+                            <button
+                              type="submit"
+                              className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+                            >
+                              Resolve report
+                            </button>
+                          </Form>
+                        </div>
+                      )
+                    ) : task.kind === "to-prepare" && task.operationId ? (
                       <PreparationTaskActions
                         task={task}
                         className="col-start-2 row-start-5 justify-self-end md:col-start-4 md:row-span-2 md:row-start-1 xl:col-start-6 xl:row-span-1 xl:row-start-1"
                       />
+                    ) : task.kind === "ready-for-pickup" ? (
+                      <ReadyPickupActions task={task} />
                     ) : (
                       <Link
                         to={task.href}
-                        className={`shrink-0 rounded-xl border border-gray-300 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800 ${
-                          task.kind === "ready-for-pickup"
-                            ? "col-span-2 justify-self-end md:col-span-1"
-                            : ""
-                        }`}
+                        className="shrink-0 rounded-xl border border-gray-300 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
                       >
                         {task.actionLabel}
                       </Link>

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
@@ -12,7 +13,9 @@ import {
   IOIO_REPORT_OPERATION,
 } from "./rate-limit.server";
 import {
+  IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES,
   ioioReportTypeSchema,
+  isIoioPhysicalUnitBlockingReport,
   reportProposalSchema,
   sanitizeReportText,
   type IoioReportType,
@@ -38,6 +41,8 @@ export type PreparedReportProposal = {
   kit: { id: string; name: string | null } | null;
   location: { id: string; name: string | null } | null;
 };
+
+export type IoioReportSource = "IOIO_ASSISTANT" | "IOIO_STUDENT_REPORT";
 
 export type BorrowedItemProblemContext = {
   bookingId: string;
@@ -126,7 +131,8 @@ function proposalHasExpired(createdAt: Date) {
  */
 export async function prepareReportProblem(
   draft: ReportProposalDraft,
-  { context, request, auth: providedAuth }: Context
+  { context, request, auth: providedAuth }: Context,
+  { source = "IOIO_ASSISTANT" }: { source?: IoioReportSource } = {}
 ): Promise<PreparedReportProposal> {
   const auth = await getIoioAuth({
     context,
@@ -144,7 +150,7 @@ export async function prepareReportProblem(
     parsed.asset_id
       ? db.asset.findFirst({
           where: { id: parsed.asset_id, organizationId: auth.organizationId },
-          select: { id: true, title: true },
+          select: { id: true, title: true, type: true },
         })
       : null,
     parsed.kit_id
@@ -181,20 +187,47 @@ export async function prepareReportProblem(
   }
 
   const token = randomUUID();
-  await db.ioioWriteOperation.create({
-    data: {
-      operationType: IOIO_REPORT_OPERATION,
-      status: "PREPARED",
-      idempotencyKey: token,
-      userId: auth.userId,
-      organizationId: auth.organizationId,
-      reportType: parsed.report_type,
-      description,
-      assetId: asset?.id ?? null,
-      kitId: kit?.id ?? null,
-      locationId: location?.id ?? null,
+  await db.$transaction(
+    async (tx) => {
+      if (asset?.type === "INDIVIDUAL") {
+        const unresolved = await tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId: auth.organizationId,
+            operationType: IOIO_REPORT_OPERATION,
+            status: { in: ["SUCCEEDED", "PROCESSING"] },
+            reportType: {
+              in: [...IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES],
+            },
+            assetId: asset.id,
+          },
+          select: { id: true },
+        });
+        if (unresolved) {
+          throw reportError(
+            "This unit has already been reported and is waiting for Staff review.",
+            409
+          );
+        }
+      }
+
+      await tx.ioioWriteOperation.create({
+        data: {
+          operationType: IOIO_REPORT_OPERATION,
+          source,
+          status: "PREPARED",
+          idempotencyKey: token,
+          userId: auth.userId,
+          organizationId: auth.organizationId,
+          reportType: parsed.report_type,
+          description,
+          assetId: asset?.id ?? null,
+          kitId: kit?.id ?? null,
+          locationId: location?.id ?? null,
+        },
+      });
     },
-  });
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
 
   return {
     confirmationToken: token,
@@ -394,7 +427,11 @@ export async function createBorrowedItemProblemReport(
       select: { resultReportId: true },
     });
     if (existing?.resultReportId) {
-      return { ok: true as const, reportId: existing.resultReportId };
+      return {
+        ok: true as const,
+        reportId: existing.resultReportId,
+        assetType: null,
+      };
     }
   }
   const { bookingAsset, kit } = await loadBorrowedItem(auth, {
@@ -413,6 +450,25 @@ export async function createBorrowedItemProblemReport(
   const content = `[IOIO student report]\nIssue: ${reportType}\nDescription: ${safeDescription}`;
 
   return db.$transaction(async (tx) => {
+    if (bookingAsset.asset.type === "INDIVIDUAL") {
+      const unresolved = await tx.ioioWriteOperation.findFirst({
+        where: {
+          organizationId: auth.organizationId,
+          operationType: IOIO_REPORT_OPERATION,
+          status: { in: ["SUCCEEDED", "PROCESSING"] },
+          reportType: { in: [...IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES] },
+          assetId: bookingAsset.asset.id,
+        },
+        select: { id: true },
+      });
+      if (unresolved) {
+        throw reportError(
+          "This unit has already been reported and is waiting for Staff review.",
+          409
+        );
+      }
+    }
+
     const report = await createReport({
       email: user.email,
       content,
@@ -438,7 +494,23 @@ export async function createBorrowedItemProblemReport(
         completedAt: new Date(),
       },
     });
-    return { ok: true as const, reportId: report.id };
+    if (
+      bookingAsset.asset.type === "INDIVIDUAL" &&
+      isIoioPhysicalUnitBlockingReport(reportType)
+    ) {
+      await tx.asset.update({
+        where: {
+          id: bookingAsset.asset.id,
+          organizationId: auth.organizationId,
+        },
+        data: { availableToBook: false },
+      });
+    }
+    return {
+      ok: true as const,
+      reportId: report.id,
+      assetType: bookingAsset.asset.type,
+    };
   });
 }
 
@@ -497,10 +569,8 @@ export async function cancelReportProblem(
 }
 
 /**
- * The only AI-assisted Shelf write. The operation row and native ReportFound
- * row are committed in one transaction, so a retry after a process restart or
- * ambiguous network response observes the same result instead of creating a
- * second report.
+ * Commit a prepared report and native ReportFound row atomically. A retry
+ * after a process restart or ambiguous response observes the existing result.
  */
 export async function reportProblem(
   {
@@ -537,6 +607,7 @@ export async function reportProblem(
       organizationId: true,
       status: true,
       resultReportId: true,
+      source: true,
       createdAt: true,
     },
   });
@@ -598,7 +669,6 @@ export async function reportProblem(
       409
     );
   }
-
   const parsedType = ioioReportTypeSchema.safeParse(reportType);
   const safeDescription = sanitizeReportText(description);
   if (!parsedType.success || safeDescription.length < 3) {
@@ -707,6 +777,7 @@ export async function reportProblem(
           assetId: true,
           kitId: true,
           locationId: true,
+          source: true,
         },
       });
       if (!current) throw reportError("This report proposal has expired.", 404);
@@ -764,7 +835,7 @@ export async function reportProblem(
         select: { email: true },
       });
       const auditMetadata = JSON.stringify({
-        source: "IOIO_ASSISTANT",
+        source: current.source,
         operationType: IOIO_REPORT_OPERATION,
         operationId: current.id,
         reportType: parsedType.data,
@@ -793,6 +864,28 @@ export async function reportProblem(
           completedAt: new Date(),
         },
       });
+      if (
+        current.assetId &&
+        isIoioPhysicalUnitBlockingReport(parsedType.data)
+      ) {
+        const reportedAsset = await tx.asset.findFirst({
+          where: {
+            id: current.assetId,
+            organizationId: auth.organizationId,
+            type: "INDIVIDUAL",
+          },
+          select: { id: true },
+        });
+        if (reportedAsset) {
+          await tx.asset.update({
+            where: {
+              id: reportedAsset.id,
+              organizationId: auth.organizationId,
+            },
+            data: { availableToBook: false },
+          });
+        }
+      }
 
       Logger.info({
         event: "ioio_assistant_report_problem",

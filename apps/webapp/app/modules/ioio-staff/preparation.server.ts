@@ -838,11 +838,13 @@ export async function cancelStudentPreparationRequest({
   organizationId,
   operationId,
   borrowerUserId,
+  staffUserId,
   hints,
 }: {
   organizationId: string;
   operationId: string;
   borrowerUserId: string;
+  staffUserId?: string;
   hints: Parameters<typeof cancelBooking>[0]["hints"];
 }) {
   const operation = await db.ioioWriteOperation.findFirst({
@@ -921,7 +923,10 @@ export async function cancelStudentPreparationRequest({
       data: {
         status: "CANCELLED",
         completedAt: new Date(),
-        reviewComment: "Cancelled by Student.",
+        reviewComment: staffUserId
+          ? "Cancelled by Staff."
+          : "Cancelled by Student.",
+        ...(staffUserId ? { reviewedByUserId: staffUserId } : {}),
       },
     });
     if (updated.count !== 1) {
@@ -943,7 +948,9 @@ export async function cancelStudentPreparationRequest({
     (item) => item.status === PREPARATION_READY && Boolean(item.bookingAssetId)
   );
   const cancelledAt = new Date();
-  const cancellationReview = "Cancelled by Student.";
+  const cancellationReview = staffUserId
+    ? "Cancelled by Staff."
+    : "Cancelled by Student.";
 
   if (preparedUnits.length) {
     // Keep the reserved Shelf booking in place while any physical unit remains
@@ -961,6 +968,7 @@ export async function cancelStudentPreparationRequest({
         completedAt: null,
         reviewedAt: cancelledAt,
         reviewComment: cancellationReview,
+        ...(staffUserId ? { reviewedByUserId: staffUserId } : {}),
       },
     });
 
@@ -979,6 +987,7 @@ export async function cancelStudentPreparationRequest({
           completedAt: cancelledAt,
           reviewedAt: cancelledAt,
           reviewComment: cancellationReview,
+          ...(staffUserId ? { reviewedByUserId: staffUserId } : {}),
         },
       });
     }
@@ -994,16 +1003,18 @@ export async function cancelStudentPreparationRequest({
     await deleteBooking(
       { id: requestBooking.id, organizationId },
       hints,
-      borrowerUserId
+      staffUserId ?? borrowerUserId
     );
   } else if (requestBooking?.status === BookingStatus.RESERVED) {
     await cancelBooking({
       id: requestBooking.id,
       organizationId,
-      userId: borrowerUserId,
+      userId: staffUserId ?? borrowerUserId,
       hints,
       expectedStatus: BookingStatus.RESERVED,
-      cancellationReason: "Student cancelled the preparation request.",
+      cancellationReason: staffUserId
+        ? "Staff cancelled the preparation pickup."
+        : "Student cancelled the preparation request.",
     });
   } else {
     throw new Error(
@@ -1023,6 +1034,7 @@ export async function cancelStudentPreparationRequest({
       completedAt: cancelledAt,
       reviewedAt: cancelledAt,
       reviewComment: cancellationReview,
+      ...(staffUserId ? { reviewedByUserId: staffUserId } : {}),
     },
   });
 
@@ -1216,6 +1228,7 @@ async function loadStudentPreparationPickup({
               id: true,
               title: true,
               type: true,
+              availableToBook: true,
               assetModelId: true,
               sequentialId: true,
               assetModel: { select: { name: true } },
@@ -1256,7 +1269,7 @@ async function loadStudentPreparationPickup({
 
 type PickupVerification = {
   valid: boolean;
-  status: "valid" | "wrong-unit" | "wrong-item" | "unresolved";
+  status: "valid" | "wrong-unit" | "wrong-item" | "unresolved" | "unavailable";
   assignedUnitLabel: string;
   scannedUnitLabel?: string;
   error?: string;
@@ -1272,6 +1285,7 @@ async function verifyAssignedPickupUnit({
     id: string;
     title: string;
     type: AssetType;
+    availableToBook: boolean;
     assetModelId: string | null;
     sequentialId: string | null;
     assetModel: { name: string } | null;
@@ -1302,6 +1316,14 @@ async function verifyAssignedPickupUnit({
 
   if (pickupAsset.type !== AssetType.INDIVIDUAL) {
     return { valid: true, status: "valid", assignedUnitLabel };
+  }
+  if (pickupAsset.availableToBook === false) {
+    return {
+      valid: false,
+      status: "unavailable",
+      assignedUnitLabel,
+      error: "This item is currently out of service and cannot be borrowed.",
+    };
   }
 
   // First resolve QR IDs through the QR table to their linked physical Asset.
@@ -1455,12 +1477,14 @@ export async function confirmStudentPreparationPickup({
   organizationId,
   operationId,
   borrowerUserId,
+  staffUserId,
   hints,
   verificationValue,
 }: {
   organizationId: string;
   operationId: string;
   borrowerUserId: string;
+  staffUserId?: string;
   hints: Parameters<typeof checkoutBooking>[0]["hints"];
   verificationValue?: string;
 }) {
@@ -1502,7 +1526,7 @@ export async function confirmStudentPreparationPickup({
       await checkoutBooking({
         id: operation.bookingId,
         organizationId,
-        userId: borrowerUserId,
+        userId: staffUserId ?? borrowerUserId,
         hints,
         activeWindow,
       });
@@ -1513,7 +1537,7 @@ export async function confirmStudentPreparationPickup({
         id: operation.bookingId,
         organizationId,
         assetIds: [pickupAsset.id],
-        userId: borrowerUserId,
+        userId: staffUserId ?? borrowerUserId,
         hints,
       });
     }
@@ -1529,6 +1553,13 @@ export async function confirmStudentPreparationPickup({
     data: {
       status: PREPARATION_PICKED_UP,
       completedAt: new Date(),
+      ...(staffUserId
+        ? {
+            reviewedByUserId: staffUserId,
+            reviewComment: "Pickup confirmed by Staff.",
+            reviewedAt: new Date(),
+          }
+        : {}),
     },
   });
   if (updated.count !== 1) {

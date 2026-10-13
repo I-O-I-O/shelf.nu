@@ -3,6 +3,10 @@ import { db } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { deduplicateStaffInventoryRows } from "~/modules/asset/staff-inventory-view";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
+import {
+  classifyIoioReport,
+  IOIO_REPORT_LABELS,
+} from "~/modules/ioio-student/report-problem.shared";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import { createNote } from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
@@ -10,6 +14,7 @@ import { ShelfError } from "~/utils/error";
 export type LabIssueSeverity = "critical" | "attention";
 export type LabIssueKind =
   | "report"
+  | "general-report"
   | "incomplete-kit"
   | "overdue-loan"
   | "out-of-stock"
@@ -31,10 +36,26 @@ export type LabIssue = {
   detail: string;
   href: string;
   targetUnavailable?: boolean;
-  resolution?: {
-    operationId: string;
-  };
 };
+
+const LAB_ISSUE_OPERATIONS_VIEWS: Partial<Record<LabIssueKind, string>> = {
+  report: "broken",
+  "incomplete-kit": "broken",
+  "general-report": "general",
+  "overdue-loan": "overdue",
+  "return-check": "returns",
+  "returned-with-issue": "returned-with-issues",
+  preparation: "to-prepare",
+  "cancelled-pickup": "cancelled-pickups",
+  "ready-for-pickup": "ready-for-pickup",
+  "annual-access": "access-approvals",
+};
+
+/** Route each actionable Lab status issue to its Operations queue. */
+export function getLabIssueOperationsHref(kind: LabIssueKind) {
+  const view = LAB_ISSUE_OPERATIONS_VIEWS[kind];
+  return view ? `/operations?view=${view}` : undefined;
+}
 
 export type LabStatus = {
   totalIssues: number;
@@ -43,6 +64,7 @@ export type LabStatus = {
   lowStock: number;
   outOfStock: number;
   unresolvedReports: number;
+  generalReports: number;
   incompleteKits: number;
   importWarnings: number;
   pendingReservationRequests: number;
@@ -53,16 +75,6 @@ export type LabStatus = {
   readyForPickup: number;
   annualAccessApprovals: number;
   issues: LabIssue[];
-};
-
-const REPORT_LABELS: Record<string, string> = {
-  ITEM_MISSING: "Item missing",
-  ITEM_DAMAGED: "Item damaged",
-  WRONG_LOCATION: "Wrong location",
-  LOCATION_FULL: "Location full",
-  CANNOT_FIND: "Can't find item",
-  KIT_INCOMPLETE: "Kit incomplete",
-  OTHER: "Operational report",
 };
 
 type QuantityAssetCandidate = {
@@ -118,9 +130,12 @@ function getReportReference(
 export async function resolveLabIssue({
   organizationId,
   operationId,
+  resolveRelatedReports = true,
 }: {
   organizationId: string;
   operationId: string;
+  /** Bulk selection should resolve only the explicitly selected report rows. */
+  resolveRelatedReports?: boolean;
 }) {
   const operation = await db.ioioWriteOperation.findFirst({
     where: {
@@ -148,15 +163,22 @@ export async function resolveLabIssue({
   }
 
   const result = await db.ioioWriteOperation.updateMany({
-    where: {
-      organizationId,
-      operationType: "REPORT_PROBLEM",
-      status: "SUCCEEDED",
-      reportType: operation.reportType,
-      assetId: operation.assetId,
-      kitId: operation.kitId,
-      locationId: operation.locationId,
-    },
+    where: resolveRelatedReports
+      ? {
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+          reportType: operation.reportType,
+          assetId: operation.assetId,
+          kitId: operation.kitId,
+          locationId: operation.locationId,
+        }
+      : {
+          id: operationId,
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+        },
     data: {
       status: "RESOLVED",
       completedAt: new Date(),
@@ -187,6 +209,7 @@ export async function returnBrokenAssetToService({
   staffUserId: string;
 }) {
   const brokenTypes = [
+    "ITEM_MISSING",
     "ITEM_DAMAGED",
     "ITEM_NOT_WORKING",
     "PART_MISSING",
@@ -343,6 +366,90 @@ export async function returnBrokenAssetToService({
     );
 
     return { assetId: asset.id, title: asset.title, status: "AVAILABLE" };
+  });
+}
+
+/** Resolve a reviewed broken-item report while keeping its exact unit disabled. */
+export async function resolveBrokenAssetOutOfService({
+  organizationId,
+  operationId,
+}: {
+  organizationId: string;
+  operationId: string;
+}) {
+  const brokenTypes = [
+    "ITEM_MISSING",
+    "ITEM_DAMAGED",
+    "ITEM_NOT_WORKING",
+    "PART_MISSING",
+    "KIT_INCOMPLETE",
+  ];
+
+  return db.$transaction(async (tx) => {
+    const operation = await tx.ioioWriteOperation.findFirst({
+      where: {
+        id: operationId,
+        organizationId,
+        operationType: "REPORT_PROBLEM",
+        status: "SUCCEEDED",
+        reportType: { in: brokenTypes },
+        assetId: { not: null },
+      },
+      select: { id: true, assetId: true, reportType: true },
+    });
+    if (!operation?.assetId) {
+      throw new ShelfError({
+        cause: null,
+        message: "This broken item is no longer waiting for review.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const asset = await tx.asset.findFirst({
+      where: {
+        id: operation.assetId,
+        organizationId,
+        type: AssetType.INDIVIDUAL,
+      },
+      select: { id: true, availableToBook: true },
+    });
+    if (!asset) {
+      throw new ShelfError({
+        cause: null,
+        message: "The reported physical unit could not be found.",
+        label: "Operations",
+        status: 404,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const resolved = await tx.ioioWriteOperation.updateMany({
+      where: {
+        organizationId,
+        operationType: "REPORT_PROBLEM",
+        status: "SUCCEEDED",
+        reportType: operation.reportType,
+        assetId: asset.id,
+      },
+      data: { status: "RESOLVED", completedAt: new Date() },
+    });
+    if (!resolved.count) {
+      throw new ShelfError({
+        cause: null,
+        message: "This broken item is no longer waiting for review.",
+        label: "Operations",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    await tx.asset.update({
+      where: { id: asset.id, organizationId },
+      data: { availableToBook: false },
+    });
+    return { assetId: asset.id, status: "OUT_OF_SERVICE" as const };
   });
 }
 
@@ -598,7 +705,7 @@ export async function getLabStatus({
         operation.reportType === "RETURN_ITEM"
           ? "Kit return waiting for Staff check."
           : "Returned with an issue. Staff inspection is required.",
-      href: `/bookings/return-check/${operation.id}`,
+      href: getLabIssueOperationsHref("return-check")!,
     })
   );
   const returnedWithIssueItems: LabIssue[] = returnedWithIssueOperations.map(
@@ -610,7 +717,7 @@ export async function getLabStatus({
       detail:
         getStudentReturnIssueComment(operation.description) ??
         "The Student reported a problem. Staff review is required.",
-      href: `/bookings/return-check/${operation.id}`,
+      href: getLabIssueOperationsHref("returned-with-issue")!,
     })
   );
 
@@ -719,24 +826,37 @@ export async function getLabStatus({
     const key = `${operation.reportType}:${referenceId}`;
     if (seenReportKeys.has(key)) continue;
     seenReportKeys.add(key);
-    const label = REPORT_LABELS[operation.reportType] ?? "Operational report";
+    const classification = classifyIoioReport(operation.reportType);
+    const label =
+      IOIO_REPORT_LABELS[
+        operation.reportType as keyof typeof IOIO_REPORT_LABELS
+      ] ?? "Operational report";
     const reference = getReportReference(operation, references);
     const isIncompleteKit = operation.reportType === "KIT_INCOMPLETE";
     const targetUnavailable = Boolean(
       (operation.assetId || operation.kitId || operation.locationId) &&
         (!reference || reference.href === null)
     );
+    const kind: LabIssueKind =
+      classification === "equipment-condition"
+        ? isIncompleteKit
+          ? "incomplete-kit"
+          : "report"
+        : "general-report";
     reportIssues.push({
       id: `report:${operation.id}`,
-      kind: isIncompleteKit ? "incomplete-kit" : "report",
-      severity: "critical",
+      kind,
+      severity:
+        classification === "equipment-condition" ? "critical" : "attention",
       title: reference ? `${label}: ${reference.label}` : label,
       detail: targetUnavailable
         ? "The linked item is no longer active. Review the submitted report."
         : "Staff review is required.",
-      href: reference?.href ?? "/reports/operational",
+      href:
+        getLabIssueOperationsHref(kind) ??
+        reference?.href ??
+        "/reports/operational",
       targetUnavailable,
-      resolution: { operationId: operation.id },
     });
   }
 
@@ -746,7 +866,7 @@ export async function getLabStatus({
     severity: "attention",
     title: "Overdue loan",
     detail: `Due ${formatDueDate(loan.to)}.`,
-    href: `/bookings/${loan.id}`,
+    href: getLabIssueOperationsHref("overdue-loan")!,
   }));
 
   const importIssues: LabIssue[] = importOperations.map((operation) => ({
@@ -784,7 +904,7 @@ export async function getLabStatus({
             preparationTaskCount === 1 ? "" : "s"
           } to prepare`,
           detail: "Prepare equipment and move it to the Pickup Zone.",
-          href: "/operations?view=to-prepare",
+          href: getLabIssueOperationsHref("preparation")!,
         },
       ]
     : [];
@@ -798,7 +918,7 @@ export async function getLabStatus({
             annualAccessApprovalCount === 1 ? "" : "s"
           } need review`,
           detail: "Review Student borrowing access requests.",
-          href: "/operations?view=access-approvals",
+          href: getLabIssueOperationsHref("annual-access")!,
         },
       ]
     : [];
@@ -859,7 +979,7 @@ export async function getLabStatus({
         detail: operation.reviewComment?.startsWith("Pickup expired")
           ? "Pickup expired. Return it from the Pickup Zone."
           : `${borrower} cancelled a prepared pickup. Return it from the Pickup Zone.`,
-        href: "/operations?view=cancelled-pickups",
+        href: getLabIssueOperationsHref("cancelled-pickup")!,
       };
     }
   );
@@ -880,7 +1000,11 @@ export async function getLabStatus({
   const incompleteKits = reportIssues.filter(
     (issue) => issue.kind === "incomplete-kit"
   ).length;
-  const unresolvedReports = reportIssues.length - incompleteKits;
+  const generalReports = reportIssues.filter(
+    (issue) => issue.kind === "general-report"
+  ).length;
+  const unresolvedReports =
+    reportIssues.length - generalReports - incompleteKits;
   const outOfStock = quantityIssues.filter(
     (issue) => issue.kind === "out-of-stock"
   ).length;
@@ -902,6 +1026,7 @@ export async function getLabStatus({
     lowStock,
     outOfStock,
     unresolvedReports,
+    generalReports,
     incompleteKits,
     importWarnings,
     pendingReservationRequests: pendingReservationRequestCount,

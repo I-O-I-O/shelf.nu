@@ -162,8 +162,8 @@ type BorrowPhysicalUnit = {
 };
 
 function getPhysicalUnitUnavailableMessage(unit: BorrowPhysicalUnit) {
-  if (unit.status === AssetStatus.AVAILABLE && !unit.availableToBook) {
-    return `${unit.title} is temporarily unavailable and cannot be borrowed. Ask a TA if you think this kit should be available.`;
+  if (!unit.availableToBook) {
+    return "This item is currently out of service and cannot be borrowed.";
   }
   return `${unit.title} is no longer available.`;
 }

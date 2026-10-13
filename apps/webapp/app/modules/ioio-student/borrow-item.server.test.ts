@@ -934,6 +934,7 @@ describe("IOIO borrow_item", () => {
     dbMock.asset.findFirst
       .mockResolvedValueOnce(product)
       .mockResolvedValueOnce(unit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
     dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
     getIoioAvailabilityMock.mockResolvedValue({
       totalActive: 2,
@@ -993,8 +994,7 @@ describe("IOIO borrow_item", () => {
         { context, request }
       )
     ).rejects.toMatchObject({
-      message:
-        "Makey Kit #003 is temporarily unavailable and cannot be borrowed. Ask a TA if you think this kit should be available.",
+      message: "This item is currently out of service and cannot be borrowed.",
       status: 409,
     });
   });
@@ -1023,6 +1023,7 @@ describe("IOIO borrow_item", () => {
     dbMock.asset.findFirst
       .mockResolvedValueOnce(product)
       .mockResolvedValueOnce(unit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
     dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
     getIoioAvailabilityMock.mockResolvedValue({
       totalActive: 1,
@@ -1059,6 +1060,59 @@ describe("IOIO borrow_item", () => {
         data: expect.objectContaining({ source: "IOIO_HAVE_ITEM" }),
       })
     );
+  });
+
+  it("does not let I have the kit borrow a physical unit reported out of service", async () => {
+    const product = {
+      ...asset,
+      id: "product-a",
+      title: "Makey Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "model-a",
+    };
+    const unit = {
+      id: "unit-3",
+      title: "Makey Makey Kit #003",
+      status: "AVAILABLE" as const,
+      availableToBook: false,
+      assetModelId: "model-a",
+      assetKits: [],
+      qrCodes: [{ id: "qr-3" }],
+    };
+    dbMock.asset.findFirst
+      .mockResolvedValueOnce(product)
+      .mockResolvedValueOnce(unit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
+    dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 1,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      staffReservationFrom: null,
+      staffReservationTo: null,
+      availableWithoutStaffReservations: 0,
+    });
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: product.id,
+          candidate_asset_ids: [unit.id],
+          scanned_asset_id: unit.id,
+          scanned_qr_id: "qr-3",
+          borrow_mode: "I_HAVE_ITEM",
+          kit_id: null,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).rejects.toMatchObject({ status: 409 });
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
   });
 
   it.each(["001", "#001"])(

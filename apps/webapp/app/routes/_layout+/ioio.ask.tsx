@@ -5,6 +5,7 @@ import {
   useActionData,
   useFetcher,
   useLoaderData,
+  useNavigation,
 } from "react-router";
 import {
   data,
@@ -54,6 +55,10 @@ import {
   reportProblem,
   type PreparedReportProposal,
 } from "~/modules/ioio-student/report-problem.server";
+import {
+  getAssistantActionFeedback,
+  isSubmittedAssistantMessage,
+} from "~/modules/ioio-student/report-submission-feedback";
 import {
   cancelReturnItem,
   prepareReturnProblemReport,
@@ -344,9 +349,11 @@ function displayAssistantText(value: string) {
 function BorrowCard({
   proposal,
   onAction,
+  isSubmitting,
 }: {
   proposal: PreparedBorrowProposal;
   onAction: (token: string) => void;
+  isSubmitting: boolean;
 }) {
   return (
     <Form
@@ -396,6 +403,7 @@ function BorrowCard({
           type="submit"
           name="intent"
           value="confirm-borrow"
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl bg-red-600 px-4 font-semibold text-white hover:bg-red-700"
         >
           Confirm borrow
@@ -405,6 +413,7 @@ function BorrowCard({
           name="intent"
           value="cancel-borrow"
           formNoValidate
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl border border-gray-300 bg-white px-4 font-semibold text-gray-800 hover:bg-gray-50"
         >
           Cancel
@@ -417,9 +426,11 @@ function BorrowCard({
 function ReturnCard({
   proposal,
   onAction,
+  isSubmitting,
 }: {
   proposal: PreparedReturnProposal;
   onAction: (token: string) => void;
+  isSubmitting: boolean;
 }) {
   return (
     <Form
@@ -459,6 +470,7 @@ function ReturnCard({
           type="submit"
           name="intent"
           value="confirm-return"
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl bg-red-600 px-4 font-semibold text-white hover:bg-red-700"
         >
           Confirm return
@@ -468,6 +480,7 @@ function ReturnCard({
           name="intent"
           value="prepare-return-report"
           formNoValidate
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl border border-red-300 bg-white px-4 font-semibold text-red-800 hover:bg-red-50"
         >
           Report a problem
@@ -477,6 +490,7 @@ function ReturnCard({
           name="intent"
           value="cancel-return"
           formNoValidate
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl border border-gray-300 bg-white px-4 font-semibold text-gray-800 hover:bg-gray-50"
         >
           Cancel
@@ -489,9 +503,11 @@ function ReturnCard({
 function ReportCard({
   proposal,
   onAction,
+  isSubmitting,
 }: {
   proposal: PreparedReportProposal;
   onAction: (token: string) => void;
+  isSubmitting: boolean;
 }) {
   return (
     <Form
@@ -556,6 +572,7 @@ function ReportCard({
           type="submit"
           name="intent"
           value="confirm-report"
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl bg-red-600 px-4 font-semibold text-white hover:bg-red-700"
         >
           Submit report
@@ -565,6 +582,7 @@ function ReportCard({
           name="intent"
           value="cancel-report"
           formNoValidate
+          disabled={isSubmitting}
           className="min-h-11 rounded-xl border border-gray-300 bg-white px-4 font-semibold text-gray-800 hover:bg-gray-50"
         >
           Cancel
@@ -575,26 +593,24 @@ function ReportCard({
 }
 
 function ActionStatus({
-  actionState,
+  actionResult,
+  isSubmitting,
 }: {
-  actionState: ActionState | undefined;
+  actionResult: unknown;
+  isSubmitting: boolean;
 }) {
-  if (!actionState?.status || actionState.status === "prepared") return null;
-  const text =
-    actionState.status === "submitted"
-      ? actionState.kind === "borrow"
-        ? "Your borrow was recorded in Shelf."
-        : actionState.kind === "return"
-        ? "Your return was recorded in Shelf."
-        : "Your problem report was submitted for TA review."
-      : actionState.status === "duplicate"
-      ? "Shelf already recorded this action; no duplicate was created."
-      : actionState.status === "cancelled"
-      ? "The proposal was cancelled."
-      : "Shelf could not complete that action.";
+  const feedback = getAssistantActionFeedback(actionResult, isSubmitting);
+  if (!feedback) return null;
   return (
-    <p className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-      {text}
+    <p
+      role={feedback.ok ? "status" : "alert"}
+      className={`rounded-2xl border p-4 text-sm ${
+        feedback.ok
+          ? "border-green-200 bg-green-50 font-semibold text-green-900"
+          : "border-red-200 bg-red-50 font-semibold text-red-800"
+      }`}
+    >
+      {feedback.message}
     </p>
   );
 }
@@ -603,6 +619,7 @@ export default function IoioAsk() {
   const { chatScope } = useLoaderData<typeof loader>();
   const actionResult = useActionData<typeof action>();
   const fetcher = useFetcher<typeof action>();
+  const navigation = useNavigation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatHistoryStore>({
     activeChatId: null,
@@ -619,6 +636,9 @@ export default function IoioAsk() {
   const pendingQuestion = useRef<string | null>(null);
   const syncedChatSignature = useRef<string | null>(null);
   const actionState = actionResult as unknown as ActionState | undefined;
+  const isSubmittingProposal =
+    navigation.state !== "idle" &&
+    Boolean(navigation.formData?.has("confirmationToken"));
   const chatStorageKey = getChatHistoryStorageKey("student", chatScope);
 
   useEffect(() => {
@@ -885,7 +905,12 @@ export default function IoioAsk() {
                         : "rounded-bl-md border border-gray-200 bg-white text-gray-800"
                     }`}
                   >
-                    <p className="whitespace-pre-wrap">{message.content}</p>
+                    {isSubmittedAssistantMessage(
+                      message.answer,
+                      submittedProposalToken
+                    ) ? null : (
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    )}
                     {message.answer ? (
                       <>
                         {message.answer.borrowProposal &&
@@ -898,6 +923,7 @@ export default function IoioAsk() {
                           <BorrowCard
                             proposal={message.answer.borrowProposal}
                             onAction={setSubmittedProposalToken}
+                            isSubmitting={isSubmittingProposal}
                           />
                         ) : null}
                         {message.answer.returnProposal &&
@@ -910,6 +936,7 @@ export default function IoioAsk() {
                           <ReturnCard
                             proposal={message.answer.returnProposal}
                             onAction={setSubmittedProposalToken}
+                            isSubmitting={isSubmittingProposal}
                           />
                         ) : null}
                         {message.answer.proposal &&
@@ -922,6 +949,7 @@ export default function IoioAsk() {
                           <ReportCard
                             proposal={message.answer.proposal}
                             onAction={setSubmittedProposalToken}
+                            isSubmitting={isSubmittingProposal}
                           />
                         ) : null}
                         {message.answer.displayAssets?.length ? (
@@ -952,7 +980,10 @@ export default function IoioAsk() {
                 </div>
               ) : null}
               {submittedProposalToken ? (
-                <ActionStatus actionState={actionState} />
+                <ActionStatus
+                  actionResult={actionResult}
+                  isSubmitting={isSubmittingProposal}
+                />
               ) : null}
               {actionReportProposal &&
               !actionWasResolved(
@@ -964,6 +995,7 @@ export default function IoioAsk() {
                 <ReportCard
                   proposal={actionReportProposal}
                   onAction={setSubmittedProposalToken}
+                  isSubmitting={isSubmittingProposal}
                 />
               ) : null}
             </div>

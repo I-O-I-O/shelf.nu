@@ -67,13 +67,13 @@ export function getIoioSettingsTabs(isPersonal: boolean) {
   return isPersonal
     ? [{ to: "backup", content: "Backup" }]
     : [
-        { to: "emails", content: "Emails" },
         { to: "lab-information", content: "Lab information" },
         { to: "access-approval", content: "Access approval" },
+        { to: "team", content: "IOIO Users" },
+        { to: "emails", content: "Emails" },
+        { to: "card-access", content: "IOIO Lab Access" },
         { to: "ai", content: "AI" },
         { to: "backup", content: "Backup" },
-        { to: "card-access", content: "IOIO Lab Access" },
-        { to: "team", content: "IOIO Users" },
       ];
 }
 

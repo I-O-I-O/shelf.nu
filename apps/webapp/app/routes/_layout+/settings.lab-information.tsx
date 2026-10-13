@@ -29,6 +29,10 @@ import {
 import { Overrides } from "~/components/working-hours/overrides/overrides";
 import { EnableWorkingHoursForm } from "~/components/working-hours/toggle-working-hours-form";
 import { WeeklyScheduleForm } from "~/components/working-hours/weekly-schedule-form";
+import {
+  getBrokenSectionSettings,
+  saveBrokenSectionLocation,
+} from "~/modules/ioio-lab-information/broken-section.server";
 import { BUILT_IN_LAB_INFO_SECTIONS } from "~/modules/ioio-lab-information/sections.shared";
 import {
   addLabTA,
@@ -132,11 +136,18 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       canManageWorkingHours = false;
     }
 
-    const [information, workingHours] = await Promise.all([
-      getStaffLabInformation(organizationId),
-      getWorkingHoursForOrganization(organizationId),
-    ]);
-    return payload({ ...information, workingHours, canManageWorkingHours });
+    const [information, workingHours, brokenSectionSettings] =
+      await Promise.all([
+        getStaffLabInformation(organizationId),
+        getWorkingHoursForOrganization(organizationId),
+        getBrokenSectionSettings(organizationId),
+      ]);
+    return payload({
+      ...information,
+      ...brokenSectionSettings,
+      workingHours,
+      canManageWorkingHours,
+    });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -170,6 +181,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
         })
       : await request.formData();
     const intent = String(formData.get("intent") ?? "");
+
+    if (intent === "save-broken-section") {
+      const locationId = String(formData.get("locationId") ?? "");
+      await saveBrokenSectionLocation({ organizationId, locationId });
+      return payload({ success: true, message: "Broken section saved." });
+    }
 
     if (intent === "save-content") {
       const sectionKey = String(formData.get("sectionKey") ?? "");
@@ -710,6 +727,35 @@ export default function LabInformationSettingsPage() {
           {actionError}
         </p>
       ) : null}
+
+      <section className="mb-5 rounded-lg border border-gray-200 bg-white p-4">
+        <div className="mb-3">
+          <h2 className="font-semibold text-gray-900">Broken section</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Choose the Shelf location where Students should place damaged or
+            unsafe equipment. This is separate from the ordinary Return section.
+          </p>
+        </div>
+        <Form method="post" className="flex flex-wrap items-end gap-3">
+          <input type="hidden" name="intent" value="save-broken-section" />
+          <label className="min-w-64 flex-1 text-sm font-medium text-gray-800">
+            Broken section location
+            <select
+              name="locationId"
+              defaultValue={information.brokenSectionLocationId}
+              className="mt-1 block min-h-11 w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-normal"
+            >
+              <option value="">No location configured</option>
+              {information.brokenSectionOptions.map((location) => (
+                <option key={location.id} value={location.id}>
+                  {location.path}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button type="submit">Save broken section</Button>
+        </Form>
+      </section>
 
       {active?.kind === "opening-hours" ? (
         <div className="space-y-4">

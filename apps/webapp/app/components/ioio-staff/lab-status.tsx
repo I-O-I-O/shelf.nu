@@ -1,36 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Bell, CheckCircle2 } from "lucide-react";
-import { Link, useFetcher, useRevalidator } from "react-router";
+import { Activity, AlertTriangle, Bell, ChevronRight } from "lucide-react";
+import { Link } from "react-router";
 import type {
   LabIssue,
   LabStatus,
 } from "~/modules/ioio-staff/lab-status.server";
 
 function IssueRow({ issue }: { issue: LabIssue }) {
-  const fetcher = useFetcher();
-  const revalidator = useRevalidator();
-  const isResolving = fetcher.state !== "idle";
-
-  useEffect(() => {
-    if (
-      fetcher.state === "idle" &&
-      fetcher.data &&
-      typeof fetcher.data === "object" &&
-      "success" in fetcher.data &&
-      fetcher.data.success === true
-    ) {
-      void revalidator.revalidate();
-    }
-  }, [fetcher.data, fetcher.state, revalidator]);
-
   return (
-    <li className="relative rounded-xl border border-gray-100 px-3 py-2.5 transition hover:border-red-200 hover:bg-red-50">
+    <li className="rounded-xl border border-gray-100 transition hover:border-red-200 hover:bg-red-50">
       <Link
         to={issue.href}
         aria-label={`${issue.title}: ${issue.detail}`}
-        className="absolute inset-0 z-0 rounded-xl focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
-      />
-      <div className="pointer-events-none relative z-10 flex items-start gap-3">
+        className="flex items-center gap-3 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
+      >
         <div className="min-w-0 flex-1">
           <span className="block text-sm font-bold text-gray-950">
             {issue.title}
@@ -39,28 +22,11 @@ function IssueRow({ issue }: { issue: LabIssue }) {
             {issue.detail}
           </span>
         </div>
-        {issue.resolution ? (
-          <fetcher.Form
-            method="post"
-            action="/api/ioio-staff-notifications"
-            className="pointer-events-auto shrink-0"
-          >
-            <input type="hidden" name="intent" value="resolve" />
-            <input
-              type="hidden"
-              name="operationId"
-              value={issue.resolution.operationId}
-            />
-            <button
-              type="submit"
-              disabled={isResolving}
-              className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-bold text-gray-600 transition hover:border-red-200 hover:text-red-800 disabled:cursor-wait disabled:opacity-60"
-            >
-              {isResolving ? "Saving" : "Mark complete"}
-            </button>
-          </fetcher.Form>
-        ) : null}
-      </div>
+        <ChevronRight
+          aria-hidden="true"
+          className="size-4 shrink-0 text-gray-400"
+        />
+      </Link>
     </li>
   );
 }
@@ -88,6 +54,11 @@ function IssueSummary({ status }: { status: LabStatus }) {
       href: "/operations?view=broken",
     },
     {
+      label: "General",
+      count: status.generalReports,
+      href: "/operations?view=general",
+    },
+    {
       label: "Items to prepare",
       count: status.preparationTasks,
       href: "/operations?view=to-prepare",
@@ -109,14 +80,14 @@ function IssueSummary({ status }: { status: LabStatus }) {
     },
   ] as const;
   return (
-    <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+    <div className="mt-4 grid auto-rows-fr grid-cols-2 items-stretch gap-2 sm:grid-cols-4">
       {summaries.map(({ label, count, href }) => (
         <Link
           key={label}
           to={href}
-          className="rounded-xl bg-gray-50 px-3 py-2 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
+          className="flex h-full min-w-0 flex-col rounded-xl bg-gray-50 px-3 py-2 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
         >
-          <p className="text-[0.68rem] font-bold uppercase tracking-wide text-gray-500">
+          <p className="break-words text-[0.68rem] font-bold uppercase tracking-wide text-gray-500">
             {label}
           </p>
           <p className="mt-0.5 text-lg font-black text-gray-950">{count}</p>
@@ -127,7 +98,7 @@ function IssueSummary({ status }: { status: LabStatus }) {
 }
 
 export function LabStatusCard({ status }: { status: LabStatus }) {
-  const visibleIssues = status.issues.slice(0, 8);
+  const visibleIssues = status.issues.slice(0, 3);
   return (
     <section
       aria-labelledby="lab-status-heading"
@@ -136,9 +107,6 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.16em] text-red-700">
-            Operations
-          </p>
           <h2
             id="lab-status-heading"
             className="mt-1 text-xl font-black tracking-tight text-gray-950"
@@ -153,22 +121,10 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
           >
             View all
           </Link>
-          {status.severity === "healthy" ? (
-            <CheckCircle2
-              aria-label="No current issues"
-              className="size-6 shrink-0 text-green-600"
-            />
-          ) : (
-            <AlertTriangle
-              aria-label={`${status.totalIssues} current issues`}
-              className={
-                "size-6 shrink-0 " +
-                (status.severity === "critical"
-                  ? "text-red-700"
-                  : "text-orange-500")
-              }
-            />
-          )}
+          <Activity
+            aria-label={`${status.totalIssues} current issues`}
+            className="size-6 shrink-0 text-gray-500"
+          />
         </div>
       </div>
       <IssueSummary status={status} />
@@ -191,7 +147,7 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
           </ul>
           {status.issues.length > visibleIssues.length ? (
             <p className="mt-3 text-xs text-gray-500">
-              Showing the first {visibleIssues.length} issues.
+              Showing 3 of {status.issues.length} items.
             </p>
           ) : null}
         </section>
