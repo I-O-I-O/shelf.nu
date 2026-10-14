@@ -37,6 +37,7 @@ import {
 import { computeBookingAssetRemainingToCheckOut } from "~/modules/booking/service.server";
 import {
   archiveIoioItems,
+  getIoioAssetLifecycleRedirectTarget,
   trashIoioItems,
 } from "~/modules/ioio-staff/archive.server";
 import { getTeamMembersForQuantityCustody } from "~/modules/team-member/service.server";
@@ -110,6 +111,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         entity: PermissionEntity.asset,
         action: PermissionAction.read,
       });
+
+    const lifecycleRedirect = await getIoioAssetLifecycleRedirectTarget({
+      organizationId,
+      assetId: id,
+    });
+    if (lifecycleRedirect) return redirect(lifecycleRedirect);
 
     const asset = await getAsset({
       id,
@@ -383,12 +390,18 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           trashedById: userId,
         });
         sendNotification({
-          title: "Item moved to Trash",
-          message: "The item can be restored from Trash.",
+          title: "Item deleted",
+          message: "The item was moved to Trash and can be restored later.",
           icon: { name: "success", variant: "success" },
           senderId: userId,
         });
-        return redirect("/assets");
+        const requestedReturnTo = formData.get("redirectTo");
+        const inventoryReturnTo =
+          typeof requestedReturnTo === "string" &&
+          /^\/assets(?:\?.*)?$/.test(requestedReturnTo)
+            ? safeRedirect(requestedReturnTo, "/assets")
+            : "/assets";
+        return redirect(inventoryReturnTo);
       }
 
       case "delete": {

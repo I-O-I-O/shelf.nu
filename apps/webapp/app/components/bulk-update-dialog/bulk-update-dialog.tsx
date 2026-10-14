@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect } from "react";
+import { forwardRef, useCallback, useEffect, useRef } from "react";
 import type { ElementRef, ReactNode } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 
@@ -12,8 +12,10 @@ import {
   selectedBulkItemsAtom,
   selectedBulkItemsCountAtom,
 } from "~/atoms/list";
+import type { ListItemData } from "~/components/list/list-item";
 import { useSearchParams } from "~/hooks/search-params";
 import useFetcherWithReset from "~/hooks/use-fetcher-with-reset";
+import type { AssetLifecycleIntent } from "~/modules/asset/lifecycle-intent";
 import { isFormProcessing } from "~/utils/form";
 import { tw } from "~/utils/tw";
 import Icon from "../icons/icon";
@@ -148,7 +150,14 @@ type DialogContentChildrenProps = {
   fetcherData?: Record<string, any>;
 };
 
+export type BulkUpdateSuccessContext = {
+  fetcherData?: Record<string, unknown>;
+  selectedItems: ListItemData[];
+};
+
 type BulkUpdateDialogContentProps = CommonBulkDialogProps & {
+  /** Explicit Staff Inventory lifecycle action sent to the route action. */
+  intent?: AssetLifecycleIntent;
   /**
    * Additional className to dialog
    */
@@ -171,7 +180,7 @@ type BulkUpdateDialogContentProps = CommonBulkDialogProps & {
   /**
    * This will be called when the request was success
    */
-  onSuccess?: () => void;
+  onSuccess?: (context: BulkUpdateSuccessContext) => void;
   /**
    * Content to be rendered inside the Dialog.
    * It can either be a `ReactNode` or it can be a function returning `ReactNode`
@@ -234,6 +243,7 @@ const BulkUpdateDialogContent = forwardRef<
     title = `Update ${type}`,
     description,
     actionUrl,
+    intent,
     arrayFieldId,
     skipCloseOnSuccess = false,
     keepSelectionOnSuccess = false,
@@ -251,6 +261,8 @@ const BulkUpdateDialogContent = forwardRef<
   const closeBulkDialog = useSetAtom(closeBulkDialogAtom);
 
   const selectedItems = useAtomValue(selectedBulkItemsAtom);
+  const selectedItemsRef = useRef(selectedItems);
+  selectedItemsRef.current = selectedItems;
   const totalItemsSelected = useAtomValue(selectedBulkItemsCountAtom);
   const setSelectedItems = useSetAtom(selectedBulkItemsAtom);
 
@@ -273,6 +285,13 @@ const BulkUpdateDialogContent = forwardRef<
    * `skipCloseOnSuccess`).
    */
   const handleBulkActionSuccess = useCallback(() => {
+    // Snapshot the response and selection before closing resets the fetcher
+    // and clearing the atom removes the selected item data.
+    const successContext = {
+      fetcherData: fetcher.data as Record<string, unknown> | undefined,
+      selectedItems: selectedItemsRef.current,
+    };
+
     if (!keepSelectionOnSuccess) {
       setSelectedItems([]);
     }
@@ -281,8 +300,9 @@ const BulkUpdateDialogContent = forwardRef<
       handleCloseDialog();
     }
 
-    onSuccess && onSuccess();
+    onSuccess?.(successContext);
   }, [
+    fetcher.data,
     keepSelectionOnSuccess,
     setSelectedItems,
     skipCloseOnSuccess,
@@ -337,6 +357,7 @@ const BulkUpdateDialogContent = forwardRef<
           action={actionUrl ? actionUrl : `/api/assets/bulk-update-${type}`}
           className={tw("px-6 pb-6", formClassName)}
         >
+          {intent ? <input type="hidden" name="intent" value={intent} /> : null}
           <input
             type="hidden"
             name="currentSearchParams"

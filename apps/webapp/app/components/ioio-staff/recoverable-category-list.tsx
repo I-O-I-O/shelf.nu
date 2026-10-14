@@ -1,5 +1,10 @@
 import { Form, Link } from "react-router";
 import { DateS } from "~/components/shared/date";
+import {
+  recoverablePermanentDeleteActionClassName,
+  recoverableRestoreActionClassName,
+  recoverableTrashActionClassName,
+} from "./recoverable-action-styles";
 
 export type RecoverableCategory = {
   id: string;
@@ -88,7 +93,7 @@ export function RecoverableCategoryList({
                 <input type="hidden" name="intent" value="restore-category" />
                 <button
                   type="submit"
-                  className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                  className={recoverableRestoreActionClassName}
                 >
                   Restore
                 </button>
@@ -103,7 +108,7 @@ export function RecoverableCategoryList({
                   <input type="hidden" name="intent" value="trash-category" />
                   <button
                     type="submit"
-                    className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-300 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                    className={recoverableTrashActionClassName}
                   >
                     Move to Trash
                   </button>
@@ -122,7 +127,7 @@ export function RecoverableCategoryList({
                   />
                   <button
                     type="submit"
-                    className="rounded-lg border border-red-600 bg-red-600 px-3 py-2 text-sm font-semibold text-white transition hover:border-red-800 hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                    className={recoverablePermanentDeleteActionClassName}
                   >
                     Delete permanently
                   </button>

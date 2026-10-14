@@ -15,7 +15,7 @@ const database = vi.hoisted(() => ({
     findFirst: vi.fn(),
     updateMany: vi.fn(),
   },
-  ioioArchivedItem: { findMany: vi.fn() },
+  ioioArchivedItem: { findMany: vi.fn(), findFirst: vi.fn() },
   annualAccessApproval: { count: vi.fn() },
   createNote: vi.fn(),
   recordEvent: vi.fn(),
@@ -55,6 +55,7 @@ describe("getLabStatus", () => {
     database.ioioWriteOperation.findFirst.mockResolvedValue(null);
     database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 0 });
     database.ioioArchivedItem.findMany.mockResolvedValue([]);
+    database.ioioArchivedItem.findFirst.mockResolvedValue(null);
     database.annualAccessApproval.count.mockResolvedValue(0);
     database.$transaction.mockImplementation((callback) => callback(database));
     database.asset.findFirst.mockResolvedValue(null);
@@ -116,6 +117,23 @@ describe("getLabStatus", () => {
       severity: "healthy",
       readyForPickup: 1,
       issues: [],
+    });
+  });
+
+  it("keeps Student access approvals in actionable Lab status", async () => {
+    database.annualAccessApproval.count.mockResolvedValue(2);
+
+    const result = await getLabStatus({ organizationId: "org-1" });
+
+    expect(result).toMatchObject({
+      totalIssues: 1,
+      annualAccessApprovals: 2,
+      issues: [
+        expect.objectContaining({
+          kind: "annual-access",
+          href: "/operations?view=access-approvals",
+        }),
+      ],
     });
   });
 
@@ -280,68 +298,39 @@ describe("getLabStatus", () => {
     });
   });
 
-  it("deduplicates low-stock logical items and separates incomplete kits", async () => {
-    database.booking.count.mockResolvedValue(1);
-    database.booking.findMany.mockResolvedValue([
-      { id: "booking-1", name: "Arduino checkout", to: new Date("2026-09-08") },
-    ]);
-    database.asset.findMany.mockResolvedValue([
-      {
-        id: "asset-1",
-        title: "Arduino Nano",
-        quantity: 2,
-        minQuantity: 3,
-        availableToBook: true,
-        updatedAt: new Date("2026-09-08"),
-        category: { name: "Boards & Embedded Systems" },
-        assetLocations: [{ location: { name: "Container A1-13" } }],
-      },
-      {
-        id: "asset-duplicate",
-        title: "Arduino Nano",
-        quantity: 1,
-        minQuantity: 3,
-        availableToBook: false,
-        updatedAt: new Date("2026-09-07"),
-        category: { name: "Boards & Embedded Systems" },
-        assetLocations: [],
-      },
-    ]);
-    database.ioioWriteOperation.findMany
-      .mockResolvedValueOnce([
-        {
-          id: "report-1",
-          reportType: "KIT_INCOMPLETE",
-          assetId: null,
-          kitId: "kit-1",
-          locationId: null,
-        },
-        {
-          id: "report-older",
-          reportType: "KIT_INCOMPLETE",
-          assetId: null,
-          kitId: "kit-1",
-          locationId: null,
-        },
-      ])
-      .mockResolvedValueOnce([]);
-    database.kit.findMany.mockResolvedValue([
-      { id: "kit-1", name: "Arduino Kit #014" },
-    ]);
+  it("does not turn low-quantity assets below their minimum into Lab status issues", async () => {
+    database.asset.findMany.mockImplementation(({ where }) => {
+      if (where.type === "QUANTITY_TRACKED") {
+        return Promise.resolve([
+          {
+            id: "asset-low-quantity-at-minimum",
+            title: "IOIO image upload verification",
+            quantity: 1,
+            minQuantity: 1,
+          },
+          {
+            id: "asset-below-minimum",
+            title: "Low quantity asset",
+            quantity: 2,
+            minQuantity: 5,
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
 
     const result = await getLabStatus({ organizationId: "org-1" });
 
-    expect(result.totalIssues).toBe(3);
-    expect(result.lowStock).toBe(1);
-    expect(result.incompleteKits).toBe(1);
-    expect(result.unresolvedReports).toBe(0);
-    expect(result.overdueLoans).toBe(1);
-    expect(result.issues.map((issue) => issue.id)).toEqual([
-      "report:report-1",
-      "overdue-loan:booking-1",
-      "low-stock:asset-1",
-    ]);
-    expect(result.issues.join()).not.toContain("asset-duplicate");
+    expect(result).toMatchObject({
+      totalIssues: 0,
+      severity: "healthy",
+      issues: [],
+    });
+    expect(
+      database.asset.findMany.mock.calls.some(
+        ([{ where }]) => where.type === "QUANTITY_TRACKED"
+      )
+    ).toBe(false);
   });
 
   it("resolves all active duplicate reports for the same task reference", async () => {
@@ -388,6 +377,7 @@ describe("getLabStatus", () => {
         data: expect.objectContaining({ status: "RESOLVED" }),
       })
     );
+    expect(database.asset.update).not.toHaveBeenCalled();
   });
 
   it("resolves only the selected report when bulk resolution requests exact rows", async () => {
@@ -418,6 +408,7 @@ describe("getLabStatus", () => {
         data: expect.objectContaining({ status: "RESOLVED" }),
       })
     );
+    expect(database.asset.update).not.toHaveBeenCalled();
   });
 
   it("surfaces cancelled prepared pickups in Staff status notifications", async () => {
@@ -517,6 +508,7 @@ describe("returnBrokenAssetToService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     database.$transaction.mockImplementation((callback) => callback(database));
+    database.ioioWriteOperation.findFirst.mockResolvedValue(null);
     database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
     database.asset.findFirst.mockResolvedValue({
       id: "unit-002",
@@ -527,6 +519,7 @@ describe("returnBrokenAssetToService", () => {
     database.asset.update.mockResolvedValue({});
     database.custody.findFirst.mockResolvedValue(null);
     database.bookingAsset.findFirst.mockResolvedValue(null);
+    database.ioioArchivedItem.findFirst.mockResolvedValue(null);
     database.createNote.mockResolvedValue({});
     database.recordEvent.mockResolvedValue({});
   });
@@ -631,5 +624,85 @@ describe("returnBrokenAssetToService", () => {
       where: { id: "unit-002", organizationId: "org-1" },
       data: { availableToBook: false },
     });
+  });
+
+  it("returns an explicitly selected out-of-service unit after its report was resolved", async () => {
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+
+    await expect(
+      (await import("./lab-status.server")).returnResolvedAssetToService({
+        organizationId: "org-1",
+        assetId: "unit-004",
+        staffUserId: "staff-1",
+      })
+    ).resolves.toEqual({
+      assetId: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+    });
+
+    expect(database.asset.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "unit-004",
+          organizationId: "org-1",
+          type: "INDIVIDUAL",
+        },
+      })
+    );
+    expect(database.asset.update).toHaveBeenCalledWith({
+      where: { id: "unit-004", organizationId: "org-1" },
+      data: { availableToBook: true },
+    });
+    expect(database.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not return a unit while another blocking issue remains open", async () => {
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.ioioWriteOperation.findFirst.mockResolvedValue({ id: "report-2" });
+
+    await expect(
+      (await import("./lab-status.server")).returnResolvedAssetToService({
+        organizationId: "org-1",
+        assetId: "unit-004",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+
+    expect(database.asset.update).not.toHaveBeenCalled();
+  });
+
+  it("does not return a unit while an active booking remains", async () => {
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.bookingAsset.findFirst.mockResolvedValue({ id: "active-loan" });
+
+    await expect(
+      (await import("./lab-status.server")).returnResolvedAssetToService({
+        organizationId: "org-1",
+        assetId: "unit-004",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+
+    expect(database.asset.update).not.toHaveBeenCalled();
   });
 });

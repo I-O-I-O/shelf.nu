@@ -7,7 +7,6 @@ import { data, Link, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import { RecoverableCategoryList } from "~/components/ioio-staff/recoverable-category-list";
 import { RecoverableInventoryList } from "~/components/ioio-staff/recoverable-inventory-list";
-import { PageBackLink } from "~/components/shared/page-back-link";
 import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   IOIO_ITEM_DISPOSITION,
@@ -133,9 +132,6 @@ export default function StaffArchivedInventoryPage() {
     <div className="space-y-5">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <PageBackLink to="/assets" className="mb-5">
-            Back to inventory
-          </PageBackLink>
           <p className="text-xs font-black uppercase tracking-[0.18em] text-red-800">
             Inventory
           </p>

@@ -6427,6 +6427,42 @@ describe("updateAssetMainImage", () => {
     expect(removeStorageImageObject).not.toHaveBeenCalled();
   });
 
+  it("treats an empty optional upload as no image update", async () => {
+    vitest.mocked(parseFileFormData).mockResolvedValue(new FormData());
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/new", { method: "POST" }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      isNewAsset: true,
+      allowEmptyFile: true,
+    });
+
+    expect(result).toBe(false);
+    expect(db.asset.update).not.toHaveBeenCalled();
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
+  it("leaves an existing image untouched when an edit has no new file", async () => {
+    vitest.mocked(parseFileFormData).mockResolvedValue(new FormData());
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/asset-1/edit", {
+        method: "POST",
+      }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      allowEmptyFile: true,
+    });
+
+    expect(result).toBe(false);
+    expect(db.asset.findFirst).not.toHaveBeenCalled();
+    expect(db.asset.update).not.toHaveBeenCalled();
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
   it("replaces an image and removes previous objects only after the DB write", async () => {
     //@ts-expect-error mock setup
     db.asset.findFirst.mockResolvedValue({

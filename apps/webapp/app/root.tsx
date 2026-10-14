@@ -24,6 +24,7 @@ import { Clarity } from "./components/marketing/clarity";
 import { CloudflareWebAnalytics } from "./components/marketing/cloudflare-web-analytics";
 import { AnimationProvider } from "./components/shared/animation-provider";
 import { TooltipProvider } from "./components/shared/tooltip";
+import { IOIO_BRAND_NAME } from "./config/ioio-brand";
 import { config } from "./config/shelf.config";
 import { db } from "./database/db.server";
 import { useNprogress } from "./hooks/use-nprogress";
@@ -62,8 +63,17 @@ export const handle = {
 
 export const links: LinksFunction = () => [
   { rel: "manifest", href: "/static/manifest.json" },
-  { rel: "apple-touch-icon", href: config.faviconPath },
-  { rel: "icon", href: config.faviconPath },
+  {
+    rel: "apple-touch-icon",
+    href: "/static/images/ioio-app-icon.png",
+    sizes: "512x512",
+  },
+  {
+    rel: "icon",
+    href: config.faviconPath,
+    type: "image/svg+xml",
+    sizes: "any",
+  },
   ...splashScreenLinks,
   { rel: "stylesheet", href: styles },
   { rel: "stylesheet", href: fontsStylesheetUrl },
@@ -75,7 +85,7 @@ export const links: LinksFunction = () => [
 
 export const meta: MetaFunction = () => [
   {
-    title: "shelf.nu",
+    title: IOIO_BRAND_NAME,
   },
 ];
 

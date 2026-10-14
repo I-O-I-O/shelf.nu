@@ -147,6 +147,12 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
     expect(updateAsset).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Updated Makey Kit" })
     );
+    expect(updateAssetMainImage).toHaveBeenCalledWith(
+      expect.objectContaining({ assetId: "asset-1", allowEmptyFile: true })
+    );
+    expect(updateAsset).toHaveBeenCalledWith(
+      expect.not.objectContaining({ mainImage: expect.anything() })
+    );
     expect(response).toBeInstanceOf(Response);
     expect((response as Response).headers.get("Location")).toBe("/assets");
   });

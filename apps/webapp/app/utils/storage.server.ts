@@ -481,6 +481,7 @@ export async function parseFileFormData({
   generateThumbnail = false,
   thumbnailSize = 108,
   maxFileSize = DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
+  allowEmptyFile = false,
 }: {
   request: Request;
   newFileName: string;
@@ -489,6 +490,8 @@ export async function parseFileFormData({
   generateThumbnail?: boolean;
   thumbnailSize?: number;
   maxFileSize?: number;
+  /** Treat the multipart parser's zero-byte no-selection placeholder as absent. */
+  allowEmptyFile?: boolean;
 }) {
   try {
     const uploadHandler = async (upload: any) => {
@@ -497,6 +500,28 @@ export async function parseFileFormData({
         upload?.type ?? upload?.contentType ?? file?.type ?? undefined;
 
       if (!file) {
+        return undefined;
+      }
+
+      // The browser submits an unselected file input as a zero-byte part with
+      // no filename and application/octet-stream. The multipart parser
+      // normalizes a missing filename to "file-upload", so recognize that
+      // exact placeholder before MIME validation. Named zero-byte uploads
+      // remain invalid image files.
+      const fileName =
+        typeof file?.name === "string"
+          ? file.name
+          : typeof upload?.filename === "string"
+          ? upload.filename
+          : undefined;
+      const isEmptyFileInput =
+        allowEmptyFile &&
+        file?.size === 0 &&
+        (fileName === "" ||
+          (fileName === "file-upload" &&
+            mimeType === "application/octet-stream"));
+
+      if (isEmptyFileInput) {
         return undefined;
       }
 

@@ -21,8 +21,6 @@ function createStatus(count: number): LabStatus {
     totalIssues: issues.length,
     severity: issues.length ? "attention" : "healthy",
     overdueLoans: 0,
-    lowStock: 0,
-    outOfStock: 0,
     unresolvedReports: 0,
     generalReports: issues.length,
     incompleteKits: 0,

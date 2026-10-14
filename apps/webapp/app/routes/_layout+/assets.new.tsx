@@ -476,6 +476,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
         userId: authSession.userId,
         organizationId,
         isNewAsset: true,
+        allowEmptyFile: true,
       }),
       createNote({
         content: `Asset was created by ${actor}.`,

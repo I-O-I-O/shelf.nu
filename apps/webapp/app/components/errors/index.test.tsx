@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Mutable per-test state driving the mocked hooks
 let mockRouteError: unknown;
 let mockUser: { id: string } | undefined;
+let mockPathname = "/kits";
 
 // why: useRouteError/useLocation need a data router; we drive them per test
 vi.mock("react-router", async () => {
@@ -21,7 +22,7 @@ vi.mock("react-router", async () => {
   return {
     ...actual,
     useRouteError: () => mockRouteError,
-    useLocation: () => ({ pathname: "/kits" }),
+    useLocation: () => ({ pathname: mockPathname, search: "?view=active" }),
   };
 });
 
@@ -201,6 +202,7 @@ describe("ErrorContent report-an-issue", () => {
     mockFeedbackModal.mockImplementation(() => null);
     mockRouteError = buildRouteError();
     mockUser = { id: "user_123" };
+    mockPathname = "/kits";
   });
 
   it("shows the report button for authenticated layout errors", () => {
@@ -239,12 +241,47 @@ describe("ErrorContent report-an-issue", () => {
     });
   });
 
-  it("still renders the error message and trace id", () => {
+  it("shows branded public copy without leaking error details", () => {
     renderErrorContent();
     expect(
-      screen.getByText(/Something went wrong while fetching the kit/)
+      screen.getByRole("heading", { name: "Something went wrong" })
     ).toBeTruthy();
-    expect(screen.getByText(/trace_789/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "We couldn't load this page right now. Try again, or contact IOIO staff if the problem continues."
+      )
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/fetching the kit|trace_789|Kit error/)
+    ).toBeNull();
+    expect(document.title).toBe("Something went wrong · IOIO Lab");
+    const errorLogo = screen.getByTestId("ioio-staff-logo");
+    expect(errorLogo.querySelector("img")?.getAttribute("alt")).toBe(
+      "IOIO Lab"
+    );
+    expect(errorLogo).toHaveClass("bg-red-800", "rounded-2xl");
+    expect(errorLogo).toHaveClass("w-40");
+    const image = errorLogo.querySelector("img");
+    expect(image?.getAttribute("src")).toBe(
+      "/static/images/ioio-logo-white.png"
+    );
+    expect(image?.className).toContain("object-contain");
+    expect(image?.getAttribute("src")).not.toContain("favicon");
+    expect(
+      screen.getByRole("link", { name: "Try again" }).getAttribute("href")
+    ).toBe("/kits?view=active");
+    expect(
+      screen.getByRole("link", { name: "Back to IOIO" }).getAttribute("href")
+    ).toBe("/home");
+  });
+
+  it("returns Student errors to the Student Desk", () => {
+    mockPathname = "/ioio/inventory";
+    renderErrorContent();
+
+    expect(
+      screen.getByRole("link", { name: "Back to IOIO" }).getAttribute("href")
+    ).toBe("/ioio");
   });
 
   it("hides the report UI instead of blanking the page when the modal crashes", async () => {
@@ -267,9 +304,7 @@ describe("ErrorContent report-an-issue", () => {
       ).toBeNull()
     );
     // The error page itself survives
-    expect(
-      screen.getByText(/Something went wrong while fetching the kit/)
-    ).toBeTruthy();
+    expect(screen.getByText(/couldn't load this page right now/i)).toBeTruthy();
 
     consoleError.mockRestore();
   });
@@ -279,21 +314,24 @@ describe("ErrorContent not-found screen", () => {
   beforeEach(() => {
     mockUser = { id: "user_123" };
     mockError404Handler.mockClear();
+    mockPathname = "/kits";
   });
 
-  it("renders a calm Not-found screen for a genuine 404 (not the workspace-switcher shape)", () => {
+  it("renders safe IOIO not-found copy for a genuine 404", () => {
     mockRouteError = buildNotFoundRouteError({
       message: "Audit asset not found",
     });
     renderErrorContent();
 
-    expect(screen.getByText("Not found")).toBeTruthy();
-    expect(screen.getByText(/Audit asset not found/)).toBeTruthy();
-    expect(screen.getByText(/trace_404/)).toBeTruthy();
-    // Not the alarming generic framing
-    expect(screen.queryByText(/Oops, something went wrong/i)).toBeNull();
-    // Only "Back to home" is offered — no Reload/Report actions
+    expect(screen.getByText("Page not found")).toBeTruthy();
+    expect(
+      screen.getByText("We couldn't find the page you're looking for.")
+    ).toBeTruthy();
+    expect(screen.queryByText(/Audit asset not found|trace_404/)).toBeNull();
+    expect(document.title).toBe("Page not found · IOIO Lab");
+    // A missing page only offers an IOIO landing action.
     expect(screen.queryByRole("link", { name: /reload page/i })).toBeNull();
+    expect(screen.getByRole("link", { name: "Back to IOIO" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: /report this issue/i })
     ).toBeNull();
@@ -303,16 +341,14 @@ describe("ErrorContent not-found screen", () => {
     mockRouteError = buildRouterNotFoundError();
     renderErrorContent();
 
-    expect(screen.getByText("Not found")).toBeTruthy();
-    // Generic not-found copy: there is no Shelf `message` to read (the
-    // router error's `.data` is a plain Error, not `{ error: {...} }`)
-    expect(screen.getByText(/doesn't exist/i)).toBeTruthy();
-    // Not the alarming generic framing
+    expect(screen.getByText("Page not found")).toBeTruthy();
+    expect(
+      screen.getByText("We couldn't find the page you're looking for.")
+    ).toBeTruthy();
     expect(screen.queryByText(/Oops, something went wrong/i)).toBeNull();
-    // No Shelf trace id to show for a router-generated 404
-    expect(screen.queryByText(/Trace id/)).toBeNull();
-    // Only "Back to home" is offered — no Reload/Report actions
+    // A missing page only offers an IOIO landing action.
     expect(screen.queryByRole("link", { name: /reload page/i })).toBeNull();
+    expect(screen.getByRole("link", { name: "Back to IOIO" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: /report this issue/i })
     ).toBeNull();
@@ -331,7 +367,7 @@ describe("ErrorContent not-found screen", () => {
     const props = mockError404Handler.mock.calls.at(-1)?.[0];
     expect(props?.additionalData).toEqual(additionalData);
     // Not our new not-found screen
-    expect(screen.queryByText("Not found")).toBeNull();
+    expect(screen.queryByText("Page not found")).toBeNull();
   });
 });
 
@@ -344,22 +380,19 @@ describe("ErrorContent rate-limited screen", () => {
     mockRouteError = buildRateLimitedRouteError();
     renderErrorContent();
 
-    expect(screen.getByText("Too many requests")).toBeTruthy();
+    expect(screen.getByText("Please wait a moment")).toBeTruthy();
     expect(screen.getByText(/doing that a bit too quickly/i)).toBeTruthy();
     // Not the alarming generic framing (SHELF-WEBAPP-21S/221's actual bug:
     // this text is what real users saw for a transient rate limit)
     expect(screen.queryByText(/Oops, something went wrong/i)).toBeNull();
-    expect(
-      screen.queryByText(/If the issues persists, please contact support/i)
-    ).toBeNull();
-    // Only "Back to home" is offered — no Reload/Report actions
-    expect(screen.queryByRole("link", { name: /reload page/i })).toBeNull();
+    expect(screen.queryByText(/contact support/i)).toBeNull();
+    expect(screen.getByRole("link", { name: "Try again" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: /report this issue/i })
     ).toBeNull();
   });
 
-  it("prefers a Shelf-shaped 429 payload's own message when present", () => {
+  it("does not render a Shelf-shaped 429 payload's internal message", () => {
     mockRouteError = buildRouteError({
       status: 429,
       message: "You've hit the bulk-action limit. Try again in a minute.",
@@ -367,7 +400,8 @@ describe("ErrorContent rate-limited screen", () => {
     });
     renderErrorContent();
 
-    expect(screen.getByText(/hit the bulk-action limit/i)).toBeTruthy();
+    expect(screen.getByText(/doing that a bit too quickly/i)).toBeTruthy();
+    expect(screen.queryByText(/bulk-action limit/i)).toBeNull();
   });
 });
 
@@ -381,7 +415,7 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
     window.env = { SENTRY_DSN: "test-dsn" } as Window["env"];
   });
 
-  it("captures an unexpected 4xx route error (e.g. 409) with source=error-boundary and the on-screen trace id", async () => {
+  it("captures an unexpected 4xx route error with its trace ID in Sentry tags", async () => {
     mockRouteError = buildRouteError({
       status: 409,
       message: "This asset is already booked for that window",
@@ -413,7 +447,7 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
     // Give the capture effect a chance to run, then assert it did not fire
     await waitFor(() =>
       expect(
-        screen.getByText(/This scan can no longer be updated/)
+        screen.getByText(/couldn't load this page right now/i)
       ).toBeTruthy()
     );
     expect(mockCaptureException).not.toHaveBeenCalled();
@@ -427,7 +461,9 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
     });
     renderErrorContent();
 
-    await waitFor(() => expect(screen.getByText("Not found")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("Page not found")).toBeTruthy()
+    );
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 
@@ -436,7 +472,7 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
     renderErrorContent();
 
     await waitFor(() =>
-      expect(screen.getByText("Too many requests")).toBeTruthy()
+      expect(screen.getByText("Please wait a moment")).toBeTruthy()
     );
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
@@ -445,7 +481,9 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
     mockRouteError = buildRouterNotFoundError();
     renderErrorContent();
 
-    await waitFor(() => expect(screen.getByText("Not found")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("Page not found")).toBeTruthy()
+    );
     expect(mockCaptureException).not.toHaveBeenCalled();
   });
 
@@ -468,7 +506,7 @@ describe("ErrorContent capturing route-error boundary failures to Sentry", () =>
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Something went wrong while fetching the kit/)
+        screen.getByText(/couldn't load this page right now/i)
       ).toBeTruthy()
     );
     expect(mockCaptureException).not.toHaveBeenCalled();

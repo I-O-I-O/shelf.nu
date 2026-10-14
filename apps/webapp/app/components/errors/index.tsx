@@ -3,6 +3,8 @@ import { Component, lazy, Suspense, useEffect, useState } from "react";
 import * as Sentry from "@sentry/react-router";
 import { isRouteErrorResponse, useLocation, useRouteError } from "react-router";
 
+import { StaffLogo } from "~/components/ioio-staff/staff-logo";
+import { IOIO_BRAND_NAME } from "~/config/ioio-brand";
 import { useUserData } from "~/hooks/use-user-data";
 import { isRouteError } from "~/utils/http";
 import { isExpectedErrorBoundaryStatus } from "~/utils/sentry-filters";
@@ -44,105 +46,61 @@ class ReportModalBoundary extends Component<
 
 type ErrorContentProps = { className?: string };
 
-/**
- * Splits a multi-line error message into objects with stable, cumulative-
- * offset ids so the rendered list has unique keys that don't depend on the
- * array index (satisfies react-doctor/no-array-index-as-key) and stays
- * stable across re-renders even if line content changes.
- */
-function splitIntoStableLines(message: string) {
-  let offset = 0;
-  return message.split("\n").map((content) => {
-    const id = `line-${offset}`;
-    offset += content.length + 1;
-    return { id, content };
-  });
-}
+export const IOIO_ERROR_COPY = {
+  unexpected:
+    "We couldn't load this page right now. Try again, or contact IOIO staff if the problem continues.",
+  notFound: "We couldn't find the page you're looking for.",
+  rateLimit:
+    "You're doing that a bit too quickly. Please wait a moment, then try again.",
+};
 
-/**
- * Renders the "(Trace id: …)" line shown under the error message on both
- * the not-found and generic error screens. Renders nothing when no trace id
- * is available (e.g. a client-side crash that never reached the server).
- */
-function TraceIdLine({ traceId }: { traceId?: string }) {
-  if (!traceId) {
-    return null;
-  }
-  return <p className="text-gray-400">(Trace id: {traceId})</p>;
-}
-
-/**
- * The "Back to home" action shared by the not-found and generic error
- * screens — factored out so both screens render the identical button
- * instead of duplicating its props.
- */
-function BackHomeButton() {
+export function BackToIoioButton({ to }: { to: string }) {
   return (
-    <Button to="/" variant="secondary" icon="home">
-      Back to home
+    <Button to={to} variant="secondary">
+      Back to IOIO
     </Button>
   );
 }
 
-type ErrorScreenLayoutProps = {
+const IOIO_PRIMARY_BUTTON_CLASS =
+  "!border-red-700 !bg-red-700 text-white focus-visible:!ring-red-700 active:!bg-red-800 enabled:hover:!bg-red-800";
+
+export type IoioErrorScreenProps = {
   className?: string;
   title: string;
   message: string;
-  traceId?: string;
-  /** Extra content rendered between the trace id line and the action
-   * buttons — e.g. the Sentry event id line on the generic screen. */
-  extra?: ReactNode;
-  /** The screen's action buttons. Content differs per screen (the
-   * not-found screen only offers "Back to home"; the generic screen also
-   * offers Reload / Report), so the caller owns this slot. */
   actions: ReactNode;
 };
 
 /**
- * Shared centered "error screen" chrome — icon, heading, message body, and
- * trace id line — used by both the not-found screen and the generic
- * "something went wrong" screen so they don't duplicate this layout block.
- * Screen-specific content (extra info line, action buttons) is supplied by
- * the caller via `extra`/`actions`.
+ * Shared standalone IOIO error screen. It is intentionally independent of
+ * the staff/student shells so it can render when either shell failed.
  */
-function ErrorScreenLayout({
+export function IoioErrorScreen({
   className,
   title,
   message,
-  traceId,
-  extra,
   actions,
-}: ErrorScreenLayoutProps) {
-  // Preserve newlines as <br/> without injecting HTML: split the message on
-  // "\n" and interleave <br/> elements between segments. Keeps the same
-  // visual output as the previous dangerouslySetInnerHTML approach while
-  // avoiding any raw HTML injection. Uses cumulative-offset ids so keys are
-  // stable when the message text changes (not derived from the array index).
-  const messageLines = splitIntoStableLines(message);
-
+}: IoioErrorScreenProps) {
   return (
     <div
       className={tw(
-        "flex size-full h-dvh items-center justify-center",
+        "flex min-h-dvh w-full items-center justify-center bg-white px-4 py-12",
         className
       )}
     >
-      <div className="flex flex-col items-center text-center">
-        <span className="mb-5 size-14 text-primary">
-          <ErrorIcon />
-        </span>
-        <h2 className="mb-2">{title}</h2>
-        <p className="max-w-[550px]">
-          {messageLines.map((line, i) => (
-            <span key={line.id}>
-              {i > 0 && <br />}
-              {line.content}
-            </span>
-          ))}
+      <div className="flex w-full max-w-xl flex-col items-center text-center">
+        <div className="mb-4">
+          <StaffLogo large />
+        </div>
+        <p className="mb-5 text-sm font-semibold tracking-wide text-gray-700">
+          {IOIO_BRAND_NAME}
         </p>
-        <TraceIdLine traceId={traceId} />
-        {extra}
-        <div className="mt-8 flex gap-3">{actions}</div>
+        <h1 className="mb-2 text-2xl font-bold text-gray-900">{title}</h1>
+        <p className="max-w-[550px] text-gray-600">{message}</p>
+        <div className="mt-7 flex flex-wrap justify-center gap-3">
+          {actions}
+        </div>
       </div>
     </div>
   );
@@ -155,10 +113,10 @@ function ErrorScreenLayout({
  * - The benign workspace-switcher case (`<Error404Handler/>`): the resource
  *   exists but belongs to another of the user's organizations.
  * - A genuine 404 that is NOT the workspace-switcher shape: a calm
- *   "Not found" screen. This includes both Shelf-thrown 404s (`{ error }`
+ *   not-found screen. This includes both Shelf-thrown 404s (`{ error }`
  *   payload) and router-generated 404s for an unmatched/stale URL (a plain
  *   `Error` payload) — see `isNotFound` below.
- * - Everything else: the generic "Oops, something went wrong" screen.
+ * - Everything else: a generic, IOIO-branded error screen.
  *
  * Also captures failures to Sentry: unhandled client-side `Error` instances
  * (JS crashes), and route-error 4xx responses that aren't already captured
@@ -179,13 +137,9 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
    * instead of leaving a button that blanks the page when clicked */
   const [reportBroken, setReportBroken] = useState(false);
 
-  // `rawTitle` is the error's own title, if any, BEFORE either screen's
-  // fallback is applied — the not-found screen falls back to "Not found",
-  // the generic screen falls back to "Oops, something went wrong".
-  let rawTitle: string | undefined;
-  let title = "Oops, something went wrong";
-  let message =
-    "There was an unexpected error. Please refresh to try again. If the issues persists, please contact support.";
+  let reportErrorTitle: string | undefined;
+  let reportErrorMessage = "An unexpected application error occurred.";
+  let sentryMessage = reportErrorMessage;
   let traceId: string | undefined;
   let errorLabel: string | undefined;
   let errorStatus: string | undefined;
@@ -197,17 +151,19 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
   }
 
   if (isRouteError(response)) {
-    message = response.data.error.message;
-    rawTitle = response.data.error.title;
-    title = rawTitle || "Oops, something went wrong";
+    sentryMessage = response.data.error.message;
+    reportErrorMessage = sentryMessage;
+    reportErrorTitle = response.data.error.title;
     traceId = response.data.error.traceId;
     errorLabel = response.data.error.label;
   }
 
   /* For client-side crashes the rendered message is a generic fallback, so
    * attach the real error message to the report instead */
-  const reportErrorMessage =
-    response instanceof Error ? response.message : message;
+  if (response instanceof Error) {
+    reportErrorMessage = response.message;
+    sentryMessage = response.message;
+  }
 
   const error404 = parse404ErrorData(response);
 
@@ -254,7 +210,7 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
    * server-side — `error()` in http.server.ts only routes 5xx (and
    * uncaught errors) to Sentry via `Logger.error`; handled 4xx land on the
    * low-severity log trail instead. Capture them here so they're findable
-   * by the same trace id shown to the user. 5xx is excluded (already
+   * by their trace id in internal reports. 5xx is excluded (already
    * captured server-side — capturing again here would double-report), and
    * the benign workspace-switcher case is excluded entirely (expected
    * cross-org UX, not a bug).
@@ -279,27 +235,25 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
     !isExpectedErrorBoundaryStatus(statusCode);
 
   /**
-   * Body copy for the not-found screen. A Shelf-thrown 404 carries its own
-   * `message` (extracted above); a router-generated 404 (unmatched/stale
-   * URL) has no Shelf payload, so `message` is still at its generic
-   * "Oops, something went wrong" default — swap in copy appropriate for a
-   * calm not-found screen instead.
+   * Public not-found copy is deliberately static; Shelf's error payload may
+   * contain resource identifiers or internal route details.
    */
-  const notFoundMessage = isRouteError(response)
-    ? message
-    : "The page or item you're looking for doesn't exist.";
+  const notFoundMessage = IOIO_ERROR_COPY.notFound;
 
-  /**
-   * Body copy for the rate-limit screen. Same fallback pattern as
-   * `notFoundMessage`: a Shelf-shaped 429 payload (e.g. the mobile
-   * `enforceUserRateLimit` ShelfError) carries its own `message`; the
-   * `appLoaderRateLimit` Hono-middleware 429 (this issue's actual source)
-   * has no Shelf payload, so `message` is still at its generic default —
-   * swap in copy appropriate for a calm "you're going too fast" screen.
-   */
-  const rateLimitMessage = isRouteError(response)
-    ? message
-    : "You're doing that a bit too quickly. Please wait a moment, then refresh the page.";
+  /** Keep rate-limit copy fixed so internal error payloads stay hidden. */
+  const rateLimitMessage = IOIO_ERROR_COPY.rateLimit;
+
+  const errorPageTitle = isNotFound
+    ? "Page not found"
+    : error404.isError404
+    ? "Page not found"
+    : isRateLimited
+    ? "Please wait a moment"
+    : "Something went wrong";
+
+  useEffect(() => {
+    document.title = `${errorPageTitle} · ${IOIO_BRAND_NAME}`;
+  }, [errorPageTitle]);
 
   // Capture unhandled Error instances (client-side crashes) client-side,
   // and capturable 4xx route errors (see shouldCaptureRouteError above).
@@ -331,7 +285,7 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
       // (see `isRouteError` above); a router-generated 404 has neither, so
       // both are omitted entirely here rather than sent as the literal
       // string "undefined".
-      Sentry.captureException(new Error(message), {
+      Sentry.captureException(new Error(sentryMessage), {
         tags: {
           source: "error-boundary",
           status: errorStatus,
@@ -345,7 +299,7 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
     response,
     error404.isError404,
     shouldCaptureRouteError,
-    message,
+    sentryMessage,
     traceId,
     errorLabel,
     errorStatus,
@@ -363,46 +317,63 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
 
   if (isNotFound) {
     return (
-      <ErrorScreenLayout
+      <IoioErrorScreen
         className={className}
-        title={rawTitle || "Not found"}
+        title={errorPageTitle}
         message={notFoundMessage}
-        traceId={traceId}
-        actions={<BackHomeButton />}
+        actions={
+          <BackToIoioButton
+            to={loc.pathname.startsWith("/ioio") ? "/ioio" : "/home"}
+          />
+        }
       />
     );
   }
 
   if (isRateLimited) {
     return (
-      <ErrorScreenLayout
+      <IoioErrorScreen
         className={className}
-        title={rawTitle || "Too many requests"}
+        title={errorPageTitle}
         message={rateLimitMessage}
-        traceId={traceId}
-        actions={<BackHomeButton />}
+        actions={
+          <>
+            <Button
+              to={`${loc.pathname}${loc.search}`}
+              reloadDocument
+              variant="primary"
+              className={IOIO_PRIMARY_BUTTON_CLASS}
+            >
+              Try again
+            </Button>
+            <BackToIoioButton
+              to={loc.pathname.startsWith("/ioio") ? "/ioio" : "/home"}
+            />
+          </>
+        }
       />
     );
   }
 
   return (
     <>
-      <ErrorScreenLayout
+      <IoioErrorScreen
         className={className}
-        title={title}
-        message={message}
-        traceId={traceId}
-        extra={
-          sentryEventId ? (
-            <p className="text-gray-400">(Error ID: {sentryEventId})</p>
-          ) : null
-        }
+        title={errorPageTitle}
+        message={IOIO_ERROR_COPY.unexpected}
         actions={
           <>
-            <BackHomeButton />
-            <Button to={loc.pathname} reloadDocument>
-              Reload page
+            <Button
+              to={`${loc.pathname}${loc.search}`}
+              reloadDocument
+              variant="primary"
+              className={IOIO_PRIMARY_BUTTON_CLASS}
+            >
+              Try again
             </Button>
+            <BackToIoioButton
+              to={loc.pathname.startsWith("/ioio") ? "/ioio" : "/home"}
+            />
             {user && !reportBroken ? (
               <Button
                 type="button"
@@ -435,7 +406,7 @@ export const ErrorContent = ({ className }: ErrorContentProps) => {
                 traceId,
                 sentryEventId: sentryEventId ?? undefined,
                 errorStatus,
-                errorTitle: title,
+                errorTitle: reportErrorTitle,
                 errorMessage: reportErrorMessage,
               }}
             />

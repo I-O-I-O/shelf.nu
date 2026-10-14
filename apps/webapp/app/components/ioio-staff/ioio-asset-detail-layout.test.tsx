@@ -79,6 +79,8 @@ describe("IoioAssetDetailLayout", () => {
   it("shows concise student availability and the requested details grid", () => {
     const { container } = renderDetail();
 
+    const backLink = screen.getByRole("link", { name: "Back to Inventory" });
+    expect(backLink.getAttribute("href")).toBe("/ioio");
     expect(screen.getByText("4 / 5 kits available")).toBeTruthy();
     expect(screen.queryByText("4 available · 1 unavailable")).toBeNull();
     expect(

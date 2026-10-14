@@ -1,7 +1,6 @@
-import { AssetType } from "@prisma/client";
+import { AssetType, type Prisma } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
-import { deduplicateStaffInventoryRows } from "~/modules/asset/staff-inventory-view";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import {
   classifyIoioReport,
@@ -17,8 +16,6 @@ export type LabIssueKind =
   | "general-report"
   | "incomplete-kit"
   | "overdue-loan"
-  | "out-of-stock"
-  | "low-stock"
   | "import-warning"
   | "reservation-request"
   | "return-check"
@@ -61,8 +58,6 @@ export type LabStatus = {
   totalIssues: number;
   severity: "healthy" | LabIssueSeverity;
   overdueLoans: number;
-  lowStock: number;
-  outOfStock: number;
   unresolvedReports: number;
   generalReports: number;
   incompleteKits: number;
@@ -76,21 +71,6 @@ export type LabStatus = {
   annualAccessApprovals: number;
   issues: LabIssue[];
 };
-
-type QuantityAssetCandidate = {
-  id: string;
-  title: string;
-  quantity: number | null;
-  minQuantity: number | null;
-  availableToBook: boolean;
-  updatedAt: Date;
-  category: { name: string } | null;
-  assetLocations: Array<{ location: { name: string } }>;
-};
-
-function formatQuantity(value: number | null) {
-  return value === null ? "0" : String(value);
-}
 
 function formatDueDate(value: Date) {
   return value.toISOString().slice(0, 10);
@@ -238,82 +218,12 @@ export async function returnBrokenAssetToService({
       });
     }
 
-    const asset = await tx.asset.findFirst({
-      where: { id: operation.assetId, organizationId },
-      select: { id: true, title: true, status: true, availableToBook: true },
+    const asset = await ensureIoioAssetCanReturnToService({
+      tx,
+      organizationId,
+      assetId: operation.assetId,
+      ignoreReportType: operation.reportType,
     });
-    if (!asset) {
-      throw new ShelfError({
-        cause: null,
-        message: "The broken item could not be found in this workspace.",
-        label: "Operations",
-        status: 404,
-        shouldBeCaptured: false,
-      });
-    }
-    if (asset.status !== "AVAILABLE") {
-      throw new ShelfError({
-        cause: null,
-        message:
-          "This item is still checked out, reserved, or in custody and cannot return to service yet.",
-        label: "Operations",
-        status: 409,
-        shouldBeCaptured: false,
-      });
-    }
-
-    const [custody, activeBooking, preparationHold, otherOpenReport] =
-      await Promise.all([
-        tx.custody.findFirst({
-          where: { assetId: asset.id },
-          select: { id: true },
-        }),
-        tx.bookingAsset.findFirst({
-          where: {
-            assetId: asset.id,
-            checkedInAt: null,
-            booking: {
-              organizationId,
-              status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
-              OR: [
-                { description: { not: IOIO_STAFF_RESERVATION_DESCRIPTION } },
-                { description: null },
-              ],
-            },
-          },
-          select: { id: true },
-        }),
-        tx.ioioWriteOperation.findFirst({
-          where: {
-            organizationId,
-            assetId: asset.id,
-            operationType: "IOIO_PREPARATION",
-            status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
-          },
-          select: { id: true },
-        }),
-        tx.ioioWriteOperation.findFirst({
-          where: {
-            organizationId,
-            assetId: asset.id,
-            operationType: "REPORT_PROBLEM",
-            status: "SUCCEEDED",
-            id: { not: operation.id },
-            reportType: { not: operation.reportType },
-          },
-          select: { id: true },
-        }),
-      ]);
-    if (custody || activeBooking || preparationHold || otherOpenReport) {
-      throw new ShelfError({
-        cause: null,
-        message:
-          "Resolve the remaining hold or issue before returning this item to service.",
-        label: "Operations",
-        status: 409,
-        shouldBeCaptured: false,
-      });
-    }
 
     const resolved = await tx.ioioWriteOperation.updateMany({
       where: {
@@ -367,6 +277,211 @@ export async function returnBrokenAssetToService({
 
     return { assetId: asset.id, title: asset.title, status: "AVAILABLE" };
   });
+}
+
+/**
+ * Explicitly restore a previously resolved physical unit. Generic report
+ * resolution deliberately leaves this persisted out-of-service condition
+ * alone, so Staff need a safe recovery path after a report has been closed.
+ */
+export async function returnResolvedAssetToService({
+  organizationId,
+  assetId,
+  staffUserId,
+}: {
+  organizationId: string;
+  assetId: string;
+  staffUserId: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const asset = await ensureIoioAssetCanReturnToService({
+      tx,
+      organizationId,
+      assetId,
+      requireIndividual: true,
+    });
+    if (asset.availableToBook) {
+      throw new ShelfError({
+        cause: null,
+        message: "This physical unit is already available for borrowing.",
+        label: "Inventory",
+        status: 409,
+        shouldBeCaptured: false,
+      });
+    }
+
+    await markIoioAssetAvailable({ tx, asset, organizationId, staffUserId });
+    return { assetId: asset.id, title: asset.title, status: "AVAILABLE" };
+  });
+}
+
+async function ensureIoioAssetCanReturnToService({
+  tx,
+  organizationId,
+  assetId,
+  ignoreReportType,
+  requireIndividual = false,
+}: {
+  tx: Prisma.TransactionClient;
+  organizationId: string;
+  assetId: string;
+  ignoreReportType?: string;
+  requireIndividual?: boolean;
+}) {
+  const asset = await tx.asset.findFirst({
+    where: {
+      id: assetId,
+      organizationId,
+      ...(requireIndividual ? { type: AssetType.INDIVIDUAL } : {}),
+    },
+    select: { id: true, title: true, status: true, availableToBook: true },
+  });
+  if (!asset) {
+    throw new ShelfError({
+      cause: null,
+      message: "The physical unit could not be found in this workspace.",
+      label: "Inventory",
+      status: 404,
+      shouldBeCaptured: false,
+    });
+  }
+  if (asset.status !== "AVAILABLE") {
+    throw new ShelfError({
+      cause: null,
+      message:
+        "This unit is still checked out or in custody and cannot return to service yet.",
+      label: "Inventory",
+      status: 409,
+      shouldBeCaptured: false,
+    });
+  }
+
+  const [archived, custody, activeBooking, preparationHold, openIssue] =
+    await Promise.all([
+      tx.ioioArchivedItem.findFirst({
+        where: {
+          organizationId,
+          itemType: "ASSET",
+          itemId: asset.id,
+          restoredAt: null,
+        },
+        select: { id: true },
+      }),
+      tx.custody.findFirst({
+        where: { assetId: asset.id },
+        select: { id: true },
+      }),
+      tx.bookingAsset.findFirst({
+        where: {
+          assetId: asset.id,
+          checkedInAt: null,
+          booking: {
+            organizationId,
+            status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
+            OR: [
+              { description: { not: IOIO_STAFF_RESERVATION_DESCRIPTION } },
+              { description: null },
+            ],
+          },
+        },
+        select: { id: true },
+      }),
+      tx.ioioWriteOperation.findFirst({
+        where: {
+          organizationId,
+          assetId: asset.id,
+          operationType: "IOIO_PREPARATION",
+          status: {
+            in: [
+              "PENDING_PREPARATION",
+              "READY_FOR_PICKUP",
+              "CANCELLED_PICKUP",
+              "ASSIGNED",
+            ],
+          },
+        },
+        select: { id: true },
+      }),
+      tx.ioioWriteOperation.findFirst({
+        where: {
+          organizationId,
+          assetId: asset.id,
+          operationType: "REPORT_PROBLEM",
+          status: { in: ["SUCCEEDED", "PROCESSING"] },
+          reportType: {
+            in: [
+              "ITEM_MISSING",
+              "ITEM_DAMAGED",
+              "ITEM_NOT_WORKING",
+              "PART_MISSING",
+              "KIT_INCOMPLETE",
+            ],
+          },
+          ...(ignoreReportType
+            ? {
+                OR: [
+                  { reportType: { not: ignoreReportType } },
+                  { status: "PROCESSING" },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true },
+      }),
+    ]);
+  if (archived || custody || activeBooking || preparationHold || openIssue) {
+    throw new ShelfError({
+      cause: null,
+      message:
+        "Resolve the remaining loan, preparation, report, or archive hold before returning this unit to service.",
+      label: "Inventory",
+      status: 409,
+      shouldBeCaptured: false,
+    });
+  }
+  return asset;
+}
+
+async function markIoioAssetAvailable({
+  tx,
+  asset,
+  organizationId,
+  staffUserId,
+}: {
+  tx: Prisma.TransactionClient;
+  asset: { id: string; title: string; availableToBook: boolean };
+  organizationId: string;
+  staffUserId: string;
+}) {
+  await tx.asset.update({
+    where: { id: asset.id, organizationId },
+    data: { availableToBook: true },
+  });
+  await createNote(
+    {
+      content: "Returned to service.",
+      type: "UPDATE",
+      userId: staffUserId,
+      assetId: asset.id,
+      organizationId,
+    },
+    tx
+  );
+  await recordEvent(
+    {
+      organizationId,
+      actorUserId: staffUserId,
+      action: "ASSET_STATUS_CHANGED",
+      entityType: "ASSET",
+      entityId: asset.id,
+      assetId: asset.id,
+      field: "availableToBook",
+      fromValue: asset.availableToBook,
+      toValue: true,
+      meta: { source: "IOIO_INVENTORY_RETURN_TO_SERVICE" },
+    },
+    tx
+  );
 }
 
 /** Resolve a reviewed broken-item report while keeping its exact unit disabled. */
@@ -469,7 +584,6 @@ export async function getLabStatus({
   const [
     overdueLoanCount,
     overdueLoans,
-    quantityAssets,
     reportOperations,
     importOperations,
     pendingReservationRequestCount,
@@ -501,26 +615,6 @@ export async function getLabStatus({
       },
       select: { id: true, to: true },
       orderBy: [{ to: "asc" }, { id: "asc" }],
-    }),
-    db.asset.findMany({
-      where: {
-        organizationId,
-        type: AssetType.QUANTITY_TRACKED,
-        minQuantity: { not: null },
-      },
-      select: {
-        id: true,
-        title: true,
-        quantity: true,
-        minQuantity: true,
-        availableToBook: true,
-        updatedAt: true,
-        category: { select: { name: true } },
-        assetLocations: {
-          select: { location: { select: { name: true } } },
-        },
-      },
-      orderBy: [{ title: "asc" }, { id: "asc" }],
     }),
     db.ioioWriteOperation.findMany({
       where: {
@@ -719,46 +813,6 @@ export async function getLabStatus({
         "The Student reported a problem. Staff review is required.",
       href: getLabIssueOperationsHref("returned-with-issue")!,
     })
-  );
-
-  const canonicalQuantityAssets = deduplicateStaffInventoryRows(
-    (quantityAssets as QuantityAssetCandidate[])
-      .filter((asset) => !archivedAssetIds.has(asset.id))
-      .filter((asset) => (asset.quantity ?? 0) <= (asset.minQuantity ?? 0))
-  );
-  const quantityIssues: LabIssue[] = canonicalQuantityAssets.flatMap(
-    (asset): LabIssue[] => {
-      const quantity = asset.quantity ?? 0;
-      const minQuantity = asset.minQuantity ?? 0;
-      const location = asset.assetLocations[0]?.location.name;
-      const locationSuffix = location ? ` in ${location}` : "";
-      if (quantity <= 0) {
-        return [
-          {
-            id: `out-of-stock:${asset.id}`,
-            kind: "out-of-stock" as const,
-            severity: "critical" as const,
-            title: `${asset.title} is out of stock`,
-            detail: `Quantity 0 of ${formatQuantity(
-              minQuantity
-            )} minimum${locationSuffix}.`,
-            href: `/assets/${asset.id}/overview`,
-          },
-        ];
-      }
-      return [
-        {
-          id: `low-stock:${asset.id}`,
-          kind: "low-stock" as const,
-          severity: "attention" as const,
-          title: `${asset.title} is low stock`,
-          detail: `${quantity} available, minimum ${formatQuantity(
-            minQuantity
-          )}${locationSuffix}.`,
-          href: `/assets/${asset.id}/overview`,
-        },
-      ];
-    }
   );
 
   const reportAssetIds = reportOperationsForBrokenItems.flatMap((operation) =>
@@ -984,11 +1038,11 @@ export async function getLabStatus({
     }
   );
 
+  // IOIO attention is reserved for operational work; Shelf quantity and
+  // minimum-stock settings remain available without creating attention items.
   const issues: LabIssue[] = [
     ...reportIssues,
     ...overdueIssues,
-    ...quantityIssues.filter((issue) => issue.kind === "out-of-stock"),
-    ...quantityIssues.filter((issue) => issue.kind === "low-stock"),
     ...importIssues,
     ...reservationIssues,
     ...preparationIssues,
@@ -1005,12 +1059,6 @@ export async function getLabStatus({
   ).length;
   const unresolvedReports =
     reportIssues.length - generalReports - incompleteKits;
-  const outOfStock = quantityIssues.filter(
-    (issue) => issue.kind === "out-of-stock"
-  ).length;
-  const lowStock = quantityIssues.filter(
-    (issue) => issue.kind === "low-stock"
-  ).length;
   const importWarnings = importIssues.length;
   const totalIssues = issues.length;
   const severity = totalIssues
@@ -1023,8 +1071,6 @@ export async function getLabStatus({
     totalIssues,
     severity,
     overdueLoans: overdueLoanCount,
-    lowStock,
-    outOfStock,
     unresolvedReports,
     generalReports,
     incompleteKits,

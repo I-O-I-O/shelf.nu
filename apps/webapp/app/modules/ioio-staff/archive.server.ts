@@ -22,6 +22,8 @@ export const IOIO_ITEM_DISPOSITION = {
   TRASH: "TRASH",
 } as const;
 
+const ACTIVE_BOOKING_STATUSES = ["RESERVED", "ONGOING", "OVERDUE"] as const;
+
 export type IoioItemDisposition =
   (typeof IOIO_ITEM_DISPOSITION)[keyof typeof IOIO_ITEM_DISPOSITION];
 
@@ -68,6 +70,35 @@ export async function getIoioArchivedItemIds({
   }
 
   return [...allArchivedIds];
+}
+
+/**
+ * Return a safe destination for an Asset URL that is no longer active.
+ * The lookup is organization-scoped; callers must authorize the current
+ * organization before using this result.
+ */
+export async function getIoioAssetLifecycleRedirectTarget({
+  organizationId,
+  assetId,
+}: {
+  organizationId: string;
+  assetId: string;
+}) {
+  const marker = await db.ioioArchivedItem.findFirst({
+    where: {
+      organizationId,
+      itemType: IOIO_ARCHIVE_ITEM_TYPE.ASSET,
+      itemId: assetId,
+      restoredAt: null,
+    },
+    orderBy: { archivedAt: "desc" },
+    select: { disposition: true },
+  });
+
+  if (!marker) return null;
+  return marker.disposition === IOIO_ITEM_DISPOSITION.TRASH
+    ? "/staff/trash"
+    : "/assets";
 }
 
 export async function getIoioArchivedCategoryIds({
@@ -465,6 +496,8 @@ async function moveIoioItemsToDisposition({
               where: { organizationId, id: { in: expandedAssetIds } },
               select: {
                 id: true,
+                status: true,
+                assetModelId: true,
                 categoryId: true,
                 category: { select: { name: true } },
                 assetLocations: {
@@ -503,6 +536,65 @@ async function moveIoioItemsToDisposition({
           status: 404,
           shouldBeCaptured: false,
         });
+      }
+
+      if (assets.length > 0) {
+        const assetModelIds = assets.flatMap((asset) =>
+          asset.assetModelId ? [asset.assetModelId] : []
+        );
+        const [custodyRows, activeBookings, modelBookingRequests] =
+          await Promise.all([
+            tx.custody.findMany({
+              where: { assetId: { in: expandedAssetIds } },
+              select: { assetId: true },
+            }),
+            tx.bookingAsset.findMany({
+              where: {
+                assetId: { in: expandedAssetIds },
+                booking: { status: { in: [...ACTIVE_BOOKING_STATUSES] } },
+              },
+              select: { assetId: true, bookingId: true },
+            }),
+            assetModelIds.length > 0
+              ? tx.bookingModelRequest.findMany({
+                  where: {
+                    assetModelId: { in: assetModelIds },
+                    fulfilledAt: null,
+                    booking: {
+                      status: { in: [...ACTIVE_BOOKING_STATUSES] },
+                    },
+                  },
+                  select: { assetModelId: true, bookingId: true },
+                })
+              : Promise.resolve([]),
+          ]);
+
+        if (
+          assets.some((asset) => asset.status !== "AVAILABLE") ||
+          custodyRows.length > 0
+        ) {
+          throw new ShelfError({
+            cause: null,
+            title: "Asset is currently in use",
+            message:
+              "One or more selected assets are checked out or in custody. Check them in before archiving or moving them to Trash.",
+            label: "Assets",
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        if (activeBookings.length > 0 || modelBookingRequests.length > 0) {
+          throw new ShelfError({
+            cause: null,
+            title: "Asset has an active booking",
+            message:
+              "One or more selected assets have an active booking. Remove them from the booking before archiving or moving them to Trash.",
+            label: "Assets",
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
       }
 
       const existing = await tx.ioioArchivedItem.findMany({

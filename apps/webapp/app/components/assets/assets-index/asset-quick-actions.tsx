@@ -100,6 +100,7 @@ export default function AssetQuickActions({
       >
         <DeleteAsset
           asset={asset}
+          behavior="trash"
           trigger={
             <Button
               type="button"

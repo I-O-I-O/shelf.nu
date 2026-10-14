@@ -1,5 +1,6 @@
 import { useZorm } from "react-zorm";
 import { z } from "zod";
+import { ASSET_LIFECYCLE_INTENT } from "~/modules/asset/lifecycle-intent";
 import {
   BulkUpdateDialogContent,
   type BulkUpdateSuccessContext,
@@ -24,7 +25,7 @@ export default function BulkArchiveDialog({
       title="Archive selected assets"
       description="The selected assets will be hidden from active Inventory and can be restored later."
       actionUrl="."
-      intent="bulk-archive"
+      intent={ASSET_LIFECYCLE_INTENT.ARCHIVE}
       arrayFieldId="assetIds"
       onSuccess={onSuccess}
     >

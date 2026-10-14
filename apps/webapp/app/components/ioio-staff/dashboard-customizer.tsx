@@ -251,7 +251,12 @@ export function DashboardCustomizer({
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" variant="primary" disabled={isSaving}>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    className="!border-red-700 !bg-red-700 text-white focus-visible:!ring-red-700 active:!bg-red-800 enabled:hover:!bg-red-800"
+                    disabled={isSaving}
+                  >
                     {isSaving ? "Saving..." : "Done"}
                   </Button>
                 </div>

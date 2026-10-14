@@ -21,10 +21,13 @@
 import type { PropsWithChildren } from "react";
 import { act, render } from "@testing-library/react";
 import { Provider, createStore } from "jotai";
+import { parseFormAny } from "react-zorm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { bulkDialogAtom } from "~/atoms/bulk-update-dialog";
 import { selectedBulkItemsAtom } from "~/atoms/list";
 import type { ListItemData } from "~/components/list/list-item";
+import { ASSET_LIFECYCLE_INTENT } from "~/modules/asset/lifecycle-intent";
 import type { BulkDialogType } from "./bulk-update-dialog";
 import { BulkUpdateDialogContent } from "./bulk-update-dialog";
 
@@ -82,11 +85,24 @@ const SELECTION = [
  * the render helper, the rerender helper and `open` cannot drift apart.
  */
 type DialogTestProps = {
+  intent?: (typeof ASSET_LIFECYCLE_INTENT)[keyof typeof ASSET_LIFECYCLE_INTENT];
   keepSelectionOnSuccess?: boolean;
   skipCloseOnSuccess?: boolean;
   allowBodyOverflow?: boolean;
   className?: string;
+  onSuccess?: (context: {
+    fetcherData?: Record<string, unknown>;
+    selectedItems: ListItemData[];
+  }) => void;
 };
+
+const inventoryLifecycleSchema = z.object({
+  intent: z.enum([
+    ASSET_LIFECYCLE_INTENT.ARCHIVE,
+    ASSET_LIFECYCLE_INTENT.TRASH,
+  ] as const),
+  assetIds: z.array(z.string()).min(1),
+});
 
 /**
  * Renders the dialog for a given `type` under a dedicated jotai store, then
@@ -163,6 +179,20 @@ describe("BulkUpdateDialogContent — post-success selection handling", () => {
     expect(utils.store.get(bulkDialogAtom).location).toBe(false);
   });
 
+  it("passes the successful response and selected items to onSuccess before clearing selection", async () => {
+    const onSuccess = vi.fn();
+    const utils = await open("trash", { onSuccess });
+    const response = { success: true, undo: { operation: "trash" } };
+
+    await resolveFetcher(utils, response);
+
+    expect(onSuccess).toHaveBeenCalledWith({
+      fetcherData: response,
+      selectedItems: SELECTION,
+    });
+    expect(utils.store.get(selectedBulkItemsAtom)).toEqual([]);
+  });
+
   it.each(["trash", "archive", "cancel", "delete-audit"] as const)(
     "still clears the selection on success for destructive type %s",
     async (type) => {
@@ -205,6 +235,46 @@ describe("BulkUpdateDialogContent — post-success selection handling", () => {
     expect(utils.store.get(selectedBulkItemsAtom)).toEqual(SELECTION);
     expect(utils.store.get(bulkDialogAtom).location).toBe(true);
   });
+});
+
+describe("BulkUpdateDialogContent — Staff Inventory lifecycle request", () => {
+  it("reproduces the old request failure when required intent is omitted", () => {
+    const oldFormData = new FormData();
+    oldFormData.set("currentSearchParams", "");
+    oldFormData.set("assetIds[0]", "asset-001");
+
+    const oldRequest = inventoryLifecycleSchema.safeParse(
+      parseFormAny(oldFormData)
+    );
+
+    expect(oldRequest.success).toBe(false);
+    if (!oldRequest.success) {
+      expect(oldRequest.error.flatten().fieldErrors).toEqual({
+        intent: ["Required"],
+      });
+    }
+  });
+
+  it.each([
+    ["trash", ASSET_LIFECYCLE_INTENT.TRASH],
+    ["archive", ASSET_LIFECYCLE_INTENT.ARCHIVE],
+  ] as const)(
+    "submits valid %s intent and Asset record IDs",
+    async (type, intent) => {
+      await open(type, { intent });
+      const form = document.querySelector("form");
+      expect(form).not.toBeNull();
+
+      const parsedRequest = parseFormAny(new FormData(form!));
+      expect(inventoryLifecycleSchema.safeParse(parsedRequest)).toMatchObject({
+        success: true,
+        data: {
+          intent,
+          assetIds: ["a1", "a2", "a3"],
+        },
+      });
+    }
+  );
 });
 
 /**

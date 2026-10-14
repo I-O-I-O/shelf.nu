@@ -24,6 +24,7 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
+import { StaffLogo } from "~/components/ioio-staff/staff-logo";
 import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
@@ -66,22 +67,6 @@ function readSavedNavigationOrder() {
   } catch {
     return defaultNavigationOrder;
   }
-}
-
-function StaffLogo({ compact = false }: { compact?: boolean }) {
-  return (
-    <div
-      className={`flex aspect-[316/129] items-center justify-center overflow-hidden rounded-2xl bg-red-800 p-1.5 ${
-        compact ? "w-24" : "w-32"
-      }`}
-    >
-      <img
-        src="/static/images/ioio-logo-white.png"
-        alt="IOIO Lab"
-        className="size-full object-contain"
-      />
-    </div>
-  );
 }
 
 export function StaffNavigation({
@@ -360,7 +345,7 @@ export default function StaffShell() {
         </aside>
 
         <div className="md:pl-60">
-          <header className="sticky top-0 z-20 border-b border-red-100 bg-white">
+          <header className="sticky top-0 z-20 bg-white">
             <div className="flex items-center justify-between gap-3 p-4">
               <Link
                 to="/home"

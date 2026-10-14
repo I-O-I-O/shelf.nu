@@ -4129,27 +4129,33 @@ export default function OperationsPage() {
                         </Form>
                       ) : null}
                       {compatibleAllFamily === "broken" ? (
-                        <Form method="post">
-                          <input
-                            type="hidden"
-                            name="intent"
-                            value="return-to-service-bulk"
-                          />
-                          {selectedAllEntries.map((entry) => (
+                        <>
+                          <p className="basis-full text-right text-xs text-gray-500">
+                            Resolving a report closes it; units stay out of
+                            service until Staff explicitly returns them.
+                          </p>
+                          <Form method="post">
                             <input
-                              key={entry.key}
                               type="hidden"
-                              name="assetIds"
-                              value={entry.id}
+                              name="intent"
+                              value="return-to-service-bulk"
                             />
-                          ))}
-                          <button
-                            type="submit"
-                            className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
-                          >
-                            Return to service
-                          </button>
-                        </Form>
+                            {selectedAllEntries.map((entry) => (
+                              <input
+                                key={entry.key}
+                                type="hidden"
+                                name="assetIds"
+                                value={entry.id}
+                              />
+                            ))}
+                            <button
+                              type="submit"
+                              className="rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-bold text-green-900 hover:bg-green-100"
+                            >
+                              Return to service
+                            </button>
+                          </Form>
+                        </>
                       ) : null}
                       {compatibleAllFamily === "returns" ? (
                         <>

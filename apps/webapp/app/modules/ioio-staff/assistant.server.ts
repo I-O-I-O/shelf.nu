@@ -42,8 +42,6 @@ async function answerOperationalQuestion({
       { label: "operational reports", count: status.unresolvedReports },
       { label: "incomplete kits", count: status.incompleteKits },
       { label: "overdue loans", count: status.overdueLoans },
-      { label: "out-of-stock items", count: status.outOfStock },
-      { label: "low-stock items", count: status.lowStock },
       { label: "import warnings", count: status.importWarnings },
     ]
       .filter((item) => item.count > 0)

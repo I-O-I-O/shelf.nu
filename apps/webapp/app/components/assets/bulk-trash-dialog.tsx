@@ -3,6 +3,7 @@ import { useLoaderData } from "react-router";
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { selectedBulkItemsAtom } from "~/atoms/list";
+import { ASSET_LIFECYCLE_INTENT } from "~/modules/asset/lifecycle-intent";
 import type { AssetIndexLoaderData } from "~/routes/_layout+/assets._index";
 import { isSelectingAllItems } from "~/utils/list";
 import {
@@ -31,10 +32,10 @@ export default function BulkTrashDialog({
     <BulkUpdateDialogContent
       ref={zo.ref}
       type="trash"
-      title={`Move ${totalSelected} items to trash`}
-      description="The selected items will be hidden from active Inventory and can be restored from Trash."
+      title={`Delete ${totalSelected} item${totalSelected === 1 ? "" : "s"}?`}
+      description="These items will be removed from Inventory and moved to Trash, where they can be restored later."
       actionUrl="."
-      intent="bulk-trash"
+      intent={ASSET_LIFECYCLE_INTENT.TRASH}
       arrayFieldId="assetIds"
       onSuccess={onSuccess}
     >
@@ -59,7 +60,7 @@ export default function BulkTrashDialog({
               width="full"
               disabled={disabled}
             >
-              Move to trash
+              Delete
             </Button>
           </div>
         </div>

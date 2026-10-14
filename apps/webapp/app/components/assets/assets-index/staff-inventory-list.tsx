@@ -719,6 +719,7 @@ function StaffInventoryRow({
   onToggle: () => void;
 }) {
   const { roles } = useUserRoleHelper();
+  const [searchParams] = useSearchParams();
   const location = getPrimaryLocation(item);
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
@@ -763,6 +764,11 @@ function StaffInventoryRow({
               <div className="flex min-w-0 items-center gap-2">
                 <Button
                   to={`/assets/${item.id}`}
+                  state={{
+                    inventoryReturnTo: `/assets${
+                      searchParams.size ? `?${searchParams}` : ""
+                    }`,
+                  }}
                   variant="link"
                   className="min-w-0 truncate p-0 text-left font-medium text-gray-900 hover:text-gray-700"
                   title={item.logicalTitle}
@@ -942,6 +948,9 @@ function StaffInventoryExpandedUnitsContent({
     entity: PermissionEntity.qr,
     action: PermissionAction.read,
   });
+  const canReturnUnitToService = roles?.some(
+    (role) => role === "ADMIN" || role === "OWNER"
+  );
   const selectedUnitSet = useMemo(
     () => new Set(selectedUnitIds),
     [selectedUnitIds]
@@ -1150,6 +1159,28 @@ function StaffInventoryExpandedUnitsContent({
                           <span>Change category</span>
                         </DropdownMenuItem>
                       ) : null}
+                      {canReturnUnitToService &&
+                      member.status === AssetStatus.AVAILABLE &&
+                      !member.availableToBook &&
+                      !member.blockingIssueReported &&
+                      !member.preparedPickupHeld &&
+                      member.custody.length === 0 &&
+                      member.bookingAssets.length === 0 ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-green-800"
+                          onSelect={() =>
+                            fetcher.submit(
+                              {
+                                intent: "return-unit-to-service",
+                                assetId: member.id,
+                              },
+                              { method: "post" }
+                            )
+                          }
+                        >
+                          <span>Return to service</span>
+                        </DropdownMenuItem>
+                      ) : null}
                       {canUpdate ? (
                         <DropdownMenuItem
                           className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2"
@@ -1198,7 +1229,7 @@ function StaffInventoryExpandedUnitsContent({
                           }
                         >
                           <Trash2Icon className="size-5 shrink-0" />
-                          <span>Move to trash</span>
+                          <span>Delete</span>
                         </DropdownMenuItem>
                       ) : null}
                     </DropdownMenuContent>
@@ -1266,9 +1297,9 @@ function ExpandedUnitActionDialog({
       ? `Archive ${assetIds.length} physical unit${
           assetIds.length === 1 ? "" : "s"
         }`
-      : `Move ${assetIds.length} physical unit${
+      : `Delete ${assetIds.length} physical unit${
           assetIds.length === 1 ? "" : "s"
-        } to trash`;
+        }?`;
   const [searchParams] = useSearchParams();
   const currentCategory =
     selectedUnits.length === 1 ? selectedUnits[0].category?.id ?? "" : "";
@@ -1371,12 +1402,12 @@ function ExpandedUnitActionDialog({
             <p className="text-sm text-gray-600">
               {action === "archive"
                 ? "These physical units will be hidden from active Inventory and can be restored later."
-                : "These physical units will be hidden from active Inventory and can be restored from Trash."}
+                : "These physical units will be removed from Inventory and moved to Trash, where they can be restored later."}
             </p>
             <ExpandedUnitDialogButtons
               busy={busy}
               onClose={onClose}
-              submitLabel={action === "archive" ? "Archive" : "Move to trash"}
+              submitLabel={action === "archive" ? "Archive" : "Delete"}
               danger
             />
           </fetcher.Form>
@@ -1448,6 +1479,7 @@ function StaffInventoryMobileRow({
   onToggle: () => void;
 }) {
   const { roles } = useUserRoleHelper();
+  const [searchParams] = useSearchParams();
   const location = getPrimaryLocation(item);
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
@@ -1487,6 +1519,11 @@ function StaffInventoryMobileRow({
         />
         <Button
           to={`/assets/${item.id}`}
+          state={{
+            inventoryReturnTo: `/assets${
+              searchParams.size ? `?${searchParams}` : ""
+            }`,
+          }}
           variant="link"
           className="min-w-0 truncate p-0 text-left font-medium text-gray-900 hover:text-gray-700"
           title={item.logicalTitle}
@@ -1817,7 +1854,7 @@ function StaffInventoryActions({
                   onSelect={() => openLifecycleDialog("trash")}
                 >
                   <Trash2Icon className="size-5 shrink-0" />
-                  <span>Move to trash</span>
+                  <span>Delete</span>
                 </DropdownMenuItem>
               ) : null}
             </DropdownMenuContent>

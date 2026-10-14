@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -134,6 +134,22 @@ describe("IOIO staff Loans navigation active state", () => {
 });
 
 describe("StaffShell account controls", () => {
+  it("keeps shell actions and content spacing without a header divider", () => {
+    renderStaffShell();
+
+    const header = screen.getByRole("banner");
+    expect(header).not.toHaveClass("border-b");
+    expect(
+      within(header).getByRole("button", {
+        name: "Open lab status notifications",
+      })
+    ).toBeInTheDocument();
+    expect(
+      within(header).getByRole("link", { name: /Open borrowing list/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveClass("pt-2");
+  });
+
   it("does not expose workspace switching or workspace management", async () => {
     const user = userEvent.setup();
     renderStaffShell();

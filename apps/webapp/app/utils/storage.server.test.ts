@@ -418,6 +418,74 @@ describe("unreadable image upload", () => {
     });
   });
 
+  it("reproduces an unselected file input being rejected as an unsupported image", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File([], "", { type: "application/octet-stream" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+      })
+    ).rejects.toMatchObject({
+      title: "Unsupported image format",
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+  });
+
+  it("omits an empty no-selection file part when optional uploads allow it", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File([], "", { type: "application/octet-stream" })
+    );
+
+    const parsed = await parseFileFormData({
+      request: new Request("http://localhost/assets/new", {
+        method: "POST",
+        body: form,
+      }),
+      newFileName: "asset-1/main",
+      bucketName: "assets",
+      allowEmptyFile: true,
+    });
+
+    expect(parsed.has("mainImage")).toBe(false);
+  });
+
+  it("still rejects a named unsupported file when optional uploads allow no selection", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File(["not an image"], "asset.txt", { type: "text/plain" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+        allowEmptyFile: true,
+      })
+    ).rejects.toMatchObject({
+      status: 400,
+      title: "Unsupported image format",
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+  });
+
   it("returns a useful validation error when the file exceeds its limit", async () => {
     const form = new FormData();
     form.append(
@@ -434,6 +502,7 @@ describe("unreadable image upload", () => {
         newFileName: "asset-1/main",
         bucketName: "assets",
         maxFileSize: 4,
+        allowEmptyFile: true,
       })
     ).rejects.toMatchObject({ status: 400, title: "File too large" });
   });

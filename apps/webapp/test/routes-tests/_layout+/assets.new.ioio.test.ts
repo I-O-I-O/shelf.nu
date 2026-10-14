@@ -135,7 +135,7 @@ describe("IOIO /assets/new route", () => {
     });
   });
 
-  it("creates an asset using the modern organization-scoped asset service", async () => {
+  it("creates an asset without requiring an image upload", async () => {
     const request = new Request("http://localhost/assets/new", {
       method: "POST",
       body: createFormData(),
@@ -160,6 +160,7 @@ describe("IOIO /assets/new route", () => {
         assetId: "asset-1",
         organizationId: "team-org-1",
         isNewAsset: true,
+        allowEmptyFile: true,
       })
     );
     expect(requirePermission).toHaveBeenCalledWith(

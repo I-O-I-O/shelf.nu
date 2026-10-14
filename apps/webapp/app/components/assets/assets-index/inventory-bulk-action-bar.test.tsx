@@ -30,7 +30,7 @@ describe("InventoryBulkActionBar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Change category" }));
     fireEvent.click(screen.getByRole("button", { name: "Change location" }));
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
-    fireEvent.click(screen.getByRole("button", { name: "Move to trash" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     fireEvent.click(screen.getByRole("button", { name: "Print labels / QR" }));
 
     expect(onChangeCategory).toHaveBeenCalledOnce();

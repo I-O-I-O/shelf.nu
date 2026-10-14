@@ -789,6 +789,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       assetId: id,
       userId: authSession.userId,
       organizationId,
+      allowEmptyFile: true,
     });
 
     /**

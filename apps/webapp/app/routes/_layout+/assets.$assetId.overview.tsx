@@ -12,7 +12,7 @@ import {
   PrinterIcon,
   Trash2Icon,
 } from "lucide-react";
-import { data, useFetcher, useLoaderData } from "react-router";
+import { data, redirect, useFetcher, useLoaderData } from "react-router";
 import type {
   MetaFunction,
   ActionFunctionArgs,
@@ -102,7 +102,10 @@ import {
 import { getRemindersForOverviewPage } from "~/modules/asset-reminder/service.server";
 import { getCustodyCardHolderUserId } from "~/modules/custody/utils";
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
-import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import {
+  getIoioArchivedItemIds,
+  getIoioAssetLifecycleRedirectTarget,
+} from "~/modules/ioio-staff/archive.server";
 import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import { isIoioPhysicalUnitBlockingReport } from "~/modules/ioio-student/report-problem.shared";
@@ -185,6 +188,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       entity: PermissionEntity.asset,
       action: PermissionAction.read,
     });
+
+    const lifecycleRedirect = await getIoioAssetLifecycleRedirectTarget({
+      organizationId,
+      assetId: id,
+    });
+    if (lifecycleRedirect) return redirect(lifecycleRedirect);
 
     const { locale, timeZone } = getClientHint(request);
 
@@ -1304,7 +1313,7 @@ export default function AssetOverview() {
                           className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-red-700 hover:bg-red-50"
                         >
                           <Trash2Icon className="size-4 shrink-0" />
-                          <span>Move to Trash</span>
+                          <span>Delete</span>
                         </Button>
                       }
                     />

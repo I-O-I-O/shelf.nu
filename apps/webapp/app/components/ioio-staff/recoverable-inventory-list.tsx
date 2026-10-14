@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { Form, Link } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
+import {
+  recoverablePermanentDeleteActionClassName,
+  recoverableRestoreActionClassName,
+  recoverableTrashActionClassName,
+} from "~/components/ioio-staff/recoverable-action-styles";
 import { SelectableRow } from "~/components/ioio-staff/selectable-row";
 import KitImage from "~/components/kits/kit-image";
 import { Button } from "~/components/shared/button";
@@ -78,52 +83,57 @@ export function RecoverableInventoryList({
   return (
     <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
       {items.length > 0 ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-4 py-3">
-          <label className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-            <input
-              type="checkbox"
-              checked={allSelected}
-              onChange={(event) => toggleAll(event.target.checked)}
-              className="size-4 rounded border-gray-300 text-red-700 focus:ring-red-700"
-              aria-label="Select all items"
-            />
-            Select all
-            {selected.size > 0 ? ` (${selected.size} selected)` : null}
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <Form method="post" id={formId}>
-              <button
-                type="submit"
-                name="intent"
-                value="restore"
-                disabled={selected.size === 0}
-                className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Restore selected
-              </button>
-              {mode === "archive" ? (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-200 bg-gray-50 px-3 py-2.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={(event) => toggleAll(event.target.checked)}
+                className="size-4 rounded border-gray-300 text-red-700 focus:ring-red-700"
+                aria-label="Select all items"
+              />
+              Select all
+            </label>
+            {selected.size > 0 ? (
+              <span className="text-sm text-gray-500">
+                {selected.size} selected
+              </span>
+            ) : null}
+          </div>
+          {selected.size > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Form method="post" id={formId} className="flex flex-wrap gap-2">
                 <button
                   type="submit"
                   name="intent"
-                  value="trash"
-                  disabled={selected.size === 0}
-                  className="ml-2 rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-300 hover:bg-red-50 hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  value="restore"
+                  className={recoverableRestoreActionClassName}
                 >
-                  Move selected to Trash
+                  Restore selected
+                </button>
+                {mode === "archive" ? (
+                  <button
+                    type="submit"
+                    name="intent"
+                    value="trash"
+                    className={recoverableTrashActionClassName}
+                  >
+                    Move selected to Trash
+                  </button>
+                ) : null}
+              </Form>
+              {mode === "trash" ? (
+                <button
+                  type="button"
+                  onClick={() => setIsPermanentDeleteDialogOpen(true)}
+                  className={recoverablePermanentDeleteActionClassName}
+                >
+                  Delete permanently
                 </button>
               ) : null}
-            </Form>
-            {mode === "trash" ? (
-              <button
-                type="button"
-                disabled={selected.size === 0}
-                onClick={() => setIsPermanentDeleteDialogOpen(true)}
-                className="rounded-lg border border-red-600 bg-red-600 px-3 py-2 text-sm font-semibold text-white transition hover:border-red-800 hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Delete permanently
-              </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -139,13 +149,13 @@ export function RecoverableInventoryList({
               selected={selected.has(item.id)}
               onToggle={() => toggleItem(item, !selected.has(item.id))}
               variant="list"
-              className="grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
+              className="grid grid-cols-[20px_56px_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 p-3 xl:grid-cols-[20px_56px_minmax(220px,1.1fr)_minmax(190px,0.9fr)_auto] xl:gap-x-4 xl:py-2.5"
             >
               <input
                 type="checkbox"
                 checked={selected.has(item.id)}
                 onChange={(event) => toggleItem(item, event.target.checked)}
-                className="mt-1 size-4 rounded border-gray-300 text-red-700 focus:ring-red-700 sm:mt-0"
+                className="size-4 justify-self-center rounded border-gray-300 text-red-700 focus:ring-red-700"
                 aria-label={`Select ${item.name}`}
               />
               {selected.has(item.id)
@@ -170,28 +180,29 @@ export function RecoverableInventoryList({
                   ))
                 : null}
 
-              <div className="flex min-w-0 items-start gap-4">
-                <div className="size-20 shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-gray-50">
+              <div className="contents">
+                <div className="size-14 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-50 p-1">
                   {item.assetImage ? (
                     <AssetImage
                       asset={item.assetImage}
                       alt={item.name}
                       className="size-full"
+                      imageFit="contain"
                     />
                   ) : item.kitImage ? (
                     <KitImage
                       kit={{ ...item.kitImage, alt: item.name }}
-                      className="size-full"
+                      className="size-full [&_img]:!object-contain"
                     />
                   ) : (
                     <img
                       src="/static/images/asset-placeholder.jpg"
                       alt=""
-                      className="size-full object-cover"
+                      className="size-full object-contain"
                     />
                   )}
                 </div>
-                <div className="min-w-0">
+                <div className="col-start-3 min-w-0 xl:col-start-auto">
                   <div className="flex flex-wrap items-center gap-2">
                     <Link
                       to={
@@ -207,56 +218,60 @@ export function RecoverableInventoryList({
                       {item.itemType === "ASSET" ? "Asset" : "Kit"}
                     </span>
                   </div>
-                  <dl className="mt-2 grid gap-x-5 gap-y-1 text-sm text-gray-600 sm:grid-cols-2">
-                    <div>
-                      <dt className="inline font-semibold text-gray-500">
-                        Category:{" "}
-                      </dt>
-                      <dd className="inline">
+                  <dl className="mt-1.5 space-y-0.5 text-sm leading-5 text-gray-600">
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-gray-500">Category</dt>
+                      <dd className="min-w-0 break-words font-medium text-gray-700">
                         {item.category ?? "Uncategorized"}
                       </dd>
                     </div>
-                    {item.quantity !== null ? (
-                      <div>
-                        <dt className="inline font-semibold text-gray-500">
-                          Quantity: {""}
-                        </dt>
-                        <dd className="inline">{item.quantity}</dd>
-                      </div>
-                    ) : null}
-                    <div>
-                      <dt className="inline font-semibold text-gray-500">
-                        Previous location:{" "}
+                    <div className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-gray-500">
+                        {mode === "archive" ? "Archived" : "Deleted"}
                       </dt>
-                      <dd className="inline">
-                        {item.location ?? "Not recorded"}
+                      <dd className="min-w-0 font-medium text-gray-700">
+                        <DateS
+                          date={item.archivedAt}
+                          options={{
+                            year: "numeric",
+                            month: "short",
+                            day: "numeric",
+                          }}
+                        />
                       </dd>
-                    </div>
-                    <div>
-                      <dt className="inline font-semibold text-gray-500">
-                        {mode === "archive" ? "Archived" : "Deleted"}:{" "}
-                      </dt>
-                      <dd className="inline">
-                        <DateS date={item.archivedAt} />
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="inline font-semibold text-gray-500">
-                        By:{" "}
-                      </dt>
-                      <dd className="inline">{item.archivedBy}</dd>
                     </div>
                   </dl>
-                  {item.needsReview ? (
-                    <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">
-                      Review required. The original category or location is no
-                      longer available.
-                    </p>
-                  ) : null}
                 </div>
               </div>
 
-              <div className="flex items-center justify-between gap-2 sm:justify-end">
+              <dl className="col-span-2 col-start-2 grid min-w-0 grid-cols-1 gap-x-4 gap-y-1 text-sm leading-5 sm:grid-cols-2 xl:col-span-1 xl:col-start-auto xl:grid-cols-2">
+                <div className="min-w-0">
+                  <dt className="text-xs font-medium text-gray-500">
+                    Previous location
+                  </dt>
+                  <dd className="break-words font-medium text-gray-700">
+                    {item.location ?? "Not recorded"}
+                  </dd>
+                </div>
+                <div className="min-w-0">
+                  <dt className="text-xs font-medium text-gray-500">
+                    {mode === "archive" ? "Archived by" : "Deleted by"}
+                  </dt>
+                  <dd className="break-words font-medium text-gray-700">
+                    {item.archivedBy}
+                  </dd>
+                </div>
+                {item.needsReview ? (
+                  <div className="col-span-full">
+                    <dd className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
+                      Review required. The original category or location is no
+                      longer available.
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
+
+              <div className="col-span-2 col-start-2 flex flex-wrap items-center justify-start gap-2 xl:col-span-1 xl:col-start-auto xl:justify-end">
                 <Form method="post">
                   <input type="hidden" name="intent" value="restore" />
                   {item.lifecycleItems.map((lifecycleItem) => (
@@ -278,7 +293,7 @@ export function RecoverableInventoryList({
                   ))}
                   <button
                     type="submit"
-                    className="rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                    className={recoverableRestoreActionClassName}
                   >
                     Restore
                   </button>
@@ -305,7 +320,7 @@ export function RecoverableInventoryList({
                     ))}
                     <button
                       type="submit"
-                      className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-300 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                      className={recoverableTrashActionClassName}
                     >
                       Trash
                     </button>
@@ -314,7 +329,7 @@ export function RecoverableInventoryList({
                   <button
                     type="button"
                     onClick={() => setItemToDelete(item)}
-                    className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 transition hover:border-red-300 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+                    className={recoverablePermanentDeleteActionClassName}
                   >
                     Delete permanently
                   </button>
@@ -369,7 +384,8 @@ export function RecoverableInventoryList({
                   ))}
                   <Button
                     type="submit"
-                    className="border-error-600 bg-error-600 hover:border-error-800 hover:bg-error-800"
+                    variant="danger"
+                    className={recoverablePermanentDeleteActionClassName}
                   >
                     Delete permanently
                   </Button>
@@ -424,7 +440,8 @@ export function RecoverableInventoryList({
                     ))}
                     <Button
                       type="submit"
-                      className="border-error-600 bg-error-600 hover:border-error-800 hover:bg-error-800"
+                      variant="danger"
+                      className={recoverablePermanentDeleteActionClassName}
                     >
                       Delete permanently
                     </Button>

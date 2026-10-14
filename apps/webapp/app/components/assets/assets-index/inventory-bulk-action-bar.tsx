@@ -46,7 +46,7 @@ export function InventoryBulkActionBar({
             Archive
           </Button>
           <Button type="button" variant="danger" onClick={onTrash}>
-            Move to trash
+            Delete
           </Button>
         </>
       ) : null}

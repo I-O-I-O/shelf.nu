@@ -16,6 +16,7 @@ import { db } from "~/database/db.server";
 
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { simpleModeLoader } from "~/modules/asset/data.server";
+import { ASSET_LIFECYCLE_INTENT } from "~/modules/asset/lifecycle-intent";
 import {
   addIndividualUnitsToAssetModel,
   bulkDeleteAssets,
@@ -42,6 +43,7 @@ import {
   getIoioArchivedItemIds,
   trashIoioItems,
 } from "~/modules/ioio-staff/archive.server";
+import { returnResolvedAssetToService } from "~/modules/ioio-staff/lab-status.server";
 import assetCss from "~/styles/assets.css?url";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -177,8 +179,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const IntentSchema = z.enum([
       "bulk-delete",
-      "bulk-archive",
-      "bulk-trash",
+      ASSET_LIFECYCLE_INTENT.ARCHIVE,
+      ASSET_LIFECYCLE_INTENT.TRASH,
+      "return-unit-to-service",
       "add-individual-units",
       "create-preset",
       "rename-preset",
@@ -186,15 +189,20 @@ export async function action({ context, request }: ActionFunctionArgs) {
       "toggle-star-preset",
     ]);
 
-    const { intent } = parseData(formData, z.object({ intent: IntentSchema }));
+    const { intent } = parseData(formData, z.object({ intent: IntentSchema }), {
+      message:
+        "Unable to complete this inventory action because the request was invalid. Please try again.",
+      shouldBeCaptured: false,
+    });
 
     const intent2ActionMap: Record<
       z.infer<typeof IntentSchema>,
       PermissionAction
     > = {
       "bulk-delete": PermissionAction.delete,
-      "bulk-archive": PermissionAction.delete,
-      "bulk-trash": PermissionAction.delete,
+      [ASSET_LIFECYCLE_INTENT.ARCHIVE]: PermissionAction.delete,
+      [ASSET_LIFECYCLE_INTENT.TRASH]: PermissionAction.delete,
+      "return-unit-to-service": PermissionAction.update,
       "add-individual-units": PermissionAction.update,
       "create-preset": PermissionAction.read,
       "rename-preset": PermissionAction.read,
@@ -218,6 +226,21 @@ export async function action({ context, request }: ActionFunctionArgs) {
     });
 
     switch (intent) {
+      case "return-unit-to-service": {
+        if (role !== "ADMIN" && role !== "OWNER") {
+          throw new Response("Staff access required", { status: 403 });
+        }
+        const { assetId } = parseData(
+          formData,
+          z.object({ assetId: z.string().min(1) })
+        );
+        const result = await returnResolvedAssetToService({
+          organizationId,
+          assetId,
+          staffUserId: userId,
+        });
+        return payload({ success: true, result });
+      }
       case "add-individual-units": {
         const { assetModelId, count } = parseData(
           formData,
@@ -247,12 +270,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
           createdAssetIds: result.createdAssetIds,
         });
       }
-      case "bulk-archive": {
+      case ASSET_LIFECYCLE_INTENT.ARCHIVE: {
         const { assetIds } = parseData(
           formData,
           z
             .object({ assetIds: z.array(z.string()).min(1) })
-            .and(CurrentSearchParamsSchema)
+            .and(CurrentSearchParamsSchema),
+          {
+            message:
+              "Unable to archive the selected assets because the request was invalid. Please try again.",
+            shouldBeCaptured: false,
+          }
         );
 
         await archiveIoioItems({
@@ -274,12 +302,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
           undo: { operation: "archive" as const },
         });
       }
-      case "bulk-trash": {
+      case ASSET_LIFECYCLE_INTENT.TRASH: {
         const { assetIds } = parseData(
           formData,
           z
             .object({ assetIds: z.array(z.string()).min(1) })
-            .and(CurrentSearchParamsSchema)
+            .and(CurrentSearchParamsSchema),
+          {
+            message:
+              "Unable to move the selected assets to Trash because the request was invalid. Please try again.",
+            shouldBeCaptured: false,
+          }
         );
 
         await trashIoioItems({
@@ -292,12 +325,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
         });
 
         sendNotification({
-          title: "Items moved to Trash",
-          message: "The selected inventory items can be restored from Trash.",
+          title: "Items deleted",
+          message: "Deleted inventory items can be restored from Trash.",
           icon: { name: "success", variant: "success" },
           senderId: authSession.userId,
         });
 
+        // Return success to the Inventory fetcher. React Router revalidates
+        // the current list in place, preserving its filters and pagination.
         return payload({
           success: true,
           undo: { operation: "trash" as const },
