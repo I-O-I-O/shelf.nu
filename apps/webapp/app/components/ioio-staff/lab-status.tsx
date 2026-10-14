@@ -31,6 +31,15 @@ function IssueRow({ issue }: { issue: LabIssue }) {
   );
 }
 
+function getLabIssueReadKey(issue: LabIssue) {
+  const fingerprint = JSON.stringify([issue.id, issue.title, issue.detail]);
+  let hash = 2166136261;
+  for (let index = 0; index < fingerprint.length; index++) {
+    hash = Math.imul(hash ^ fingerprint.charCodeAt(index), 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function IssueSummary({ status }: { status: LabStatus }) {
   const summaries = [
     {
@@ -193,13 +202,39 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
 
 export function StaffLabStatusBell({
   status,
-  assignedTaskCount = 0,
+  readStateKey,
 }: {
   status: LabStatus | null;
-  assignedTaskCount?: number;
+  /** User and Team scoped browser storage key for the last seen issue keys. */
+  readStateKey?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isOpen, setIsOpen] = useState(false);
+  const [seenState, setSeenState] = useState<{
+    key: string | undefined;
+    issueKeys: string[];
+  }>({ key: readStateKey, issueKeys: [] });
+
+  useEffect(() => {
+    if (!readStateKey) {
+      setSeenState({ key: readStateKey, issueKeys: [] });
+      return;
+    }
+
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(readStateKey) ?? "[]"
+      );
+      setSeenState({
+        key: readStateKey,
+        issueKeys: Array.isArray(saved)
+          ? saved.filter((id): id is string => typeof id === "string")
+          : [],
+      });
+    } catch {
+      setSeenState({ key: readStateKey, issueKeys: [] });
+    }
+  }, [readStateKey]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -227,27 +262,51 @@ export function StaffLabStatusBell({
     };
   }, [isOpen]);
 
-  if (!status && assignedTaskCount === 0) return null;
-  const issueCount = status?.totalIssues ?? 0;
-  const notificationCount = issueCount + assignedTaskCount;
+  const currentIssueCount = status?.totalIssues ?? 0;
+  const seenIssueKeys =
+    seenState.key === readStateKey ? new Set(seenState.issueKeys) : new Set();
+  const newIssueCount =
+    status?.issues.filter(
+      (issue) => !seenIssueKeys.has(getLabIssueReadKey(issue))
+    ).length ?? 0;
+
+  function toggleOpen() {
+    const nextOpen = !isOpen;
+    if (nextOpen) {
+      const currentIssueKeys = status?.issues.map(getLabIssueReadKey) ?? [];
+      setSeenState({ key: readStateKey, issueKeys: currentIssueKeys });
+      if (readStateKey) {
+        try {
+          window.localStorage.setItem(
+            readStateKey,
+            JSON.stringify(currentIssueKeys)
+          );
+        } catch {
+          // The in-memory read state still applies when storage is unavailable.
+        }
+      }
+    }
+    setIsOpen(nextOpen);
+  }
+
   return (
     <div ref={containerRef} className="relative">
       <button
         type="button"
-        aria-label="Open lab status and task notifications"
+        aria-label="Open lab status notifications"
         aria-expanded={isOpen}
-        onClick={() => setIsOpen((open) => !open)}
+        onClick={toggleOpen}
         className="flex size-10 cursor-pointer list-none items-center justify-center rounded-xl border border-gray-200 text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 [&::-webkit-details-marker]:hidden"
       >
         <Bell aria-hidden="true" className="size-4" />
-        {notificationCount > 0 ? (
+        {newIssueCount > 0 ? (
           <span
             className={
               "absolute -right-1 -top-1 min-w-5 rounded-full px-1 text-center text-[0.65rem] font-black leading-5 text-white " +
               "bg-red-700"
             }
           >
-            {notificationCount > 99 ? "99+" : notificationCount}
+            {newIssueCount > 99 ? "99+" : newIssueCount}
           </span>
         ) : null}
       </button>
@@ -255,18 +314,16 @@ export function StaffLabStatusBell({
         <div className="absolute right-0 top-12 z-50 w-[min(22rem,calc(100vw-2rem))] rounded-2xl border border-gray-200 bg-white p-4 shadow-xl">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-black text-gray-950">
-                {status ? "Lab status" : "Lab tasks"}
-              </p>
+              <p className="text-sm font-black text-gray-950">Lab status</p>
               <p className="mt-0.5 text-xs text-gray-500">
-                {status?.totalIssues
-                  ? `${status.totalIssues} issue${
-                      status.totalIssues === 1 ? "" : "s"
-                    } need attention.`
-                  : assignedTaskCount
-                  ? `${assignedTaskCount} open task${
-                      assignedTaskCount === 1 ? "" : "s"
-                    } assigned to you.`
+                {currentIssueCount
+                  ? `${currentIssueCount} current actionable item${
+                      currentIssueCount === 1 ? "" : "s"
+                    }; ${
+                      newIssueCount
+                        ? `${newIssueCount} new.`
+                        : "all have been seen."
+                    }`
                   : "Nothing needs attention right now."}
               </p>
             </div>
@@ -292,24 +349,16 @@ export function StaffLabStatusBell({
               ))}
             </ul>
           ) : null}
-          {assignedTaskCount > 0 ? (
-            <Link
-              to="/operations/tasks?filter=mine"
-              onClick={() => setIsOpen(false)}
-              className="mt-3 flex items-center justify-between rounded-xl bg-red-50 px-3 py-2 text-sm font-semibold text-red-800 transition hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-700"
-            >
-              <span>
-                {assignedTaskCount} task{assignedTaskCount === 1 ? "" : "s"}{" "}
-                assigned to you
-              </span>
-              <span aria-hidden="true">View tasks</span>
-            </Link>
+          {currentIssueCount > 5 ? (
+            <p className="mt-3 text-xs text-gray-500">
+              Showing 5 of {currentIssueCount} current actionable items.
+            </p>
           ) : null}
           <Link
-            to={status ? "/operations" : "/operations/tasks"}
+            to="/operations"
             className="mt-3 inline-flex text-xs font-bold text-red-700 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
           >
-            {status ? "Open operations" : "Open Lab Tasks"}
+            Open operations
           </Link>
         </div>
       ) : null}

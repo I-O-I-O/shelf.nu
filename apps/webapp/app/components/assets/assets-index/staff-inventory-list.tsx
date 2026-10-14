@@ -93,6 +93,7 @@ import type {
   BulkMutationUndo,
   BulkUndoRequest,
 } from "~/modules/ioio-staff/bulk-undo";
+import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
 import {
   getIoioKitDisplayName,
   getIoioPhysicalUnitDisplayName,
@@ -109,6 +110,7 @@ import { tw } from "~/utils/tw";
 type StaffInventorySourceItem = AssetsFromViewItem & {
   physicalAvailable?: number;
   preparedPickupHeld?: boolean;
+  blockingIssueReported?: boolean;
 };
 type StaffInventoryItem = StaffInventoryDisplayRow<StaffInventorySourceItem>;
 type ExpandedUnitAction =
@@ -276,7 +278,7 @@ export function StaffInventoryList({
             </div>
           ) : null}
         </div>
-        <dl className="grid grid-cols-3 divide-x border-b border-gray-200 bg-gray-50/50">
+        <dl className="grid grid-cols-2 divide-x border-b border-gray-200 bg-gray-50/50 sm:grid-cols-4">
           <InventorySummaryStat
             label="Total quantity"
             value={inventorySummary.totalQuantity}
@@ -286,6 +288,10 @@ export function StaffInventoryList({
             value={inventorySummary.available}
           />
           <InventorySummaryStat label="In use" value={inventorySummary.inUse} />
+          <InventorySummaryStat
+            label="Out of service"
+            value={inventorySummary.outOfService}
+          />
         </dl>
         <StaffInventoryFilters />
         {selectedItems.length > 0 ? (
@@ -618,6 +624,8 @@ function formatInventoryLocationName(name: string): string {
 type StaffInventoryQuantities = {
   totalQuantity: number;
   availableQuantity: number;
+  inUseQuantity: number;
+  outOfServiceQuantity: number;
 };
 
 function getStaffInventoryQuantities(
@@ -638,30 +646,67 @@ function getStaffInventoryQuantities(
           totalQuantity: summary.totalQuantity + memberQuantity.totalQuantity,
           availableQuantity:
             summary.availableQuantity + memberQuantity.availableQuantity,
+          inUseQuantity: summary.inUseQuantity + memberQuantity.inUseQuantity,
+          outOfServiceQuantity:
+            summary.outOfServiceQuantity + memberQuantity.outOfServiceQuantity,
         };
       },
-      { totalQuantity: 0, availableQuantity: 0 }
+      {
+        totalQuantity: 0,
+        availableQuantity: 0,
+        inUseQuantity: 0,
+        outOfServiceQuantity: 0,
+      }
     );
   }
 
   const quantityData = getQuantityData(item);
   const totalQuantity = isQuantityTracked(item) ? item.quantity ?? 0 : 1;
-  const availableQuantity = isQuantityTracked(item)
-    ? Math.max(
-        0,
-        item.physicalAvailable ??
-          quantityData?.available ??
-          (item.availableToBook && item.status !== "CHECKED_OUT"
-            ? totalQuantity
-            : 0)
-      )
-    : !item.preparedPickupHeld &&
-      item.availableToBook &&
-      item.status === "AVAILABLE"
-    ? 1
-    : 0;
+  if (isQuantityTracked(item)) {
+    const availableQuantity = Math.max(
+      0,
+      item.physicalAvailable ??
+        quantityData?.available ??
+        (item.availableToBook && item.status !== "CHECKED_OUT"
+          ? totalQuantity
+          : 0)
+    );
+    return {
+      totalQuantity,
+      availableQuantity,
+      inUseQuantity: item.availableToBook
+        ? Math.max(0, totalQuantity - availableQuantity)
+        : 0,
+      outOfServiceQuantity: item.availableToBook ? 0 : totalQuantity,
+    };
+  }
 
-  return { totalQuantity, availableQuantity };
+  const unitState = getStaffInventoryUnitState(item);
+  return {
+    totalQuantity,
+    availableQuantity: unitState === "Available" ? 1 : 0,
+    inUseQuantity: unitState === "In use" ? 1 : 0,
+    outOfServiceQuantity:
+      unitState === "Out of service" || unitState === "Broken" ? 1 : 0,
+  };
+}
+
+function getStaffInventoryUnitState(item: StaffInventorySourceItem) {
+  return getIoioPhysicalUnitState({
+    assetStatus: item.custody.length > 0 ? "IN_CUSTODY" : item.status,
+    availableToBook: item.availableToBook,
+    bookingStates: item.bookingAssets.map(({ booking }) => ({
+      status: booking.status,
+      isSoftStaffReservation: false,
+    })),
+    preparationStates: item.preparedPickupHeld ? ["READY_FOR_PICKUP"] : [],
+    issueReportTypes: item.blockingIssueReported ? ["ITEM_DAMAGED"] : [],
+    availableAccordingToIoioInventory:
+      item.status === AssetStatus.AVAILABLE &&
+      item.availableToBook &&
+      !item.preparedPickupHeld &&
+      item.custody.length === 0,
+  });
 }
 
 function StaffInventoryRow({
@@ -1008,6 +1053,7 @@ function StaffInventoryExpandedUnitsContent({
         {selectedUnits.map((member) => {
           const location = getPrimaryLocation(member);
           const unitLabel = getUnitLabel(member.title);
+          const unitState = getStaffInventoryUnitState(member);
           return (
             <div
               key={member.id}
@@ -1032,14 +1078,24 @@ function StaffInventoryExpandedUnitsContent({
               </span>
               <div className="flex min-w-0 items-center justify-end gap-2">
                 <Badge
-                  color={member.status === "AVAILABLE" ? "#dcfce7" : "#fee2e2"}
+                  color={
+                    unitState === "Available"
+                      ? "#dcfce7"
+                      : unitState === "Broken"
+                      ? "#fee2e2"
+                      : "#f3f4f6"
+                  }
                   textColor={
-                    member.status === "AVAILABLE" ? "#166534" : "#b91c1c"
+                    unitState === "Available"
+                      ? "#166534"
+                      : unitState === "Broken"
+                      ? "#991b1b"
+                      : "#374151"
                   }
                   withDot={false}
                   className="shrink-0 px-2 py-1 text-xs font-semibold"
                 >
-                  {member.status === "AVAILABLE" ? "Available" : "In use"}
+                  {unitState}
                 </Badge>
                 <span className="hidden shrink-0 text-xs font-medium text-gray-600 sm:inline">
                   QR: {member.qrCodes?.[0]?.id ? "Active" : "Not assigned"}

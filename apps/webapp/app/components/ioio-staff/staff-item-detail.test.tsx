@@ -69,7 +69,10 @@ describe("StaffItemDetail", () => {
     render(<RouterProvider router={router} />);
 
     expect(screen.getByRole("heading", { name: "Makey Kit" })).toBeTruthy();
-    expect(screen.getByText("3 units available now")).toBeTruthy();
+    expect(screen.getByText("3 / 5 units available")).toBeTruthy();
+    expect(
+      screen.getByText("3 available · 1 ready for pickup · 1 in use")
+    ).toBeTruthy();
     expect(
       screen.queryByRole("heading", { name: "Makey Kit #005" })
     ).toBeNull();

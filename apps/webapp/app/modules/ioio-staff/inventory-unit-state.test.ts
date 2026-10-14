@@ -118,6 +118,31 @@ describe("IOIO physical inventory state", () => {
         ...available,
         issueReportTypes: ["WRONG_LOCATION"],
       })
-    ).toBe("Issue reported");
+    ).toBe("Available");
+  });
+
+  it("shows the persisted out-of-service condition after a damaged report closes", () => {
+    expect(
+      getIoioPhysicalUnitState({
+        ...available,
+        availableToBook: false,
+      })
+    ).toBe("Out of service");
+  });
+
+  it("uses only unresolved physical-condition reports as unit blockers", () => {
+    expect(
+      getIoioPhysicalUnitState({
+        ...available,
+        issueReportTypes: ["ITEM_DAMAGED"],
+      })
+    ).toBe("Broken");
+
+    expect(
+      getIoioPhysicalUnitState({
+        ...available,
+        issueReportTypes: ["WRONG_LOCATION", "LOCATION_FULL", "OTHER"],
+      })
+    ).toBe("Available");
   });
 });

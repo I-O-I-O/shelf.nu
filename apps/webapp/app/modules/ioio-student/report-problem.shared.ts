@@ -48,19 +48,22 @@ export function classifyIoioReport(
 
 /** Student-facing success acknowledgement for each persisted report type. */
 export const IOIO_REPORT_ACKNOWLEDGEMENTS: Record<IoioReportType, string> = {
-  ITEM_MISSING: "Thanks for reporting this item. Staff will look into it.",
+  ITEM_MISSING:
+    "Thanks for reporting the missing item. Staff will look into it.",
   ITEM_DAMAGED: "Thanks for reporting the damaged item. Staff will review it.",
   ITEM_NOT_WORKING:
     "Thanks for reporting the item that is not working. Staff will review it.",
   PART_MISSING: "Thanks for reporting the missing part. Staff will review it.",
   WRONG_LOCATION:
-    "Thanks for reporting the location issue. Staff will check it.",
-  LOCATION_FULL: "Thanks for reporting the full location. Staff will check it.",
-  CANNOT_FIND: "Thanks for reporting this item. Staff will look into it.",
+    "Thanks for reporting the location issue. Staff will review it.",
+  LOCATION_FULL:
+    "Thanks for reporting the full location. Staff will review it.",
+  CANNOT_FIND:
+    "Thanks for letting us know. Staff will help check where this item is.",
   KIT_INCOMPLETE:
     "Thanks for reporting the incomplete kit. Staff will review it.",
   FOUND_SOMETHING: "Thanks for letting Staff know.",
-  OTHER: "Thanks for your report. Staff will review it.",
+  OTHER: "Thanks for letting us know. Staff will review your report.",
 };
 
 export const IOIO_REPORT_FORM_VALUES = [

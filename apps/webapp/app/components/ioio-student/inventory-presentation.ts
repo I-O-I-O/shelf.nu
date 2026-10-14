@@ -106,6 +106,27 @@ export function getStudentLabAreaFilters(
 }
 
 /**
+ * Resolve a hierarchy path to the deepest location the Student browse filters
+ * accept. The browse page intentionally exposes lab-room child areas rather
+ * than every storage level, and validates query IDs against that list.
+ */
+export function getStudentBrowseLocationIdForPath(
+  pathIds: string[],
+  locations: StudentLocation[]
+) {
+  const browseableLocationIds = new Set(
+    getStudentLabAreaFilters(locations)
+      .map((area) => area.locationId)
+      .filter((locationId): locationId is string => Boolean(locationId))
+  );
+  return (
+    [...pathIds]
+      .reverse()
+      .find((locationId) => browseableLocationIds.has(locationId)) ?? null
+  );
+}
+
+/**
  * Applies the same deterministic canonical grouping as Staff Inventory.
  * AssetModel-linked individual units are presented as one product with
  * availability summed from those physical records. Same-name imported or

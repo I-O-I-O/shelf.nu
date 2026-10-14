@@ -75,6 +75,40 @@ describe("staff inventory presentation helpers", () => {
       totalQuantity: 7,
       available: 4,
       inUse: 3,
+      outOfService: 0,
+    });
+  });
+
+  it("does not count out-of-service stock as in use", () => {
+    expect(
+      summarizeStaffInventory([
+        {
+          totalQuantity: 5,
+          availableQuantity: 4,
+          inUseQuantity: 0,
+          outOfServiceQuantity: 1,
+        },
+      ])
+    ).toEqual({
+      logicalItems: 1,
+      totalQuantity: 5,
+      available: 4,
+      inUse: 0,
+      outOfService: 1,
+    });
+  });
+
+  it("keeps an active loan in use while four other units remain available", () => {
+    expect(
+      summarizeStaffInventory([
+        { totalQuantity: 5, availableQuantity: 4, inUseQuantity: 1 },
+      ])
+    ).toEqual({
+      logicalItems: 1,
+      totalQuantity: 5,
+      available: 4,
+      inUse: 1,
+      outOfService: 0,
     });
   });
 

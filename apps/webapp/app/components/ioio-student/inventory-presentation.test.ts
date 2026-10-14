@@ -4,6 +4,7 @@ import {
   asksForPhysicalUnits,
   filterStudentInventory,
   groupStudentAssets,
+  getStudentBrowseLocationIdForPath,
   getStudentLabAreaFilters,
   requestsStudentAssistantAssetCards,
   selectStudentAssistantDisplayAssets,
@@ -699,5 +700,56 @@ describe("student inventory presentation", () => {
         locationId: "section-b",
       },
     ]);
+  });
+
+  it("links exact storage paths through the deepest browseable Student area", () => {
+    const locations = [
+      {
+        id: "lab-room",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        children: [
+          {
+            id: "section-a",
+            name: "Section A",
+            parentId: "lab-room",
+            children: [
+              {
+                id: "shelf-a1",
+                name: "Shelf A1",
+                parentId: "section-a",
+                children: [
+                  {
+                    id: "container-a1-13",
+                    name: "Container A1-13",
+                    parentId: "shelf-a1",
+                    children: [],
+                    assetCount: 1,
+                    imageUrl: null,
+                    thumbnailUrl: null,
+                  },
+                ],
+                assetCount: 0,
+                imageUrl: null,
+                thumbnailUrl: null,
+              },
+            ],
+            assetCount: 0,
+            imageUrl: null,
+            thumbnailUrl: null,
+          },
+        ],
+        assetCount: 0,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+    ];
+
+    expect(
+      getStudentBrowseLocationIdForPath(
+        ["lab-room", "section-a", "shelf-a1", "container-a1-13"],
+        locations
+      )
+    ).toBe("section-a");
   });
 });

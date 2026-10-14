@@ -51,6 +51,9 @@ export function getStaffInventoryActionTargets<
 export type LogicalInventoryQuantity = {
   totalQuantity: number;
   availableQuantity: number;
+  /** Active custody/loan count when known; unavailable stock is not "in use". */
+  inUseQuantity?: number;
+  outOfServiceQuantity?: number;
 };
 
 export type StaffInventorySummary = {
@@ -58,6 +61,7 @@ export type StaffInventorySummary = {
   totalQuantity: number;
   available: number;
   inUse: number;
+  outOfService: number;
 };
 
 export function summarizeStaffInventory(
@@ -77,11 +81,26 @@ export function summarizeStaffInventory(
     0
   );
 
+  const inUse = quantities.reduce(
+    (sum, item) =>
+      sum +
+      Math.max(
+        0,
+        item.inUseQuantity ?? item.totalQuantity - item.availableQuantity
+      ),
+    0
+  );
+  const outOfService = quantities.reduce(
+    (sum, item) => sum + Math.max(0, item.outOfServiceQuantity ?? 0),
+    0
+  );
+
   return {
     logicalItems: quantities.length,
     totalQuantity,
     available,
-    inUse: Math.max(0, totalQuantity - available),
+    inUse,
+    outOfService,
   };
 }
 

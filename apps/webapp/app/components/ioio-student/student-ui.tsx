@@ -41,6 +41,7 @@ export function StudentAssetPlaceholder({
   asset,
   className = "",
   variant = "card",
+  imageFit = "cover",
 }: {
   asset?: Pick<
     StudentAsset,
@@ -48,6 +49,7 @@ export function StudentAssetPlaceholder({
   > & { kitImage?: string | null };
   className?: string;
   variant?: Extract<AssetImageFrameVariant, "card" | "detail" | "thumbnail">;
+  imageFit?: "contain" | "cover";
 }) {
   return (
     <div
@@ -64,6 +66,7 @@ export function StudentAssetPlaceholder({
           }}
           alt={`Image of ${formatStudentTitle(asset.title, asset.type)}`}
           useThumbnail={false}
+          imageFit={imageFit}
           className="size-full"
         />
       ) : (
@@ -540,10 +543,12 @@ export function StudentCheckoutButton({
   asset,
   compact = false,
   availabilityOverride,
+  primary = false,
 }: {
   asset: StudentAsset | StudentInventoryItem;
   compact?: boolean;
   availabilityOverride?: number;
+  primary?: boolean;
 }) {
   const { addItem, hasItem, removeItem } = useStudentCheckout();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
@@ -606,6 +611,8 @@ export function StudentCheckoutButton({
       className={`min-h-10 max-w-full rounded-xl border px-3 py-2 text-xs font-bold transition focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
         inCheckout
           ? "border-red-700 bg-red-700 text-white hover:bg-red-800"
+          : primary
+          ? "border-red-700 bg-red-700 text-white hover:border-red-800 hover:bg-red-800"
           : "border-red-200 bg-red-50 text-red-800 hover:border-red-400 hover:bg-red-100"
       } ${
         compact ? "shrink-0 whitespace-normal px-2.5 text-left" : "shrink-0"

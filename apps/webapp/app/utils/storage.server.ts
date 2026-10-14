@@ -357,6 +357,12 @@ export async function uploadFile(
     upsert?: boolean;
   }
 ): Promise<string | { originalPath: string; thumbnailPath: string }> {
+  const uploadedObjectPaths: string[] = [];
+  // cropImage always encodes its result as WebP. Keep Storage metadata aligned
+  // with the bytes regardless of the source file's MIME type.
+  const storedContentType = "image/webp";
+  const storedFilename = `${filename.replace(/\.[^/.]+$/, "")}.webp`;
+
   try {
     // Process original image
     const file = await cropImage(fileData, resizeOptions);
@@ -364,11 +370,15 @@ export async function uploadFile(
     // Upload original file
     const { data, error } = await getSupabaseAdmin()
       .storage.from(bucketName)
-      .upload(filename, file, { contentType, upsert });
+      .upload(storedFilename, file, {
+        contentType: storedContentType,
+        upsert,
+      });
 
     if (error) {
       throw error;
     }
+    uploadedObjectPaths.push(data.path);
 
     // If thumbnail generation is requested
     if (generateThumbnail) {
@@ -390,12 +400,25 @@ export async function uploadFile(
       );
 
       // Upload thumbnail
+      // Include the path before the request: if Storage accepts the object but
+      // the response is lost, cleanup should still attempt to remove it.
+      const storedThumbnailFilename = `${thumbFilename.replace(
+        /\.[^/.]+$/,
+        ""
+      )}.webp`;
+      uploadedObjectPaths.push(storedThumbnailFilename);
       const { data: thumbData, error: thumbError } = await getSupabaseAdmin()
         .storage.from(bucketName)
-        .upload(thumbFilename, thumbnailFile, { contentType, upsert: true });
+        .upload(storedThumbnailFilename, thumbnailFile, {
+          contentType: storedContentType,
+          upsert: true,
+        });
 
       if (thumbError) {
         throw thumbError;
+      }
+      if (!uploadedObjectPaths.includes(thumbData.path)) {
+        uploadedObjectPaths.push(thumbData.path);
       }
 
       return {
@@ -407,6 +430,27 @@ export async function uploadFile(
     // Return just the path string for backward compatibility
     return data.path;
   } catch (cause) {
+    if (uploadedObjectPaths.length > 0) {
+      try {
+        const { error: cleanupError } = await getSupabaseAdmin()
+          .storage.from(bucketName)
+          .remove(uploadedObjectPaths);
+        if (cleanupError) {
+          Logger.dev("[IMAGE UPLOAD] partial upload cleanup failed", {
+            bucketName,
+            uploadedObjectPaths,
+            cleanupError,
+          });
+        }
+      } catch (cleanupCause) {
+        Logger.dev("[IMAGE UPLOAD] partial upload cleanup failed", {
+          bucketName,
+          uploadedObjectPaths,
+          cleanupCause,
+        });
+      }
+    }
+
     const isShelfError = isLikeShelfError(cause);
 
     throw new ShelfError({
@@ -451,19 +495,27 @@ export async function parseFileFormData({
       const file = upload?.file ?? upload;
       const mimeType =
         upload?.type ?? upload?.contentType ?? file?.type ?? undefined;
-      const originalName =
-        upload?.name ?? upload?.filename ?? file?.name ?? undefined;
+
+      if (!file) {
+        return undefined;
+      }
 
       // Only process image files. Matched as a prefix rather than a substring:
       // `.includes("image")` also accepts a parameterised type such as
       // `text/html; x=image`, which would then be handed to `uploadFile` as the
-      // content type the object is stored and served with.
+      // content type the object is stored and served with. A provided file
+      // with a non-image type is a validation error, not an empty upload; the
+      // latter made invalid file submissions look like successful saves.
       if (mimeType && !String(mimeType).startsWith("image/")) {
-        return undefined;
-      }
-
-      if (!file) {
-        return undefined;
+        throw new ShelfError({
+          cause: null,
+          title: "Unsupported image format",
+          message:
+            "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
       }
 
       const fileStream = await normalizeToAsyncIterable(file);
@@ -472,12 +524,10 @@ export async function parseFileFormData({
         return undefined;
       }
 
-      const extension = originalName?.includes(".")
-        ? originalName.split(".").pop()
-        : undefined;
-      const targetFilename = extension
-        ? `${newFileName}.${extension}`
-        : newFileName;
+      // cropImage converts all accepted source formats to WebP, so persisted
+      // object names must not retain a source extension such as .png or .jpg.
+      const baseFilename = newFileName.replace(/\.[^/.]+$/, "");
+      const targetFilename = `${baseFilename}.webp`;
 
       const uploadedFilePaths = await uploadFile(fileStream, {
         filename: targetFilename,

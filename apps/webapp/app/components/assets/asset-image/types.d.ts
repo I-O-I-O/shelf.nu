@@ -35,6 +35,8 @@ export type BaseAssetImageProps = {
   alt: string;
   className?: string;
   useThumbnail?: boolean;
+  imageFit?: "contain" | "cover";
+  imageSizing?: "fill" | "natural" | "detail";
   rest?: HTMLImageElement;
 };
 

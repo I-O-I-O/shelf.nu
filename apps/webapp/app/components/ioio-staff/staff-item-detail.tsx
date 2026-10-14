@@ -1,19 +1,17 @@
 import type { ReactNode } from "react";
-import {
-  AssetDetailInformation,
-  type AssetDetailField,
-} from "~/components/assets/asset-detail-information";
-import { ASSET_IMAGE_FRAME_CLASSES } from "~/components/assets/asset-image/sizing";
+import type { AssetDetailField } from "~/components/assets/asset-detail-information";
+import { IoioAssetDetailLayout } from "~/components/ioio-staff/ioio-asset-detail-layout";
 import {
   PhysicalUnitAvailabilityList,
   type PhysicalUnitAvailabilityRow,
 } from "~/components/ioio-staff/physical-unit-availability-list";
-import { PageBackLink } from "~/components/shared/page-back-link";
 
 export type StaffItemDetailProps = {
   title: string;
   image: ReactNode;
   availableQuantity: number;
+  totalQuantity?: number;
+  availabilityDetail?: string;
   unitLabel?: string;
   categoryName?: string | null;
   locationPath: string[];
@@ -36,6 +34,8 @@ export function StaffItemDetail({
   title,
   image,
   availableQuantity,
+  totalQuantity,
+  availabilityDetail,
   unitLabel = "items",
   categoryName,
   locationPath,
@@ -53,74 +53,49 @@ export function StaffItemDetail({
   canEditPhysicalUnits = false,
   physicalUnitsActionUrl,
 }: StaffItemDetailProps) {
-  const available = availableQuantity > 0;
-  const availabilityUnitLabel =
-    availableQuantity === 1
-      ? (
-          { items: "item", units: "unit", kits: "kit" } as Record<
-            string,
-            string
-          >
-        )[unitLabel] ?? unitLabel
-      : unitLabel;
+  const total = totalQuantity ?? physicalUnits?.length ?? availableQuantity;
+  const statusCounts = new Map<string, number>();
+  for (const unit of physicalUnits ?? []) {
+    statusCounts.set(unit.status, (statusCounts.get(unit.status) ?? 0) + 1);
+  }
+  const detail =
+    availabilityDetail ??
+    (physicalUnits
+      ? [
+          `${availableQuantity} available`,
+          ...Array.from(statusCounts)
+            .filter(([status]) => status !== "Available")
+            .map(([status, count]) => `${count} ${status.toLocaleLowerCase()}`),
+        ].join(" · ")
+      : undefined);
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-5 sm:px-6 lg:px-8">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0">
-          <PageBackLink to="/assets" className="mb-5">
-            Back to inventory
-          </PageBackLink>
-
-          <p className="text-xs font-black uppercase tracking-[0.18em] text-red-800">
-            Inventory
-          </p>
-          <h1 className="mt-2 break-words text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
-            {title}
-          </h1>
-          {assistantAction ? (
-            <div className="mt-4">{assistantAction}</div>
-          ) : null}
-        </div>
-        {actions ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {actions}
-          </div>
-        ) : null}
-      </header>
-
-      <div className="mt-6 space-y-4">
-        <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <div
-            className={`flex items-center justify-center bg-gray-50 [&_img]:max-h-full [&_img]:max-w-full [&_img]:object-contain [&_img]:p-4 sm:[&_img]:p-8 ${ASSET_IMAGE_FRAME_CLASSES.detail}`}
-          >
-            {image}
-          </div>
-          <div className="p-5">
-            <div className="flex justify-end">{borrowAction}</div>
-          </div>
-        </section>
-
+    <IoioAssetDetailLayout
+      backTo="/assets"
+      backLabel="Back to inventory"
+      title={title}
+      description={description}
+      image={image}
+      actions={
+        <>
+          {assistantAction}
+          {actions}
+          {borrowAction}
+        </>
+      }
+      availableQuantity={availableQuantity}
+      totalQuantity={total}
+      availabilityDetail={detail}
+      unitLabel={unitLabel}
+      categoryName={categoryName}
+      locations={locationPath.length ? [{ path: locationPath }] : []}
+      tracking={tracking}
+      status={status}
+      maxBorrowDays={maxBorrowDays}
+      additionalFields={additionalFields}
+    >
+      <div className="mt-5 space-y-4">
         {qrLifecycle}
-
-        <AssetDetailInformation
-          categoryName={categoryName}
-          locations={locationPath.length ? [{ path: locationPath }] : []}
-          availability={
-            available
-              ? `${availableQuantity} ${
-                  availabilityUnitLabel || "items"
-                } available now`
-              : "Unavailable now"
-          }
-          tracking={tracking}
-          status={status}
-          maxBorrowDays={maxBorrowDays}
-          description={description}
-          additionalFields={additionalFields}
-          compact
-        />
-
         {contents ? (
           <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500">
@@ -139,6 +114,6 @@ export function StaffItemDetail({
           </section>
         ) : null}
       </div>
-    </div>
+    </IoioAssetDetailLayout>
   );
 }

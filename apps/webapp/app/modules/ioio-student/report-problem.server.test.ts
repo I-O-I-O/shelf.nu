@@ -35,7 +35,7 @@ describe("IOIO problem report safety", () => {
       "Thanks for reporting the damaged item. Staff will review it."
     );
     expect(IOIO_REPORT_ACKNOWLEDGEMENTS.WRONG_LOCATION).toBe(
-      "Thanks for reporting the location issue. Staff will check it."
+      "Thanks for reporting the location issue. Staff will review it."
     );
     expect(IOIO_REPORT_ACKNOWLEDGEMENTS.FOUND_SOMETHING).toBe(
       "Thanks for letting Staff know."

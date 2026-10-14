@@ -1,3 +1,5 @@
+import { isIoioPhysicalUnitBlockingReport } from "~/modules/ioio-student/report-problem.shared";
+
 export type IoioUnitBookingState = {
   status: string;
   isSoftStaffReservation: boolean;
@@ -12,14 +14,6 @@ export type IoioPhysicalUnitStateInput = {
   availableAccordingToIoioInventory: boolean;
 };
 
-const brokenIssueTypes = new Set([
-  "ITEM_DAMAGED",
-  "ITEM_MISSING",
-  "ITEM_NOT_WORKING",
-  "PART_MISSING",
-  "KIT_INCOMPLETE",
-]);
-
 /** Resolve one display state for both IOIO Inventory counts and unit badges. */
 export function getIoioPhysicalUnitState({
   assetStatus,
@@ -29,10 +23,10 @@ export function getIoioPhysicalUnitState({
   issueReportTypes,
   availableAccordingToIoioInventory,
 }: IoioPhysicalUnitStateInput) {
-  if (issueReportTypes.some((type) => brokenIssueTypes.has(type))) {
-    return "Broken";
-  }
-  if (issueReportTypes.length) return "Issue reported";
+  const blockingIssueReportTypes = issueReportTypes.filter(
+    isIoioPhysicalUnitBlockingReport
+  );
+  if (blockingIssueReportTypes.length) return "Broken";
 
   if (preparationStates.includes("READY_FOR_PICKUP")) {
     return "Ready for pickup";
@@ -65,7 +59,7 @@ export function getIoioPhysicalUnitState({
     return "Reserved";
   }
 
-  if (!availableToBook) return "Temporarily unavailable";
+  if (!availableToBook) return "Out of service";
   const hasOnlySoftReservationOverlaps =
     bookingStates.length > 0 &&
     bookingStates.every(({ isSoftStaffReservation }) => isSoftStaffReservation);

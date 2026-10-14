@@ -21,7 +21,7 @@ import type {
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { CustodyCard } from "~/components/assets/asset-custody-card";
-import { AssetImage } from "~/components/assets/asset-image";
+import { AssetDetailImage } from "~/components/assets/asset-image";
 import { AssetReminderCards } from "~/components/assets/asset-reminder-cards";
 import { DeleteAsset } from "~/components/assets/delete-asset";
 import { MoveUnitsDialog } from "~/components/assets/move-units-dialog";
@@ -105,8 +105,10 @@ import { getActiveCustomFields } from "~/modules/custom-field/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
+import { isIoioPhysicalUnitBlockingReport } from "~/modules/ioio-student/report-problem.shared";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { moveAssetKitUnits } from "~/modules/kit/service.server";
+import { getLocationHierarchy } from "~/modules/location/service.server";
 import { generateQrObj } from "~/modules/qr/utils.server";
 import { getLastScanForViewer } from "~/modules/scan/service.server";
 import { getTeamMembersForQuantityCustody } from "~/modules/team-member/service.server";
@@ -203,6 +205,17 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       request,
       include: getAssetOverviewFields(canUseBarcodes),
     });
+    const primaryAssetLocation = getPrimaryLocation(asset);
+    const assetLocationPath =
+      (asset.type === AssetType.INDIVIDUAL || isQuantityTracked(asset)) &&
+      primaryAssetLocation
+        ? (
+            await getLocationHierarchy({
+              organizationId,
+              locationId: primaryAssetLocation.id,
+            })
+          ).map(({ name }) => name)
+        : [];
 
     const canEditAssetModel = asset.assetModelId
       ? await hasPermission({
@@ -277,7 +290,10 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
               organizationId,
               assetId: { in: individualUnitIds },
               OR: [
-                { operationType: "REPORT_PROBLEM", status: "SUCCEEDED" },
+                {
+                  operationType: "REPORT_PROBLEM",
+                  status: { in: ["SUCCEEDED", "PROCESSING"] },
+                },
                 {
                   operationType: "IOIO_PREPARATION",
                   status: {
@@ -323,7 +339,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       const preparationStates = operations
         .filter((operation) => operation.operationType === "IOIO_PREPARATION")
         .map((operation) => operation.status);
-      const hasIssueReport = issueReportTypes.length > 0;
+      const hasIssueReport = issueReportTypes.some(
+        isIoioPhysicalUnitBlockingReport
+      );
       const hasPreparationState = preparationStates.length > 0;
       const status = getIoioPhysicalUnitState({
         assetStatus: unit.status,
@@ -600,6 +618,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         canSeeAllCustody,
         userId,
       })[0],
+      assetLocationPath,
       currentOrganization,
       userId,
       lastScan,
@@ -1007,6 +1026,7 @@ async function handleMoveUnitsIntent({
 export default function AssetOverview() {
   const {
     asset,
+    assetLocationPath,
     locale,
     qrObj,
     lastScan,
@@ -1110,7 +1130,7 @@ export default function AssetOverview() {
       <StaffItemDetail
         title={inventoryDetailTitle}
         image={
-          <AssetImage
+          <AssetDetailImage
             asset={{
               id: inventoryImage.id,
               mainImage: inventoryImage.mainImage,
@@ -1120,12 +1140,17 @@ export default function AssetOverview() {
               kitImage: asset.assetKits[0]?.kit.image ?? null,
             }}
             alt={`Image of ${inventoryDetailTitle}`}
-            useThumbnail={false}
             withPreview
-            className="size-full"
           />
         }
         availableQuantity={inventoryAvailableQuantity}
+        totalQuantity={
+          individualProductSummary
+            ? physicalUnitRows.length
+            : isQuantityTracked(asset)
+            ? Math.max(0, asset.quantity ?? 0)
+            : 1
+        }
         unitLabel={
           individualProductSummary
             ? /\bkit\b/i.test(inventoryDetailTitle)
@@ -1136,7 +1161,7 @@ export default function AssetOverview() {
             : "item"
         }
         categoryName={asset.category?.name}
-        locationPath={location ? [location.name] : []}
+        locationPath={assetLocationPath}
         description={asset.description}
         physicalUnits={physicalUnitRows}
         physicalUnitsActionUrl={`/assets/${encodeURIComponent(

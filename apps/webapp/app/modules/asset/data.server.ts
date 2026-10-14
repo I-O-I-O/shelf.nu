@@ -57,6 +57,7 @@ import {
   getAssetModelRollup,
 } from "../asset-model/rollup.server";
 import { getActiveCustomFields } from "../custom-field/service.server";
+import { IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES } from "../ioio-student/report-problem.shared";
 import type { OrganizationFromUser } from "../organization/service.server";
 import { TAG_WITH_COLOR_SELECT } from "../tag/constants";
 import { getTagsForBookingTagsFilter } from "../tag/service.server";
@@ -358,13 +359,33 @@ export async function simpleModeLoader({
     ReturnType<typeof getAssetAvailabilityBatch>
   > | null = null;
   let preparedPickupHeldUnitIds = new Set<string>();
+  let blockingReportAssetIds = new Set<string>();
   if (excludeAssetIds !== undefined) {
-    preparedPickupHeldUnitIds = await getPreparedPickupHeldUnitIds({
-      organizationId,
-      assetIds: assets
-        .filter((asset) => asset.type === AssetType.INDIVIDUAL)
-        .map((asset) => asset.id),
-    });
+    const individualAssetIds = assets
+      .filter((asset) => asset.type === AssetType.INDIVIDUAL)
+      .map((asset) => asset.id);
+    const [heldPickupUnitIds, blockingReports] = await Promise.all([
+      getPreparedPickupHeldUnitIds({
+        organizationId,
+        assetIds: individualAssetIds,
+      }),
+      db.ioioWriteOperation.findMany({
+        where: {
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: { in: ["SUCCEEDED", "PROCESSING"] },
+          reportType: { in: [...IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES] },
+          assetId: { in: individualAssetIds },
+        },
+        select: { assetId: true },
+      }),
+    ]);
+    preparedPickupHeldUnitIds = heldPickupUnitIds;
+    blockingReportAssetIds = new Set(
+      blockingReports
+        .map(({ assetId }) => assetId)
+        .filter((assetId): assetId is string => Boolean(assetId))
+    );
     try {
       physicalAvailabilityByAssetId = await getAssetAvailabilityBatch(
         assets.map((asset) => asset.id),
@@ -478,6 +499,9 @@ export async function simpleModeLoader({
             : {}),
           ...(preparedPickupHeldUnitIds.has(asset.id)
             ? { preparedPickupHeld: true }
+            : {}),
+          ...(blockingReportAssetIds.has(asset.id)
+            ? { blockingIssueReported: true }
             : {}),
         })) as unknown as Array<(typeof assets)[number] & RowWithCustody>,
         { canSeeAllCustody, userId }

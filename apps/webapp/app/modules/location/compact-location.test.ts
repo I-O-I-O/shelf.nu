@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import { getCompactLocationSummary } from "./compact-location";
+
+describe("getCompactLocationSummary", () => {
+  it("keeps the room and every named storage level", () => {
+    expect(
+      getCompactLocationSummary([
+        "IOIO Lab - B477",
+        "Section A",
+        "Shelf A1",
+        "Container A1-13",
+      ])
+    ).toEqual({
+      room: "IOIO Lab - B477",
+      storageLabel: "Section A · Shelf A1 · Container A1-13",
+    });
+  });
+
+  it("omits empty location levels", () => {
+    expect(
+      getCompactLocationSummary(["Room B477", "  ", "Shelf A1", ""])
+    ).toEqual({ room: "Room B477", storageLabel: "Shelf A1" });
+  });
+
+  it("does not repeat hierarchy labels already present in stored names", () => {
+    expect(
+      getCompactLocationSummary([
+        "IOIO Lab - B477",
+        "Section Section A",
+        "Shelf Shelf A1",
+        "Container Container A1-13",
+      ])
+    ).toEqual({
+      room: "IOIO Lab - B477",
+      storageLabel: "Section A · Shelf A1 · Container A1-13",
+    });
+  });
+
+  it("normalizes the misspelled section prefix without changing stored data", () => {
+    expect(getCompactLocationSummary(["IOIO Lab - B477", "Seciton A"])).toEqual(
+      { room: "IOIO Lab - B477", storageLabel: "Section A" }
+    );
+  });
+
+  it("keeps only the room and deepest assigned descendant for asset quick views", () => {
+    expect(
+      getCompactLocationSummary(
+        ["IOIO Lab - B477", "Section A", "Shelf A1", "Container A1-13"],
+        { showIntermediateLocations: false }
+      )
+    ).toEqual({
+      room: "IOIO Lab - B477",
+      storageLabel: "Container A1-13",
+    });
+    expect(
+      getCompactLocationSummary(["IOIO Lab - B477", "Section A", "Shelf A1"], {
+        showIntermediateLocations: false,
+      }).storageLabel
+    ).toBe("Shelf A1");
+    expect(
+      getCompactLocationSummary(["IOIO Lab - B477", "Section A"], {
+        showIntermediateLocations: false,
+      }).storageLabel
+    ).toBe("Section A");
+    expect(
+      getCompactLocationSummary(["IOIO Lab - B477"], {
+        showIntermediateLocations: false,
+      })
+    ).toEqual({ room: "IOIO Lab - B477", storageLabel: null });
+  });
+});

@@ -23,7 +23,11 @@ type AvailabilityAction = "unavailable" | "available" | "broken";
 function statusStyle(status: string) {
   if (status === "Available") return "bg-green-50 text-green-800";
   if (status === "Broken") return "bg-red-50 text-red-800";
-  if (status === "Temporarily unavailable" || status === "Unavailable") {
+  if (
+    status === "Temporarily unavailable" ||
+    status === "Out of service" ||
+    status === "Unavailable"
+  ) {
     return "bg-gray-100 text-gray-700";
   }
   return "bg-amber-50 text-amber-800";
@@ -146,6 +150,7 @@ function PhysicalUnitRow({
                   </DropdownMenuItem>
                 </>
               ) : unit.status === "Temporarily unavailable" ||
+                unit.status === "Out of service" ||
                 unit.status === "Unavailable" ||
                 unit.status === "Broken" ||
                 unit.status === "Issue reported" ? (

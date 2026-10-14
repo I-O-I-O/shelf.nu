@@ -1,15 +1,16 @@
 import { useLoaderData } from "react-router";
 import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import { z } from "zod";
-import { AssetDetailInformation } from "~/components/assets/asset-detail-information";
-import { AskAboutItemButton } from "~/components/ioio/ask-about-item-button";
-import { groupStudentAssets } from "~/components/ioio-student/inventory-presentation";
+import { AssetDetailImage } from "~/components/assets/asset-image";
+import { IoioAssetDetailLayout } from "~/components/ioio-staff/ioio-asset-detail-layout";
+import {
+  getStudentBrowseLocationIdForPath,
+  groupStudentAssets,
+} from "~/components/ioio-student/inventory-presentation";
 import {
   formatStudentTitle,
-  StudentAssetPlaceholder,
   StudentCheckoutButton,
 } from "~/components/ioio-student/student-ui";
-import { PageBackLink } from "~/components/shared/page-back-link";
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import {
   getStudentAsset,
@@ -66,11 +67,14 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
 
 function locationPaths(
   locations: StudentLocation[],
-  parentPath: string[] = [],
-  paths = new Map<string, string[]>()
+  parentPath: { names: string[]; ids: string[] } = { names: [], ids: [] },
+  paths = new Map<string, { names: string[]; ids: string[] }>()
 ) {
   for (const location of locations) {
-    const path = [...parentPath, location.name];
+    const path = {
+      names: [...parentPath.names, location.name],
+      ids: [...parentPath.ids, location.id],
+    };
     paths.set(location.id, path);
     locationPaths(location.children, path, paths);
   }
@@ -87,57 +91,55 @@ function normalizeProductTitle(title: string) {
 export default function IoioAssetDetail() {
   const { asset, locations } = useLoaderData<typeof loader>();
   const paths = locationPaths(locations);
-  const availability =
+  const totalQuantity =
     asset.type === "INDIVIDUAL"
-      ? `${asset.quantity ?? 1} physical units, ${
-          asset.availableQuantity ?? 0
-        } available`
-      : asset.availableQuantity
-      ? `${asset.availableQuantity} available`
-      : "Unavailable";
+      ? asset.quantity ?? 1
+      : asset.type === "QUANTITY_TRACKED"
+      ? asset.quantity ?? asset.availableQuantity ?? 0
+      : 1;
+  const availableQuantity = asset.availableToBook
+    ? Math.max(0, asset.availableQuantity ?? 0)
+    : 0;
+  const unitLabel =
+    asset.type === "INDIVIDUAL"
+      ? "kits"
+      : asset.type === "QUANTITY_TRACKED"
+      ? "items"
+      : "item";
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <PageBackLink to="/ioio" className="mb-5">
-        Back to Inventory
-      </PageBackLink>
-      <h1 className="mb-5 text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
-        {formatStudentTitle(asset.title, asset.type)}
-      </h1>
-      <div className="mb-5">
-        <AskAboutItemButton
-          itemName={formatStudentTitle(asset.title, asset.type)}
-          assetId={asset.id}
-          kitId={asset.kits[0]?.id}
-          locationId={asset.locations[0]?.id}
-          to="/ioio/ask"
+    <IoioAssetDetailLayout
+      backTo="/ioio"
+      backLabel="Back to Inventory"
+      title={formatStudentTitle(asset.title, asset.type)}
+      description={asset.description}
+      image={
+        <AssetDetailImage
+          asset={asset}
+          alt={`Image of ${formatStudentTitle(asset.title, asset.type)}`}
         />
-      </div>
+      }
+      actions={<StudentCheckoutButton asset={asset} primary />}
+      categoryName={asset.category?.name}
+      locations={asset.locations.map((location) => {
+        const locationPath = paths.get(location.id);
+        const browseLocationId = getStudentBrowseLocationIdForPath(
+          locationPath?.ids ?? [location.id],
+          locations
+        );
 
-      <div className="space-y-4">
-        <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <StudentAssetPlaceholder asset={asset} variant="detail" />
-          <div className="p-5">
-            <div className="mt-4 flex justify-end">
-              <StudentCheckoutButton asset={asset} />
-            </div>
-          </div>
-        </section>
-
-        <AssetDetailInformation
-          categoryName={asset.category?.name}
-          locations={asset.locations.map((location) => ({
-            path: paths.get(location.id) ?? [location.name],
-            href: `/ioio/browse?location=${location.id}`,
-          }))}
-          availability={availability}
-          tracking={
-            asset.type === "INDIVIDUAL" ? "Individual QR tracking" : null
-          }
-          maxBorrowDays={asset.maxBorrowDays}
-          description={asset.description}
-        />
-      </div>
-    </div>
+        return {
+          path: locationPath?.names ?? [location.name],
+          href: browseLocationId
+            ? `/ioio/browse?location=${encodeURIComponent(browseLocationId)}`
+            : "/ioio/browse",
+        };
+      })}
+      availableQuantity={availableQuantity}
+      totalQuantity={totalQuantity}
+      unitLabel={unitLabel}
+      tracking={asset.type === "INDIVIDUAL" ? "Individual QR tracking" : null}
+      maxBorrowDays={asset.maxBorrowDays}
+    />
   );
 }

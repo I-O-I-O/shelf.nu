@@ -325,7 +325,6 @@ export default function StaffShell() {
   );
   const canViewLabTasks = Boolean(layoutData?.isIoioStaff);
   const labStatus = layoutData?.labStatus ?? null;
-  const assignedLabTaskCount = layoutData?.assignedLabTaskCount ?? 0;
   const askMatch = matches.find((match) => match.pathname === "/staff/ask");
   const chatScope = (askMatch?.data as { chatScope?: string } | undefined)
     ?.chatScope;
@@ -373,7 +372,11 @@ export default function StaffShell() {
               <div className="ml-auto flex items-center gap-3">
                 <StaffLabStatusBell
                   status={labStatus}
-                  assignedTaskCount={assignedLabTaskCount}
+                  readStateKey={
+                    layoutData?.user?.id && layoutData.currentOrganizationId
+                      ? `ioio-staff-lab-status-seen:${layoutData.currentOrganizationId}:${layoutData.user.id}`
+                      : undefined
+                  }
                 />
                 <StudentBorrowListIndicator />
                 <button

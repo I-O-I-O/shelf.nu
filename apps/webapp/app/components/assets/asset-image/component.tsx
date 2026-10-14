@@ -1,4 +1,11 @@
-import { useEffect, useReducer, useState, useCallback, useRef } from "react";
+import {
+  useEffect,
+  useReducer,
+  useState,
+  useCallback,
+  useRef,
+  type SyntheticEvent,
+} from "react";
 
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
 import { Button } from "~/components/shared/button";
@@ -142,6 +149,8 @@ export const AssetImage = ({
   className,
   withPreview = false,
   useThumbnail = true,
+  imageFit = "cover",
+  imageSizing = "fill",
   alt,
   ...rest
 }: AssetImageProps) => {
@@ -149,6 +158,7 @@ export const AssetImage = ({
     assetImageReducer,
     INITIAL_ASSET_IMAGE_STATE
   );
+  const [loadedImageNaturalWidth, setLoadedImageNaturalWidth] = useState(0);
   const {
     isLoading,
     isImageError,
@@ -342,8 +352,9 @@ export const AssetImage = ({
     [assetId]
   );
 
-  const handleImageLoad = () => {
+  const handleImageLoad = (event: SyntheticEvent<HTMLImageElement>) => {
     // Successfully loaded, clear both loading and error states
+    setLoadedImageNaturalWidth(event.currentTarget.naturalWidth);
     dispatch({ type: "load_success" });
   };
 
@@ -377,6 +388,7 @@ export const AssetImage = ({
     if (previousAssetIdRef.current !== assetId) {
       previousAssetIdRef.current = assetId;
       hasAttemptedRefreshRef.current = false;
+      setLoadedImageNaturalWidth(0);
       dispatch({ type: "asset_changed" });
     }
 
@@ -468,7 +480,13 @@ export const AssetImage = ({
 
   return (
     <>
-      <div className={tw("relative overflow-hidden", className)}>
+      <div
+        className={tw(
+          "relative",
+          imageSizing === "fill" && "overflow-hidden",
+          className
+        )}
+      >
         {(isLoading ||
           (useThumbnail && isFetchingImage && !thumbnailImage)) && (
           <div
@@ -499,12 +517,24 @@ export const AssetImage = ({
           tabIndex={withPreview ? 0 : undefined}
           aria-label={withPreview ? `Open preview for ${alt}` : undefined}
           src={imageUrl}
-          width={108}
-          height={108}
+          width={imageSizing === "fill" ? 108 : undefined}
+          height={imageSizing === "fill" ? 108 : undefined}
           className={tw(
-            "size-full object-cover",
+            imageSizing === "detail"
+              ? "block h-auto max-h-[min(68dvh,calc(100dvh-20rem))] w-full object-contain"
+              : imageSizing === "natural"
+              ? "block size-auto max-h-full max-w-full"
+              : "size-full",
+            imageFit === "contain" ? "object-contain" : "object-cover",
             withPreview && "cursor-pointer"
           )}
+          style={
+            imageSizing === "detail" &&
+            loadedImageNaturalWidth > 0 &&
+            loadedImageNaturalWidth < 640
+              ? { maxWidth: `${loadedImageNaturalWidth * 1.5}px` }
+              : undefined
+          }
           alt={alt}
           onLoad={handleImageLoad}
           onError={handleImageError}
@@ -535,7 +565,11 @@ export const AssetImage = ({
             >
               <div className="flex max-h-[calc(100%-4rem)] grow items-center justify-center border-y border-gray-200 bg-gray-50">
                 {/* Always use full-size image in the preview dialog */}
-                <img src={previewImageUrl} className={"max-h-full"} alt={alt} />
+                <img
+                  src={previewImageUrl}
+                  className="max-h-full max-w-full object-contain"
+                  alt={alt}
+                />
               </div>
               <div className="flex w-full justify-center gap-3 px-6 py-3 md:justify-end">
                 <Button to={`/assets/${assetId}/edit`} variant="secondary">

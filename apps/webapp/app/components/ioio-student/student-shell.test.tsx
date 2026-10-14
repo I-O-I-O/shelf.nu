@@ -1,5 +1,5 @@
 import type { FormEventHandler, ReactNode } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -101,6 +101,23 @@ function checkoutAsset(): StudentAsset {
 describe("StudentShell account controls", () => {
   it("shows only the IOIO student destinations in its navigation", () => {
     render(<StudentShell />);
+
+    expect(screen.getByText("Student desk")).toBeInTheDocument();
+    const mobileHeader = screen.getByRole("banner");
+    expect(mobileHeader).not.toHaveClass("border-b");
+    expect(
+      within(mobileHeader).getByRole("button", { name: "Open notifications" })
+    ).toBeInTheDocument();
+    expect(
+      within(mobileHeader).getByRole("link", { name: /Open borrowing list/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveClass("pt-6");
+    expect(
+      screen.getAllByRole("button", { name: "Open notifications" })
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("link", { name: /Open borrowing list/ })
+    ).toHaveLength(2);
 
     const expectedLinks = [
       ["Home", "/ioio"],

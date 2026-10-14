@@ -40,7 +40,6 @@ import { revokeAllSessions } from "~/modules/auth/service.server";
 import { getLegacyLoginDecisionForUser } from "~/modules/auth/sso-enforcement.server";
 import { getBookingSettingsForOrganization } from "~/modules/booking-settings/service.server";
 import { getLabStatus } from "~/modules/ioio-staff/lab-status.server";
-import { getAssignedOpenLabTaskCount } from "~/modules/ioio-staff/lab-tasks.server";
 import { getStudentAnnualAccessApproval } from "~/modules/ioio-student/annual-access.server";
 import { isStudentLabIntroductionRequired } from "~/modules/ioio-student/lab-introduction.shared";
 import {
@@ -397,7 +396,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       workingHours,
       unreadUpdatesCount,
       labStatus,
-      assignedLabTaskCount,
       annualAccessApproval,
     ] = await Promise.all([
       withIoioStudentLoadStage(
@@ -427,12 +425,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             preparationOrganizationId: currentOrganization.id,
           })
         : Promise.resolve(null),
-      isIoioStaff
-        ? getAssignedOpenLabTaskCount({
-            organizationId: currentOrganization.id,
-            userId: authSession.userId,
-          })
-        : Promise.resolve(0),
       !isIoioStaff &&
       !isIoioTA &&
       currentOrganizationUserRoles.includes(OrganizationRoles.SELF_SERVICE)
@@ -495,7 +487,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         warnForNoPaymentMethod: user.warnForNoPaymentMethod,
         needsSequentialIdMigration,
         labStatus,
-        assignedLabTaskCount,
         annualAccessApproval,
         studentIoioNotifications,
         /** THis is used to disable team organizations when the currentOrg is Team and no subscription is present  */

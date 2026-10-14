@@ -68,6 +68,16 @@ describe("skipRevalidationOnClientViewChange", () => {
     expect(call({ formMethod: "POST" })).toBe(true);
   });
 
+  it("revalidates the shared shell after an Operations action on the same URL", () => {
+    expect(
+      call({
+        currentUrl: new URL("https://app.test/operations?view=general"),
+        nextUrl: new URL("https://app.test/operations?view=general"),
+        formMethod: "POST",
+      })
+    ).toBe(true);
+  });
+
   it("defers to default for a real navigation (different path)", () => {
     expect(
       call({

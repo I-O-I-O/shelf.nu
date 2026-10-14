@@ -10,6 +10,7 @@ import {
   getIoioArchivedItemIds,
   IOIO_ARCHIVE_ITEM_TYPE,
 } from "~/modules/ioio-staff/archive.server";
+import { IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES } from "~/modules/ioio-student/report-problem.shared";
 
 export type CanonicalIndividualProductQuantity = {
   total: number;
@@ -69,14 +70,17 @@ export async function getPreparedPickupHeldUnitIds({
  */
 export function calculateIndividualUnitAvailability(
   units: IndividualUnitAvailabilityCandidate[],
-  reservedUnitIds: Iterable<string>
+  reservedUnitIds: Iterable<string>,
+  unavailableUnitIds: Iterable<string> = []
 ) {
   const reserved = new Set(reservedUnitIds);
+  const unavailable = new Set(unavailableUnitIds);
   const borrowableUnits = units.filter(
     (unit) =>
       unit.status === AssetStatus.AVAILABLE &&
       unit.availableToBook &&
-      !reserved.has(unit.id)
+      !reserved.has(unit.id) &&
+      !unavailable.has(unit.id)
   );
 
   return {
@@ -153,15 +157,37 @@ export async function getIndividualUnitAvailability({
         select: { assetId: true },
       })
     : [];
-  const heldPickupUnitIds = await getPreparedPickupHeldUnitIds({
-    organizationId,
-    assetIds: units.map((unit) => unit.id),
-  });
+  const [heldPickupUnitIds, openBlockingReports, custodyRows] =
+    await Promise.all([
+      getPreparedPickupHeldUnitIds({
+        organizationId,
+        assetIds: units.map((unit) => unit.id),
+      }),
+      db.ioioWriteOperation.findMany({
+        where: {
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: { in: ["SUCCEEDED", "PROCESSING"] },
+          reportType: { in: [...IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES] },
+          assetId: { in: units.map((unit) => unit.id) },
+        },
+        select: { assetId: true },
+      }),
+      db.custody.findMany({
+        where: { assetId: { in: units.map((unit) => unit.id) } },
+        select: { assetId: true },
+      }),
+    ]);
 
-  return calculateIndividualUnitAvailability(units, [
-    ...reservations.map((reservation) => reservation.assetId),
-    ...heldPickupUnitIds,
-  ]);
+  return calculateIndividualUnitAvailability(
+    units,
+    [
+      ...reservations.map((reservation) => reservation.assetId),
+      ...heldPickupUnitIds,
+      ...custodyRows.map(({ assetId }) => assetId),
+    ],
+    openBlockingReports.flatMap(({ assetId }) => assetId ?? [])
+  );
 }
 
 /**

@@ -28,7 +28,11 @@ import {
 import { getQr } from "~/modules/qr/service.server";
 import { createReport } from "~/modules/report-found/service.server";
 import { ShelfError } from "~/utils/error";
-import { createSignedUrl } from "~/utils/storage.server";
+import {
+  createSignedUrl,
+  parseFileFormData,
+  removeStorageImageObject,
+} from "~/utils/storage.server";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
 import {
   ASSET_SEARCH_CEILING_MESSAGE,
@@ -61,6 +65,7 @@ import {
   relinkAssetQrCode,
   renderBulkAssetTitle,
   updateAsset,
+  updateAssetMainImage,
   uploadDuplicateAssetMainImage,
 } from "./service.server";
 
@@ -331,6 +336,10 @@ vitest.mock("~/utils/storage.server", async () => {
   return {
     ...actual,
     createSignedUrl: vitest.fn(),
+    // why: exercise the asset image DB write and failure cleanup without
+    // sending this service unit test through the separate Storage HTTP tests.
+    parseFileFormData: vitest.fn(),
+    removeStorageImageObject: vitest.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -6369,6 +6378,138 @@ describe("setIndividualAssetAvailability", () => {
           assetId: "unit-002",
           description: "Broken connector",
         }),
+      })
+    );
+  });
+});
+
+describe("updateAssetMainImage", () => {
+  const imagePaths = {
+    originalPath: "user-1/asset-1/main-image-new.webp",
+    thumbnailPath: "user-1/asset-1/main-image-new-thumbnail.webp",
+  };
+
+  function imageFormData() {
+    const formData = new FormData();
+    formData.set("mainImage", JSON.stringify(imagePaths));
+    return formData;
+  }
+
+  beforeEach(() => {
+    vitest.clearAllMocks();
+    vitest.mocked(parseFileFormData).mockResolvedValue(imageFormData());
+  });
+
+  it("persists Shelf storage paths with an organization-scoped asset update", async () => {
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/new", { method: "POST" }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      isNewAsset: true,
+    });
+
+    expect(result).toBe(true);
+    expect(parseFileFormData).toHaveBeenCalledWith(
+      expect.objectContaining({ bucketName: "assets" })
+    );
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "asset-1", organizationId: "org-1" },
+        data: expect.objectContaining({
+          mainImage: null,
+          thumbnailImage: null,
+          mainImageStoragePath: imagePaths.originalPath,
+          thumbnailImageStoragePath: imagePaths.thumbnailPath,
+        }),
+      })
+    );
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
+  it("replaces an image and removes previous objects only after the DB write", async () => {
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue({
+      mainImageStoragePath: "user-1/asset-1/main-image-old.webp",
+      thumbnailImageStoragePath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    });
+    //@ts-expect-error mock setup
+    getSupabaseAdmin.mockReturnValue({
+      storage: {
+        from: () => ({
+          list: vitest.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      },
+    });
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/asset-1/edit", {
+        method: "POST",
+      }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    });
+
+    expect(result).toBe(true);
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mainImageStoragePath: imagePaths.originalPath,
+          thumbnailImageStoragePath: imagePaths.thumbnailPath,
+        }),
+      })
+    );
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: "user-1/asset-1/main-image-old.webp",
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    });
+  });
+
+  it("cleans new objects after a DB failure and keeps the old image objects", async () => {
+    const previousPaths = {
+      mainImageStoragePath: "user-1/asset-1/main-image-old.webp",
+      thumbnailImageStoragePath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    };
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue(previousPaths);
+    //@ts-expect-error mock setup
+    db.$transaction.mockRejectedValueOnce(new Error("local DB write failed"));
+
+    await expect(
+      updateAssetMainImage({
+        request: new Request("http://localhost/assets/asset-1/edit", {
+          method: "POST",
+        }),
+        assetId: "asset-1",
+        userId: "user-1",
+        organizationId: "org-1",
+      })
+    ).rejects.toMatchObject({
+      message: expect.any(String),
+    });
+
+    expect(removeStorageImageObject).toHaveBeenCalledTimes(2);
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: imagePaths.originalPath,
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: imagePaths.thumbnailPath,
+    });
+    expect(removeStorageImageObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectPath: previousPaths.mainImageStoragePath,
+      })
+    );
+    expect(removeStorageImageObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectPath: previousPaths.thumbnailImageStoragePath,
       })
     );
   });

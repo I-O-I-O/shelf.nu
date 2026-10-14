@@ -35,6 +35,7 @@ import {
   getLabIssueOperationsHref,
   getLabStatus,
   resolveBrokenAssetOutOfService,
+  resolveLabIssue,
   returnBrokenAssetToService,
 } from "./lab-status.server";
 
@@ -208,12 +209,74 @@ describe("getLabStatus", () => {
     const result = await getLabStatus({ organizationId: "org-1" });
 
     expect(result.unresolvedReports).toBe(0);
+    expect(result.totalIssues).toBe(1);
     expect(result.generalReports).toBe(1);
+    expect(database.ioioWriteOperation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          organizationId: "org-1",
+          operationType: "REPORT_PROBLEM",
+          status: "SUCCEEDED",
+        },
+      })
+    );
     expect(result.issues[0]).toMatchObject({
       kind: "general-report",
       title: "Wrong location: Shelf B",
       severity: "attention",
       href: "/operations?view=general",
+    });
+  });
+
+  it("removes a resolved General report from the current attention total", async () => {
+    let reportStatus = "SUCCEEDED";
+    const report = {
+      id: "wrong-location",
+      source: "IOIO_STUDENT_REPORT",
+      reportType: "WRONG_LOCATION",
+      assetId: null,
+      kitId: null,
+      locationId: "location-1",
+      bookingAssetId: null,
+    };
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "REPORT_PROBLEM" &&
+          where.status === "SUCCEEDED" &&
+          reportStatus === "SUCCEEDED"
+          ? [report]
+          : []
+      )
+    );
+    database.ioioWriteOperation.findFirst.mockResolvedValue({
+      reportType: "WRONG_LOCATION",
+      assetId: null,
+      kitId: null,
+      locationId: "location-1",
+    });
+    database.ioioWriteOperation.updateMany.mockImplementation(({ where }) => {
+      expect(where).toMatchObject({
+        organizationId: "org-1",
+        operationType: "REPORT_PROBLEM",
+        status: "SUCCEEDED",
+      });
+      reportStatus = "RESOLVED";
+      return Promise.resolve({ count: 1 });
+    });
+    database.location.findMany.mockResolvedValue([
+      { id: "location-1", name: "Shelf B", parentId: null },
+    ]);
+
+    const before = await getLabStatus({ organizationId: "org-1" });
+    expect(before).toMatchObject({ totalIssues: 1, generalReports: 1 });
+
+    await resolveLabIssue({ organizationId: "org-1", operationId: report.id });
+    const after = await getLabStatus({ organizationId: "org-1" });
+
+    expect(after).toMatchObject({
+      totalIssues: 0,
+      generalReports: 0,
+      issues: [],
     });
   });
 

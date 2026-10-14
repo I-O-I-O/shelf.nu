@@ -18,41 +18,29 @@ type AssetDetailInformationProps = {
   categoryName?: string | null;
   locations: AssetDetailLocation[];
   availability: string;
+  availabilityTone: "available" | "unavailable";
+  availabilityDetail?: string;
   tracking?: string | null;
   status?: string | null;
   maxBorrowDays?: number | null;
-  description?: string | null;
   additionalFields?: AssetDetailField[];
-  compact?: boolean;
 };
 
-function LocationValue({
-  location,
-  compact = false,
-}: {
-  location: AssetDetailLocation;
-  compact?: boolean;
-}) {
-  const summary = getCompactLocationSummary(location.path);
-  const content = compact ? (
-    <span className="inline-flex max-w-full flex-wrap items-baseline gap-x-2 gap-y-0.5">
-      {summary.room ? <span>{summary.room}</span> : null}
-      {summary.room && summary.storageLabel ? (
-        <span aria-hidden="true" className="text-gray-400">
-          ·
-        </span>
-      ) : null}
-      {summary.storageLabel ? <span>{summary.storageLabel}</span> : null}
+function LocationValue({ location }: { location: AssetDetailLocation }) {
+  const summary = getCompactLocationSummary(location.path, {
+    showIntermediateLocations: false,
+  });
+  const storageLabel = summary.storageLabel ? (
+    <span className="text-gray-600">
+      {summary.room ? " · " : ""}
+      {summary.storageLabel}
     </span>
-  ) : (
-    <>
-      {summary.room ? <span className="block">{summary.room}</span> : null}
-      {summary.storageLabel ? (
-        <span className="mt-0.5 block text-sm text-gray-700">
-          {summary.storageLabel}
-        </span>
-      ) : null}
-    </>
+  ) : null;
+  const content = (
+    <span className="block">
+      {summary.room}
+      {storageLabel}
+    </span>
   );
 
   return location.href ? (
@@ -71,27 +59,28 @@ export function AssetDetailInformation({
   categoryName,
   locations,
   availability,
+  availabilityTone,
+  availabilityDetail,
   tracking,
   status,
   maxBorrowDays,
-  description,
   additionalFields = [],
-  compact = false,
 }: AssetDetailInformationProps) {
+  const usefulLocations = locations.filter((location) => {
+    const summary = getCompactLocationSummary(location.path, {
+      showIntermediateLocations: false,
+    });
+    return summary.room || summary.storageLabel;
+  });
   const fields: AssetDetailField[] = [
     {
-      label: "Category",
-      value: categoryName || "Uncategorized",
-    },
-    {
       label: "Location",
-      value: locations.length ? (
-        <div className={compact ? "space-y-1" : "space-y-3"}>
-          {locations.map((location, index) => (
+      value: usefulLocations.length ? (
+        <div className="space-y-2">
+          {usefulLocations.map((location, index) => (
             <LocationValue
               key={`${location.path.join("/")}-${index}`}
               location={location}
-              compact={compact}
             />
           ))}
         </div>
@@ -99,18 +88,29 @@ export function AssetDetailInformation({
         "Location not recorded"
       ),
     },
-    { label: "Availability", value: availability },
-    ...(status ? [{ label: "Status", value: status }] : []),
-    ...(tracking ? [{ label: "Tracking", value: tracking }] : []),
+    {
+      label: "Category",
+      value: categoryName || "Uncategorized",
+    },
     ...(maxBorrowDays != null
+      ? [{ label: "Maximum borrowing period", value: `${maxBorrowDays} days` }]
+      : []),
+    ...(tracking
       ? [
           {
-            label: "Maximum borrowing period",
-            value: `${maxBorrowDays} days`,
-            help: "How long this item can be borrowed before an extension is required.",
+            label: "Tracking",
+            value: tracking,
+            ...(tracking === "Individual QR tracking"
+              ? {
+                  help: "Each physical unit has its own QR code so IOIO can track which exact unit is borrowed and returned.",
+                }
+              : {}),
           },
         ]
       : []),
+  ];
+  const staffFields = [
+    ...(status ? [{ label: "Status", value: status }] : []),
     ...additionalFields,
   ];
 
@@ -119,13 +119,21 @@ export function AssetDetailInformation({
       <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500">
         Details
       </h2>
-      <dl
-        className={
-          compact
-            ? "mt-3 grid gap-x-6 gap-y-3 sm:grid-cols-2"
-            : "mt-4 grid gap-4 sm:grid-cols-2"
-        }
+      <div
+        className={`mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-xl border p-3.5 ${
+          availabilityTone === "available"
+            ? "border-green-200 bg-green-50 text-green-800"
+            : "border-red-200 bg-red-50 text-red-800"
+        }`}
       >
+        <p className="text-xl font-black tracking-tight sm:text-2xl">
+          {availability}
+        </p>
+        {availabilityDetail ? (
+          <p className="text-sm text-gray-600">{availabilityDetail}</p>
+        ) : null}
+      </div>
+      <dl className="mt-4 grid grid-cols-2 gap-4 sm:gap-x-6">
         {fields.map((field) => (
           <div key={field.label} className="min-w-0">
             <dt className="text-xs font-bold uppercase tracking-wide text-gray-500">
@@ -135,28 +143,30 @@ export function AssetDetailInformation({
                 field.label
               )}
             </dt>
-            <dd
-              className={
-                compact
-                  ? "mt-0.5 break-words text-sm leading-5 text-gray-800"
-                  : "mt-1 break-words text-sm text-gray-800"
-              }
-            >
+            <dd className="mt-1 break-words text-sm leading-5 text-gray-800">
               {field.value}
             </dd>
           </div>
         ))}
-        {description?.trim() ? (
-          <div className="sm:col-span-2">
-            <dt className="text-xs font-bold uppercase tracking-wide text-gray-500">
-              Description
-            </dt>
-            <dd className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">
-              {description.trim()}
-            </dd>
-          </div>
-        ) : null}
       </dl>
+      {staffFields.length ? (
+        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-gray-100 pt-3 sm:gap-x-6">
+          {staffFields.map((field) => (
+            <div key={field.label} className="min-w-0">
+              <dt className="text-xs font-bold uppercase tracking-wide text-gray-500">
+                {field.help ? (
+                  <SettingHelpLabel label={field.label} help={field.help} />
+                ) : (
+                  field.label
+                )}
+              </dt>
+              <dd className="mt-0.5 break-words text-sm leading-5 text-gray-800">
+                {field.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
     </section>
   );
 }

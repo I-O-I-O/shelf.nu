@@ -5325,6 +5325,9 @@ export async function updateAssetMainImage({
   organizationId: Organization["id"];
   isNewAsset?: boolean;
 }): Promise<boolean> {
+  let uploadedImagePaths: string[] = [];
+  let imageSaved = false;
+
   try {
     const fileData = await parseFileFormData({
       request,
@@ -5371,6 +5374,9 @@ export async function updateAssetMainImage({
       // If parsing fails, it's just a regular path string
       mainImagePath = image;
     }
+    uploadedImagePaths = [mainImagePath, thumbnailPath].filter(
+      (path): path is string => !!path
+    );
 
     const previousImage = isNewAsset
       ? null
@@ -5393,6 +5399,7 @@ export async function updateAssetMainImage({
       organizationId,
       request,
     });
+    imageSaved = true;
 
     const previousPaths = [
       previousImage?.mainImageStoragePath,
@@ -5426,6 +5433,19 @@ export async function updateAssetMainImage({
 
     return true;
   } catch (cause) {
+    if (!imageSaved && uploadedImagePaths.length > 0) {
+      await Promise.all(
+        uploadedImagePaths.map((objectPath) =>
+          removeStorageImageObject({ bucketName: "assets", objectPath })
+        )
+      ).catch((cleanupCause: unknown) => {
+        Logger.dev("[IOIO IMAGE] failed asset image cleanup after save error", {
+          assetId,
+          cleanupCause,
+        });
+      });
+    }
+
     const isShelfError = isLikeShelfError(cause);
     throw new ShelfError({
       cause,

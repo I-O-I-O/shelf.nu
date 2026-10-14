@@ -9,7 +9,6 @@ function renderStaffShell() {
     isIoioStaff: true,
     isIoioTA: false,
     labStatus: null,
-    assignedLabTaskCount: 0,
   };
   const router = createMemoryRouter(
     [

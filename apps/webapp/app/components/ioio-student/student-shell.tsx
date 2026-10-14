@@ -543,7 +543,7 @@ function StudentShellContent({
       </aside>
 
       <div className="md:pl-56">
-        <header className="border-b border-red-100 bg-white md:hidden">
+        <header className="bg-white md:hidden">
           <div className="flex items-center justify-between gap-3 p-4">
             <Link
               to="/ioio"
