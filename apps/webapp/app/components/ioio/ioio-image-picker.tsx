@@ -145,17 +145,17 @@ export function IoioImagePicker({
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center px-3 py-5 text-center">
+          <div className="flex flex-col items-center justify-center p-3 text-center">
             <span className="flex size-10 items-center justify-center rounded-full bg-white text-red-700 shadow-sm ring-1 ring-gray-200">
               <ImagePlus aria-hidden="true" className="size-5" />
             </span>
-            <p className="mt-3 text-sm font-semibold text-gray-900">
+            <p className="mt-2 text-sm font-semibold text-gray-900">
               Drop an image here
             </p>
-            <p className="mt-1 text-xs text-gray-500">or</p>
+            <p className="mt-0.5 text-xs text-gray-500">or</p>
             <button
               type="button"
-              className="box-shadow-xs mt-2 inline-flex max-w-xl flex-row items-center justify-center gap-2 whitespace-nowrap rounded border border-primary-400 bg-primary-500 px-[14px] py-2 text-center text-sm font-semibold text-white focus:ring-2 enabled:hover:bg-primary-400 disabled:border-primary-300 disabled:bg-primary-300"
+              className="box-shadow-xs mt-1.5 inline-flex max-w-xl flex-row items-center justify-center gap-2 whitespace-nowrap rounded border border-primary-400 bg-primary-500 px-[14px] py-1.5 text-center text-sm font-semibold text-white focus:ring-2 enabled:hover:bg-primary-400 disabled:border-primary-300 disabled:bg-primary-300"
               disabled={disabled || uploading}
               onClick={() => inputRef.current?.click()}
             >
@@ -168,7 +168,7 @@ export function IoioImagePicker({
             </button>
           </div>
         )}
-        <p id={helpId} className="mt-3 text-center text-xs text-gray-500">
+        <p id={helpId} className="mt-2 text-center text-xs text-gray-500">
           PNG, JPG, JPEG or WebP · Max 8 MB
         </p>
       </div>

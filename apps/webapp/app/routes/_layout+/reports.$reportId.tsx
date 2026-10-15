@@ -52,8 +52,6 @@ import type {
   DistributionBreakdown,
   ReportPayload,
   TimeframePreset,
-  TopBookedAssetRow,
-  TopBookedKitRow,
 } from "~/modules/reports/types";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { getClientHint } from "~/utils/client-hints";
@@ -372,15 +370,11 @@ export default function ReportPage() {
     page,
     pageSize,
     complianceData,
-    topBookedAsset,
-    topBookedKit,
     distributionKpis,
     distributionBreakdown,
     chartSeries,
   } = loaderData as typeof loaderData & {
     complianceData?: ComplianceData;
-    topBookedAsset?: TopBookedAssetRow | null;
-    topBookedKit?: TopBookedKitRow | null;
     distributionKpis?: ReportPayload["kpis"];
     distributionBreakdown?: DistributionBreakdown;
     chartSeries?: ChartSeries[];
@@ -420,8 +414,6 @@ export default function ReportPage() {
             totalRows={totalRows}
             timeframe={filters.timeframe}
             complianceData={complianceData}
-            topBookedAsset={topBookedAsset}
-            topBookedKit={topBookedKit}
             distributionKpis={distributionKpis}
             distributionBreakdown={distributionBreakdown}
             chartSeries={chartSeries}

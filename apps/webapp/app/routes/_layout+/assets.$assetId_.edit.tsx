@@ -309,6 +309,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             : getPrimaryLocation(asset)?.id ?? null,
         },
         tagUseFor: TagUseFor.ASSET,
+        includeAllLocations: true,
       }),
       getAssetModels({ organizationId, page: 1, perPage: 100 }),
     ]);

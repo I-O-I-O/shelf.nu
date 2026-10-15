@@ -1,14 +1,33 @@
-import { render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
-import { describe, expect, it } from "vitest";
-import StaffShell, { StaffNavigation } from "./staff-shell";
+import { beforeEach, describe, expect, it } from "vitest";
+import StaffShell, {
+  DEFAULT_STAFF_NAVIGATION_ORDER,
+  StaffNavigation,
+} from "./staff-shell";
 
-function renderStaffShell() {
+function renderStaffShell({
+  initialEntry = "/home",
+  userId = "staff-1",
+  organizationId = "org-1",
+}: {
+  initialEntry?: string;
+  userId?: string;
+  organizationId?: string;
+} = {}) {
   const layoutData = {
     isIoioStaff: true,
     isIoioTA: false,
     labStatus: null,
+    user: { id: userId },
+    currentOrganizationId: organizationId,
   };
   const router = createMemoryRouter(
     [
@@ -17,11 +36,15 @@ function renderStaffShell() {
         path: "/",
         Component: StaffShell,
         loader: () => layoutData,
-        children: [{ path: "home", Component: () => null }],
+        children: [
+          { path: "home", Component: () => null },
+          { path: "assets", Component: () => null },
+          { path: "settings", Component: () => null },
+        ],
       },
     ],
     {
-      initialEntries: ["/home"],
+      initialEntries: [initialEntry],
       hydrationData: {
         loaderData: { "routes/_layout+/_layout": layoutData },
       },
@@ -29,6 +52,13 @@ function renderStaffShell() {
   );
 
   return render(<RouterProvider router={router} />);
+}
+
+function navigationLabels(nav: HTMLElement) {
+  return within(nav)
+    .getAllByRole("link")
+    .map((link) => link.textContent?.trim())
+    .filter((label) => label && label !== "My Loans");
 }
 
 function renderNavigation(
@@ -57,6 +87,31 @@ function expectSelected(link: HTMLElement, selected: boolean) {
 }
 
 describe("IOIO staff Loans navigation active state", () => {
+  it("uses the shared canonical Staff order by default", () => {
+    renderNavigation("/home", DEFAULT_STAFF_NAVIGATION_ORDER);
+
+    expect(
+      navigationLabels(
+        screen.getByRole("navigation", {
+          name: "IOIO staff navigation",
+        })
+      )
+    ).toEqual([
+      "Dashboard",
+      "Ask IOIO",
+      "Handbook",
+      "Inventory",
+      "Categories",
+      "Locations",
+      "Loans",
+      "Calendar",
+      "Analytics",
+      "Settings",
+      "Archive",
+      "Trash",
+    ]);
+  });
+
   it("selects Loans on the organization loan list only", () => {
     renderNavigation("/bookings");
 
@@ -130,6 +185,130 @@ describe("IOIO staff Loans navigation active state", () => {
         screen.queryByRole("link", { name: label })
       ).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("StaffShell navigation order persistence", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it("keeps one custom order across navigation and a shell remount", async () => {
+    const rendered = renderStaffShell();
+    const nav = screen.getByRole("navigation", {
+      name: "IOIO staff navigation",
+    });
+    await waitFor(() => {
+      expect(navigationLabels(nav)).toEqual([
+        "Dashboard",
+        "Ask IOIO",
+        "Handbook",
+        "Inventory",
+        "Categories",
+        "Locations",
+        "Loans",
+        "Calendar",
+        "Analytics",
+        "Settings",
+        "Archive",
+        "Trash",
+      ]);
+    });
+
+    const inventory = within(nav).getByRole("link", { name: "Inventory" });
+    const dashboard = within(nav).getByRole("link", { name: "Dashboard" });
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: () => undefined,
+      getData: () => "/assets",
+    };
+    fireEvent.dragStart(inventory, { dataTransfer });
+    fireEvent.drop(dashboard, { dataTransfer });
+
+    await waitFor(() => {
+      expect(navigationLabels(nav).slice(0, 5)).toEqual([
+        "Dashboard",
+        "Inventory",
+        "Ask IOIO",
+        "Handbook",
+        "Categories",
+      ]);
+    });
+
+    await userEvent.click(within(nav).getByRole("link", { name: "Settings" }));
+    await waitFor(() =>
+      expect(
+        within(nav).getByRole("link", { name: "Settings" })
+      ).toHaveAttribute("aria-current", "page")
+    );
+    expect(navigationLabels(nav).slice(0, 5)).toEqual([
+      "Dashboard",
+      "Inventory",
+      "Ask IOIO",
+      "Handbook",
+      "Categories",
+    ]);
+
+    rendered.unmount();
+    renderStaffShell({ initialEntry: "/assets" });
+    const refreshedNav = screen.getByRole("navigation", {
+      name: "IOIO staff navigation",
+    });
+    await waitFor(() => {
+      expect(navigationLabels(refreshedNav).slice(0, 5)).toEqual([
+        "Dashboard",
+        "Inventory",
+        "Ask IOIO",
+        "Handbook",
+        "Categories",
+      ]);
+    });
+  });
+
+  it("does not share a saved order between users or organizations", async () => {
+    const firstUser = renderStaffShell({
+      userId: "staff-1",
+      organizationId: "org-1",
+    });
+    const nav = screen.getByRole("navigation", {
+      name: "IOIO staff navigation",
+    });
+    await waitFor(() =>
+      expect(navigationLabels(nav)).toEqual([
+        "Dashboard",
+        "Ask IOIO",
+        "Handbook",
+        "Inventory",
+        "Categories",
+        "Locations",
+        "Loans",
+        "Calendar",
+        "Analytics",
+        "Settings",
+        "Archive",
+        "Trash",
+      ])
+    );
+
+    const inventory = within(nav).getByRole("link", { name: "Inventory" });
+    const dashboard = within(nav).getByRole("link", { name: "Dashboard" });
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: () => undefined,
+      getData: () => "/assets",
+    };
+    fireEvent.dragStart(inventory, { dataTransfer });
+    fireEvent.drop(dashboard, { dataTransfer });
+    await waitFor(() => expect(navigationLabels(nav)[1]).toBe("Inventory"));
+
+    firstUser.unmount();
+    renderStaffShell({ userId: "staff-2", organizationId: "org-1" });
+    const otherUserNav = screen.getByRole("navigation", {
+      name: "IOIO staff navigation",
+    });
+    await waitFor(() =>
+      expect(navigationLabels(otherUserNav)[1]).toBe("Ask IOIO")
+    );
   });
 });
 

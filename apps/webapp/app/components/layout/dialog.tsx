@@ -14,6 +14,7 @@ export const Dialog = ({
   className,
   headerClassName,
   wrapperClassName,
+  showCloseButton = true,
 }: {
   title: string | ReactNode;
   children: ReactNode;
@@ -22,6 +23,7 @@ export const Dialog = ({
   className?: string;
   headerClassName?: string;
   wrapperClassName?: string;
+  showCloseButton?: boolean;
 }) => {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const onCloseRef = useRef(onClose);
@@ -130,15 +132,17 @@ export const Dialog = ({
             )}
           >
             {title}
-            <Button
-              type="button"
-              onClick={onClose}
-              variant="link"
-              className={"mt-2 leading-none text-gray-500 md:right-6"}
-              aria-label="Close dialog"
-            >
-              <XIcon />
-            </Button>
+            {showCloseButton ? (
+              <Button
+                type="button"
+                onClick={onClose}
+                variant="link"
+                className={"mt-2 leading-none text-gray-500 md:right-6"}
+                aria-label="Close dialog"
+              >
+                <XIcon />
+              </Button>
+            ) : null}
           </div>
           <div className="dialog-body grow overflow-auto">{children}</div>
         </div>

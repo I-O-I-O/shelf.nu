@@ -42,11 +42,12 @@ export default function Header({
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
-  const shouldHideQuickFind = hideQuickFind || Boolean(layoutData?.isIoioStaff);
+  const isIoioStaff = Boolean(layoutData?.isIoioStaff);
+  const shouldHideQuickFind = hideQuickFind || isIoioStaff;
 
   return header ? (
     <header className={tw("-mx-4 bg-white", classNames)}>
-      {!hideBreadcrumbs && (
+      {!hideBreadcrumbs && !isIoioStaff && (
         <>
           <div className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 md:min-h-[67px] md:py-3">
             <Breadcrumbs />
@@ -71,7 +72,12 @@ export default function Header({
         </>
       )}
       {!hidePageDescription && (
-        <div className="relative flex items-center border-b border-gray-200 px-4 py-3">
+        <div
+          className={tw(
+            "relative flex items-center border-b border-gray-200 px-4 py-3",
+            isIoioStaff && "border-b-0 py-1"
+          )}
+        >
           {slots?.["left-of-title"] ? (
             <div className="relative">{slots["left-of-title"]}</div>
           ) : null}
@@ -100,8 +106,16 @@ export default function Header({
             )}
           </div>
           {slots?.["right-of-title"] || null}
+          {isIoioStaff && children ? (
+            <div className="ml-auto flex shrink-0 items-center gap-3">
+              {children}
+            </div>
+          ) : null}
         </div>
       )}
+      {isIoioStaff && hidePageDescription && children ? (
+        <div className="flex justify-end px-4 py-1">{children}</div>
+      ) : null}
     </header>
   ) : null;
 }

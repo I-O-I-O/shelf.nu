@@ -51,7 +51,24 @@ describe("Header Quick Find visibility", () => {
     );
     expect(
       screen.getAllByRole("textbox", { name: "Search inventory" })
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(screen.queryByRole("button", { name: /quick find/i })).toBeNull();
+    expect(
+      screen.queryByRole("navigation", { name: "Breadcrumbs" })
+    ).toBeNull();
+  });
+
+  it("removes the Staff breadcrumb row and page title divider", () => {
+    mocks.useRouteLoaderData.mockReturnValue({ isIoioStaff: true } as never);
+
+    const { container } = render(<Header />);
+    const header = container.querySelector("header");
+    const titleRow = header?.firstElementChild;
+
+    expect(header?.children).toHaveLength(1);
+    expect(titleRow).not.toHaveClass("border-b");
+    expect(
+      screen.queryByRole("navigation", { name: "Breadcrumbs" })
+    ).toBeNull();
   });
 });

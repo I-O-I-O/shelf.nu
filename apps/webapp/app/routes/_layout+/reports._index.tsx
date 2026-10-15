@@ -46,9 +46,7 @@ export default function ReportsIndex() {
     <>
       <Header hideQuickFind />
       <ListContentWrapper>
-        <div className="space-y-8">
-          <IoioAnalyticsLanding reports={analyticsReports} />
-        </div>
+        <IoioAnalyticsLanding reports={analyticsReports} />
       </ListContentWrapper>
     </>
   );

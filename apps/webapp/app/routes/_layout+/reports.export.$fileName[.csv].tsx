@@ -633,9 +633,7 @@ function generateTopBookedAssetsCsv(rows: TopBookedAssetRow[]): string {
     "Asset Name",
     "Category",
     "Location",
-    "Booking Count",
-    "Total Days Booked",
-    "Avg Days per Booking",
+    "Loans",
   ];
 
   const csvRows = rows.map((row, index) => [
@@ -645,10 +643,6 @@ function generateTopBookedAssetsCsv(rows: TopBookedAssetRow[]): string {
     row.category || "",
     row.location || "",
     row.bookingCount.toString(),
-    row.totalDaysBooked.toString(),
-    row.bookingCount > 0
-      ? (row.totalDaysBooked / row.bookingCount).toFixed(1)
-      : "0",
   ]);
 
   return buildCsv(headers, csvRows);
@@ -664,9 +658,7 @@ function generateTopBookedKitsCsv(rows: TopBookedKitRow[]): string {
     "Kit Name",
     "Category",
     "Location",
-    "Booking Count",
-    "Total Days Booked",
-    "Avg Days per Booking",
+    "Loans",
   ];
 
   const csvRows = rows.map((row, index) => [
@@ -676,10 +668,6 @@ function generateTopBookedKitsCsv(rows: TopBookedKitRow[]): string {
     row.category || "",
     row.location || "",
     row.bookingCount.toString(),
-    row.totalDaysBooked.toString(),
-    row.bookingCount > 0
-      ? (row.totalDaysBooked / row.bookingCount).toFixed(1)
-      : "0",
   ]);
 
   return buildCsv(headers, csvRows);

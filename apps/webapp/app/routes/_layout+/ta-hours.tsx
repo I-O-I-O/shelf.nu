@@ -6,6 +6,7 @@ import {
   PopoverPortal,
   PopoverTrigger,
 } from "@radix-ui/react-popover";
+import { useSetAtom } from "jotai";
 import {
   ChevronDown,
   Clock3,
@@ -28,6 +29,7 @@ import {
   useLoaderData,
   useNavigate,
 } from "react-router";
+import { showNotificationAtom } from "~/atoms/notifications";
 import {
   Select,
   SelectContent,
@@ -35,6 +37,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/forms/select";
+import { TAHoursBudgetEditor } from "~/components/ioio-staff/ta-hours-budget-editor";
+import { TAHoursNoticeConsumer } from "~/components/ioio-staff/ta-hours-notice-consumer";
 import { Dialog } from "~/components/layout/dialog";
 import { getAcademicYear } from "~/modules/ioio-lab-information/service.server";
 import {
@@ -64,24 +68,10 @@ const VIEWS = ["overview", "schedule", "timesheets"] as const;
 type View = (typeof VIEWS)[number];
 type PageData = Awaited<ReturnType<typeof getTAHoursPageData>> & {
   view: View;
-  notice: string | null;
 };
 
 function getView(value: string | null): View {
   return VIEWS.includes(value as View) ? (value as View) : "overview";
-}
-
-function noticeText(notice: string | null) {
-  const notices: Record<string, string> = {
-    budget: "TA hour budget saved.",
-    allocation: "TA allocation saved.",
-    shift: "Shift saved.",
-    cancelled: "Shift cancelled.",
-    confirmed: "Worked hours saved.",
-    period:
-      "Next academic-year period created with an empty budget and no allocations.",
-  };
-  return notice ? notices[notice] ?? null : null;
 }
 
 export const meta: MetaFunction = () => [{ title: appendToMetaTitle(title) }];
@@ -107,7 +97,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   return {
     ...page,
     view: access.isStaff ? getView(url.searchParams.get("view")) : "overview",
-    notice: noticeText(url.searchParams.get("notice")),
   };
 }
 
@@ -153,7 +142,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
         submissionKey: form.get("submissionKey"),
         allowAdditional: form.get("allowAdditional") === "1",
       });
-      return data({ quickEntry: result });
+      const updatedPage = await getTAHoursPageData({
+        organizationId: access.organizationId,
+        academicYear,
+        userId,
+        isStaff: access.isStaff,
+        isTA: access.isTA,
+      });
+      return data({
+        quickEntry: result,
+        budgetWarning: budgetWarning(updatedPage.summary),
+      });
     }
     if (intent === "undoLastLog") {
       await undoLastTAHoursLog({
@@ -165,7 +164,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
         academicYear,
         shiftId: form.get("shiftId"),
       });
-      return data({ undoLog: true });
+      const updatedPage = await getTAHoursPageData({
+        organizationId: access.organizationId,
+        academicYear,
+        userId,
+        isStaff: access.isStaff,
+        isTA: access.isTA,
+      });
+      return data({
+        undoLog: true,
+        budgetWarning: budgetWarning(updatedPage.summary),
+      });
     }
     if (!access.isStaff) {
       throw new ShelfError({
@@ -191,10 +200,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
         organizationId: access.organizationId,
         academicYear,
         userId,
-        mode: form.get("budgetMode"),
+        mode: "hours",
         totalHoursBudget: form.get("totalHoursBudget"),
-        budgetAmountSek: form.get("budgetAmountSek"),
-        hourlyRateSekPerHour: form.get("hourlyRateSekPerHour"),
+        budgetAmountSek: null,
+        hourlyRateSekPerHour: null,
         reason: form.get("reason"),
         confirmedOverBudget,
       });
@@ -263,6 +272,27 @@ function hours(value: number | string | null | undefined) {
   return `${new Intl.NumberFormat("en-SE", {
     maximumFractionDigits: 2,
   }).format(Number.isFinite(amount) ? amount : 0)} h`;
+}
+
+function budgetWarning(summary: PageData["summary"]) {
+  const workedOverage = summary.worked - summary.budget;
+  if (workedOverage > 0) {
+    return `TA hour budget exceeded by ${hours(workedOverage)}.`;
+  }
+
+  const allocationOverage = summary.allocated - summary.budget;
+  if (allocationOverage > 0) {
+    return `TA allocations exceed the total budget by ${hours(
+      allocationOverage
+    )}.`;
+  }
+
+  const projectedOverage = summary.worked + summary.scheduled - summary.budget;
+  if (projectedOverage > 0) {
+    return `TA hour budget exceeded by ${hours(projectedOverage)}.`;
+  }
+
+  return null;
 }
 
 function displayDate(value: string) {
@@ -484,8 +514,25 @@ function UndoLastLogForm({
   menuItem?: boolean;
 }) {
   const result = fetcher.data as
-    | { undoLog?: boolean; error?: string }
+    | { undoLog?: boolean; budgetWarning?: string | null; error?: string }
     | undefined;
+  const showNotification = useSetAtom(showNotificationAtom);
+  const notifiedResult = useRef<typeof result>(undefined);
+
+  useEffect(() => {
+    if (!result?.undoLog || result === notifiedResult.current) return;
+    notifiedResult.current = result;
+    showNotification({
+      title: "TA Hours",
+      message: result.budgetWarning ?? "Hours restored.",
+      icon: {
+        name: "success",
+        variant: result.budgetWarning ? "primary" : "success",
+      },
+      senderId: null,
+    });
+  }, [result, showNotification]);
+
   return (
     <div
       className={
@@ -522,11 +569,6 @@ function UndoLastLogForm({
           {fetcher.state !== "idle" ? "Removing…" : "Remove last log"}
         </button>
       </fetcher.Form>
-      {result?.undoLog ? (
-        <span role="status" className="text-green-700">
-          Hours restored.
-        </span>
-      ) : null}
       {result?.error ? (
         <span role="alert" className="text-red-700">
           {result.error}
@@ -540,17 +582,36 @@ function PersonalQuickLog({ page }: { page: PageData }) {
   const fetcher = useFetcher<typeof action>();
   const undoFetcher = useFetcher<typeof action>();
   const formRef = useRef<HTMLFormElement>(null);
+  const showNotification = useSetAtom(showNotificationAtom);
   const result = fetcher.data as
     | {
         quickEntry?: { kind: "logged"; actualHours: string; entryId: string };
+        budgetWarning?: string | null;
         error?: string;
       }
     | undefined;
   const loggedEntryId = result?.quickEntry?.entryId;
 
   useEffect(() => {
-    if (loggedEntryId) formRef.current?.reset();
-  }, [loggedEntryId]);
+    if (!loggedEntryId) return;
+    formRef.current?.reset();
+    showNotification({
+      title: "TA Hours",
+      message:
+        result?.budgetWarning ??
+        `${hours(result?.quickEntry?.actualHours)} logged.`,
+      icon: {
+        name: "success",
+        variant: result?.budgetWarning ? "primary" : "success",
+      },
+      senderId: null,
+    });
+  }, [
+    loggedEntryId,
+    result?.budgetWarning,
+    result?.quickEntry?.actualHours,
+    showNotification,
+  ]);
 
   return (
     <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -587,11 +648,6 @@ function PersonalQuickLog({ page }: { page: PageData }) {
         >
           {fetcher.state !== "idle" ? "Logging…" : "Log hours"}
         </button>
-        {result?.quickEntry ? (
-          <span role="status" className="text-sm font-semibold text-green-700">
-            {hours(result.quickEntry.actualHours)} logged
-          </span>
-        ) : null}
         {result?.error ? (
           <span role="alert" className="text-sm font-medium text-red-700">
             {result.error}
@@ -625,6 +681,7 @@ export default function TAHoursPage() {
   const navigate = useNavigate();
   return (
     <div className="mx-auto max-w-6xl space-y-6 pb-10">
+      <TAHoursNoticeConsumer budgetWarning={budgetWarning(page.summary)} />
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-red-700">
@@ -692,14 +749,6 @@ export default function TAHoursPage() {
         ) : null}
       </header>
 
-      {page.notice ? (
-        <div
-          role="status"
-          className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-900"
-        >
-          {page.notice}
-        </div>
-      ) : null}
       {actionData?.error ? (
         <div
           role="alert"
@@ -750,9 +799,12 @@ function Overview({ page }: { page: PageData }) {
   const [allocatedInput, setAllocatedInput] = useState("0");
   const [logSubmissionKey, setLogSubmissionKey] = useState("");
   const logFetcher = useFetcher<typeof action>();
+  const showNotification = useSetAtom(showNotificationAtom);
+  const notifiedLogResult = useRef<typeof logFetcher.data>(undefined);
   const logResult = logFetcher.data as
     | {
         quickEntry?: { kind: "logged" | "alreadyLogged"; actualHours: string };
+        budgetWarning?: string | null;
         error?: string;
       }
     | undefined;
@@ -769,6 +821,28 @@ function Overview({ page }: { page: PageData }) {
     if (logSucceeded) setLogOpen(false);
   }, [logSucceeded]);
 
+  useEffect(() => {
+    if (
+      !logSucceeded ||
+      !logResult?.quickEntry ||
+      logResult === notifiedLogResult.current
+    ) {
+      return;
+    }
+    notifiedLogResult.current = logResult;
+    showNotification({
+      title: "TA Hours",
+      message:
+        logResult.budgetWarning ??
+        `${hours(logResult.quickEntry.actualHours)} logged.`,
+      icon: {
+        name: "success",
+        variant: logResult.budgetWarning ? "primary" : "success",
+      },
+      senderId: null,
+    });
+  }, [logResult, logSucceeded, showNotification]);
+
   return (
     <div className="space-y-6">
       {page.isStaff ? (
@@ -784,11 +858,6 @@ function Overview({ page }: { page: PageData }) {
               <p className="mt-1 text-2xl font-black tabular-nums text-gray-950">
                 {hours(page.summary.budget)}
               </p>
-              {page.period.budgetAmountSek !== null ? (
-                <p className="mt-0.5 text-sm font-medium tabular-nums text-gray-600">
-                  {formatSek(page.period.budgetAmountSek)}
-                </p>
-              ) : null}
               <button
                 type="button"
                 onClick={() => setBudgetOpen(true)}
@@ -810,25 +879,6 @@ function Overview({ page }: { page: PageData }) {
           </div>
         </section>
       ) : null}
-      {page.isStaff && page.summary.allocated > page.summary.budget ? (
-        <p
-          role="status"
-          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-950"
-        >
-          TA allocations exceed the total budget by{" "}
-          {hours(page.summary.allocated - page.summary.budget)}.
-        </p>
-      ) : null}
-      {page.isStaff && page.summary.worked > page.summary.budget ? (
-        <p
-          role="status"
-          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-950"
-        >
-          TA hour budget exceeded by{" "}
-          {hours(page.summary.worked - page.summary.budget)}.
-        </p>
-      ) : null}
-
       {!page.isStaff && page.canSelfLog ? (
         <PersonalQuickLog page={page} />
       ) : null}
@@ -909,7 +959,14 @@ function Overview({ page }: { page: PageData }) {
         </>
       ) : null}
       {page.isStaff && budgetOpen ? (
-        <BudgetEditor page={page} onClose={() => setBudgetOpen(false)} />
+        <TAHoursBudgetEditor
+          academicYear={page.period.academicYear}
+          hours={page.period.totalHoursBudget}
+          workedHours={page.summary.worked}
+          scheduledHours={page.summary.scheduled}
+          action={viewHref(page, "overview")}
+          onClose={() => setBudgetOpen(false)}
+        />
       ) : null}
       {page.isStaff && allocateOpen ? (
         <Dialog
@@ -1111,196 +1168,6 @@ function SummaryMetric({
       </p>
       {note ? <p className="mt-0.5 text-xs text-gray-500">{note}</p> : null}
     </div>
-  );
-}
-
-function formatSek(value: string) {
-  return `${new Intl.NumberFormat("en-SE", { maximumFractionDigits: 2 }).format(
-    Number(value)
-  )} SEK`;
-}
-
-function BudgetEditor({
-  page,
-  onClose,
-}: {
-  page: PageData;
-  onClose: () => void;
-}) {
-  const initialMode = page.period.budgetAmountSek !== null ? "budget" : "hours";
-  const [mode, setMode] = useState<"budget" | "hours">(initialMode);
-  const [hoursValue, setHoursValue] = useState(page.period.totalHoursBudget);
-  const [budgetValue, setBudgetValue] = useState(
-    page.period.budgetAmountSek ?? ""
-  );
-  const [rateValue, setRateValue] = useState(
-    page.period.hourlyRateSekPerHour ?? ""
-  );
-  const hoursNumber = Number(hoursValue);
-  const budgetNumber = Number(budgetValue);
-  const rateNumber = Number(rateValue);
-  const previewHours =
-    mode === "budget" && rateNumber > 0 && Number.isFinite(budgetNumber)
-      ? (budgetNumber / rateNumber).toFixed(2)
-      : hoursValue;
-  const previewBudget =
-    mode === "hours" && Number.isFinite(hoursNumber) && rateNumber > 0
-      ? (hoursNumber * rateNumber).toFixed(2)
-      : budgetValue;
-
-  return (
-    <Dialog
-      open
-      onClose={onClose}
-      title={<h2 className="text-lg font-bold">Edit TA budget</h2>}
-      className="w-full max-w-lg"
-    >
-      <Form
-        method="post"
-        action={viewHref(page, "overview")}
-        className="space-y-4 p-6"
-        onSubmit={(event) => {
-          const committed = page.summary.worked + page.summary.scheduled;
-          const proposed = Number(previewHours);
-          const overage = committed - proposed;
-          if (
-            overage > 0 &&
-            !window.confirm(
-              `The budget will be ${hours(
-                overage
-              )} below confirmed and scheduled hours. Continue?`
-            )
-          ) {
-            event.preventDefault();
-            return;
-          }
-          setConfirmedFlag(event.currentTarget, overage > 0);
-        }}
-      >
-        <FormCommon page={page} intent="saveBudget" />
-        <input type="hidden" name="confirmedOverBudget" value="0" />
-        <input type="hidden" name="budgetMode" value={mode} />
-        <div
-          role="group"
-          aria-label="Budget input mode"
-          className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1"
-        >
-          <button
-            type="button"
-            onClick={() => setMode("budget")}
-            aria-pressed={mode === "budget"}
-            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
-              mode === "budget"
-                ? "bg-white text-red-700 shadow-sm"
-                : "text-gray-600"
-            }`}
-          >
-            Budget
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("hours")}
-            aria-pressed={mode === "hours"}
-            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
-              mode === "hours"
-                ? "bg-white text-red-700 shadow-sm"
-                : "text-gray-600"
-            }`}
-          >
-            Hours
-          </button>
-        </div>
-        {mode === "budget" ? (
-          <label className="block text-sm font-semibold text-gray-700">
-            Budget
-            <span className="mt-1 flex h-10 items-center rounded-lg border border-gray-300 focus-within:ring-2 focus-within:ring-red-100">
-              <input
-                name="budgetAmountSek"
-                type="number"
-                min="0"
-                step="0.01"
-                required
-                value={budgetValue}
-                onChange={(event) => setBudgetValue(event.currentTarget.value)}
-                className="h-full min-w-0 flex-1 rounded-l-lg px-3 outline-none"
-              />
-              <span className="px-3 text-sm text-gray-500">SEK</span>
-            </span>
-          </label>
-        ) : (
-          <label className="block text-sm font-semibold text-gray-700">
-            Hours
-            <span className="mt-1 flex h-10 items-center rounded-lg border border-gray-300">
-              <input
-                name="totalHoursBudget"
-                type="number"
-                min="0"
-                max="100000"
-                step="0.01"
-                required
-                value={hoursValue}
-                onChange={(event) => setHoursValue(event.currentTarget.value)}
-                className="h-full min-w-0 flex-1 rounded-l-lg px-3 outline-none"
-              />
-              <span className="px-3 text-sm text-gray-500">h</span>
-            </span>
-          </label>
-        )}
-        <label className="block text-sm font-semibold text-gray-700">
-          Hourly rate
-          <span className="mt-1 flex h-10 items-center rounded-lg border border-gray-300">
-            <input
-              name="hourlyRateSekPerHour"
-              type="number"
-              min="0.01"
-              step="0.01"
-              required
-              value={rateValue}
-              onChange={(event) => setRateValue(event.currentTarget.value)}
-              className="h-full min-w-0 flex-1 rounded-l-lg px-3 outline-none"
-            />
-            <span className="px-3 text-sm text-gray-500">SEK / h</span>
-          </span>
-        </label>
-        <p className="rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
-          {mode === "budget" ? (
-            <>
-              Available hours{" "}
-              <strong className="ml-1 tabular-nums">
-                {rateNumber > 0 && budgetValue !== ""
-                  ? `${previewHours} h`
-                  : "—"}
-              </strong>
-            </>
-          ) : (
-            <>
-              Required budget{" "}
-              <strong className="ml-1 tabular-nums">
-                {rateNumber > 0 && hoursValue !== ""
-                  ? formatSek(previewBudget)
-                  : "—"}
-              </strong>
-            </>
-          )}
-        </p>
-        <p className="text-xs text-gray-500">
-          The hours or SEK amount shown above is calculated from your selected
-          input and rate.
-        </p>
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-10 rounded-lg border border-gray-300 px-4 text-sm font-semibold"
-          >
-            Cancel
-          </button>
-          <button className="h-10 rounded-lg bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800">
-            Save budget
-          </button>
-        </div>
-      </Form>
-    </Dialog>
   );
 }
 

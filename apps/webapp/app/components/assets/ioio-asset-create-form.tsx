@@ -27,7 +27,12 @@ import type { Tag } from "react-tag-autocomplete";
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { updateDynamicTitleAtom } from "~/atoms/dynamic-title-atom";
-import { fileErrorAtom, assetImageValidateFileAtom } from "~/atoms/file";
+import {
+  ASSET_IMAGE_VALIDATION,
+  assetImageValidateFileAtom,
+  createScopedValidateFile,
+  fileErrorAtom,
+} from "~/atoms/file";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
 import { assetAdvancedSettingsSchema } from "~/modules/asset/advanced-settings";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
@@ -188,7 +193,7 @@ export const NewAssetBulkFormSchema = NewAssetFormSchema.extend({
   ),
 });
 
-type IoioAssetFormLoaderData = {
+export type IoioAssetFormLoaderData = {
   customFields: Array<
     Pick<
       CustomField,
@@ -258,6 +263,21 @@ type Props = Partial<
    * Default `false` preserves the single-create behaviour.
    */
   bulkMode?: boolean;
+  /** Keep this form mounted in the Staff in-memory multi-asset queue. */
+  assetQueueMode?: boolean;
+  /** Prevent edits while the queued save is being validated or created. */
+  assetQueueSaving?: boolean;
+  /** Stable per-draft id so Zorm's form identifiers do not collide. */
+  assetQueueDraftId?: string;
+  /** Queue-side actions; form markup and button styling remain the same. */
+  onAssetQueueAddAnother?: () => void;
+  onAssetQueueSaveAll?: () => void;
+  onAssetQueueFormChange?: (form: HTMLFormElement) => void;
+  onAssetQueueFormRef?: (form: HTMLFormElement | null) => void;
+  assetQueueActionError?: DataOrErrorResponse["error"];
+  /** Category-scoped custom fields loaded for this queue draft. */
+  assetQueueCustomFields?: IoioAssetFormLoaderData["customFields"];
+  onAssetQueueCategoryChange?: (categoryId: string | undefined) => void;
   /** Hide the optional Shelf Asset Model selector in the IOIO single-item form. */
   showAssetModel?: boolean;
   /** Active physical units in the logical individual-product group. */
@@ -324,6 +344,16 @@ export const IoioAssetCreateForm = ({
   barcodes,
   referer,
   bulkMode = false,
+  assetQueueMode = false,
+  assetQueueSaving = false,
+  assetQueueDraftId,
+  onAssetQueueAddAnother,
+  onAssetQueueSaveAll,
+  onAssetQueueFormChange,
+  onAssetQueueFormRef,
+  assetQueueActionError,
+  assetQueueCustomFields,
+  onAssetQueueCategoryChange,
   showAssetModel = true,
   physicalUnits = [],
   productGroup,
@@ -335,7 +365,11 @@ export const IoioAssetCreateForm = ({
     locations,
     assetModels,
   } = useLoaderData<IoioAssetFormLoaderData>();
-  const customFields = loaderCustomFields
+  const formCustomFields =
+    assetQueueMode && assetQueueCustomFields
+      ? assetQueueCustomFields
+      : loaderCustomFields;
+  const customFields = formCustomFields
     .filter((field) => field.active)
     .map(
       (field): CustomFieldZodSchema => ({
@@ -365,8 +399,13 @@ export const IoioAssetCreateForm = ({
     [bulkMode, customFields]
   );
 
-  const zo = useZorm("NewAssetFormScreen", FormSchema);
-  const disabled = isFormProcessing(navigation.state);
+  const zo = useZorm(
+    assetQueueDraftId
+      ? `NewAssetFormScreen-${assetQueueDraftId}`
+      : "NewAssetFormScreen",
+    FormSchema
+  );
+  const disabled = isFormProcessing(navigation.state) || assetQueueSaving;
 
   // Focus the asset Title field on mount so create/edit pages start
   // ready for typing instead of relying on the removed autoFocus prop.
@@ -383,11 +422,22 @@ export const IoioAssetCreateForm = ({
 
   /** Server-side validation errors as fallback when client-side validation fails */
   const validationErrors = getValidationErrors<typeof NewAssetFormSchema>(
-    actionData?.error
+    assetQueueActionError ?? actionData?.error
   );
 
-  const fileError = useAtomValue(fileErrorAtom);
-  const [, validateFile] = useAtom(assetImageValidateFileAtom);
+  // Every queued form remains mounted to preserve its native controls and
+  // selected File object. Give each instance its own image-validation atom so
+  // an invalid image in one draft cannot mark every other draft as invalid.
+  const imageValidation = useMemo(
+    () => createScopedValidateFile(ASSET_IMAGE_VALIDATION),
+    []
+  );
+  const fileError = useAtomValue(
+    assetQueueMode ? imageValidation.errorAtom : fileErrorAtom
+  );
+  const [, validateFile] = useAtom(
+    assetQueueMode ? imageValidation.validateAtom : assetImageValidateFileAtom
+  );
   const [, updateDynamicTitle] = useAtom(updateDynamicTitleAtom);
 
   /** Whether we are in edit mode (asset already exists). */
@@ -585,6 +635,9 @@ export const IoioAssetCreateForm = ({
   const revalidator = useRevalidator();
   const location = useLocation();
   const [showPhysicalUnits, setShowPhysicalUnits] = useState(false);
+  const [assetQueueCategoryId, setAssetQueueCategoryId] = useState<
+    string | undefined
+  >(categoryId ?? undefined);
   const isGroupedIndividualProduct =
     !bulkMode &&
     selectedAssetType === AssetType.INDIVIDUAL &&
@@ -742,6 +795,19 @@ export const IoioAssetCreateForm = ({
     // wrongly flash the error.
     setHasPickedAssetModel(Boolean(modelId));
     setSelectedAssetModelId(modelId);
+    if (assetQueueMode) {
+      if (!modelId) {
+        setAssetQueueCategoryId(undefined);
+        onAssetQueueCategoryChange?.(undefined);
+      } else {
+        const model = assetModelsData?.find((item) => item.id === modelId);
+        if (model?.defaultCategoryId) {
+          setAssetQueueCategoryId(model.defaultCategoryId);
+          onAssetQueueCategoryChange?.(model.defaultCategoryId);
+        }
+      }
+      return;
+    }
     const params = new URLSearchParams(location.search);
 
     if (!modelId) {
@@ -834,11 +900,37 @@ export const IoioAssetCreateForm = ({
           sampleTitles={bulkPreviewTitles}
         />
         <Form
-          ref={zo.ref}
+          ref={(form) => {
+            zo.ref(form);
+            onAssetQueueFormRef?.(form);
+          }}
           method="post"
           action="."
           className="flex w-full flex-col gap-2"
           encType="multipart/form-data"
+          noValidate={assetQueueMode}
+          onSubmit={(event) => {
+            if (!assetQueueMode) return;
+            event.preventDefault();
+            onAssetQueueFormChange?.(event.currentTarget);
+            const submitter = (event.nativeEvent as SubmitEvent)
+              .submitter as HTMLButtonElement | null;
+            if (submitter?.name === "addAnother") {
+              onAssetQueueAddAnother?.();
+            } else {
+              onAssetQueueSaveAll?.();
+            }
+          }}
+          onInput={(event) => {
+            if (assetQueueMode) {
+              onAssetQueueFormChange?.(event.currentTarget);
+            }
+          }}
+          onChange={(event) => {
+            if (assetQueueMode) {
+              onAssetQueueFormChange?.(event.currentTarget);
+            }
+          }}
         >
           {isProductGroupEdit ? (
             <input type="hidden" name="productGroup" value="1" />
@@ -902,32 +994,37 @@ export const IoioAssetCreateForm = ({
             <input type="hidden" name="title" value={bulkFirstTitle} />
           </When>
 
-          <div className="flex items-start justify-between border-b pb-5">
-            <div className=" ">
-              <h2 className="mb-1 text-[18px] font-semibold">
-                {bulkMode ? "Bulk create from model" : "Basic fields"}
-              </h2>
-              <p>
-                {bulkMode
-                  ? "Create multiple assets from a model in one go. Common fields below apply to every asset created."
-                  : isProductGroupEdit
-                  ? "Shared information for this inventory product."
-                  : "Basic information about your asset."}
-              </p>
+          {isEditMode || bulkMode || isProductGroupEdit ? (
+            <div className="flex items-start justify-between border-b pb-5">
+              <div className=" ">
+                <h2 className="mb-1 text-[18px] font-semibold">
+                  {bulkMode ? "Bulk create from model" : "Basic fields"}
+                </h2>
+                <p>
+                  {bulkMode
+                    ? "Create multiple assets from a model in one go. Common fields below apply to every asset created."
+                    : isProductGroupEdit
+                    ? "Shared information for this inventory product."
+                    : "Basic information about your asset."}
+                </p>
+              </div>
+              <div className="hidden flex-1 justify-end gap-2 md:flex">
+                <Actions
+                  disabled={disabled}
+                  cancelTo={cancelTo}
+                  showAddAnother={!bulkMode && !isProductGroupEdit}
+                  assetQueueMode={assetQueueMode}
+                  onAssetQueueAddAnother={onAssetQueueAddAnother}
+                  onAssetQueueSaveAll={onAssetQueueSaveAll}
+                  hideSubmit={Boolean(
+                    conversionResult ||
+                      needsIndividualConversion ||
+                      needsProductGroupQuantityConversion
+                  )}
+                />
+              </div>
             </div>
-            <div className="hidden flex-1 justify-end gap-2 md:flex">
-              <Actions
-                disabled={disabled}
-                cancelTo={cancelTo}
-                showAddAnother={!bulkMode && !isProductGroupEdit}
-                hideSubmit={Boolean(
-                  conversionResult ||
-                    needsIndividualConversion ||
-                    needsProductGroupQuantityConversion
-                )}
-              />
-            </div>
-          </div>
+          ) : null}
 
           <When truthy={!bulkMode}>
             <FormRow
@@ -1544,10 +1641,18 @@ export const IoioAssetCreateForm = ({
             <DynamicSelect
               disabled={disabled}
               defaultValue={
-                new URLSearchParams(location.search).get("category") ||
-                categoryId ||
-                undefined
+                assetQueueMode
+                  ? assetQueueCategoryId
+                  : new URLSearchParams(location.search).get("category") ||
+                    categoryId ||
+                    undefined
               }
+              onChange={(value) => {
+                if (assetQueueMode) {
+                  setAssetQueueCategoryId(value);
+                  onAssetQueueCategoryChange?.(value);
+                }
+              }}
               model={{ name: "category", queryKey: "name" }}
               triggerWrapperClassName="flex flex-col !gap-0 justify-start items-start [&_.inner-label]:w-full [&_.inner-label]:text-left "
               contentLabel="Categories"
@@ -1612,6 +1717,7 @@ export const IoioAssetCreateForm = ({
               value={locationId}
               fieldName="newLocationId"
               disabled={disabled}
+              showQuickLocation
             />
           </FormRow>
 
@@ -1697,6 +1803,9 @@ export const IoioAssetCreateForm = ({
                 disabled={disabled}
                 cancelTo={cancelTo}
                 showAddAnother={!bulkMode && !isProductGroupEdit}
+                assetQueueMode={assetQueueMode}
+                onAssetQueueAddAnother={onAssetQueueAddAnother}
+                onAssetQueueSaveAll={onAssetQueueSaveAll}
                 hideSubmit={Boolean(
                   conversionResult ||
                     needsIndividualConversion ||
@@ -1715,6 +1824,9 @@ const Actions = ({
   disabled,
   cancelTo,
   showAddAnother = true,
+  assetQueueMode = false,
+  onAssetQueueAddAnother,
+  onAssetQueueSaveAll,
   hideSubmit = false,
 }: {
   disabled: boolean;
@@ -1727,12 +1839,20 @@ const Actions = ({
    * sense — one submit already creates many assets, and the success
    * modal offers the natural follow-up CTAs — so the caller hides it. */
   showAddAnother?: boolean;
+  assetQueueMode?: boolean;
+  onAssetQueueAddAnother?: () => void;
+  onAssetQueueSaveAll?: () => void;
   hideSubmit?: boolean;
 }) => (
   <>
     {/* Save button is first in DOM order so Enter key triggers it by default */}
     {!hideSubmit ? (
-      <Button type="submit" disabled={disabled} className="order-last">
+      <Button
+        type={assetQueueMode ? "button" : "submit"}
+        disabled={disabled}
+        className="order-last"
+        onClick={assetQueueMode ? onAssetQueueSaveAll : undefined}
+      >
         Save
       </Button>
     ) : null}
@@ -1741,21 +1861,36 @@ const Actions = ({
       <Button to={cancelTo} variant="secondary" disabled={disabled}>
         Cancel
       </Button>
-      {showAddAnother ? <AddAnother disabled={disabled} /> : null}
+      {showAddAnother ? (
+        <AddAnother
+          disabled={disabled}
+          assetQueueMode={assetQueueMode}
+          onAssetQueueAddAnother={onAssetQueueAddAnother}
+        />
+      ) : null}
     </ButtonGroup>
   </>
 );
 
-const AddAnother = ({ disabled }: { disabled: boolean }) => (
+const AddAnother = ({
+  disabled,
+  assetQueueMode = false,
+  onAssetQueueAddAnother,
+}: {
+  disabled: boolean;
+  assetQueueMode?: boolean;
+  onAssetQueueAddAnother?: () => void;
+}) => (
   <TooltipProvider delayDuration={100}>
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
-          type="submit"
+          type={assetQueueMode ? "button" : "submit"}
           variant="secondary"
           disabled={disabled}
           name="addAnother"
           value="true"
+          onClick={assetQueueMode ? onAssetQueueAddAnother : undefined}
         >
           Add another
         </Button>
@@ -1806,7 +1941,7 @@ const TRACKING_OPTIONS = [
   },
   {
     value: AssetType.INDIVIDUAL,
-    title: "Individual QR tracking",
+    title: "Individual QR tracking (kits)",
     description: "Each physical unit has its own QR code and history.",
   },
 ] as const;

@@ -17,7 +17,6 @@ import type {
   AssetActivityRow,
   AssetInventoryRow,
   AssetUtilizationRow,
-  BookingComplianceRow,
   ChartSeries,
   ComplianceData,
   CustodySnapshotRow,
@@ -63,9 +62,7 @@ type Props = {
   /** Booking-compliance-only payload extra. */
   complianceData?: ComplianceData;
   /** Top-booked-assets-only payload extra (the singular #1 asset). */
-  topBookedAsset?: TopBookedAssetRow | null;
   /** Top-booked-kits-only payload extra (the singular #1 kit). */
-  topBookedKit?: TopBookedKitRow | null;
   /** Distribution-only payload extra. */
   distributionBreakdown?: DistributionBreakdown;
   /** Distribution metrics for the combined IOIO usage report. */
@@ -87,8 +84,6 @@ export function ReportContentSwitch({
   totalRows,
   timeframe,
   complianceData,
-  topBookedAsset,
-  topBookedKit,
   distributionBreakdown,
   distributionKpis,
   chartSeries,
@@ -109,19 +104,17 @@ export function ReportContentSwitch({
   if (reportId === "asset-usage-distribution") {
     return (
       <AssetUsageDistributionContent
-        usageRows={rows as AssetUtilizationRow[]}
         usageKpis={kpis}
-        usageTotalRows={totalRows}
         distributionKpis={distributionKpis ?? []}
         distributionBreakdown={distributionBreakdown}
-        onRowClick={handlers.onAssetRowClick}
+        timeframeLabel={timeframe.label}
       />
     );
   }
 
   // Every other report falls back to a shared empty state when no
   // rows came back.
-  if (rows.length === 0) {
+  if (rows.length === 0 && reportId !== "booking-compliance") {
     return (
       <div className="rounded border border-gray-200 bg-white">
         <ReportEmptyState
@@ -139,11 +132,9 @@ export function ReportContentSwitch({
     case "booking-compliance":
       return (
         <BookingComplianceContent
-          rows={rows as BookingComplianceRow[]}
           complianceData={complianceData}
-          totalBookings={totalRows}
+          kpis={kpis}
           timeframeLabel={timeframe.label}
-          onRowClick={handlers.onBookingRowClick}
         />
       );
 
@@ -182,11 +173,8 @@ export function ReportContentSwitch({
       return (
         <TopBookedAssetsContent
           rows={rows as TopBookedAssetRow[]}
-          kpis={kpis}
           totalRows={totalRows}
           timeframeLabel={timeframe.label}
-          topBookedAsset={topBookedAsset}
-          onRowClick={handlers.onAssetRowClick}
         />
       );
 
@@ -194,11 +182,8 @@ export function ReportContentSwitch({
       return (
         <TopBookedKitsContent
           rows={rows as TopBookedKitRow[]}
-          kpis={kpis}
           totalRows={totalRows}
           timeframeLabel={timeframe.label}
-          topBookedKit={topBookedKit}
-          onRowClick={handlers.onKitRowClick}
         />
       );
 

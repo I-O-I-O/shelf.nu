@@ -2,13 +2,20 @@ import type { CustomField } from "@prisma/client";
 import { AssetType, TagUseFor } from "@prisma/client";
 import { useAtomValue } from "jotai";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, redirect, redirectDocument, useLoaderData } from "react-router";
+import {
+  data,
+  redirect,
+  redirectDocument,
+  useLoaderData,
+  useRouteLoaderData,
+} from "react-router";
 import { dynamicTitleAtom } from "~/atoms/dynamic-title-atom";
 import {
   IoioAssetCreateForm,
   NewAssetBulkFormSchema,
   NewAssetFormSchema,
 } from "~/components/assets/ioio-asset-create-form";
+import { IoioAssetCreationQueue } from "~/components/assets/ioio-asset-creation-queue";
 import Header from "~/components/layout/header";
 import { useSearchParams } from "~/hooks/search-params";
 import { estimateNextSequentialId } from "~/modules/asset/sequential-id.server";
@@ -30,6 +37,7 @@ import { linkPurchaseItemToAsset } from "~/modules/ioio-staff/purchasing.server"
 import { createNote } from "~/modules/note/service.server";
 import { assertWhetherQrBelongsToCurrentOrganization } from "~/modules/qr/service.server";
 import { buildTagsSet } from "~/modules/tag/service.server";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { extractBarcodesFromFormData } from "~/utils/barcode-form-data.server";
 import {
@@ -104,6 +112,14 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     });
 
     const searchParams = getCurrentSearchParams(request);
+    if (searchParams.get("assetQueueFields") === "1") {
+      const customFields = await getActiveCustomFields({
+        organizationId,
+        category: searchParams.get("category"),
+      });
+      return payload({ header, customFields });
+    }
+
     const prefillTitle = (searchParams.get("prefillTitle") ?? "")
       .trim()
       .slice(0, 240);
@@ -125,6 +141,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         organizationId,
         request,
         tagUseFor: TagUseFor.ASSET,
+        includeAllLocations: true,
       }),
       getActiveCustomFields({
         organizationId,
@@ -192,6 +209,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
     const clonedRequest = request.clone();
 
     const formData = await clonedRequest.formData();
+    const assetQueueIntent = formData.get("assetQueueIntent");
 
     const categoryValue = formData.get("category");
     const customFields = await getActiveCustomFields({
@@ -223,6 +241,13 @@ export async function action({ context, request }: LoaderFunctionArgs) {
     });
 
     const payload = parseData(formData, FormSchema);
+
+    // The Staff creation queue validates every in-memory form before it asks
+    // this same route to create any of them. This keeps the existing form
+    // schema and route validation as the source of truth.
+    if (assetQueueIntent === "validate") {
+      return data({ assetQueueValidated: true });
+    }
     const purchaseItemId =
       new URL(request.url).searchParams.get("purchaseItemId") ?? "";
     const purchaseReturnYear =
@@ -318,11 +343,39 @@ export async function action({ context, request }: LoaderFunctionArgs) {
 
       // Mid-loop failure: surface the partial-success info to the user.
       if (result.failedAt !== undefined && result.error) {
+        if (
+          assetQueueIntent === "create" &&
+          result.createdAssetIds.length > 0
+        ) {
+          return data({
+            assetQueueCreated: true,
+            createdCount: result.createdAssetIds.length,
+            warning: `Created ${result.createdAssetIds.length} of ${count} physical units. The remaining units were not created.`,
+          });
+        }
         return data(error(result.error), { status: result.error.status });
       }
 
       if (purchaseItemId && result.createdAssetIds[0]) {
         return await redirectToPurchasing(result.createdAssetIds[0]);
+      }
+
+      if (assetQueueIntent === "create") {
+        try {
+          sendNotification({
+            title: "Assets created",
+            message: `${result.createdAssetIds.length} assets created.`,
+            icon: { name: "success", variant: "success" },
+            senderId: authSession.userId,
+          });
+        } catch {
+          // Creation has succeeded; a notification failure must not make the
+          // client retry this already-created queue draft.
+        }
+        return data({
+          assetQueueCreated: true,
+          createdCount: result.createdAssetIds.length,
+        });
       }
 
       // Resolve the model name once so the success modal can render
@@ -384,11 +437,39 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       });
 
       if (result.failedAt !== undefined && result.error) {
+        if (assetQueueIntent === "create") {
+          return data({
+            assetQueueCreated: true,
+            createdCount: result.createdAssetIds.length,
+            warning:
+              result.createdAssetIds.length > 0
+                ? `Created ${result.createdAssetIds.length} of ${quantity} physical units. The remaining units were not created.`
+                : "An asset model was created, but its physical units could not be created. The draft was removed to prevent a duplicate model on retry.",
+          });
+        }
         return data(error(result.error), { status: result.error.status });
       }
 
       if (purchaseItemId && result.createdAssetIds[0]) {
         return await redirectToPurchasing(result.createdAssetIds[0]);
+      }
+
+      if (assetQueueIntent === "create") {
+        try {
+          sendNotification({
+            title: "Physical units created",
+            message: `${result.createdAssetIds.length} physical units were created with individual QR identities.`,
+            icon: { name: "success", variant: "success" },
+            senderId: authSession.userId,
+          });
+        } catch {
+          // Do not turn a successful physical-unit creation into a retryable
+          // error just because its optional notification could not be sent.
+        }
+        return data({
+          assetQueueCreated: true,
+          createdCount: result.createdAssetIds.length,
+        });
       }
 
       sendNotification({
@@ -503,6 +584,37 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       );
     }
 
+    if (assetQueueIntent === "create") {
+      // Asset creation has succeeded at this point. A failure in a follow-up
+      // image upload or note must not make the client retry and create a
+      // duplicate asset, so return the created state with a warning instead.
+      const results = await Promise.allSettled(postCreationTasks);
+      const failedTaskCount = results.filter(
+        (task) => task.status === "rejected"
+      ).length;
+
+      try {
+        sendNotification({
+          title: "Asset created",
+          message: "Your asset has been created successfully",
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+      } catch {
+        // Asset creation and follow-up writes already completed; notification
+        // failure must not make the queue retry and duplicate the asset.
+      }
+
+      return data({
+        assetQueueCreated: true,
+        createdCount: 1,
+        warning:
+          failedTaskCount > 0
+            ? "The asset was created, but some follow-up details could not be saved."
+            : undefined,
+      });
+    }
+
     await Promise.all(postCreationTasks);
 
     if (purchaseItemId) {
@@ -535,8 +647,16 @@ export async function action({ context, request }: LoaderFunctionArgs) {
 
 export default function NewAssetPage() {
   const title = useAtomValue(dynamicTitleAtom);
-  const { nextSequentialId, referer, prefillTitle, prefillQuantity } =
-    useLoaderData<typeof loader>();
+  const {
+    nextSequentialId,
+    referer,
+    prefillTitle,
+    prefillQuantity,
+    customFields,
+  } = useLoaderData<typeof loader>();
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
   const [searchParams] = useSearchParams();
   const qrId = searchParams.get("qrId");
 
@@ -548,6 +668,13 @@ export default function NewAssetPage() {
   // when the user enables bulk-create after selecting a model. The
   // page header label and the form's field layout both branch on this.
   const bulkMode = searchParams.get("bulk") === "1";
+  const queueEligible =
+    Boolean(layoutData?.isIoioStaff) &&
+    !bulkMode &&
+    !qrId &&
+    !searchParams.has("purchaseItemId") &&
+    !searchParams.has("returnTo") &&
+    !searchParams.has("returnToPurchasing");
 
   return (
     <div className="relative">
@@ -557,17 +684,32 @@ export default function NewAssetPage() {
         }
       />
       <div>
-        <IoioAssetCreateForm
-          title={prefillTitle || undefined}
-          quantity={prefillQuantity ?? undefined}
-          qrId={qrId}
-          categoryId={categoryFromUrl}
-          locationId={searchParams.get("location")}
-          sequentialId={nextSequentialId}
-          bulkMode={bulkMode}
-          showAssetModel={false}
-          referer={referer}
-        />
+        {queueEligible ? (
+          <IoioAssetCreationQueue
+            initialValues={{
+              title: prefillTitle || undefined,
+              quantity: prefillQuantity ?? undefined,
+              qrId,
+              categoryId: categoryFromUrl,
+              locationId: searchParams.get("location"),
+              sequentialId: nextSequentialId,
+              referer,
+              customFields,
+            }}
+          />
+        ) : (
+          <IoioAssetCreateForm
+            title={prefillTitle || undefined}
+            quantity={prefillQuantity ?? undefined}
+            qrId={qrId}
+            categoryId={categoryFromUrl}
+            locationId={searchParams.get("location")}
+            sequentialId={nextSequentialId}
+            bulkMode={bulkMode}
+            showAssetModel={false}
+            referer={referer}
+          />
+        )}
       </div>
     </div>
   );

@@ -49,7 +49,7 @@ export function NewAssetDropdown({
         role="link"
         aria-label="new asset"
         data-test-id="createNewAsset"
-        className="rounded-r-none border-r-0"
+        className="rounded-r-none border-r-0 pr-2"
       >
         New asset
       </Button>
@@ -62,7 +62,7 @@ export function NewAssetDropdown({
             // halves line up; flex-center the caret so the chevron sits in
             // the middle regardless of its intrinsic SVG bounds.
             className={tw(
-              "flex items-center justify-center rounded-l-none px-2.5",
+              "flex items-center justify-center rounded-l-none pl-1.5 pr-2.5",
               // Rotate the caret 180° while the popover is open to
               // give the user a visual "expanded" affordance — same
               // convention as `actions-dropdown.css` .chev styling.

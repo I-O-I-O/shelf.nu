@@ -17,10 +17,35 @@ import { db } from "~/database/db.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import {
   calculateTAHoursBudgetValues,
+  calculateTAHoursBudgetUpdateValues,
   requireTAHoursAccess,
 } from "./ta-hours.server";
 
 describe("TA Hours budget conversion", () => {
+  it("saves an hours-only period budget without a rate or money calculation", () => {
+    const values = calculateTAHoursBudgetUpdateValues({
+      mode: "hours",
+      totalHoursBudget: "120",
+      budgetAmountSek: null,
+      hourlyRateSekPerHour: null,
+    });
+
+    expect(values.totalHoursBudget.toFixed(2)).toBe("120.00");
+    expect(values).not.toHaveProperty("budgetAmountSek");
+    expect(values).not.toHaveProperty("hourlyRateSekPerHour");
+  });
+
+  it("keeps hours budget validation required and numeric", () => {
+    expect(() =>
+      calculateTAHoursBudgetUpdateValues({
+        mode: "hours",
+        totalHoursBudget: "",
+        budgetAmountSek: null,
+        hourlyRateSekPerHour: null,
+      })
+    ).toThrow("Available hours must be a number");
+  });
+
   it("converts SEK to hours with two-decimal Decimal rounding", () => {
     const values = calculateTAHoursBudgetValues({
       mode: "budget",

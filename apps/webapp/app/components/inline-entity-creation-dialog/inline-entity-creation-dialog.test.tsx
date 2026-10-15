@@ -100,7 +100,7 @@ describe("InlineEntityCreationDialog", () => {
       });
     });
 
-    it("closes dialog when close button is clicked", async () => {
+    it("uses the form Cancel action to close category creation", async () => {
       render(
         <InlineEntityCreationDialog
           title="Create Category"
@@ -117,10 +117,11 @@ describe("InlineEntityCreationDialog", () => {
         );
       });
 
-      // Close dialog
-      const closeButton = screen.getByLabelText("Close dialog");
+      expect(screen.queryByLabelText("Close dialog")).not.toBeInTheDocument();
+
+      // Cancel stays in the form footer beside its save action.
       await act(async () => {
-        await user.click(closeButton);
+        await user.click(screen.getByRole("button", { name: "Cancel" }));
       });
 
       await waitFor(() => {

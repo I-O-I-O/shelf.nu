@@ -210,7 +210,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
   }
 }
 
-export const meta: MetaFunction = () => [{ title: "Account settings" }];
+export const meta: MetaFunction = () => [{ title: "Email & password settings" }];
 
 export default function StudentAccountSettings() {
   const { email, sso } = useLoaderData<typeof loader>();
@@ -255,9 +255,11 @@ export default function StudentAccountSettings() {
 
       <Card className="my-0 rounded-2xl p-5 shadow-sm">
         <div>
-          <h2 className="text-xl font-black text-gray-950">Account</h2>
+          <h2 className="text-xl font-black text-gray-950">
+            Email &amp; password
+          </h2>
           <p className="mt-1 text-sm text-gray-600">
-            Manage your sign-in details.
+            Manage your sign-in email and password.
           </p>
         </div>
         <dl className="mt-5">

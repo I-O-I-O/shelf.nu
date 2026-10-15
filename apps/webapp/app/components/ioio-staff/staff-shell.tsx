@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BarChart3,
   ChevronDown,
@@ -28,6 +28,11 @@ import { StaffLogo } from "~/components/ioio-staff/staff-logo";
 import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
+import {
+  getStaffNavigationStorageKey,
+  readStaffNavigationOrder,
+  saveStaffNavigationOrder,
+} from "~/modules/ioio-staff/navigation-preferences";
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
@@ -36,38 +41,18 @@ const navigation = [
   { to: "/staff/ask", label: "Ask IOIO", Icon: MessageCircle, end: true },
   { to: "/handbook", label: "Handbook", Icon: ClipboardList, end: false },
   { to: "/assets", label: "Inventory", Icon: PackageOpen, end: false },
-  { to: "/staff/archived", label: "Archive", Icon: Archive, end: true },
-  { to: "/staff/trash", label: "Trash", Icon: Trash2, end: true },
   { to: "/categories", label: "Categories", Icon: Tags, end: false },
   { to: "/locations", label: "Locations", Icon: MapPin, end: false },
   { to: "/bookings", label: "Loans", Icon: ClipboardList, end: false },
   { to: "/calendar", label: "Calendar", Icon: CalendarDays, end: true },
   { to: "/reports", label: "Analytics", Icon: BarChart3, end: false },
   { to: "/settings", label: "Settings", Icon: Settings, end: false },
+  { to: "/staff/archived", label: "Archive", Icon: Archive, end: true },
+  { to: "/staff/trash", label: "Trash", Icon: Trash2, end: true },
 ] as const;
 
-const navigationStorageKey = "ioio-staff-navigation-order";
-const defaultNavigationOrder = navigation.map(({ to }) => to);
+export const DEFAULT_STAFF_NAVIGATION_ORDER = navigation.map(({ to }) => to);
 type NavigationItem = (typeof navigation)[number];
-
-function readSavedNavigationOrder() {
-  if (typeof window === "undefined") return defaultNavigationOrder;
-
-  try {
-    const saved = JSON.parse(
-      window.localStorage.getItem(navigationStorageKey) ?? "null"
-    );
-    if (!Array.isArray(saved)) return defaultNavigationOrder;
-
-    const valid = saved.filter((to): to is NavigationItem["to"] =>
-      defaultNavigationOrder.includes(to)
-    );
-    const missing = defaultNavigationOrder.filter((to) => !valid.includes(to));
-    return [...valid, ...missing];
-  } catch {
-    return defaultNavigationOrder;
-  }
-}
 
 export function StaffNavigation({
   onNavigate,
@@ -273,41 +258,84 @@ function StaffAccountControls({ onNavigate }: { onNavigate?: () => void }) {
 
 export default function StaffShell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [navigationOrder, setNavigationOrder] = useState<readonly string[]>(
-    defaultNavigationOrder
-  );
-  const navigationLoaded = useRef(false);
   const location = useLocation();
   const isLabelGeneratorRoute = location.pathname === "/labels";
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+  const navigationStorageKey =
+    layoutData?.user?.id && layoutData.currentOrganizationId
+      ? getStaffNavigationStorageKey(
+          layoutData.user.id,
+          layoutData.currentOrganizationId
+        )
+      : null;
+  const [savedNavigation, setSavedNavigation] = useState<{
+    storageKey: string | null;
+    order: readonly string[];
+    loaded: boolean;
+  }>(() => ({
+    storageKey: navigationStorageKey,
+    order: DEFAULT_STAFF_NAVIGATION_ORDER,
+    loaded: navigationStorageKey === null,
+  }));
+  const navigationOrder =
+    savedNavigation.storageKey === navigationStorageKey
+      ? savedNavigation.order
+      : DEFAULT_STAFF_NAVIGATION_ORDER;
 
   useEffect(() => {
-    setNavigationOrder(readSavedNavigationOrder());
-    navigationLoaded.current = true;
-  }, []);
+    if (!navigationStorageKey) {
+      setSavedNavigation({
+        storageKey: null,
+        order: DEFAULT_STAFF_NAVIGATION_ORDER,
+        loaded: true,
+      });
+      return;
+    }
+
+    setSavedNavigation({
+      storageKey: navigationStorageKey,
+      order: readStaffNavigationOrder(
+        navigationStorageKey,
+        DEFAULT_STAFF_NAVIGATION_ORDER
+      ),
+      loaded: true,
+    });
+  }, [navigationStorageKey]);
 
   useEffect(() => {
-    if (!navigationLoaded.current) return;
-    window.localStorage.setItem(
-      navigationStorageKey,
-      JSON.stringify(navigationOrder)
-    );
-  }, [navigationOrder]);
+    if (
+      !navigationStorageKey ||
+      !savedNavigation.loaded ||
+      savedNavigation.storageKey !== navigationStorageKey
+    ) {
+      return;
+    }
+
+    saveStaffNavigationOrder(navigationStorageKey, savedNavigation.order);
+  }, [navigationStorageKey, savedNavigation]);
 
   function reorderNavigation(dragged: string, target: string) {
-    setNavigationOrder((current) => {
+    setSavedNavigation((currentSaved) => {
+      const current =
+        currentSaved.storageKey === navigationStorageKey
+          ? currentSaved.order
+          : DEFAULT_STAFF_NAVIGATION_ORDER;
       const next = [...current];
       const fromIndex = next.indexOf(dragged);
-      if (fromIndex < 0 || next.indexOf(target) < 0) return current;
+      if (fromIndex < 0 || next.indexOf(target) < 0) return currentSaved;
       next.splice(fromIndex, 1);
       next.splice(next.indexOf(target) + 1, 0, dragged);
-      return next;
+      return {
+        storageKey: navigationStorageKey,
+        order: next,
+        loaded: true,
+      };
     });
   }
 
   const matches = useMatches();
-  const layoutData = useRouteLoaderData<typeof layoutLoader>(
-    "routes/_layout+/_layout"
-  );
   const canViewLabTasks = Boolean(layoutData?.isIoioStaff);
   const labStatus = layoutData?.labStatus ?? null;
   const askMatch = matches.find((match) => match.pathname === "/staff/ask");

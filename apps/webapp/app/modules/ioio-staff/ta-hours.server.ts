@@ -179,6 +179,36 @@ export function calculateTAHoursBudgetValues({
   return { totalHoursBudget, budgetAmountSek, hourlyRateSekPerHour };
 }
 
+export function calculateTAHoursBudgetUpdateValues({
+  mode,
+  totalHoursBudget,
+  budgetAmountSek,
+  hourlyRateSekPerHour,
+}: {
+  mode: unknown;
+  totalHoursBudget: unknown;
+  budgetAmountSek: unknown;
+  hourlyRateSekPerHour: unknown;
+}):
+  | { totalHoursBudget: Prisma.Decimal }
+  | ReturnType<typeof calculateTAHoursBudgetValues> {
+  const hasFinancialInput = [budgetAmountSek, hourlyRateSekPerHour].some(
+    (value) => value != null && String(value).trim() !== ""
+  );
+  if (mode === "hours" && !hasFinancialInput) {
+    return {
+      totalHoursBudget: parseHours(totalHoursBudget, "Available hours"),
+    };
+  }
+
+  return calculateTAHoursBudgetValues({
+    mode,
+    totalHoursBudget,
+    budgetAmountSek,
+    hourlyRateSekPerHour,
+  });
+}
+
 function parseDateKey(value: unknown) {
   if (typeof value !== "string" || !isValidDateKey(value)) {
     throw taHoursError("Choose a valid shift date.");
@@ -941,13 +971,13 @@ export async function updateTAHoursBudget({
   reason: unknown;
   confirmedOverBudget: boolean;
 }) {
-  const { totalHoursBudget, budgetAmountSek, hourlyRateSekPerHour } =
-    calculateTAHoursBudgetValues({
-      mode,
-      totalHoursBudget: totalHoursInput,
-      budgetAmountSek: budgetAmountInput,
-      hourlyRateSekPerHour: hourlyRateInput,
-    });
+  const budgetValues = calculateTAHoursBudgetUpdateValues({
+    mode,
+    totalHoursBudget: totalHoursInput,
+    budgetAmountSek: budgetAmountInput,
+    hourlyRateSekPerHour: hourlyRateInput,
+  });
+  const { totalHoursBudget } = budgetValues;
   const period = await ensurePeriod(organizationId, academicYear);
   const summary = await getTAHoursPageData({
     organizationId,
@@ -975,11 +1005,7 @@ export async function updateTAHoursBudget({
   return db.$transaction(async (tx) => {
     const updated = await tx.tAHoursPeriod.update({
       where: { id: period.id, organizationId },
-      data: {
-        totalHoursBudget,
-        budgetAmountSek,
-        hourlyRateSekPerHour,
-      },
+      data: budgetValues,
     });
     if (!new Prisma.Decimal(period.totalHoursBudget).equals(totalHoursBudget)) {
       await tx.tAHoursBudgetAdjustment.create({

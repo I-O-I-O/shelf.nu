@@ -125,6 +125,9 @@ describe("IOIO /assets/new route", () => {
         action: "create",
       })
     );
+    expect(getAllEntriesForCreateAndEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ includeAllLocations: true })
+    );
     expect(result).toMatchObject({
       categories: [],
       locations: [],
@@ -167,6 +170,59 @@ describe("IOIO /assets/new route", () => {
       expect.objectContaining({ entity: "asset", action: "create" })
     );
     expect(response).toMatchObject({ status: 302 });
+  });
+
+  it("validates a queued draft with the existing schema without creating it", async () => {
+    const formData = createFormData();
+    formData.set("assetQueueIntent", "validate");
+
+    const response = await action(
+      routeArgs(
+        new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: formData,
+        })
+      )
+    );
+
+    expect(response).toMatchObject({
+      data: { assetQueueValidated: true },
+    });
+    expect(createAsset).not.toHaveBeenCalled();
+  });
+
+  it("creates a queued draft through the existing asset pipeline without redirecting", async () => {
+    const formData = createFormData();
+    formData.set("assetQueueIntent", "create");
+
+    const response = await action(
+      routeArgs(
+        new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: formData,
+        })
+      )
+    );
+
+    expect(createAsset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Test inventory item",
+        categoryId: "category-1",
+        locationId: "location-1",
+        type: "QUANTITY_TRACKED",
+        quantity: 2,
+      })
+    );
+    expect(updateAssetMainImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetId: "asset-1",
+        isNewAsset: true,
+        allowEmptyFile: true,
+      })
+    );
+    expect(response).toMatchObject({
+      data: { assetQueueCreated: true, createdCount: 1 },
+    });
   });
 
   it("returns to a cleared creation form after Add another", async () => {

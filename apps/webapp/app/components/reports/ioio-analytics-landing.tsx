@@ -20,7 +20,7 @@ export const IOIO_ANALYTICS_REPORT_IDS = [
 
 const REPORT_COPY: Record<string, string> = {
   "booking-compliance":
-    "See how often loans are returned and checked out on time.",
+    "See how often completed loans are returned on time or late.",
   "top-booked-assets": "See which assets are borrowed most often.",
   "top-booked-kits": "See which kits are borrowed most often.",
   "asset-usage-distribution":
@@ -51,12 +51,6 @@ export function IoioAnalyticsLanding({
 
   return (
     <section>
-      <div className="mb-3">
-        <h3 className="text-sm font-semibold text-gray-950">Analytics</h3>
-        <p className="mt-1 text-sm text-gray-500">
-          Understand borrowing patterns and inventory usage.
-        </p>
-      </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-2">
         {reports.map((report) => (
           <AnalyticsReportCard key={report.id} report={report} />

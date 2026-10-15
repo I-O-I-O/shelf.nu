@@ -265,9 +265,7 @@ export function StaffInventoryList({
       <section className="overflow-hidden rounded border border-gray-200 bg-white">
         <div className="flex flex-col gap-3 border-b border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">
-              Inventory {inventorySummary.logicalItems}
-            </h2>
+            <h2 className="text-base font-semibold text-gray-900">Inventory</h2>
             <p className="text-sm text-gray-500">
               Canonical quantities and current availability
             </p>

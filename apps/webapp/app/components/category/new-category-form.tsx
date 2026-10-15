@@ -119,6 +119,8 @@ export default function NewCategoryForm({
         <div className={tw("mb-6 lg:mb-0", inputClassName)}>
           <ColorInput
             name={zo.fields.color()}
+            label="Hex color"
+            showPreview
             disabled={disabled}
             error={colorError}
             hideErrorText={!hasOnSuccessFunc}

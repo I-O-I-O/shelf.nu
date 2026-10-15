@@ -5877,6 +5877,7 @@ export async function getAllEntriesForCreateAndEdit({
   request,
   defaults,
   tagUseFor,
+  includeAllLocations = false,
 }: {
   organizationId: Organization["id"];
   request: LoaderFunctionArgs["request"];
@@ -5886,6 +5887,8 @@ export async function getAllEntriesForCreateAndEdit({
     location?: string | null;
   };
   tagUseFor?: TagUseFor;
+  /** Load the full location tree for the shared Staff asset form cascade. */
+  includeAllLocations?: boolean;
 }) {
   const searchParams = getCurrentSearchParams(request);
   const categorySelected =
@@ -5923,6 +5926,7 @@ export async function getAllEntriesForCreateAndEdit({
         organizationId,
         request,
         defaultLocation: defaults?.location,
+        includeAll: includeAllLocations,
       }),
     ]);
 
@@ -10425,10 +10429,12 @@ export async function getLocationsForCreateAndEdit({
   organizationId,
   request,
   defaultLocation,
+  includeAll = false,
 }: {
   organizationId: Organization["id"];
   request: Request;
   defaultLocation?: string | null;
+  includeAll?: boolean;
 }) {
   try {
     const searchParams = getCurrentSearchParams(request);
@@ -10440,7 +10446,8 @@ export async function getLocationsForCreateAndEdit({
       await Promise.all([
         db.location.findMany({
           where: { organizationId, id: { not: locationSelected } },
-          take: getAllEntries.includes("location") ? undefined : 12,
+          take:
+            includeAll || getAllEntries.includes("location") ? undefined : 12,
         }),
         db.location.findMany({
           where: { organizationId, id: locationSelected },

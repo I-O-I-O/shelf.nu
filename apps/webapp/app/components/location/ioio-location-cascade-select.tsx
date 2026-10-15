@@ -1,6 +1,10 @@
 import { useMemo, useState } from "react";
 import type { Location } from "@prisma/client";
 import type { ModelFilterItem } from "~/hooks/use-model-filters";
+import {
+  getQuickLocationSelection,
+  IoioLocationQuickSelect,
+} from "./ioio-location-quick-select";
 import DynamicSelect from "../dynamic-select/dynamic-select";
 
 export type IoioLocationOption = Pick<Location, "id" | "name" | "parentId">;
@@ -23,6 +27,7 @@ type Props = {
   required?: boolean;
   error?: string;
   onChange?: (value: string | undefined) => void;
+  showQuickLocation?: boolean;
 };
 
 const locationNames = (name: string) => {
@@ -90,6 +95,7 @@ export function IoioLocationCascadeSelect({
   required = false,
   error,
   onChange,
+  showQuickLocation = false,
 }: Props) {
   const locationsById = useMemo(
     () => new Map(locations.map((location) => [location.id, location])),
@@ -154,8 +160,22 @@ export function IoioLocationCascadeSelect({
     );
   };
 
+  const selectQuickLocation = (pathIds: string[]) => {
+    updateSelection(getQuickLocationSelection(pathIds));
+  };
+
   return (
     <div className="flex w-full flex-col gap-2">
+      {showQuickLocation ? (
+        <>
+          <IoioLocationQuickSelect
+            locations={locations}
+            disabled={disabled}
+            onSelect={selectQuickLocation}
+          />
+          <p className="text-xs text-gray-500">or choose manually</p>
+        </>
+      ) : null}
       <DynamicSelect
         key="ioio-room"
         fieldName="ioioRoomId"

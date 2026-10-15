@@ -104,22 +104,3 @@
   background-color: var(--ioio-red-300);
   border-color: var(--ioio-red-300);
 }
-
-/* Keep the shared Staff route header compact so content starts near the shell. */
-@media (min-width: 768px) {
-  .ioio-staff-surface > div > main header.-mx-4.bg-white > div:first-child {
-    min-height: 0;
-    padding-bottom: 0.25rem;
-    padding-top: 0.25rem;
-  }
-
-  .ioio-staff-surface > div > main header.-mx-4.bg-white > div:nth-child(2) {
-    padding-bottom: 0.25rem;
-    padding-top: 0.25rem;
-  }
-
-  .ioio-staff-surface > div > main header.-mx-4.bg-white .breadcrumbs {
-    padding-bottom: 0.5rem;
-    padding-top: 0.5rem;
-  }
-}

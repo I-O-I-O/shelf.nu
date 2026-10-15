@@ -75,16 +75,21 @@ describe("IOIO asset creation form", () => {
   });
 
   it("shows the latest IOIO creation sections and controls with empty data", () => {
-    render(<IoioAssetCreateForm showAssetModel={false} />);
+    render(<IoioAssetCreateForm assetQueueMode showAssetModel={false} />);
 
-    expect(screen.getByText("Basic fields")).toBeInTheDocument();
+    expect(screen.queryByText("Basic fields")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Basic information about your asset.")
+    ).not.toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
     expect(screen.getByText("Tracking method")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /^Quantity Identical units/ })
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /^Individual QR tracking/ })
+      screen.getByRole("button", {
+        name: /^Individual QR tracking \(kits\)/,
+      })
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Quantity")).toBeInTheDocument();
     expect(screen.getByLabelText("Main image upload")).toHaveAttribute(
@@ -96,14 +101,14 @@ describe("IOIO asset creation form", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Location selector")).toBeInTheDocument();
     expect(screen.getByText("Advanced options")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(2);
-    expect(screen.getAllByRole("link", { name: "Cancel" })).toHaveLength(2);
-    expect(screen.getAllByRole("link", { name: "Cancel" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "Cancel" })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "Cancel" })).toHaveAttribute(
       "href",
       "/assets"
     );
     expect(screen.getAllByRole("button", { name: "Add another" })).toHaveLength(
-      2
+      1
     );
   });
 

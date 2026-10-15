@@ -1,7 +1,9 @@
 import type { ReactElement, ReactNode } from "react";
 import React from "react";
+import { useAtomValue } from "jotai";
 import { useLoaderData } from "react-router";
 
+import { selectedBulkItemsCountAtom } from "~/atoms/list";
 import { useAssetIndexView } from "~/hooks/use-asset-index-view";
 import { useAssetIndexViewState } from "~/hooks/use-asset-index-view-state";
 import { useIsUserAssetsPage } from "~/hooks/use-is-user-assets-page";
@@ -73,6 +75,8 @@ export type ListProps = {
    * Allow bulk actions on List by providing Bulk actions dropdown
    */
   bulkActions?: ReactElement;
+  /** Render bulkActions as a compact full-row toolbar only while selected. */
+  selectionToolbar?: boolean;
 
   /** Optionally recieve an element for custom pagination */
   customPagination?: ReactElement;
@@ -131,6 +135,7 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     customEmptyStateContent,
     emptyStateClassName,
     bulkActions,
+    selectionToolbar = false,
     customPagination,
     hideListTitle = false,
     tableClassName,
@@ -148,6 +153,9 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
   const items = itemsProp ?? loaderItems;
   const totalIncomingItems = items?.length;
   const hasItems = totalIncomingItems > 0;
+  const selectedItemsCount = useAtomValue(selectedBulkItemsCountAtom);
+  const showSelectionToolbar =
+    selectionToolbar && Boolean(bulkActions) && selectedItemsCount > 0;
 
   const { modeIsAdvanced } = useAssetIndexViewState();
   // The export button ships ASSET rows. The model view lists models, so it
@@ -176,29 +184,41 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
           {!hideListTitle ? (
             <div
               className={tw(
-                modeIsAdvanced
+                showSelectionToolbar
+                  ? "flex items-center justify-between gap-3 p-3 md:px-4"
+                  : modeIsAdvanced
                   ? "p-3 pb-[5px]"
                   : "flex-col p-4 pb-2 md:flex-row",
-                "flex justify-between border-b md:items-center "
+                "flex justify-between border-b md:items-center"
               )}
             >
-              <div>
-                <ListTitle
-                  title={title}
-                  disableSelectAllItems={disableSelectAllItems}
-                  hasBulkActions={!!bulkActions}
-                  items={items}
-                  countLabel={countLabel}
-                  countLabelIsTotal={countLabelIsTotal}
-                />
-              </div>
-              <div className="flex items-center justify-end gap-2">
-                <When truthy={!!headerExtraContent}>{headerExtraContent}</When>
-                <When truthy={modeIsAdvanced && !isModelView}>
-                  <ExportAssetsButton />
-                </When>
-                <When truthy={!!bulkActions}>{bulkActions}</When>
-              </div>
+              {showSelectionToolbar ? (
+                bulkActions
+              ) : (
+                <>
+                  <div>
+                    <ListTitle
+                      title={title}
+                      disableSelectAllItems={disableSelectAllItems}
+                      hasBulkActions={!!bulkActions}
+                      items={items}
+                      countLabel={countLabel}
+                      countLabelIsTotal={countLabelIsTotal}
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <When truthy={!!headerExtraContent}>
+                      {headerExtraContent}
+                    </When>
+                    <When truthy={modeIsAdvanced && !isModelView}>
+                      <ExportAssetsButton />
+                    </When>
+                    <When truthy={!!bulkActions && !selectionToolbar}>
+                      {bulkActions}
+                    </When>
+                  </div>
+                </>
+              )}
             </div>
           ) : null}
           {MobileItemComponent ? (

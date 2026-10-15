@@ -29,7 +29,7 @@ const settingsLinks = [
     label: "Email preferences",
     end: false,
   },
-  { to: "/ioio/settings/account", label: "Account", end: false },
+  { to: "/ioio/settings/account", label: "Email & password", end: false },
   {
     to: "/ioio/settings/access-approval",
     label: "Access approval",

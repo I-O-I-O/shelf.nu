@@ -6,8 +6,8 @@ import type {
 } from "react-router";
 import { data, Link, Outlet } from "react-router";
 import { z } from "zod";
-import BulkActionsDropdown from "~/components/category/bulk-actions-dropdown";
 import CategoryQuickActions from "~/components/category/category-quick-actions";
+import { CategorySelectionToolbar } from "~/components/category/category-selection-toolbar";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -153,23 +153,31 @@ export default function CategoriesPage() {
 
   return (
     <>
-      <Header>
-        <Button
-          to="new"
-          role="link"
-          aria-label={`new category`}
-          data-test-id="createNewCategory"
-        >
-          New category
-        </Button>
-      </Header>
+      <Header />
       <ListContentWrapper>
-        <Filters />
+        <Filters
+          searchClassName="md:flex-1"
+          innerWrapperClassName="md:flex-1"
+          slots={{
+            "right-of-search": (
+              <Button
+                to="new"
+                role="link"
+                aria-label="new category"
+                data-test-id="createNewCategory"
+                className="shrink-0 self-start md:self-auto"
+              >
+                New category
+              </Button>
+            ),
+          }}
+        />
         <Outlet />
         <List
           bulkActions={
-            isBaseOrSelfService ? undefined : <BulkActionsDropdown />
+            isBaseOrSelfService ? undefined : <CategorySelectionToolbar />
           }
+          selectionToolbar={!isBaseOrSelfService}
           customEmptyStateContent={{
             title: "No categories yet",
             text: "Categories help you organize assets by type. Create categories to group and filter your inventory.",
@@ -181,7 +189,8 @@ export default function CategoriesPage() {
             <>
               <Th>Description</Th>
               <Th>Assets</Th>
-              <Th>Actions</Th>
+              <Th>Edit</Th>
+              <Th>Delete</Th>
             </>
           }
         />
@@ -216,8 +225,6 @@ const CategoryItem = ({
       ) : null}
     </Td>
     <Td>{item._count.assets}</Td>
-    <Td>
-      <CategoryQuickActions category={item} />
-    </Td>
+    <CategoryQuickActions category={item} />
   </>
 );

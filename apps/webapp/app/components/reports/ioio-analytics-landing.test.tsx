@@ -24,7 +24,7 @@ describe("IOIO Analytics landing", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByRole("heading", { name: "Analytics" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Analytics" })).toBeNull();
     for (const [label, href] of [
       ["Booking Compliance", "/reports/booking-compliance"],
       ["Top Booked Assets", "/reports/top-booked-assets"],
