@@ -170,7 +170,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       action: PermissionAction.delete,
     });
 
-    await deleteLocation({ id, organizationId });
+    const deletedLocation = await deleteLocation({ id, organizationId });
 
     sendNotification({
       title: "Location deleted",
@@ -179,7 +179,10 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       senderId: authSession.userId,
     });
 
-    return redirect(`/locations`);
+    const returnToParent = deletedLocation.parentId
+      ? `?selectedLocation=${encodeURIComponent(deletedLocation.parentId)}`
+      : "";
+    return redirect(`/locations${returnToParent}`);
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
     return data(error(reason), { status: reason.status });

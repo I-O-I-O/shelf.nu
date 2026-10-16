@@ -1067,7 +1067,11 @@ export default function IoioLoans() {
                             <div className="min-w-0 flex-1">
                               <Link
                                 to={`/ioio/browse/${item.asset.id}`}
-                                className="font-semibold text-gray-950 hover:text-red-800 hover:underline"
+                                className={`${
+                                  item.isKit || item.asset.type === "INDIVIDUAL"
+                                    ? "ioio-identifier "
+                                    : ""
+                                }font-semibold text-gray-950 hover:text-red-800 hover:underline`}
                               >
                                 {formatStudentLabel(displayName)}
                               </Link>
@@ -1216,7 +1220,16 @@ export default function IoioLoans() {
                                     </h3>
                                     <p className="mt-1 inline-flex rounded-lg bg-red-50 px-2.5 py-1 text-sm font-bold text-red-900">
                                       Assigned unit:{" "}
-                                      {formatStudentLabel(displayName)}
+                                      <span
+                                        className={
+                                          item.isKit ||
+                                          item.asset.type === "INDIVIDUAL"
+                                            ? "ioio-identifier"
+                                            : undefined
+                                        }
+                                      >
+                                        {formatStudentLabel(displayName)}
+                                      </span>
                                     </p>
                                   </div>
                                   <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-1">
@@ -1764,7 +1777,15 @@ export default function IoioLoans() {
                               to={`/ioio/browse/${item.asset.id}`}
                               className="hover:text-red-800 hover:underline"
                             >
-                              {formatStudentLabel(displayName)}
+                              <span
+                                className={
+                                  item.isKit || item.asset.type === "INDIVIDUAL"
+                                    ? "ioio-identifier"
+                                    : undefined
+                                }
+                              >
+                                {formatStudentLabel(displayName)}
+                              </span>
                             </Link>
                           </p>
                           {isProblemReturn(item.id) ? (
@@ -2167,7 +2188,15 @@ function PastLoansSection({
                             to={`/ioio/browse/${item.asset.id}`}
                             className="hover:text-red-800 hover:underline"
                           >
-                            {formatStudentLabel(displayName)}
+                            <span
+                              className={
+                                item.isKit || item.asset.type === "INDIVIDUAL"
+                                  ? "ioio-identifier"
+                                  : undefined
+                              }
+                            >
+                              {formatStudentLabel(displayName)}
+                            </span>
                           </Link>
                         </p>
                         <p className="mt-1 text-xs text-gray-600">

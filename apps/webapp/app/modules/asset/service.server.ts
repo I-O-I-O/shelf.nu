@@ -49,6 +49,7 @@ import {
   assertAssetQuantityNotBelowReservations,
   computeCustodyAvailability,
 } from "~/modules/asset/availability-primitives.server";
+import { getInventoryLocationFilterIds } from "~/modules/asset/inventory-location-filter.server";
 import {
   assertStockNotBelowManualPlacements,
   reconcileManualPlacementsForStockDecrease,
@@ -66,6 +67,7 @@ import {
   importDataHasBarcodes,
 } from "~/modules/barcode/service.server";
 import { normalizeBarcodeValue } from "~/modules/barcode/validation";
+import { orderUntouchedIoioDefaults } from "~/modules/category/ioio-categories";
 import {
   createCategoriesIfNotExists,
   getCategory,
@@ -80,7 +82,6 @@ import {
 } from "~/modules/custom-field/service.server";
 import type { CustomFieldDraftPayload } from "~/modules/custom-field/types";
 import { bulkAssignKitCustody } from "~/modules/kit/service.server";
-import { getLocationDescendantIds } from "~/modules/location/descendants.server";
 import {
   createLocationChangeNote,
   createLocationsIfNotExists,
@@ -6039,23 +6040,10 @@ export async function getPaginatedAndFilterableAssets({
     // and everything stored below it. Keep the URL and filter seed on the
     // selected location, but expand the ids used by the asset query through
     // Shelf's native recursive Location hierarchy.
-    const locationIdsForAssetQuery =
-      locationIds.length > 0 && !locationIds.includes("without-location")
-        ? [
-            ...new Set(
-              (
-                await Promise.all(
-                  locationIds.map((locationId) =>
-                    getLocationDescendantIds({
-                      organizationId,
-                      locationId,
-                    })
-                  )
-                )
-              ).flat()
-            ),
-          ]
-        : locationIds;
+    const locationIdsForAssetQuery = await getInventoryLocationFilterIds({
+      organizationId,
+      locationIds,
+    });
 
     /**
      * These three queries are independent (no data flows between them),
@@ -10291,12 +10279,12 @@ export async function getEntitiesWithSelectedValues({
   );
 
   return {
-    categories: [
+    categories: orderUntouchedIoioDefaults([
       ...selectedCategories,
       ...(allSelectedEntries.includes("category")
         ? categoryExcludedSelected
         : categoryExcludedSelected.slice(0, 12)),
-    ],
+    ]),
     totalCategories: allCategories.length,
     tags: [...selectedTags, ...tagsExcludedSelected],
     totalTags,
@@ -10407,12 +10395,12 @@ export async function getCategoriesForCreateAndEdit({
     );
 
     return {
-      categories: [
+      categories: orderUntouchedIoioDefaults([
         ...selectedCategories,
         ...(getAllEntries.includes("category")
           ? categoryExcludedSelected
           : categoryExcludedSelected.slice(0, 12)),
-      ],
+      ]),
       totalCategories: allCategories.length,
     };
   } catch (cause) {

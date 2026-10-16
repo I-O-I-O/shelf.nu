@@ -36,6 +36,14 @@ import { AssetImage } from "~/components/assets/asset-image";
 import { getQuantityData } from "~/components/assets/asset-status-badge/quantity-data";
 import { InventoryBulkActionBar } from "~/components/assets/assets-index/inventory-bulk-action-bar";
 import {
+  formatInventoryLocationName,
+  getInventoryLocationContext,
+  getInventoryLocationGroup,
+  isUniqueInventoryLocationName,
+  sortInventoryLocationItems,
+  type InventoryLocationOption,
+} from "~/components/assets/assets-index/inventory-location-options";
+import {
   applyInventoryQuickFilter,
   type InventoryQuickFilter,
 } from "~/components/assets/assets-index/inventory-quick-filters";
@@ -53,7 +61,6 @@ import { StaffInventoryUndoNotice } from "~/components/assets/staff-inventory-un
 import type { BulkUpdateSuccessContext } from "~/components/bulk-update-dialog/bulk-update-dialog";
 import DynamicDropdown from "~/components/dynamic-dropdown/dynamic-dropdown";
 import { ChevronRight } from "~/components/icons/library";
-import { getIoioCategoryColor } from "~/components/ioio-staff/ioio-category-presentation";
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
 import { EmptyState } from "~/components/list/empty-state";
 import { SearchForm } from "~/components/list/filters/search-form";
@@ -313,7 +320,15 @@ export function StaffInventoryList({
           />
         ) : null}
         {!hasItems ? (
-          <EmptyState customContent={customEmptyStateContent} />
+          <EmptyState
+            customContent={customEmptyStateContent}
+            modelName={{ singular: "inventory item", plural: "inventory" }}
+            filteredEmptyMessage={({ search }) =>
+              search
+                ? `No inventory found for "${search}".`
+                : "No inventory matches these filters."
+            }
+          />
         ) : (
           <>
             <div className="hidden overflow-hidden md:block">
@@ -336,7 +351,7 @@ export function StaffInventoryList({
                     <Th className="w-[17%] md:px-3">Category</Th>
                     <Th className="w-[17%] md:px-3">Location</Th>
                     <Th className="w-[11%] px-1 md:px-2">Quantity</Th>
-                    <Th className="w-[14%] md:px-3">Updated</Th>
+                    <Th className="w-[14%] md:px-3">Last updated</Th>
                     <Th className="w-[18%] md:px-3">Actions</Th>
                   </tr>
                 </thead>
@@ -407,11 +422,13 @@ function InventorySummaryStat({
 
 function StaffInventoryFilters() {
   const { categories, locations } = useLoaderData<AssetIndexLoaderData>();
-  const filterParams = ["status", "category", "location"];
+  const filterParams = ["status", "category", "location", "assetKitFilter"];
   const hasFiltersToClear = useSearchParamHasValue(...filterParams);
   const clearFilters = useClearValueFromParams(...filterParams);
   const [searchParams, setSearchParams] = useSearchParams();
-  const selectedCategoryIds = searchParams.getAll("category");
+  const selectedCategoryIds = searchParams
+    .getAll("category")
+    .filter((id) => id !== IOIO_KIT_CATEGORY_FILTER);
   const selectedCategory =
     selectedCategoryIds.length === 1
       ? categories.find((category) => category.id === selectedCategoryIds[0])
@@ -425,7 +442,7 @@ function StaffInventoryFilters() {
     ? getIoioLocationColor({ name: selectedLocation.name })
     : null;
   const clearLocation = useClearValueFromParams("location");
-  const hasAdditionalFilters = ["status", "category"].some(
+  const hasAdditionalFilters = ["status", "category", "assetKitFilter"].some(
     (key) => searchParams.getAll(key).length > 0
   );
   const categoryFilterLabel =
@@ -433,23 +450,20 @@ function StaffInventoryFilters() {
       ? "Category"
       : selectedCategoryIds.length === 1
       ? selectedCategory?.name ??
-        (selectedCategoryIds[0] === IOIO_KIT_CATEGORY_FILTER
-          ? "Kit"
-          : selectedCategoryIds[0] === "uncategorized"
+        (selectedCategoryIds[0] === "uncategorized"
           ? "Uncategorized"
           : "Category")
       : `Category +${selectedCategoryIds.length}`;
   const categoryFilterColor =
     selectedCategoryIds.length === 1 &&
     selectedCategoryIds[0] !== "uncategorized"
-      ? selectedCategory?.color ??
-        getIoioCategoryColor(
-          selectedCategoryIds[0] === IOIO_KIT_CATEGORY_FILTER ? "Kit" : null
-        )
+      ? selectedCategory?.color ?? null
       : null;
   const activeFilterTriggerClassName = "border-red-200 bg-red-50 text-red-800";
   const activeStatus = searchParams.get("status");
-  const kitsSelected = selectedCategoryIds.includes(IOIO_KIT_CATEGORY_FILTER);
+  const kitsSelected =
+    searchParams.get("assetKitFilter") === "IN_OTHER_KITS" ||
+    searchParams.getAll("category").includes(IOIO_KIT_CATEGORY_FILTER);
   const viewFilter: InventoryQuickFilter = kitsSelected
     ? "kits"
     : activeStatus === AssetStatus.AVAILABLE
@@ -460,7 +474,11 @@ function StaffInventoryFilters() {
 
   return (
     <div className="ioio-inventory-filters flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50/50 px-4 py-3 text-sm text-gray-500">
-      <SearchForm className="min-w-[240px] flex-[1_1_320px]" />
+      <SearchForm
+        className="min-w-[240px] flex-[1_1_320px]"
+        label="Search inventory"
+        placeholder="Search inventory..."
+      />
       <InventoryViewSelect
         value={viewFilter}
         onChange={(value) =>
@@ -495,7 +513,12 @@ function StaffInventoryFilters() {
           placeholder="Search categories"
           initialDataKey="categories"
           countKey="totalCategories"
-          withValueItem={{ id: IOIO_KIT_CATEGORY_FILTER, name: "Kit" }}
+          onSelectionChange={() =>
+            setSearchParams((current) => {
+              current.delete("category", IOIO_KIT_CATEGORY_FILTER);
+              return current;
+            })
+          }
           withoutValueItem={{ id: "uncategorized", name: "Uncategorized" }}
           hideCounter
         />
@@ -556,9 +579,25 @@ function StaffInventoryFilters() {
           placeholder="Search locations"
           initialDataKey="locations"
           countKey="totalLocations"
-          getItemGroup={getInventoryLocationGroup}
-          sortItems={sortInventoryLocationItems}
-          renderItem={(item) => formatInventoryLocationName(item.name)}
+          allValueItem={{ name: "All locations" }}
+          getItemGroup={(item) =>
+            getInventoryLocationGroup(
+              item as InventoryLocationOption,
+              locations as InventoryLocationOption[]
+            )
+          }
+          sortItems={(items) =>
+            sortInventoryLocationItems(
+              items as InventoryLocationOption[],
+              locations as InventoryLocationOption[]
+            )
+          }
+          renderItem={(item) =>
+            renderInventoryLocationOption(
+              item as InventoryLocationOption,
+              locations as InventoryLocationOption[]
+            )
+          }
           withoutValueItem={{
             id: "without-location",
             name: "Without location",
@@ -580,43 +619,20 @@ function StaffInventoryFilters() {
   );
 }
 
-function getInventoryLocationGroup(item: { name: string }): string {
-  if (/^[A-Z]\d{3}(?:\s|$)/u.test(item.name)) return "Rooms";
-  if (/\bsection\b/iu.test(item.name)) return "Sections";
-  if (/\b(?:shelf|container)\b/iu.test(item.name)) return "Shelves";
-  return "Other locations";
-}
-
-function sortInventoryLocationItems(
-  items: Array<{ id: string; name: string; metadata: Record<string, any> }>
+function renderInventoryLocationOption(
+  item: InventoryLocationOption,
+  locations: InventoryLocationOption[]
 ) {
-  const groupOrder: Record<string, number> = {
-    Rooms: 0,
-    Sections: 1,
-    Shelves: 2,
-    "Other locations": 3,
-  };
-
-  return [...items].sort((left, right) => {
-    const leftGroup = getInventoryLocationGroup(left);
-    const rightGroup = getInventoryLocationGroup(right);
-    const groupDifference = groupOrder[leftGroup] - groupOrder[rightGroup];
-
-    if (groupDifference !== 0) return groupDifference;
-
-    return formatInventoryLocationName(left.name).localeCompare(
-      formatInventoryLocationName(right.name),
-      undefined,
-      { numeric: true, sensitivity: "base" }
-    );
-  });
-}
-
-function formatInventoryLocationName(name: string): string {
-  const codeFirstName = name.match(/^([A-Z]\d{3})\s+—\s+(.+)$/u);
-  if (codeFirstName) return `${codeFirstName[2]} - ${codeFirstName[1]}`;
-
-  return name.replace(/\s*—\s*/gu, " - ");
+  const context = getInventoryLocationContext(item, locations);
+  const uniqueName = isUniqueInventoryLocationName(item, locations);
+  return (
+    <span className="flex min-w-0 flex-col">
+      <span className="truncate">{formatInventoryLocationName(item.name)}</span>
+      {!uniqueName && context ? (
+        <span className="truncate text-xs text-gray-500">{context}</span>
+      ) : null}
+    </span>
+  );
 }
 
 type StaffInventoryQuantities = {
@@ -835,10 +851,9 @@ function StaffInventoryRow({
           </div>
         </Td>
         <Td className="whitespace-nowrap text-sm text-gray-600">
-          <DateS
-            date={item.updatedAt}
-            options={{ year: "numeric", month: "short", day: "numeric" }}
-          />
+          <time dateTime={new Date(item.updatedAt).toISOString()}>
+            <DateS date={item.updatedAt} includeTime />
+          </time>
         </Td>
         <Td className="md:px-3">
           <StaffInventoryActions
@@ -1081,7 +1096,7 @@ function StaffInventoryExpandedUnitsContent({
                 className="size-4 shrink-0 rounded border-gray-300 text-red-600 focus:ring-red-600"
               />
               <span className="min-w-0 whitespace-normal break-words font-medium text-gray-900">
-                {unitLabel}
+                <span className="ioio-identifier">{unitLabel}</span>
               </span>
               <div className="flex min-w-0 items-center justify-end gap-2">
                 <Badge
@@ -1597,13 +1612,12 @@ function StaffInventoryMobileRow({
         </div>
         <div>
           <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">
-            Updated
+            Last updated
           </dt>
           <dd className="mt-1 text-sm text-gray-600">
-            <DateS
-              date={item.updatedAt}
-              options={{ year: "numeric", month: "short", day: "numeric" }}
-            />
+            <time dateTime={new Date(item.updatedAt).toISOString()}>
+              <DateS date={item.updatedAt} includeTime />
+            </time>
           </dd>
         </div>
       </dl>

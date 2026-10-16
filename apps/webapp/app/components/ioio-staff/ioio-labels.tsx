@@ -60,6 +60,7 @@ export const IOIO_LABEL_CUSTOM_TEXT_MAX_LENGTH = 32;
 
 export function normalizeIoioCustomLabelText(value: string) {
   const normalized = value
+    // eslint-disable-next-line no-control-regex -- remove control characters from user-entered print text
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();

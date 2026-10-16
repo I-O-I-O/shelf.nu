@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   requireStudentRead: vi.fn(),
+  borrowItem: vi.fn(),
   assetFindFirst: vi.fn(),
   qrFindFirst: vi.fn(),
   resolvePhysicalUnitNumber: vi.fn(),
@@ -19,7 +20,7 @@ vi.mock("~/modules/ioio-student/route.server", () => ({
   requireStudentRead: mocks.requireStudentRead,
 }));
 vi.mock("~/modules/ioio-student/borrow-item.server", () => ({
-  borrowItem: vi.fn(),
+  borrowItem: mocks.borrowItem,
   acknowledgeBorrowItemStaffReservation: vi.fn(),
   cancelBorrowItem: vi.fn(),
   getBorrowItemAvailability: vi.fn(),
@@ -61,6 +62,50 @@ beforeEach(() => {
     unitNumber: "003",
     qrId: "vdqo0i7hk9",
   });
+  mocks.borrowItem.mockResolvedValue({
+    status: "submitted",
+    dueDate: "2026-11-01T00:00:00.000Z",
+  });
+});
+
+it("submits the selected basket quantity through the confirmation action", async () => {
+  const form = new FormData();
+  form.set("intent", "confirm-all");
+  form.set(
+    "proposals",
+    JSON.stringify([
+      {
+        kind: "borrow",
+        itemId: "arduino",
+        confirmationToken: "proposal-token",
+        quantity: 3,
+        selectedPhysicalUnitIds: [],
+      },
+    ])
+  );
+
+  const result = await action({
+    context: { getSession: () => ({ userId: "student-1" }) } as never,
+    request: new Request("http://localhost/ioio/checkout", {
+      method: "POST",
+      body: form,
+    }),
+    params: {},
+  } as never);
+
+  expect(result.data).toMatchObject({
+    ok: true,
+    intent: "confirmed-all",
+    results: [{ itemId: "arduino", ok: true, quantity: 3 }],
+  });
+  expect(mocks.borrowItem).toHaveBeenCalledWith(
+    expect.objectContaining({
+      confirmationToken: "proposal-token",
+      quantity: 3,
+      selectedPhysicalUnitIds: [],
+    }),
+    expect.any(Object)
+  );
 });
 
 it.each([

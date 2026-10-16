@@ -20,12 +20,14 @@ export interface CustomEmptyState {
     singular: string;
     plural: string;
   };
+  filteredEmptyMessage?: (params: { search: string | null }) => string;
 }
 
 export const EmptyState = ({
   className,
   customContent,
   modelName,
+  filteredEmptyMessage,
 }: CustomEmptyState) => {
   const {
     search,
@@ -135,7 +137,10 @@ export const EmptyState = ({
             <div className="text-text-lg font-semibold text-gray-900">
               {filteredTexts.title}
             </div>
-            <p className="text-gray-600">{filteredTexts.p}</p>
+            <p className="text-gray-600">
+              {filteredEmptyMessage?.({ search: search ?? null }) ??
+                filteredTexts.p}
+            </p>
           </div>
         ) : customContent ? (
           <div>

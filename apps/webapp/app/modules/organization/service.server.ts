@@ -32,7 +32,7 @@ import { resolveUserDisplayName } from "~/utils/user";
 import { newOwnerEmailText, previousOwnerEmailText } from "./email";
 import { recordEvent } from "../activity-event/service.server";
 import { defaultFields } from "../asset-index-settings/helpers";
-import { defaultUserCategories } from "../category/default-categories";
+import { IOIO_INITIAL_CATEGORY_DEFAULTS } from "../category/ioio-categories";
 import { updateUserTierId } from "../tier/service.server";
 import { USER_NAME_SELECT } from "../user/fields";
 import { getDefaultWeeklySchedule } from "../working-hours/service.server";
@@ -220,7 +220,14 @@ export async function createOrganization({
       type: OrganizationType.TEAM,
       hasSequentialIdsMigrated: true, // New organizations don't need migration
       categories: {
-        create: defaultUserCategories.map((c) => ({ ...c, userId })),
+        create: IOIO_INITIAL_CATEGORY_DEFAULTS.map(
+          ({ name, description, color }) => ({
+            name,
+            description,
+            color,
+            userId,
+          })
+        ),
       },
       userOrganizations: {
         create: {

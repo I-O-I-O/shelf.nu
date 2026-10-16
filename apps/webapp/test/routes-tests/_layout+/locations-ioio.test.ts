@@ -6,7 +6,9 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
+import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import {
+  deleteLocation,
   createLocation,
   getLocationDescendantsTree,
   getLocationHierarchy,
@@ -15,12 +17,18 @@ import {
   updateLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
-import { loader as locationDetailLoader } from "~/routes/_layout+/locations.$locationId";
+import {
+  action as deleteLocationAction,
+  loader as locationDetailLoader,
+} from "~/routes/_layout+/locations.$locationId";
 import {
   action as editLocationAction,
   loader as editLocationLoader,
 } from "~/routes/_layout+/locations.$locationId_.edit";
-import { loader as locationsIndexLoader } from "~/routes/_layout+/locations._index";
+import {
+  action as locationsIndexAction,
+  loader as locationsIndexLoader,
+} from "~/routes/_layout+/locations._index";
 import {
   action as newLocationAction,
   loader as newLocationLoader,
@@ -36,6 +44,7 @@ import { requirePermission } from "~/utils/roles.server";
 vi.mock("~/utils/roles.server", () => ({ requirePermission: vi.fn() }));
 // why: these route tests verify route-to-service adaptation without database or storage I/O.
 vi.mock("~/modules/location/service.server", () => ({
+  deleteLocation: vi.fn(),
   createLocation: vi.fn(),
   getLocationDescendantsTree: vi.fn(),
   getLocation: vi.fn(),
@@ -44,6 +53,10 @@ vi.mock("~/modules/location/service.server", () => ({
   removeLocationImage: vi.fn(),
   updateLocation: vi.fn(),
   updateLocationImage: vi.fn(),
+}));
+// why: the IOIO lifecycle service is an organization-scoped boundary; the route test supplies known archived IDs.
+vi.mock("~/modules/ioio-staff/archive.server", () => ({
+  getIoioArchivedItemIds: vi.fn(),
 }));
 // why: the location picker service is exercised at the route boundary while the database remains isolated.
 vi.mock("~/modules/asset/service.server", () => ({
@@ -56,6 +69,8 @@ vi.mock("~/database/db.server", () => ({
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
+    assetLocation: { findMany: vi.fn() },
+    asset: { count: vi.fn() },
   },
 }));
 // why: route behavior is asserted without sending notifications to the app event bus.
@@ -65,6 +80,7 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
 
 const requirePermissionMock = vi.mocked(requirePermission);
 const createLocationMock = vi.mocked(createLocation);
+const deleteLocationMock = vi.mocked(deleteLocation);
 const getLocationMock = vi.mocked(getLocation);
 const getLocationHierarchyMock = vi.mocked(getLocationHierarchy);
 const getLocationDescendantsTreeMock = vi.mocked(getLocationDescendantsTree);
@@ -76,6 +92,9 @@ const getLocationsForCreateAndEditMock = vi.mocked(
 );
 const findFirstLocationMock = vi.mocked(db.location.findFirst);
 const findManyLocationsMock = vi.mocked(db.location.findMany);
+const findActiveAssignmentsMock = vi.mocked(db.assetLocation.findMany);
+const countUnassignedAssetsMock = vi.mocked(db.asset.count);
+const getArchivedAssetIdsMock = vi.mocked(getIoioArchivedItemIds);
 
 function loaderArgs(url: string): LoaderFunctionArgs {
   return {
@@ -111,9 +130,12 @@ describe("IOIO Locations routes", () => {
       organizationId: "org-1",
       userOrganizations: [],
     } as never);
+    getArchivedAssetIdsMock.mockResolvedValue([]);
+    findActiveAssignmentsMock.mockResolvedValue([] as never);
+    countUnassignedAssetsMock.mockResolvedValue(0);
   });
 
-  it("loads the full filtered location hierarchy for the IOIO landing page", async () => {
+  it("loads the full hierarchy and active asset-placement summary", async () => {
     getLocationsMock
       .mockResolvedValueOnce({
         locations: [locationTree[0]],
@@ -123,9 +145,14 @@ describe("IOIO Locations routes", () => {
         locations: locationTree,
         totalLocations: 4,
       } as never);
+    getArchivedAssetIdsMock.mockResolvedValue(["archived-asset"] as never);
+    findActiveAssignmentsMock.mockResolvedValue([
+      { assetId: "active-asset", locationId: "box-1" },
+    ] as never);
+    countUnassignedAssetsMock.mockResolvedValue(2);
 
     const result = await locationsIndexLoader(
-      loaderArgs("https://example.com/locations?s=IOIO&selectedLocation=room-1")
+      loaderArgs("https://example.com/locations")
     );
 
     expect(requirePermissionMock).toHaveBeenCalledWith({
@@ -140,15 +167,399 @@ describe("IOIO Locations routes", () => {
         organizationId: "org-1",
         page: 1,
         perPage: 4,
-        search: "IOIO",
       })
     );
-    expect(result.data).toMatchObject({
-      header: { title: "Locations - 4" },
-      items: locationTree,
-      selectedLocationId: "room-1",
-      searchFieldLabel: "Search locations",
+    expect(getArchivedAssetIdsMock).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      itemType: "ASSET",
     });
+    expect(findActiveAssignmentsMock).toHaveBeenCalledWith({
+      where: {
+        organizationId: "org-1",
+        asset: {
+          organizationId: "org-1",
+          id: { notIn: ["archived-asset"] },
+        },
+      },
+      select: { assetId: true, locationId: true },
+      distinct: ["assetId", "locationId"],
+    });
+    expect(countUnassignedAssetsMock).toHaveBeenCalledWith({
+      where: {
+        organizationId: "org-1",
+        id: { notIn: ["archived-asset"] },
+        assetLocations: { none: {} },
+      },
+    });
+    expect(result.data).toMatchObject({
+      header: { title: "Locations" },
+      items: locationTree,
+      inventorySummary: {
+        containerAssetCounts: { "box-1": 1 },
+        rooms: {
+          "room-1": { sections: 1, shelves: 1, containers: 1, assets: 1 },
+        },
+        sections: { "section-1": { shelves: 1, containers: 1, assets: 1 } },
+        unassignedOrIncompleteAssetCount: 2,
+      },
+    });
+  });
+
+  it.each(["room-1", "section-1", "shelf-1", "box-1", "stale-location"])(
+    "reloads the Locations route for selectedLocation=%s",
+    async (id) => {
+      getLocationsMock.mockResolvedValue({
+        locations: locationTree,
+        totalLocations: locationTree.length,
+      } as never);
+
+      const result = await locationsIndexLoader(
+        loaderArgs(
+          `https://example.com/locations?selectedLocation=${id}&room=room-1`
+        )
+      );
+
+      expect(result.data).toBeDefined();
+      expect(getLocationsMock).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: "org-1" })
+      );
+    }
+  );
+
+  it("creates an inline child under the selected organization location", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "section-1",
+      name: "Section A",
+      parentId: "room-1",
+      parent: { parentId: null },
+    } as never);
+    findManyLocationsMock.mockResolvedValue([] as never);
+    createLocationMock.mockResolvedValue({ id: "shelf-new" } as never);
+
+    const formData = new FormData();
+    formData.set("intent", "inline-create");
+    formData.set("locationType", "shelf");
+    formData.set("parentId", "section-1");
+    formData.set("name", "Shelf A2");
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations", formData)
+    );
+
+    expect(requirePermissionMock).toHaveBeenCalledWith({
+      userId: "staff-1",
+      request: expect.any(Request),
+      entity: PermissionEntity.location,
+      action: PermissionAction.create,
+    });
+    expect(findFirstLocationMock).toHaveBeenCalledWith({
+      where: { id: "section-1", organizationId: "org-1" },
+      select: {
+        id: true,
+        name: true,
+        parentId: true,
+        parent: { select: { parentId: true } },
+      },
+    });
+    expect(createLocationMock).toHaveBeenCalledWith({
+      name: "Shelf A2",
+      description: "",
+      address: "",
+      userId: "staff-1",
+      organizationId: "org-1",
+      parentId: "section-1",
+      color: null,
+    });
+    expect(result.data).toMatchObject({
+      success: true,
+      location: { id: "shelf-new" },
+    });
+  });
+
+  it("returns to the deleted location's parent after a successful delete", async () => {
+    deleteLocationMock.mockResolvedValue({
+      id: "section-1",
+      parentId: "room-1",
+    } as never);
+
+    const result = await deleteLocationAction(
+      actionArgs("https://example.com/locations/section-1", new FormData())
+    );
+
+    expect(deleteLocationMock).toHaveBeenCalledWith({
+      id: "section-1",
+      organizationId: "org-1",
+    });
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(302);
+    expect((result as Response).headers.get("Location")).toBe(
+      "/locations?selectedLocation=room-1"
+    );
+  });
+
+  it("returns to Locations after deleting a root location", async () => {
+    deleteLocationMock.mockResolvedValue({
+      id: "room-1",
+      parentId: null,
+    } as never);
+
+    const result = await deleteLocationAction(
+      actionArgs(
+        "https://example.com/locations/room-1",
+        new FormData(),
+        "room-1"
+      )
+    );
+
+    expect(result).toBeInstanceOf(Response);
+    expect((result as Response).status).toBe(302);
+    expect((result as Response).headers.get("Location")).toBe("/locations");
+  });
+
+  it("returns a controlled response when deletion is blocked", async () => {
+    deleteLocationMock.mockRejectedValueOnce({
+      message:
+        "This location contains child locations. Move or delete them first.",
+      status: 409,
+      label: "Location",
+    });
+
+    const result = await deleteLocationAction(
+      actionArgs("https://example.com/locations/section-1", new FormData())
+    );
+
+    expect(result).toMatchObject({ init: { status: 409 } });
+    expect(result.data).toMatchObject({
+      error: {
+        message:
+          "This location contains child locations. Move or delete them first.",
+      },
+    });
+  });
+
+  it("creates an inline Section under the selected Room", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab - B477",
+      parentId: null,
+      parent: null,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([] as never);
+    createLocationMock.mockResolvedValue({
+      id: "section-new",
+      name: "Section D",
+      parentId: "room-1",
+    } as never);
+
+    const formData = new FormData();
+    formData.set("intent", "inline-create");
+    formData.set("locationType", "section");
+    formData.set("parentId", "room-1");
+    formData.set("name", "Section D");
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations", formData)
+    );
+
+    expect(findFirstLocationMock).toHaveBeenCalledWith({
+      where: { id: "room-1", organizationId: "org-1" },
+      select: {
+        id: true,
+        name: true,
+        parentId: true,
+        parent: { select: { parentId: true } },
+      },
+    });
+    expect(createLocationMock).toHaveBeenCalledWith({
+      name: "Section D",
+      description: "",
+      address: "",
+      userId: "staff-1",
+      organizationId: "org-1",
+      parentId: "room-1",
+      color: null,
+    });
+    expect(result.data).toMatchObject({
+      success: true,
+      location: { id: "section-new", name: "Section D", parentId: "room-1" },
+    });
+  });
+
+  it("moves the existing location record under the selected organization parent", async () => {
+    findManyLocationsMock
+      .mockResolvedValueOnce([
+        { id: "broken", name: "Broken Section", parentId: null },
+        { id: "room-1", name: "IOIO Lab - B477", parentId: null },
+      ] as never)
+      .mockResolvedValueOnce([] as never);
+    updateLocationMock.mockResolvedValue({
+      id: "broken",
+      name: "Broken Section",
+      parentId: "room-1",
+    } as never);
+
+    const formData = new FormData();
+    formData.set("intent", "move-location");
+    formData.set("locationId", "broken");
+    formData.set("locationType", "section");
+    formData.set("parentId", "room-1");
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations?index", formData)
+    );
+
+    expect(requirePermissionMock).toHaveBeenCalledWith({
+      userId: "staff-1",
+      request: expect.any(Request),
+      entity: PermissionEntity.location,
+      action: PermissionAction.update,
+    });
+    expect(updateLocationMock).toHaveBeenCalledWith({
+      id: "broken",
+      userId: "staff-1",
+      organizationId: "org-1",
+      parentId: "room-1",
+    });
+    expect(findActiveAssignmentsMock).not.toHaveBeenCalled();
+    expect(result.data).toMatchObject({
+      success: true,
+      location: { id: "broken", parentId: "room-1" },
+    });
+  });
+
+  it("returns a controlled error for duplicate sibling names during a move", async () => {
+    findManyLocationsMock
+      .mockResolvedValueOnce([
+        { id: "section-a", name: "Section A", parentId: "room-1" },
+        { id: "room-1", name: "IOIO Lab - B477", parentId: null },
+      ] as never)
+      .mockResolvedValueOnce([
+        { id: "section-other", name: "Section A" },
+      ] as never);
+
+    const formData = new FormData();
+    formData.set("intent", "move-location");
+    formData.set("locationId", "section-a");
+    formData.set("locationType", "section");
+    formData.set("parentId", "room-1");
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations?index", formData)
+    );
+
+    expect(updateLocationMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      init: { status: 400 },
+      data: {
+        error: { message: "A location named Section A already exists here." },
+      },
+    });
+  });
+
+  it.each([
+    {
+      locationType: "room",
+      parentId: null,
+      parent: null,
+      name: "Room Inline Test",
+    },
+    {
+      locationType: "section",
+      parentId: "room-1",
+      parent: {
+        id: "room-1",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        parent: null,
+      },
+      name: "Section Inline Test",
+    },
+    {
+      locationType: "shelf",
+      parentId: "section-1",
+      parent: {
+        id: "section-1",
+        name: "Section A",
+        parentId: "room-1",
+        parent: { parentId: null },
+      },
+      name: "Shelf Inline Test",
+    },
+    {
+      locationType: "container",
+      parentId: "shelf-1",
+      parent: {
+        id: "shelf-1",
+        name: "Shelf A1",
+        parentId: "section-1",
+        parent: { parentId: "room-1" },
+      },
+      name: "Container Inline Test",
+    },
+  ] as const)(
+    "creates an inline $locationType using its selected parent",
+    async ({ locationType, parentId, parent, name }) => {
+      if (parent) findFirstLocationMock.mockResolvedValue(parent as never);
+      findManyLocationsMock.mockResolvedValue([] as never);
+      createLocationMock.mockResolvedValue({
+        id: `${locationType}-inline-new`,
+        name,
+        parentId,
+      } as never);
+
+      const formData = new FormData();
+      formData.set("intent", "inline-create");
+      formData.set("locationType", locationType);
+      formData.set("parentId", parentId ?? "");
+      formData.set("name", name);
+      const result = await locationsIndexAction(
+        actionArgs("https://example.com/locations?index", formData)
+      );
+
+      if (parentId) {
+        expect(findFirstLocationMock).toHaveBeenCalledWith({
+          where: { id: parentId, organizationId: "org-1" },
+          select: {
+            id: true,
+            name: true,
+            parentId: true,
+            parent: { select: { parentId: true } },
+          },
+        });
+      } else {
+        expect(findFirstLocationMock).not.toHaveBeenCalled();
+      }
+      expect(createLocationMock).toHaveBeenCalledWith({
+        name,
+        description: "",
+        address: "",
+        userId: "staff-1",
+        organizationId: "org-1",
+        parentId,
+        color: locationType === "room" ? "#455A64" : null,
+      });
+      expect(result.data).toMatchObject({
+        success: true,
+        location: { id: `${locationType}-inline-new`, name, parentId },
+      });
+    }
+  );
+
+  it("rejects inline creation when the selected parent has the wrong depth", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab",
+      parentId: null,
+      parent: null,
+    } as never);
+
+    const formData = new FormData();
+    formData.set("intent", "inline-create");
+    formData.set("locationType", "container");
+    formData.set("parentId", "room-1");
+    formData.set("name", "Container A1-13");
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations", formData)
+    );
+
+    expect(createLocationMock).not.toHaveBeenCalled();
+    expect(result.init).toMatchObject({ status: 400 });
   });
 
   it("loads an empty New location picker from the current organization", async () => {

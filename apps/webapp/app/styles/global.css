@@ -37,6 +37,14 @@ body {
   @apply bg-white text-text-sm text-gray-900;
 }
 
+/* Use only for physical identifiers and codes, never ordinary quantities. */
+.ioio-identifier {
+  font-variant-numeric: slashed-zero tabular-nums;
+  font-feature-settings:
+    "zero" 1,
+    "tnum" 1;
+}
+
 h1,
 h2,
 h3,

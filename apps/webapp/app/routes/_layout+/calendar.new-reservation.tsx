@@ -571,6 +571,8 @@ export default function NewIoioReservation() {
   const [quantityInput, setQuantityInput] = useState(
     String(reservation?.quantity ?? 1)
   );
+  const [checkedAvailabilityKey, setCheckedAvailabilityKey] = useState("");
+  const [createAttemptKey, setCreateAttemptKey] = useState("");
   const quantity = Number(quantityInput);
   const quantityIsValid =
     Number.isInteger(quantity) && quantity >= 1 && quantity <= 1000;
@@ -583,6 +585,13 @@ export default function NewIoioReservation() {
   const [newReturnDate, setNewReturnDate] = useState("");
   const selected = products.find((product) => product.id === selectedId);
   const candidateAssetIds = selected?.candidateAssetIds.join(",") ?? "";
+  const availabilityKey = [
+    selectedId,
+    candidateAssetIds,
+    quantityInput,
+    startDate,
+    returnDate,
+  ].join(":");
   const matchingProducts = useMemo(() => {
     const query = productSearch.trim().toLocaleLowerCase();
     return products.filter((product) => {
@@ -592,6 +601,7 @@ export default function NewIoioReservation() {
     });
   }, [productKind, productSearch, products]);
   const liveAvailability =
+    checkedAvailabilityKey === availabilityKey &&
     quantityIsValid &&
     availabilityFetcher.data?.ok &&
     availabilityFetcher.data.intent === "availability"
@@ -614,6 +624,26 @@ export default function NewIoioReservation() {
     isStaffReservationSummary(result.availability)
       ? result.availability
       : null;
+  const applicableConflictAvailability =
+    createAttemptKey === availabilityKey ? createConflictAvailability : null;
+  const quantityMax = Math.max(
+    1,
+    applicableConflictAvailability?.availableAfterSoftConflicts ??
+      liveAvailability?.available ??
+      selected?.availableQuantity ??
+      1
+  );
+  const quantityWithinAvailability = quantityIsValid && quantity <= quantityMax;
+  const availabilityReady =
+    checkedAvailabilityKey === availabilityKey &&
+    availabilityFetcher.state === "idle" &&
+    liveAvailability !== null;
+
+  useEffect(() => {
+    if (quantityIsValid && quantity > quantityMax) {
+      setQuantityInput(String(quantityMax));
+    }
+  }, [quantity, quantityIsValid, quantityMax]);
 
   useEffect(() => {
     setSelectedId(reservation?.selectedProductId || products[0]?.id || "");
@@ -646,11 +676,13 @@ export default function NewIoioReservation() {
       formData.set("quantity", String(quantity));
       formData.set("startDate", startDate);
       formData.set("returnDate", returnDate);
+      setCheckedAvailabilityKey(availabilityKey);
       submitAvailability(formData);
     }, 180);
     return () => window.clearTimeout(timeout);
   }, [
     candidateAssetIds,
+    availabilityKey,
     quantity,
     quantityIsValid,
     returnDate,
@@ -668,11 +700,13 @@ export default function NewIoioReservation() {
       formData.set("quantity", String(quantity));
       formData.set("startDate", startDate);
       formData.set("returnDate", returnDate);
+      setCheckedAvailabilityKey(availabilityKey);
       submitAvailability(formData);
       setSelectedConflict(null);
     }
   }, [
     candidateAssetIds,
+    availabilityKey,
     quantity,
     earlierReturnBookingAssetId,
     earlierReturnSucceeded,
@@ -747,6 +781,7 @@ export default function NewIoioReservation() {
       ) : null}
       <Form
         method="post"
+        onSubmit={() => setCreateAttemptKey(availabilityKey)}
         className="space-y-5 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
       >
         {isEdit ? <input type="hidden" name="intent" value="edit" /> : null}
@@ -851,7 +886,12 @@ export default function NewIoioReservation() {
           <ReservationQuantityControl
             value={quantityInput}
             onChange={setQuantityInput}
+            max={quantityMax}
           />
+          <p className="mt-1 text-xs font-normal text-gray-600">
+            Available for these dates:{" "}
+            {liveAvailability?.available ?? selected?.availableQuantity ?? 0}
+          </p>
         </div>
         <IoioDateRangePicker
           startDate={startDate}
@@ -959,7 +999,11 @@ export default function NewIoioReservation() {
                 type="submit"
                 name="createAnyway"
                 value="true"
-                disabled={!quantityIsValid || !selectedId}
+                disabled={
+                  !quantityWithinAvailability ||
+                  !selectedId ||
+                  !availabilityReady
+                }
                 className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
               >
                 Create reservation anyway
@@ -976,7 +1020,9 @@ export default function NewIoioReservation() {
           </Link>
           <button
             type="submit"
-            disabled={!quantityIsValid || !selectedId}
+            disabled={
+              !quantityWithinAvailability || !selectedId || !availabilityReady
+            }
             className="inline-flex min-h-11 items-center justify-center rounded-xl bg-red-700 px-5 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isEdit ? "Save changes" : "Create reservation"}

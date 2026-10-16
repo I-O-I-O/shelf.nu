@@ -1,5 +1,4 @@
 import { AssetStatus } from "@prisma/client";
-import { IOIO_KIT_CATEGORY_FILTER } from "~/utils/list";
 
 export type InventoryQuickFilter = "all" | "available" | "checked-out" | "kits";
 
@@ -18,31 +17,21 @@ export function applyInventoryQuickFilter(
   filter: InventoryQuickFilter
 ): URLSearchParams {
   const next = new URLSearchParams(current);
-  const categories = next.getAll("category");
-
   if (filter === "all") {
     next.delete("status");
-    next.delete("category");
-    for (const category of categories) {
-      if (category !== IOIO_KIT_CATEGORY_FILTER) {
-        next.append("category", category);
-      }
-    }
+    next.delete("assetKitFilter");
+    next.delete("category", "__ioio-kit__");
   } else if (filter === "kits") {
     next.delete("status");
-    next.delete("category");
-    next.append("category", IOIO_KIT_CATEGORY_FILTER);
+    next.delete("category", "__ioio-kit__");
+    next.set("assetKitFilter", "IN_OTHER_KITS");
   } else {
     next.set(
       "status",
       filter === "available" ? AssetStatus.AVAILABLE : AssetStatus.CHECKED_OUT
     );
-    next.delete("category");
-    for (const category of categories) {
-      if (category !== IOIO_KIT_CATEGORY_FILTER) {
-        next.append("category", category);
-      }
-    }
+    next.delete("assetKitFilter");
+    next.delete("category", "__ioio-kit__");
   }
 
   next.delete("page");

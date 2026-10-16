@@ -986,6 +986,62 @@ export async function deleteLocation({
      * location is gone. Its URLs cannot be read back after the row is deleted.
      */
     const location = await db.$transaction(async (tx) => {
+      // Lock the parent row before checking its dependants. A concurrent child
+      // insert must wait on this lock and then fail its FK check if we delete
+      // the location, rather than slipping past the check and being promoted
+      // by the self-relation's ON DELETE SET NULL behavior.
+      await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM "Location"
+        WHERE id = ${id} AND "organizationId" = ${organizationId}
+        FOR UPDATE
+      `;
+
+      const child = await tx.location.findFirst({
+        where: { parentId: id },
+        select: { id: true },
+      });
+      if (child) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location contains child locations. Move or delete them first.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const assignedAsset = await tx.assetLocation.findFirst({
+        where: { locationId: id },
+        select: { id: true },
+      });
+      if (assignedAsset) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location contains assigned assets. Move them before deleting the location.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const kit = await tx.kit.findFirst({
+        where: { locationId: id },
+        select: { id: true },
+      });
+      if (kit) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location is used by a kit. Move the kit before deleting the location.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
       const deleted = await tx.location.delete({
         where: { id, organizationId },
       });
@@ -1003,6 +1059,7 @@ export async function deleteLocation({
 
     return location;
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while deleting the location",
@@ -1336,15 +1393,115 @@ export async function bulkDeleteLocations({
       where: locationIds.includes(ALL_SELECTED_KEY)
         ? { organizationId }
         : { id: { in: locationIds }, organizationId },
-      select: { id: true, imageId: true, imageUrl: true, thumbnailUrl: true },
+      select: {
+        id: true,
+        parentId: true,
+        imageId: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+      },
     });
 
     await db.$transaction(async (tx) => {
-      /** Deleting all locations */
-      await tx.location.deleteMany({
-        // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: ids come from `locations` fetched above with `organizationId` in the where clause, so they are already org-proven before this delete
-        where: { id: { in: locations.map((location) => location.id) } },
-      });
+      const selectedIds = locations.map((location) => location.id);
+      if (selectedIds.length) {
+        // Prevent concurrent child inserts from racing the non-selected-child
+        // check in the same way as the single-location delete path.
+        await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM "Location"
+          WHERE "organizationId" = ${organizationId}
+            AND id IN (${Prisma.join(selectedIds)})
+          FOR UPDATE
+        `;
+
+        const outsideChild = await tx.location.findFirst({
+          // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: the FK can reference a selected location from another organization, so this must find every child that ON DELETE SET NULL would promote
+          where: {
+            parentId: { in: selectedIds },
+            id: { notIn: selectedIds },
+          },
+          select: { id: true },
+        });
+        if (outsideChild) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations contain child locations that are not selected. Move or delete them first.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const assignedAsset = await tx.assetLocation.findFirst({
+          where: { locationId: { in: selectedIds } },
+          select: { id: true },
+        });
+        if (assignedAsset) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations contain assigned assets. Move them before deleting the locations.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const kit = await tx.kit.findFirst({
+          where: { locationId: { in: selectedIds } },
+          select: { id: true },
+        });
+        if (kit) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations are used by kits. Move the kits before deleting the locations.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      /**
+       * Delete selected locations from the deepest level upward. Deleting a
+       * selected parent first would invoke ON DELETE SET NULL on a selected
+       * child, even though both rows are scheduled for deletion.
+       */
+      const selectedById = new Map(
+        locations.map((location) => [location.id, location])
+      );
+      const depthOf = (location: (typeof locations)[number]) => {
+        let depth = 0;
+        let current = location;
+        const visited = new Set<string>();
+        while (
+          current.parentId &&
+          selectedById.has(current.parentId) &&
+          !visited.has(current.id)
+        ) {
+          visited.add(current.id);
+          depth += 1;
+          current = selectedById.get(current.parentId)!;
+        }
+        return depth;
+      };
+      const locationsByDepth = new Map<number, string[]>();
+      for (const location of locations) {
+        const depth = depthOf(location);
+        const idsAtDepth = locationsByDepth.get(depth) ?? [];
+        idsAtDepth.push(location.id);
+        locationsByDepth.set(depth, idsAtDepth);
+      }
+      for (const [, idsAtDepth] of [...locationsByDepth].sort(
+        ([left], [right]) => right - left
+      )) {
+        await tx.location.deleteMany({
+          where: { id: { in: idsAtDepth }, organizationId },
+        });
+      }
 
       /** Deleting images of locations */
       const locationWithImages = locations.filter(
@@ -1370,6 +1527,7 @@ export async function bulkDeleteLocations({
      */
     void safeRemoveImageFilesOfLocations(locations);
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while bulk deleting locations.",

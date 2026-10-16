@@ -35,7 +35,15 @@ import { SearchFieldTooltip } from "./search-field-tooltip";
  */
 const SEARCH_DEBOUNCE_MS = 400;
 
-export const SearchForm = ({ className }: { className?: string }) => {
+export const SearchForm = ({
+  className,
+  label: labelOverride,
+  placeholder: placeholderOverride,
+}: {
+  className?: string;
+  label?: string;
+  placeholder?: string;
+}) => {
   const [_searchParams, setSearchParams] = useSearchParams();
   const { search, modelName, searchFieldLabel } =
     useLoaderData<SearchableIndexResponse>();
@@ -75,7 +83,7 @@ export const SearchForm = ({ className }: { className?: string }) => {
     []
   );
 
-  const label = searchFieldLabel ? searchFieldLabel : `Search by ${singular}`;
+  const label = labelOverride ?? searchFieldLabel ?? `Search by ${singular}`;
 
   /**
    * Clears the search parameter and page parameter from the URL
@@ -152,7 +160,7 @@ export const SearchForm = ({ className }: { className?: string }) => {
           name="s"
           label={label}
           aria-label={label}
-          placeholder={label}
+          placeholder={placeholderOverride ?? label}
           defaultValue={search || ""}
           hideLabel
           className="w-full md:w-auto"

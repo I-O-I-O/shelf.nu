@@ -163,6 +163,7 @@ export function IoioLocationCreationForm({ locations }: Props) {
                 label="Name"
                 name="name"
                 placeholder="IOIO Lab - B477"
+                inputClassName="ioio-identifier"
                 required
                 disabled={disabled}
               />
@@ -357,6 +358,7 @@ export function IoioLocationCreationForm({ locations }: Props) {
                           : "Container A1-13"
                       }
                       value={locationName}
+                      inputClassName="ioio-identifier"
                       onChange={(event) =>
                         setLocationName(event.currentTarget.value)
                       }

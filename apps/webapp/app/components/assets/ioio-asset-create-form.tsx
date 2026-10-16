@@ -894,7 +894,7 @@ export const IoioAssetCreateForm = ({
 
   return (
     <>
-      <Card className="w-full lg:w-min">
+      <Card className={assetQueueMode ? "w-full min-w-0" : "w-full lg:w-min"}>
         <BulkCreateSuccessModal
           success={actionData?.bulkSuccess}
           sampleTitles={bulkPreviewTitles}
@@ -1365,7 +1365,7 @@ export const IoioAssetCreateForm = ({
                         >
                           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
                             <div className="min-w-0 flex-1">
-                              <p className="min-w-0 whitespace-normal break-words text-xs font-semibold text-gray-800">
+                              <p className="ioio-identifier min-w-0 whitespace-normal break-words text-xs font-semibold text-gray-800">
                                 {displayName}
                               </p>
                               <p
@@ -1390,6 +1390,7 @@ export const IoioAssetCreateForm = ({
                                     )
                                   }
                                   placeholder="001"
+                                  inputClassName="ioio-identifier"
                                   className="w-24"
                                   disabled={isBusy}
                                   autoFocus

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ReservationQuantityControl } from "./reservation-quantity-control";
 
@@ -33,5 +33,31 @@ describe("ReservationQuantityControl", () => {
     expect(screen.getByText("2").tagName).toBe("OUTPUT");
     fireEvent.click(screen.getByRole("button", { name: "Decrease quantity" }));
     expect(screen.getByText("1").tagName).toBe("OUTPUT");
+  });
+
+  it("caps staff quantity to the supplied availability", () => {
+    function LimitedHarness() {
+      const [quantity, setQuantity] = useState("2");
+      return (
+        <>
+          <label htmlFor="reservation-quantity">Quantity</label>
+          <ReservationQuantityControl
+            value={quantity}
+            onChange={setQuantity}
+            max={3}
+          />
+          <output>{quantity}</output>
+        </>
+      );
+    }
+
+    render(<LimitedHarness />);
+    const input = screen.getByRole("spinbutton", { name: "Quantity" });
+    expect(input).toHaveAttribute("max", "3");
+    fireEvent.click(screen.getByRole("button", { name: "Increase quantity" }));
+    expect(screen.getByText("3").tagName).toBe("OUTPUT");
+    expect(
+      screen.getByRole("button", { name: "Increase quantity" })
+    ).toBeDisabled();
   });
 });

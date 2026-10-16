@@ -158,9 +158,9 @@ describe("staff calendar reservation", () => {
       "candidateAssetIds",
       "makey-001,makey-002,makey-003,makey-004,makey-005"
     );
-    form.set("quantity", "1");
-    form.set("startDate", "2026-10-11");
-    form.set("returnDate", "2027-01-30");
+    form.set("quantity", "3");
+    form.set("startDate", "2027-10-11");
+    form.set("returnDate", "2028-01-30");
     form.set("createAnyway", "true");
 
     const result = await action(
@@ -183,10 +183,10 @@ describe("staff calendar reservation", () => {
         booking: expect.objectContaining({
           organizationId: "org-1",
           description: "IOIO staff reservation",
-          from: new Date("2026-10-11T00:00:00.000Z"),
-          to: new Date("2027-01-30T23:59:59.999Z"),
+          from: new Date("2027-10-11T00:00:00.000Z"),
+          to: new Date("2028-01-30T23:59:59.999Z"),
         }),
-        assetIds: ["makey-001"],
+        assetIds: ["makey-001", "makey-002", "makey-003"],
       })
     );
     expect(mocks.reserveBooking).toHaveBeenCalledWith(
@@ -218,8 +218,8 @@ describe("staff calendar reservation", () => {
     form.set("assetId", "makey-model");
     form.set("candidateAssetIds", "makey-001");
     form.set("quantity", "1");
-    form.set("startDate", "2026-10-11");
-    form.set("returnDate", "2027-01-30");
+    form.set("startDate", "2027-10-11");
+    form.set("returnDate", "2028-01-30");
     form.set("createAnyway", "true");
 
     const result = await action(

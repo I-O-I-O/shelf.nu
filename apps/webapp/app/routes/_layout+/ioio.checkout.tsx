@@ -10,6 +10,7 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { z } from "zod";
+import { QuantityStepper } from "~/components/ioio/quantity-stepper";
 import {
   BorrowSuccess,
   type BorrowCompletionItem,
@@ -820,6 +821,18 @@ function CheckoutLine({
     availabilityData &&
       quantity <= availabilityData.availableWithoutStaffReservations
   );
+
+  useEffect(() => {
+    if (!proposal || proposal.quantity === quantity) return;
+    // The server proposal is the quantity that will be written to the booking.
+    // Invalidate it when the basket quantity changes so the normal prepare path
+    // rechecks availability and creates a matching proposal before checkout.
+    setProposal(null);
+    setReservationAcknowledged(false);
+    onPrepared(item.id, null, item.title, false);
+    lastPrepareRequestRef.current = null;
+  }, [item.id, item.title, onPrepared, proposal, quantity]);
+
   useEffect(() => {
     onPreparationConfigured(
       item.id,
@@ -1094,27 +1107,21 @@ function CheckoutLine({
       ) : null}
 
       {!pendingApproval ? (
-        <label className="mt-3 inline-flex items-center gap-3 text-sm font-semibold text-gray-800">
-          Quantity
-          <input
-            type="number"
-            name="quantity"
-            aria-label={`Quantity for ${item.title}`}
-            min={1}
-            max={dateMaxQuantity}
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-gray-800">
+          <span>Quantity</span>
+          <QuantityStepper
+            label={`quantity for ${item.title}`}
             value={quantity}
-            onChange={(event) => {
-              const nextQuantity = Number(event.target.value);
-              if (Number.isFinite(nextQuantity)) {
-                setBorrowQuantity(
-                  item.id,
-                  Math.min(dateMaxQuantity, Math.max(1, nextQuantity))
-                );
-              }
-            }}
-            className="min-h-9 w-16 rounded-lg border border-gray-300 px-2 text-center"
+            max={dateMaxQuantity}
+            onChange={(nextQuantity) =>
+              setBorrowQuantity(item.id, nextQuantity)
+            }
+            disabled={availabilityFetcher.state !== "idle"}
           />
-        </label>
+          <span className="text-xs font-normal text-gray-600">
+            Available: {dateAvailability}
+          </span>
+        </div>
       ) : null}
 
       {pendingApproval ? (
@@ -1143,11 +1150,13 @@ function CheckoutLine({
                       <span aria-hidden="true" className="mr-1 font-bold">
                         ✓
                       </span>
-                      {getIoioPhysicalUnitDisplayName({
-                        logicalProductName: item.title,
-                        unitNumber: unit.unitNumber,
-                        missingUnitLabel: "Unit number missing",
-                      })}{" "}
+                      <span className="ioio-identifier">
+                        {getIoioPhysicalUnitDisplayName({
+                          logicalProductName: item.title,
+                          unitNumber: unit.unitNumber,
+                          missingUnitLabel: "Unit number missing",
+                        })}
+                      </span>{" "}
                       confirmed
                     </span>
                     <button
@@ -1292,7 +1301,7 @@ function CheckoutLine({
                         onChange={(event) =>
                           setUnitNumberInput(event.target.value)
                         }
-                        className="mt-1 min-h-10 w-full rounded-lg border border-blue-200 px-2 text-sm"
+                        className="ioio-identifier mt-1 min-h-10 w-full rounded-lg border border-blue-200 px-2 text-sm"
                         placeholder="Example: #001"
                         autoComplete="off"
                       />

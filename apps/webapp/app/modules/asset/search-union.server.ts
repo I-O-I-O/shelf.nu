@@ -105,6 +105,25 @@ function branchesForTerm(organizationId: string, term: string): Prisma.Sql {
         AND a."organizationId" = ${organizationId}
         AND l."name" ILIKE ${like}
     UNION
+    SELECT al."assetId" FROM public."Location" ancestor
+      JOIN public."AssetLocation" al ON al."locationId" = ancestor."id"
+      JOIN public."Asset" a ON a."id" = al."assetId"
+      WHERE ancestor."organizationId" = ${organizationId}
+        AND a."organizationId" = ${organizationId}
+        AND ancestor."id" IN (
+          WITH RECURSIVE location_descendants AS (
+            SELECT id, "parentId", "organizationId"
+            FROM public."Location"
+            WHERE "organizationId" = ${organizationId} AND name ILIKE ${like}
+            UNION ALL
+            SELECT child.id, child."parentId", child."organizationId"
+            FROM public."Location" child
+            JOIN location_descendants parent ON child."parentId" = parent.id
+            WHERE child."organizationId" = ${organizationId}
+          )
+          SELECT id FROM location_descendants
+        )
+    UNION
     SELECT att."A" FROM public."Tag" t
       JOIN public."_AssetToTag" att ON att."B" = t."id"
       JOIN public."Asset" a ON a."id" = att."A"

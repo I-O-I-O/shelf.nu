@@ -7,6 +7,7 @@ import {
   custodianScopeClause,
   resolveCustodianScope,
 } from "~/modules/booking/service.server";
+import { orderUntouchedIoioDefaults } from "~/modules/category/ioio-categories";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
 import { resolveCustodianPickerScope } from "~/modules/team-member/service.server";
 import { bookingWriteScopeClause } from "~/utils/booking-authorization.server";
@@ -412,14 +413,19 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
          *
          * No new data is exposed: `metadata` already carried the whole record.
          */
-        filters: queryData.map((item) => ({
-          ...item,
-          id: item.id,
-          name: item[queryKey],
-          color: item?.color,
-          metadata: item,
-          user: item?.user,
-        })),
+        filters: (() => {
+          const filters = queryData.map((item) => ({
+            ...item,
+            id: item.id,
+            name: item[queryKey],
+            color: item?.color,
+            metadata: item,
+            user: item?.user,
+          }));
+          return name === "category"
+            ? orderUntouchedIoioDefaults(filters)
+            : filters;
+        })(),
       })
     );
   } catch (cause) {

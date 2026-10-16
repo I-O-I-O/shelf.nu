@@ -593,7 +593,11 @@ function NeedsYourAttention({
                 Ready for pickup
               </p>
               <p className="break-words font-bold text-gray-950">
-                {formatStudentLabel(item.displayName)}
+                <span
+                  className={item.unitLabel ? "ioio-identifier" : undefined}
+                >
+                  {formatStudentLabel(item.displayName)}
+                </span>
               </p>
               {item.pickupLocation ? (
                 <p className="mt-0.5 flex items-start gap-1 text-xs text-gray-700">

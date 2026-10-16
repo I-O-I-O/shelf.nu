@@ -1,30 +1,65 @@
-import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import type {
+  ActionFunctionArgs,
+  LoaderFunctionArgs,
+  MetaFunction,
+} from "react-router";
+import { data, useLoaderData } from "react-router";
+import { z } from "zod";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
-import { Filters } from "~/components/list/filters";
-import { SortBy } from "~/components/list/filters/sort-by";
 import { IoioLocationHierarchy } from "~/components/location/ioio-location-hierarchy";
-import { Button } from "~/components/shared/button";
-import { useSearchParams } from "~/hooks/search-params";
-import { getLocations } from "~/modules/location/service.server";
-import { LOCATION_SORTING_OPTIONS } from "~/modules/location/utils";
+import { db } from "~/database/db.server";
+import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import {
+  findDuplicateIoioSiblingName,
+  getIoioLocationParentError,
+  summarizeIoioLocationInventory,
+} from "~/modules/location/ioio-hierarchy";
+import { validateIoioLocationMove } from "~/modules/location/ioio-location-move";
+import {
+  createLocation,
+  getLocations,
+  updateLocation,
+} from "~/modules/location/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
   setCookie,
   updateCookieWithPerPage,
   userPrefs,
 } from "~/utils/cookies.server";
-import { makeShelfError } from "~/utils/error";
-import { computeHasActiveFilters } from "~/utils/filter-params";
-import { payload, error, getCurrentSearchParams } from "~/utils/http.server";
-import { getParamsValues } from "~/utils/list";
+import { makeShelfError, ShelfError } from "~/utils/error";
+import {
+  payload,
+  error,
+  getCurrentSearchParams,
+  parseData,
+} from "~/utils/http.server";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
+
+const inlineCreateSchema = z.object({
+  intent: z.literal("inline-create"),
+  locationType: z.enum(["room", "section", "shelf", "container"]),
+  parentId: z
+    .string()
+    .optional()
+    .transform((value) => (value ? value : null)),
+  name: z.string().trim().min(1, "A name is required."),
+});
+
+const moveLocationSchema = z.object({
+  intent: z.literal("move-location"),
+  locationId: z.string().min(1),
+  locationType: z.enum(["room", "section", "shelf", "container"]),
+  parentId: z
+    .string()
+    .optional()
+    .transform((value) => (value ? value : null)),
+});
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
@@ -38,54 +73,58 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
     const searchParams = getCurrentSearchParams(request);
-    const { page, perPageParam, search, orderBy, orderDirection } =
-      getParamsValues(searchParams);
-    const selectedLocationId = searchParams.get("selectedLocation");
-    const hasActiveFilters = computeHasActiveFilters(searchParams);
+    const perPageParam = Number(searchParams.get("perPage")) || 0;
     const cookie = await updateCookieWithPerPage(request, perPageParam);
     const { perPage } = cookie;
 
-    const firstPage = await getLocations({
-      organizationId,
-      page,
-      perPage,
-      search,
-      orderBy,
-      orderDirection,
-    });
+    const [firstPage, archivedAssetIds] = await Promise.all([
+      getLocations({ organizationId, page: 1, perPage }),
+      getIoioArchivedItemIds({ organizationId, itemType: "ASSET" }),
+    ]);
     const { locations, totalLocations } =
       firstPage.totalLocations > firstPage.locations.length
         ? await getLocations({
             organizationId,
             page: 1,
             perPage: firstPage.totalLocations,
-            search,
-            orderBy,
-            orderDirection,
           })
         : firstPage;
 
-    const header: HeaderData = {
-      title: `Locations - ${totalLocations}`,
-    };
-    const modelName = {
-      singular: "location",
-      plural: "locations",
-    };
+    const [activeAssignments, unassignedAssetCount] = await Promise.all([
+      db.assetLocation.findMany({
+        where: {
+          organizationId,
+          asset: {
+            organizationId,
+            id: { notIn: archivedAssetIds },
+          },
+        },
+        select: { assetId: true, locationId: true },
+        distinct: ["assetId", "locationId"],
+      }),
+      db.asset.count({
+        where: {
+          organizationId,
+          id: { notIn: archivedAssetIds },
+          assetLocations: { none: {} },
+        },
+      }),
+    ]);
+    const inventorySummary = summarizeIoioLocationInventory({
+      locations,
+      assignments: activeAssignments,
+      unassignedAssetCount,
+    });
 
+    const header: HeaderData = {
+      title: "Locations",
+    };
     return data(
       payload({
         header,
         items: locations,
-        search,
-        page: 1,
-        totalItems: totalLocations,
-        totalPages: 1,
-        perPage: Math.max(perPage, totalLocations),
-        modelName,
-        searchFieldLabel: "Search locations",
-        hasActiveFilters,
-        selectedLocationId,
+        totalLocations,
+        inventorySummary,
       }),
       {
         headers: [setCookie(await userPrefs.serialize(cookie))],
@@ -97,83 +136,178 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
+export async function action({ context, request }: ActionFunctionArgs) {
+  const authSession = context.getSession();
+  const { userId } = authSession;
+
+  try {
+    const formData = await request.formData();
+    if (formData.get("intent") === "move-location") {
+      const { organizationId } = await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.location,
+        action: PermissionAction.update,
+      });
+      const { locationId, locationType, parentId } = parseData(
+        formData,
+        moveLocationSchema,
+        { additionalData: { userId, organizationId } }
+      );
+      const locations = await db.location.findMany({
+        where: { organizationId },
+        select: { id: true, name: true, parentId: true },
+      });
+      const moveError = validateIoioLocationMove({
+        locationId,
+        locationType,
+        parentId,
+        locations,
+      });
+      if (moveError) {
+        throw new ShelfError({
+          cause: null,
+          message: moveError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const location = locations.find((entry) => entry.id === locationId);
+      const siblings = await db.location.findMany({
+        where: { organizationId, parentId },
+        select: { id: true, name: true },
+      });
+      const duplicateName = findDuplicateIoioSiblingName(
+        siblings
+          .filter((sibling) => sibling.id !== locationId)
+          .map(({ name: siblingName }) => siblingName),
+        location?.name ?? ""
+      );
+      if (duplicateName) {
+        throw new ShelfError({
+          cause: null,
+          message: `A location named ${duplicateName} already exists here.`,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const movedLocation = await updateLocation({
+        id: locationId,
+        userId,
+        organizationId,
+        parentId,
+      });
+
+      return data(
+        payload({
+          success: true,
+          location: {
+            id: movedLocation.id,
+            name: movedLocation.name,
+            parentId: movedLocation.parentId,
+          },
+        })
+      );
+    }
+
+    const { organizationId } = await requirePermission({
+      userId,
+      request,
+      entity: PermissionEntity.location,
+      action: PermissionAction.create,
+    });
+    const { locationType, parentId, name } = parseData(
+      formData,
+      inlineCreateSchema,
+      { additionalData: { userId, organizationId } }
+    );
+
+    const parent = parentId
+      ? await db.location.findFirst({
+          where: { id: parentId, organizationId },
+          select: {
+            id: true,
+            name: true,
+            parentId: true,
+            parent: { select: { parentId: true } },
+          },
+        })
+      : null;
+    const parentError = getIoioLocationParentError({
+      locationType,
+      parentId,
+      parent: parent
+        ? {
+            name: parent.name,
+            parentId: parent.parentId,
+            grandparentId: parent.parent?.parentId ?? null,
+          }
+        : null,
+    });
+    if (parentError) {
+      throw new ShelfError({
+        cause: null,
+        message: parentError,
+        label: "Location",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const siblings = await db.location.findMany({
+      where: { organizationId, parentId },
+      select: { name: true },
+    });
+    const duplicateName = findDuplicateIoioSiblingName(
+      siblings.map(({ name: siblingName }) => siblingName),
+      name
+    );
+    if (duplicateName) {
+      throw new ShelfError({
+        cause: null,
+        message: `A location named ${duplicateName} already exists under this parent.`,
+        label: "Location",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const location = await createLocation({
+      name,
+      description: "",
+      address: "",
+      userId,
+      organizationId,
+      parentId,
+      color: locationType === "room" ? "#455A64" : null,
+    });
+
+    return data(payload({ success: true, location }));
+  } catch (cause) {
+    const reason = makeShelfError(cause, { userId });
+    return data(error(reason), { status: reason.status });
+  }
+}
+
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? appendToMetaTitle(data.header.title) : "" },
 ];
 
 export default function LocationsIndexPage() {
-  const { items, selectedLocationId } = useLoaderData<typeof loader>();
-  const [searchParams] = useSearchParams();
-  const createdLocationId = searchParams.get("created")
-    ? selectedLocationId
-    : null;
+  const { items, inventorySummary } = useLoaderData<typeof loader>();
 
   return (
     <>
       <Header hideQuickFind />
       <ListContentWrapper>
-        <Filters
-          slots={{
-            "right-of-search": (
-              <SortBy
-                sortingOptions={LOCATION_SORTING_OPTIONS}
-                defaultSortingBy="createdAt"
-                defaultSortingDirection="desc"
-              />
-            ),
-          }}
-        >
-          <div className="flex w-full justify-end md:w-auto">
-            <Button
-              to="new"
-              role="link"
-              aria-label="new location"
-              data-test-id="createNewLocation"
-              className="whitespace-nowrap"
-            >
-              New location
-            </Button>
-          </div>
-        </Filters>
-        {createdLocationId ? (
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
-            <span>Location created successfully.</span>
-            <div className="flex items-center gap-2">
-              <Link
-                to={`/labels?locationId=${encodeURIComponent(
-                  createdLocationId
-                )}`}
-                className="rounded-lg bg-green-800 px-3 py-2 font-semibold text-white hover:bg-green-900"
-              >
-                Create label
-              </Link>
-              <Link
-                to="/locations"
-                className="rounded-lg border border-green-300 bg-white px-3 py-2 font-semibold text-green-900 hover:bg-green-100"
-              >
-                Done
-              </Link>
-            </div>
-          </div>
-        ) : null}
-        {items.length ? (
-          <IoioLocationHierarchy
-            locations={items}
-            initialSelectedId={selectedLocationId}
-          />
-        ) : (
-          <div className="rounded-2xl border border-dashed border-gray-200 bg-white px-5 py-10 text-center">
-            <p className="text-lg font-bold text-gray-950">
-              No locations found.
-            </p>
-            <p className="mt-2 text-sm text-gray-600">
-              Create a location to organize assets by room, building, or site.
-            </p>
-            <Button to="new" className="mt-5">
-              New location
-            </Button>
-          </div>
-        )}
+        <IoioLocationHierarchy
+          locations={items}
+          inventorySummary={inventorySummary}
+        />
       </ListContentWrapper>
     </>
   );

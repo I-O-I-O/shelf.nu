@@ -1,6 +1,20 @@
 import type { CSSProperties } from "react";
 import type { Location } from "@prisma/client";
-import { PencilIcon, PrinterIcon, Trash2Icon } from "lucide-react";
+import {
+  MoreHorizontal,
+  MoveRightIcon,
+  PencilIcon,
+  PrinterIcon,
+  Trash2Icon,
+} from "lucide-react";
+import { Link } from "react-router";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "~/components/shared/dropdown";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import {
   PermissionAction,
@@ -9,19 +23,20 @@ import {
 import { userHasPermission } from "~/utils/permissions/permission.validator.client";
 import { tw } from "~/utils/tw";
 import { DeleteLocation } from "./delete-location";
-import { Button } from "../shared/button";
 import When from "../when/when";
 
 type LocationQuickActionsProps = {
   className?: string;
   style?: CSSProperties;
   location: Pick<Location, "id" | "name"> & { childCount?: number };
+  onMove?: () => void;
 };
 
 export default function LocationQuickActions({
   className,
   style,
   location,
+  onMove,
 }: LocationQuickActionsProps) {
   const { roles } = useUserRoleHelper();
 
@@ -37,60 +52,72 @@ export default function LocationQuickActions({
     action: PermissionAction.delete,
   });
 
-  const canPrintLabel = userHasPermission({
-    roles,
-    entity: PermissionEntity.location,
-    action: PermissionAction.update,
-  });
+  if (!canUpdate && !canDelete) return null;
 
   return (
-    <div className={tw("flex items-center gap-2", className)} style={style}>
-      <When truthy={canUpdate}>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="p-2"
-          to={`/locations/${location.id}/edit`}
-          aria-label="Edit location"
-          tooltip="Edit location"
-        >
-          <PencilIcon className="size-4" />
-        </Button>
-      </When>
-
-      <When truthy={canPrintLabel}>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="size-8 shrink-0 rounded-lg p-1.5"
-          to={`/labels?locationId=${encodeURIComponent(location.id)}`}
-          aria-label="Print location label"
-          tooltip="Print label"
-        >
-          <PrinterIcon className="size-4" />
-        </Button>
-      </When>
-
-      <When truthy={canDelete}>
-        <DeleteLocation
-          location={{
-            ...location,
-            childCount: location.childCount,
-          }}
-          trigger={
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              className="p-2"
-              aria-label="Delete location"
-              tooltip="Delete location"
-            >
-              <Trash2Icon className="size-4" />
-            </Button>
-          }
-        />
-      </When>
+    <div className={tw("flex items-center", className)} style={style}>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`Actions for ${location.name}`}
+            className="flex size-8 items-center justify-center rounded text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus:ring-2 focus:ring-red-600"
+          >
+            <MoreHorizontal className="size-4" aria-hidden="true" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-40 bg-white p-1">
+          <When truthy={canUpdate}>
+            <DropdownMenuItem asChild>
+              <Link
+                to={`/locations/${location.id}/edit`}
+                className="flex w-full items-center gap-2"
+              >
+                <PencilIcon className="size-4" aria-hidden="true" />
+                Edit
+              </Link>
+            </DropdownMenuItem>
+            {onMove ? (
+              <DropdownMenuItem
+                className="flex w-full items-center gap-2"
+                onSelect={onMove}
+              >
+                <MoveRightIcon className="size-4" aria-hidden="true" />
+                Move...
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuItem asChild>
+              <Link
+                to={`/labels?locationId=${encodeURIComponent(location.id)}`}
+                className="flex w-full items-center gap-2"
+              >
+                <PrinterIcon className="size-4" aria-hidden="true" />
+                Print label
+              </Link>
+            </DropdownMenuItem>
+          </When>
+          <When truthy={canUpdate && canDelete}>
+            <DropdownMenuSeparator />
+          </When>
+          <When truthy={canDelete}>
+            <DeleteLocation
+              location={{
+                ...location,
+                childCount: location.childCount,
+              }}
+              trigger={
+                <DropdownMenuItem
+                  className="gap-2 text-red-700 focus:text-red-700"
+                  onSelect={(event) => event.preventDefault()}
+                >
+                  <Trash2Icon className="size-4" aria-hidden="true" />
+                  Delete
+                </DropdownMenuItem>
+              }
+            />
+          </When>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

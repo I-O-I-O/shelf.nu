@@ -11,6 +11,10 @@ import { IoioLocationCreationForm } from "~/components/location/ioio-location-cr
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
+  findDuplicateIoioSiblingName,
+  getIoioLocationParentError,
+} from "~/modules/location/ioio-hierarchy";
+import {
   createLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
@@ -51,10 +55,6 @@ function throwLocationValidationError(message: string): never {
     status: 400,
     shouldBeCaptured: false,
   });
-}
-
-function normalizeLocationName(name: string) {
-  return name.trim().toLocaleLowerCase();
 }
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -131,44 +131,26 @@ export async function action({ context, request }: ActionFunctionArgs) {
         })
       : null;
 
-    if (locationType !== "room" && !parent) {
-      throwLocationValidationError("Choose a valid parent location.");
-    }
-
-    const parentDepth = parent
-      ? parent.parentId
-        ? parent.parent?.parentId
-          ? 2
-          : 1
-        : 0
-      : null;
-    const validParent =
-      locationType === "room"
-        ? !parentId
-        : locationType === "section"
-        ? parentDepth === 0
-        : locationType === "shelf"
-        ? parentDepth === 0 || parentDepth === 1
-        : parentDepth === 2 ||
-          (parentDepth === 1 && /^shelf\b/iu.test(parent?.name ?? ""));
-
-    if (!validParent) {
-      throwLocationValidationError(
-        locationType === "section"
-          ? "A section must be placed inside a room."
-          : locationType === "shelf"
-          ? "A shelf must be placed inside a room or section."
-          : "A container must be placed inside a shelf."
-      );
-    }
+    const parentError = getIoioLocationParentError({
+      locationType,
+      parentId,
+      parent: parent
+        ? {
+            name: parent.name,
+            parentId: parent.parentId,
+            grandparentId: parent.parent?.parentId ?? null,
+          }
+        : null,
+    });
+    if (parentError) throwLocationValidationError(parentError);
 
     const siblingLocations = await db.location.findMany({
       where: { organizationId, parentId: parentId ?? null },
       select: { name: true },
     });
-    const duplicate = siblingLocations.find(
-      (sibling) =>
-        normalizeLocationName(finalName) === normalizeLocationName(sibling.name)
+    const duplicate = findDuplicateIoioSiblingName(
+      siblingLocations.map(({ name: siblingName }) => siblingName),
+      finalName
     );
 
     if (duplicate) {

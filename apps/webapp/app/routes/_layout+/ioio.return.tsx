@@ -545,7 +545,15 @@ export default function IoioReturn() {
                 to={`/ioio/browse/${item.assetId}`}
                 className="hover:text-red-800 hover:underline"
               >
-                {formatStudentLabel(displayTitle)}
+                <span
+                  className={
+                    item.isKit || item.type === "INDIVIDUAL"
+                      ? "ioio-identifier"
+                      : undefined
+                  }
+                >
+                  {formatStudentLabel(displayTitle)}
+                </span>
               </Link>
             </h2>
             <p className="mt-1 text-sm text-gray-600">

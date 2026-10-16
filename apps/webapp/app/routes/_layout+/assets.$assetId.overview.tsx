@@ -1370,6 +1370,16 @@ export default function AssetOverview() {
                   <DateS date={asset.createdAt} includeTime />
                 </div>
               </li>
+              <li className="w-full border-b-[1.1px] border-b-gray-100 p-4 last:border-b-0 md:flex">
+                <span className="w-1/4 text-[14px] font-medium text-gray-900">
+                  Last updated
+                </span>
+                <div className="mt-1 w-3/5 text-gray-600 md:mt-0">
+                  <time dateTime={new Date(asset.updatedAt).toISOString()}>
+                    <DateS date={asset.updatedAt} includeTime />
+                  </time>
+                </div>
+              </li>
 
               <InlineEditableField
                 fieldName="category"

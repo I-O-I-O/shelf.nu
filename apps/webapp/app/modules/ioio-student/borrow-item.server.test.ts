@@ -125,6 +125,7 @@ describe("IOIO borrow_item", () => {
     dbMock.ioioArchivedItem.findMany.mockResolvedValue([]);
     dbMock.bookingAsset.findMany.mockResolvedValue([]);
     dbMock.teamMember.findFirst.mockResolvedValue({ id: "team-a" });
+    getIoioAvailabilityMock.mockReset();
     getIoioAvailabilityMock.mockResolvedValue({
       totalActive: 8,
       availableCount: 8,
@@ -711,6 +712,54 @@ describe("IOIO borrow_item", () => {
       )
     ).rejects.toMatchObject({ status: 409 });
     expect(enforceBorrowRateLimitMock).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("rechecks availability before borrowing and rejects a stale quantity", async () => {
+    getIoioAvailabilityMock.mockReset();
+    dbMock.booking.findFirst.mockReset().mockResolvedValue(null);
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-a",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      source: "IOIO_ASSISTANT",
+      assetId: asset.id,
+      kitId: null,
+      quantity: 3,
+      selectedAssetIds: null,
+      from: new Date(from),
+      to: new Date(to),
+      bookingId: null,
+      createdAt: new Date(),
+      failureCode: null,
+      description: null,
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 8,
+      availableCount: 2,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      availableWithoutStaffReservations: 2,
+    });
+
+    let caught: unknown;
+    try {
+      await borrowItem(
+        { confirmationToken: "proposal-token", quantity: 3 },
+        { context, request }
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      message: "The requested quantity is no longer available.",
+      status: 409,
+    });
     expect(createBookingMock).not.toHaveBeenCalled();
   });
 

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Location } from "@prisma/client";
-import { useNavigation } from "react-router";
+import { useFetcher } from "react-router";
 import { Button } from "~/components/shared/button";
 
 import {
@@ -13,8 +13,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "~/components/shared/modal";
-import { isFormProcessing } from "~/utils/form";
-import { Form } from "../custom-form";
 import { TrashIcon } from "../icons/library";
 
 type DeleteLocationProps = {
@@ -27,8 +25,10 @@ type DeleteLocationProps = {
 };
 
 export const DeleteLocation = ({ location, trigger }: DeleteLocationProps) => {
-  const navigation = useNavigation();
-  const disabled = isFormProcessing(navigation.state);
+  const fetcher = useFetcher<{
+    error?: { message?: string };
+  }>();
+  const disabled = fetcher.state !== "idle";
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
@@ -58,12 +58,10 @@ export const DeleteLocation = ({ location, trigger }: DeleteLocationProps) => {
             Are you sure you want to delete this Location? This action cannot be
             undone.
           </AlertDialogDescription>
-          {location.childCount && location.childCount > 0 ? (
-            <div className="rounded border border-warning-200 bg-warning-50 p-3 text-sm text-warning-900">
-              This location has <strong>{location.childCount}</strong> child
-              {location.childCount > 1 ? " locations" : " location"}. They will
-              move to the root level if you delete this location.
-            </div>
+          {fetcher.data?.error?.message ? (
+            <p role="alert" className="text-sm text-red-700">
+              {fetcher.data.error.message}
+            </p>
           ) : null}
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -74,7 +72,7 @@ export const DeleteLocation = ({ location, trigger }: DeleteLocationProps) => {
               </Button>
             </AlertDialogCancel>
 
-            <Form method="delete" action={`/locations/${location.id}`}>
+            <fetcher.Form method="delete" action={`/locations/${location.id}`}>
               <Button
                 className="border-error-600 bg-error-600 hover:border-error-800 hover:bg-error-800"
                 type="submit"
@@ -83,7 +81,7 @@ export const DeleteLocation = ({ location, trigger }: DeleteLocationProps) => {
               >
                 Delete
               </Button>
-            </Form>
+            </fetcher.Form>
           </div>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -164,7 +164,7 @@ export default function IoioReportComplete() {
               <h2 className="text-xl font-black text-gray-950">{item.title}</h2>
               {item.unitLabel ? (
                 <p className="mt-1 text-sm font-semibold text-gray-600">
-                  Unit {item.unitLabel}
+                  Unit <span className="ioio-identifier">{item.unitLabel}</span>
                 </p>
               ) : null}
             </div>

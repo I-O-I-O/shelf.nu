@@ -76,6 +76,17 @@ describe("buildAssetSearchUnion", () => {
     }
   });
 
+  it("matches assets below locations whose ancestor name matches the search", () => {
+    const text = sqlText(
+      buildAssetSearchUnion({ organizationId: orgId, terms: ["b477"] })
+    );
+
+    expect(text).toContain("WITH RECURSIVE location_descendants");
+    expect(text).toContain('child."parentId" = parent.id');
+    expect(text).toContain('ancestor."organizationId"');
+    expect(text).toContain('a."organizationId"');
+  });
+
   it("prefilters the custom-field branch with the indexed COALESCE concat + keeps the exact OR", () => {
     const text = sqlText(
       buildAssetSearchUnion({ organizationId: orgId, terms: ["chair"] })

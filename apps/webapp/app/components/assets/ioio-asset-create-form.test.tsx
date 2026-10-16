@@ -112,6 +112,28 @@ describe("IOIO asset creation form", () => {
     );
   });
 
+  it("keeps expanded advanced options inside the fluid queue form card", () => {
+    render(<IoioAssetCreateForm assetQueueMode showAssetModel={false} />);
+
+    const nameInput = screen.getByLabelText("Name");
+    const formCard = nameInput.closest(".card");
+    const advancedOptions = screen.getByText("Advanced options");
+
+    expect(formCard).toHaveClass("w-full", "min-w-0");
+    expect(formCard).not.toHaveClass("lg:w-min");
+
+    fireEvent.click(advancedOptions);
+
+    const details = advancedOptions.closest("details");
+    const borrowingPeriod = screen.getByLabelText("Maximum borrowing period");
+    const saveButton = screen.getAllByRole("button", { name: "Save" })[0];
+
+    expect(details).toHaveProperty("open", true);
+    expect(formCard).toContainElement(details);
+    expect(formCard).toContainElement(borrowingPeriod);
+    expect(formCard).toContainElement(saveButton);
+  });
+
   it("uses the same IOIO fields when editing a general item", () => {
     render(
       <IoioAssetCreateForm

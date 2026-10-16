@@ -23,6 +23,7 @@ import {
   isSsoUser,
   transferOwnership,
 } from "./service.server";
+import { IOIO_INITIAL_CATEGORY_DEFAULTS } from "../category/ioio-categories";
 
 // @vitest-environment node
 
@@ -431,6 +432,15 @@ describe("createOrganization logo validation", () => {
           },
         }),
       })
+    );
+    const createArgs = dbMock.organization.create.mock.calls[0]![0];
+    expect(createArgs.data.categories.create).toEqual(
+      IOIO_INITIAL_CATEGORY_DEFAULTS.map(({ name, description, color }) => ({
+        name,
+        description,
+        color,
+        userId: OWNER_ID,
+      }))
     );
   });
 });

@@ -984,6 +984,7 @@ export const AssetForm = ({
                     sequentialId ? sequentialId.split("-")[1] || "0001" : "0001"
                   }
                   className="w-full text-center font-mono"
+                  inputClassName="ioio-identifier"
                   placeholder="0001"
                 />
               </div>

@@ -9,6 +9,7 @@ import {
 } from "~/utils/error";
 import { getRandomColor } from "~/utils/get-random-color";
 import { ALL_SELECTED_KEY } from "~/utils/list";
+import { orderUntouchedIoioDefaults } from "./ioio-categories";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
 import {
   IOIO_ITEM_DISPOSITION,
@@ -21,7 +22,7 @@ const label: ErrorLabel = "Category";
 export type ActiveCategoryRecord = Pick<Category, "id" | "name" | "color">;
 
 /**
- * The single source used by assignment and filter pickers.
+ * The single source of current category records used by assignment and filter pickers.
  *
  * Shelf has no separate active flag for categories. IOIO keeps archive and
  * Trash state in its lifecycle marker, and this query excludes those markers
@@ -39,7 +40,7 @@ export async function getActiveCategoriesForOrganization({
   const archivedCategoryIds = await getIoioArchivedCategoryIds({
     organizationId,
   });
-  return db.category.findMany({
+  const categories = await db.category.findMany({
     where: {
       organizationId,
       ...(archivedCategoryIds.length
@@ -57,6 +58,7 @@ export async function getActiveCategoriesForOrganization({
     select: { id: true, name: true, color: true },
     orderBy: [{ name: "asc" }, { id: "asc" }],
   });
+  return orderUntouchedIoioDefaults(categories);
 }
 
 export async function createCategory({
@@ -87,6 +89,7 @@ export async function createCategory({
       },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw maybeUniqueConstraintViolation(cause, "Category", {
       additionalData: { userId, organizationId },
     });
@@ -126,11 +129,9 @@ export async function getCategories(params: {
       };
     }
 
-    const [categories, totalCategories] = await Promise.all([
+    const [allCategories, totalCategories] = await Promise.all([
       /** Get the items */
       db.category.findMany({
-        skip,
-        take,
         where,
         orderBy: [{ name: "asc" }, { id: "asc" }],
         include: {
@@ -143,6 +144,11 @@ export async function getCategories(params: {
       /** Count them */
       db.category.count({ where }),
     ]);
+
+    const categories = orderUntouchedIoioDefaults(allCategories).slice(
+      skip,
+      skip + take
+    );
 
     return { categories, totalCategories };
   } catch (cause) {
@@ -165,6 +171,7 @@ export async function deleteCategory({
       where: { id, organizationId },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message:
@@ -284,6 +291,7 @@ export async function updateCategory({
       },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw maybeUniqueConstraintViolation(cause, "Category", {
       additionalData: { id, organizationId, name },
     });
@@ -312,7 +320,9 @@ export async function bulkDeleteCategories({
               : {}),
           }
         : { id: { in: categoryIds }, organizationId },
-      select: { id: true },
+      select: {
+        id: true,
+      },
     });
 
     return await Promise.all(
@@ -326,6 +336,7 @@ export async function bulkDeleteCategories({
       )
     );
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while bulk deleting categories.",
