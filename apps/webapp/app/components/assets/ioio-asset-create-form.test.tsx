@@ -134,6 +134,37 @@ describe("IOIO asset creation form", () => {
     expect(formCard).toContainElement(saveButton);
   });
 
+  it("renders one canonical title control inside the submitted form", () => {
+    const { rerender } = render(
+      <IoioAssetCreateForm assetQueueMode showAssetModel={false} />
+    );
+
+    const titleInput = screen.getByLabelText("Name") as HTMLInputElement;
+    const form = titleInput.form;
+
+    expect(titleInput).toHaveAttribute("name", "title");
+    expect(titleInput).not.toBeDisabled();
+    expect(form).toBeInTheDocument();
+    expect(form?.querySelectorAll('[name="title"]')).toHaveLength(1);
+
+    fireEvent.change(titleInput, { target: { value: "Arduino Uno" } });
+    const formData = new FormData(form!);
+    expect(formData.get("title")).toBe("Arduino Uno");
+    expect(formData.getAll("title")).toEqual(["Arduino Uno"]);
+
+    rerender(
+      <IoioAssetCreateForm
+        assetQueueMode
+        assetQueueSaving
+        showAssetModel={false}
+      />
+    );
+    expect(titleInput).toHaveValue("Arduino Uno");
+    expect(titleInput).toBeDisabled();
+    expect(new FormData(form!).get("title")).toBeNull();
+    expect(formData.get("title")).toBe("Arduino Uno");
+  });
+
   it("uses the same IOIO fields when editing a general item", () => {
     render(
       <IoioAssetCreateForm

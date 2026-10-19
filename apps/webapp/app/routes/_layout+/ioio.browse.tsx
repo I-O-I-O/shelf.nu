@@ -3,7 +3,7 @@ import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import {
   filterStudentInventory,
-  getStudentLabAreaFilters,
+  getStudentLocationPath,
   groupStudentAssets,
 } from "~/components/ioio-student/inventory-presentation";
 import {
@@ -53,10 +53,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       ? requestedCategory
       : null;
     const requestedLocation = params.get("location");
-    const selectedLocation = getStudentLabAreaFilters(locations).some(
-      (area) => area.locationId === requestedLocation
-    )
-      ? requestedLocation
+    const selectedLocation = requestedLocation
+      ? getStudentLocationPath(requestedLocation, locations)
+        ? requestedLocation
+        : null
       : null;
     const [assets] = await Promise.all([
       getStudentAssets({

@@ -222,11 +222,12 @@ export async function returnBrokenAssetToService({
       tx,
       organizationId,
       assetId: operation.assetId,
-      ignoreReportType: operation.reportType,
+      ignoreReportOperationId: operation.id,
     });
 
     const resolved = await tx.ioioWriteOperation.updateMany({
       where: {
+        id: operation.id,
         organizationId,
         operationType: "REPORT_PROBLEM",
         status: "SUCCEEDED",
@@ -319,13 +320,13 @@ async function ensureIoioAssetCanReturnToService({
   tx,
   organizationId,
   assetId,
-  ignoreReportType,
+  ignoreReportOperationId,
   requireIndividual = false,
 }: {
   tx: Prisma.TransactionClient;
   organizationId: string;
   assetId: string;
-  ignoreReportType?: string;
+  ignoreReportOperationId?: string;
   requireIndividual?: boolean;
 }) {
   const asset = await tx.asset.findFirst({
@@ -392,13 +393,10 @@ async function ensureIoioAssetCanReturnToService({
           assetId: asset.id,
           operationType: "IOIO_PREPARATION",
           status: {
-            in: [
-              "PENDING_PREPARATION",
-              "READY_FOR_PICKUP",
-              "CANCELLED_PICKUP",
-              "ASSIGNED",
-            ],
+            in: ["PENDING_PREPARATION", "READY_FOR_PICKUP", "ASSIGNED"],
           },
+          // The assigned request is a parent marker; its BookingAsset carries the actual hold.
+          NOT: { source: "IOIO_PREPARATION_REQUEST", status: "ASSIGNED" },
         },
         select: { id: true },
       }),
@@ -417,19 +415,49 @@ async function ensureIoioAssetCanReturnToService({
               "KIT_INCOMPLETE",
             ],
           },
-          ...(ignoreReportType
-            ? {
-                OR: [
-                  { reportType: { not: ignoreReportType } },
-                  { status: "PROCESSING" },
-                ],
-              }
+          ...(ignoreReportOperationId
+            ? { id: { not: ignoreReportOperationId } }
             : {}),
         },
         select: { id: true },
       }),
     ]);
-  if (archived || custody || activeBooking || preparationHold || openIssue) {
+  const cancelledPreparationPickups = await tx.ioioWriteOperation.findMany({
+    where: {
+      organizationId,
+      assetId: asset.id,
+      operationType: "IOIO_PREPARATION",
+      status: "CANCELLED_PICKUP",
+      bookingId: { not: null },
+      bookingAssetId: { not: null },
+    },
+    select: { bookingAssetId: true },
+  });
+  const cancelledPickupBookingAssetIds = cancelledPreparationPickups
+    .map((operation) => operation.bookingAssetId)
+    .filter((id): id is string => Boolean(id));
+  const activeCancelledPickup = cancelledPickupBookingAssetIds.length
+    ? await tx.bookingAsset.findFirst({
+        where: {
+          id: { in: cancelledPickupBookingAssetIds },
+          assetId: asset.id,
+          checkedInAt: null,
+          booking: {
+            organizationId,
+            status: { in: ["RESERVED", "CANCELLED"] },
+          },
+        },
+        select: { id: true },
+      })
+    : null;
+  if (
+    archived ||
+    custody ||
+    activeBooking ||
+    preparationHold ||
+    activeCancelledPickup ||
+    openIssue
+  ) {
     throw new ShelfError({
       cause: null,
       message:

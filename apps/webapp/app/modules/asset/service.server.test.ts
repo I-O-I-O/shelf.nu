@@ -2468,6 +2468,23 @@ describe("createAsset cross-org guards", () => {
     // never reach the org-scope lookup.
     expect(db.category.findFirst).not.toHaveBeenCalled();
   });
+
+  it("persists the selected Location record ID on the AssetLocation placement", async () => {
+    const locationId = "container-d1-15-id";
+
+    await createAsset({
+      title: "Container test asset",
+      userId: "user-1",
+      organizationId: "org-A",
+      locationId,
+    } as any);
+
+    expect(db.assetLocation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ locationId }),
+      })
+    );
+  });
 });
 
 describe("createAsset reused barcodes", () => {

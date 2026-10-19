@@ -6,6 +6,7 @@ import {
   groupStudentAssets,
   getStudentBrowseLocationIdForPath,
   getStudentLabAreaFilters,
+  getStudentLocationPath,
   requestsStudentAssistantAssetCards,
   selectStudentAssistantDisplayAssets,
   selectStudentInventoryPreview,
@@ -37,6 +38,58 @@ function asset(overrides: Partial<StudentAsset>): StudentAsset {
 }
 
 describe("student inventory presentation", () => {
+  it("resolves the visible current hierarchy path for nested location filters", () => {
+    const locations = [
+      {
+        id: "room",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        children: [
+          {
+            id: "section-c",
+            name: "Section C",
+            parentId: "room",
+            children: [
+              {
+                id: "shelf-2",
+                name: "Shelf 2",
+                parentId: "section-c",
+                children: [
+                  {
+                    id: "container-4",
+                    name: "Container 4",
+                    parentId: "shelf-2",
+                    children: [],
+                    assetCount: 1,
+                    imageUrl: null,
+                    thumbnailUrl: null,
+                  },
+                ],
+                assetCount: 0,
+                imageUrl: null,
+                thumbnailUrl: null,
+              },
+            ],
+            assetCount: 0,
+            imageUrl: null,
+            thumbnailUrl: null,
+          },
+        ],
+        assetCount: 0,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+    ];
+
+    expect(getStudentLocationPath("container-4", locations)).toEqual([
+      "IOIO Lab - B477",
+      "Section C",
+      "Shelf 2",
+      "Container 4",
+    ]);
+    expect(getStudentLocationPath("missing", locations)).toBeNull();
+  });
+
   it("prioritizes borrowable equipment in the short home preview", () => {
     const items = groupStudentAssets([
       asset({

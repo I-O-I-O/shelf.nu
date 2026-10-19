@@ -1,5 +1,5 @@
 import { Link, useLoaderData } from "react-router";
-import { data, type LoaderFunctionArgs } from "react-router";
+import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import {
   formatStudentLabel,
   SectionHeading,
@@ -10,13 +10,23 @@ import { getStudentKits } from "~/modules/ioio-student/service.server";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
 
+export const meta: MetaFunction = () => [{ title: "Kits | IOIO Lab" }];
+
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const { userId, organizationId } = await requireStudentRead({
     context,
     request,
   });
   try {
-    return data(payload({ kits: await getStudentKits({ organizationId }) }));
+    const kits = await getStudentKits({ organizationId });
+    const requestedKitId = new URL(request.url).searchParams.get("kit");
+    return data(
+      payload({
+        kits: requestedKitId
+          ? kits.filter((kit) => kit.id === requestedKitId)
+          : kits,
+      })
+    );
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });

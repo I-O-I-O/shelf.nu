@@ -4,7 +4,7 @@ import { OrganizationRoles } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { requirePermission } from "~/utils/roles.server";
-import { requireStudentRead } from "./route.server";
+import { requireIoioBorrowerAccess, requireStudentRead } from "./route.server";
 
 // why: permission resolution depends on the authenticated organization
 // membership; these cases exercise the Student-only boundary independently.
@@ -73,6 +73,49 @@ describe("IOIO Student route authorization", () => {
       });
     }
   );
+
+  it.each([OrganizationRoles.ADMIN, OrganizationRoles.OWNER])(
+    "allows authorized %s Staff to use the shared borrowing service access",
+    async (role) => {
+      vi.mocked(requirePermission).mockResolvedValue({
+        organizationId: "org-1",
+        currentOrganization: { id: "org-1", type: "TEAM" },
+        userOrganizations: [
+          {
+            organizationId: "org-1",
+            organization: { id: "org-1", type: "TEAM" },
+            roles: [role],
+          },
+        ],
+        role,
+      } as never);
+
+      await expect(requireIoioBorrowerAccess(args())).resolves.toMatchObject({
+        userId: "student-1",
+        organizationId: "org-1",
+        role,
+      });
+    }
+  );
+
+  it("denies a BASE member from the shared borrowing service access", async () => {
+    vi.mocked(requirePermission).mockResolvedValue({
+      organizationId: "org-1",
+      currentOrganization: { id: "org-1", type: "TEAM" },
+      userOrganizations: [
+        {
+          organizationId: "org-1",
+          organization: { id: "org-1", type: "TEAM" },
+          roles: [OrganizationRoles.BASE],
+        },
+      ],
+      role: OrganizationRoles.BASE,
+    } as never);
+
+    await expect(requireIoioBorrowerAccess(args())).rejects.toMatchObject({
+      status: 403,
+    });
+  });
 
   it("rejects Student writes while PERSONAL is selected", async () => {
     vi.mocked(requirePermission).mockResolvedValue({

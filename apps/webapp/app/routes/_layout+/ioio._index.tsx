@@ -3,6 +3,7 @@ import { useRouteLoaderData, Link, useLoaderData } from "react-router";
 import { data, type LoaderFunctionArgs, type MetaFunction } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
 import { ErrorContent } from "~/components/errors";
+import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import {
   groupStudentAssets,
   selectStudentInventoryPreview,
@@ -517,12 +518,15 @@ export default function IoioHome() {
             </p>
           </div>
         )}
-        <Link
-          to="/ioio/browse"
-          className="inline-flex min-h-11 items-center rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-        >
-          Browse all equipment
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to="/ioio/browse"
+            className="inline-flex min-h-11 items-center rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+          >
+            Browse all equipment
+          </Link>
+          <InventoryQrScanner audience="student" />
+        </div>
       </section>
     </div>
   );

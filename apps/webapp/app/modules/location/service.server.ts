@@ -8,6 +8,10 @@ import type {
 } from "@prisma/client";
 import { AssetType, BookingStatus, Prisma } from "@prisma/client";
 import invariant from "tiny-invariant";
+import {
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+} from "~/components/location/ioio-location-colors";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
@@ -70,6 +74,108 @@ import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Location";
 const MAX_LOCATION_DEPTH = 12;
+
+type IoioLocationColorTransaction = {
+  $queryRaw<T = unknown>(
+    query: TemplateStringsArray,
+    ...values: string[]
+  ): Promise<T>;
+  location: {
+    findMany(args: {
+      where: Prisma.LocationWhereInput;
+      select: { id: true; name: true; parentId: true; color: true };
+    }): Promise<Array<Pick<Location, "id" | "name" | "parentId" | "color">>>;
+  };
+};
+
+async function validateIoioLocationColorInTransaction({
+  tx,
+  organizationId,
+  parentId,
+  color,
+  locationType,
+  currentLocationId,
+  previousColor,
+}: {
+  tx: IoioLocationColorTransaction;
+  organizationId: string;
+  parentId: string | null;
+  color: string | null | undefined;
+  locationType: "room" | "section";
+  currentLocationId?: string;
+  previousColor?: string | null;
+}) {
+  // Serialize color assignments in this room (or among root rooms). The read
+  // and write below must share a lock so two simultaneous creates cannot both
+  // observe the same palette color as free.
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${organizationId}), hashtext(${
+    parentId ?? "ioio-rooms"
+  }))::text AS locked`;
+  const where: Prisma.LocationWhereInput =
+    locationType === "section"
+      ? parentId
+        ? { organizationId, OR: [{ parentId }, { id: parentId }] }
+        : { organizationId, parentId: null }
+      : { organizationId, parentId };
+  const locations = await tx.location.findMany({
+    where,
+    select: { id: true, name: true, parentId: true, color: true },
+  });
+  const message =
+    locationType === "room"
+      ? getIoioRoomColorError({ color, locations, currentLocationId })
+      : getIoioSectionColorError({
+          color,
+          locations,
+          parentId,
+          currentLocationId,
+        });
+  if (message) {
+    throw new ShelfError({
+      cause: null,
+      message,
+      label,
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+  if (
+    locationType === "room" &&
+    currentLocationId &&
+    previousColor?.toLowerCase() !== color?.toLowerCase()
+  ) {
+    const children = await tx.location.findMany({
+      where: { organizationId, parentId: currentLocationId },
+      select: { id: true, name: true, parentId: true, color: true },
+    });
+    const inheritedSections = children.filter((child) => !child.color);
+    for (const section of inheritedSections) {
+      const conflict = getIoioSectionColorError({
+        color,
+        locations: [
+          ...children,
+          {
+            id: currentLocationId,
+            name: "",
+            parentId: null,
+            color,
+          },
+        ],
+        parentId: currentLocationId,
+        currentLocationId: section.id,
+      });
+      if (conflict) {
+        throw new ShelfError({
+          cause: null,
+          message: `Changing this room color would conflict with ${section.name}. ${conflict}`,
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+  }
+}
 
 /**
  * SECURITY: Asserts that every supplied asset ID belongs to `organizationId`.
@@ -817,11 +923,13 @@ export async function createLocation({
   organizationId,
   parentId,
   color,
+  ioioColorType,
 }: Pick<Location, "description" | "name" | "address"> & {
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
   color?: Location["color"];
+  ioioColorType?: "room" | "section";
 }) {
   try {
     // Geocode the address if provided
@@ -837,6 +945,15 @@ export async function createLocation({
 
     // Use transaction to ensure location creation and activity event are atomic
     const created = await db.$transaction(async (tx) => {
+      if (ioioColorType) {
+        await validateIoioLocationColorInTransaction({
+          tx,
+          organizationId,
+          parentId: validatedParentId ?? null,
+          color,
+          locationType: ioioColorType,
+        });
+      }
       const location = await tx.location.create({
         data: {
           name: name.trim(),
@@ -1078,6 +1195,7 @@ export async function updateLocation(payload: {
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
+  ioioColorType?: "room" | "section";
 }) {
   const {
     id,
@@ -1088,6 +1206,7 @@ export async function updateLocation(payload: {
     userId,
     organizationId,
     parentId,
+    ioioColorType,
   } = payload;
 
   try {
@@ -1101,6 +1220,7 @@ export async function updateLocation(payload: {
         latitude: true,
         longitude: true,
         parentId: true,
+        color: true,
         parent: { select: { id: true, name: true } },
       },
     });
@@ -1130,6 +1250,20 @@ export async function updateLocation(payload: {
 
     // Use transaction to ensure location update and activity event are atomic
     const updatedLocation = await db.$transaction(async (tx) => {
+      if (ioioColorType) {
+        await validateIoioLocationColorInTransaction({
+          tx,
+          organizationId,
+          parentId:
+            validatedParentId === undefined
+              ? currentLocation.parentId
+              : validatedParentId,
+          color: color === undefined ? currentLocation.color : color,
+          locationType: ioioColorType,
+          currentLocationId: id,
+          previousColor: currentLocation.color,
+        });
+      }
       const location = await tx.location.update({
         where: { id, organizationId },
         data: {
@@ -1587,6 +1721,7 @@ export async function updateLocationImage({
   try {
     const fileData = await parseFileFormData({
       request,
+      allowEmptyFile: true,
       bucketName: PUBLIC_BUCKET,
       newFileName: getFileUploadPath({
         organizationId,

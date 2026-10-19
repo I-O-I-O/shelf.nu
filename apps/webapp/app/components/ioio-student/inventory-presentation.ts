@@ -105,6 +105,25 @@ export function getStudentLabAreaFilters(
   ];
 }
 
+/** Return the current parent-to-child location path for an inventory filter. */
+export function getStudentLocationPath(
+  locationId: string,
+  locations: StudentLocation[],
+  parentPath: string[] = []
+): string[] | null {
+  for (const location of locations) {
+    const path = [...parentPath, location.name];
+    if (location.id === locationId) return path;
+    const childPath = getStudentLocationPath(
+      locationId,
+      location.children,
+      path
+    );
+    if (childPath) return childPath;
+  }
+  return null;
+}
+
 /**
  * Resolve a hierarchy path to the deepest location the Student browse filters
  * accept. The browse page intentionally exposes lab-room child areas rather

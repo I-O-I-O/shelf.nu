@@ -8,6 +8,7 @@ const dbMock = vi.hoisted(() => ({
   consumptionLog: { findMany: vi.fn(), aggregate: vi.fn() },
   ioioWriteOperation: {
     create: vi.fn(),
+    findFirst: vi.fn(),
     findUnique: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -50,6 +51,7 @@ vi.mock("~/utils/logger", () => ({
 }));
 
 import {
+  completeSubmittedReturn,
   prepareReturnItem,
   prepareReturnProblemReport,
   returnItem,
@@ -380,6 +382,41 @@ describe("IOIO return_item", () => {
       }),
       expect.anything(),
       expect.objectContaining({ source: "IOIO_STUDENT_RETURN" })
+    );
+  });
+
+  it("keeps the problem report open when Staff completes a return for service review", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue(
+      operation({
+        status: "SUBMITTED",
+        reportType: "ITEM_DAMAGED",
+      })
+    );
+
+    await expect(
+      completeSubmittedReturn(
+        { operationId: "operation-a", keepProblemReportOpen: true },
+        {
+          context,
+          request,
+          auth: {
+            userId: "staff-a",
+            organizationId: auth.organizationId,
+            role: "OWNER",
+          },
+        }
+      )
+    ).resolves.toMatchObject({ ok: true, status: "checked" });
+
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledTimes(1);
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "operation-a",
+          status: "SUBMITTED",
+        }),
+        data: expect.objectContaining({ status: "SUCCEEDED" }),
+      })
     );
   });
 

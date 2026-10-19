@@ -15,6 +15,7 @@ import { useStudentCheckout } from "./checkout-context";
 import {
   type StudentInventoryItem,
   getStudentLabAreaFilters,
+  getStudentLocationPath,
 } from "./inventory-presentation";
 
 export function formatStudentDate(value: Date) {
@@ -191,7 +192,8 @@ export function InventoryFilterControls({
     locationId
       ? {
           key: "location",
-          label: `Lab area: ${
+          label: `Location: ${
+            getStudentLocationPath(locationId, locations)?.join(" › ") ??
             areaFilters.find((area) => area.locationId === locationId)?.label ??
             "Selected"
           }`,

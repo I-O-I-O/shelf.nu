@@ -109,6 +109,139 @@ export const IOIO_LOCATION_COLOR_VALUES = IOIO_LOCATION_COLORS.map(
   (entry) => entry.color
 );
 
+export function getUsedIoioRoomColors({
+  locations,
+  currentLocationId,
+}: {
+  locations: IoioLocationNode[];
+  currentLocationId?: string;
+}) {
+  return new Set(
+    locations
+      .filter(
+        (location) =>
+          !location.parentId &&
+          location.id !== currentLocationId &&
+          location.color
+      )
+      .map((location) => location.color!.toLowerCase())
+  );
+}
+
+export function getFirstAvailableIoioColor(usedColors: Set<string>) {
+  return (
+    IOIO_LOCATION_COLORS.find(
+      (entry) => !usedColors.has(entry.color.toLowerCase())
+    )?.color ?? null
+  );
+}
+
+export function getIoioRoomColorError({
+  color,
+  locations,
+  currentLocationId,
+}: {
+  color: string | null | undefined;
+  locations: IoioLocationNode[];
+  currentLocationId?: string;
+}) {
+  if (
+    !color &&
+    !getFirstAvailableIoioColor(
+      getUsedIoioRoomColors({ locations, currentLocationId })
+    )
+  ) {
+    return "No room colors are available. Reassign a room color first.";
+  }
+  if (!color || !IOIO_LOCATION_COLOR_VALUES.includes(color)) {
+    return "Choose an available room color.";
+  }
+  const owner = locations.find(
+    (location) =>
+      !location.parentId &&
+      location.id !== currentLocationId &&
+      location.color?.toLowerCase() === color.toLowerCase()
+  );
+  return owner ? `This color is already used by ${owner.name}.` : null;
+}
+
+export function getUsedIoioSectionColors({
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  if (!parentId) return new Set<string>();
+  const fallbackColor =
+    locations.find((location) => location.id === parentId)?.color ??
+    ROOM_COLOR.color;
+  return new Set(
+    locations
+      .filter(
+        (location) =>
+          location.parentId === parentId && location.id !== currentLocationId
+      )
+      .map((location) => (location.color ?? fallbackColor).toLowerCase())
+  );
+}
+
+export function isIoioSectionColorAvailable({
+  color,
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  color: string;
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  return !getUsedIoioSectionColors({
+    locations,
+    parentId,
+    currentLocationId,
+  }).has(color.toLowerCase());
+}
+
+export function getIoioSectionColorError({
+  color,
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  color: string | null | undefined;
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  if (
+    !color &&
+    !getFirstAvailableIoioColor(
+      getUsedIoioSectionColors({ locations, parentId, currentLocationId })
+    )
+  ) {
+    return "No section colors are available in this room.";
+  }
+  if (!color || !IOIO_LOCATION_COLOR_VALUES.includes(color)) {
+    return "Choose a supported section color.";
+  }
+  const fallbackColor =
+    locations.find((location) => location.id === parentId)?.color ??
+    ROOM_COLOR.color;
+  const owner = locations.find(
+    (location) =>
+      location.parentId === parentId &&
+      location.id !== currentLocationId &&
+      (location.color ?? fallbackColor).toLowerCase() === color.toLowerCase()
+  );
+  return owner
+    ? `This color is already used by ${owner.name} in this room.`
+    : null;
+}
+
 function normalized(value: string | null | undefined) {
   return value?.trim().toLocaleLowerCase() ?? "";
 }
@@ -139,10 +272,7 @@ function colorForName(value: string) {
   return IOIO_LOCATION_COLORS[hash % IOIO_LOCATION_COLORS.length];
 }
 
-/**
- * Resolves the room theme for a location. Child-level stored colors are
- * intentionally ignored so changing a room updates its whole hierarchy.
- */
+/** Resolve the nearest Section color from parent IDs, then fall back to the room. */
 export function getEffectiveIoioLocationColor({
   location,
   locations,
@@ -157,24 +287,30 @@ export function getEffectiveIoioLocationColor({
     location ?? (parentId ? locationsById.get(parentId) : undefined);
   if (!resolvedLocation) return ROOM_COLOR;
 
+  let current = resolvedLocation;
   let room = resolvedLocation;
+  let section: IoioLocationNode | undefined;
   const visited = new Set<string>();
-  while (room.parentId && !visited.has(room.id)) {
-    visited.add(room.id);
-    const parent = locationsById.get(room.parentId);
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    const parent = current.parentId
+      ? locationsById.get(current.parentId)
+      : undefined;
+    if (parent && !parent.parentId) {
+      section = current;
+    }
     if (!parent) break;
     room = parent;
+    current = parent;
   }
 
+  if (section?.color) return getIoioLocationColorByHex(section.color);
   return room.parentId
     ? ROOM_COLOR
     : getIoioLocationColorByHex(room.color ?? ROOM_COLOR.color);
 }
 
-/**
- * Resolves a new or edited location's effective room theme. Only rooms store a
- * chosen color; child locations inherit the top-level room color at render time.
- */
+/** Resolve a new location's Section color through its chosen parent. */
 export function getDerivedIoioLocationColor({
   locations,
   parentId,
@@ -189,18 +325,7 @@ export function getDerivedIoioLocationColor({
     return ROOM_COLOR;
   }
 
-  const locationsById = new Map(locations.map((entry) => [entry.id, entry]));
-  const visited = new Set<string>();
-  let room = parentId ? locationsById.get(parentId) : undefined;
-
-  while (room?.parentId && !visited.has(room.id)) {
-    visited.add(room.id);
-    room = locationsById.get(room.parentId);
-  }
-
-  return room && !room.parentId
-    ? getIoioLocationColorByHex(room.color ?? ROOM_COLOR.color)
-    : ROOM_COLOR;
+  return getEffectiveIoioLocationColor({ locations, parentId });
 }
 
 /**

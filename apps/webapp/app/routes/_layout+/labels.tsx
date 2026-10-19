@@ -11,23 +11,29 @@ import { z } from "zod";
 import { loadIoioQrLogoDataUrl } from "~/components/ioio-staff/ioio-branded-qr";
 import { getIoioCategoryColor } from "~/components/ioio-staff/ioio-category-presentation";
 import {
+  addIoioLabelToQueue,
+  clearIoioLabelQueue,
+  packIoioLabelsForA4,
+  removeIoioLabelFromQueue,
+  toggleIoioLabelInQueue,
+  type IoioLabelQueueEntry,
+} from "~/components/ioio-staff/ioio-label-queue";
+import {
   fitsIoioA4Portrait,
   formatIoioDimension,
   getIoioCloseUpPreviewSize,
-  getIoioA4Capacity,
-  getIoioA4PreviewScale,
   getIoioDefaultPrintSize,
   getIoioDefaultQrEnabled,
   getIoioPrintDimensionsError,
   getIoioPrintDimensions,
   IOIO_A4,
+  IOIO_A4_PRINTABLE_AREA,
   IOIO_PRINT_SIZE_ORDER,
   IOIO_PRINT_SIZE_PRESETS,
   type IoioPrintSizeKey,
 } from "~/components/ioio-staff/ioio-label-sizing";
 import {
   getIoioLabelColor,
-  getIoioLocationIdentifier,
   getIoioLocationPathIdentifier,
   IOIO_LABEL_CUSTOM_TEXT_MAX_LENGTH,
   IOIO_LABEL_COLORS,
@@ -484,12 +490,6 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? appendToMetaTitle(data.header.title) : "Labels" },
 ];
 
-function shortLocationName(name: string) {
-  return normalizeIoioLabelText(
-    name.replace(/^(?:section|shelf|container|box)\s+/iu, "").trim()
-  );
-}
-
 function getPath(id: string, locationsById: Map<string, LocationRecord>) {
   const path: LocationRecord[] = [];
   const seen = new Set<string>();
@@ -511,7 +511,7 @@ function locationLevel(path: LocationRecord[]) {
   return "container" as const;
 }
 
-function makeLocationLabel(
+export function makeLocationLabel(
   location: LocationRecord,
   locationsById: Map<string, LocationRecord>,
   overrideLevel: "room" | "section" | "shelf" | "container" | undefined,
@@ -523,29 +523,11 @@ function makeLocationLabel(
   const roomHeader = path[0]
     ? formatIoioRoomHeader(path[0].name)
     : "Location not recorded";
-  const sectionIdentifier = path[1]
-    ? getIoioLocationIdentifier(path[1].name, "section")
-    : undefined;
-  const shelfIdentifier = path[2]
-    ? getIoioLocationIdentifier(path[2].name, "shelf", sectionIdentifier)
-    : undefined;
-  const target =
-    path[
-      level === "room" ? 0 : level === "section" ? 1 : level === "shelf" ? 2 : 3
-    ] ?? location;
+  const target = location;
   const color = getEffectiveIoioLocationColor({
     location: target,
     locations: [...locationsById.values()],
-    locationType: level,
   });
-  const code =
-    level === "room"
-      ? getIoioLocationIdentifier(target.name, "section")
-      : level === "section"
-      ? getIoioLocationIdentifier(target.name, "section")
-      : level === "shelf"
-      ? getIoioLocationIdentifier(target.name, "shelf", sectionIdentifier)
-      : getIoioLocationIdentifier(target.name, "box", shelfIdentifier);
   const variant =
     level === "room"
       ? "room"
@@ -554,6 +536,7 @@ function makeLocationLabel(
       : level === "shelf"
       ? "shelf"
       : "box";
+  const code = target.name;
   const title = level === "container" ? "CONTAINER" : level.toUpperCase();
 
   return {
@@ -565,6 +548,10 @@ function makeLocationLabel(
     color: color.color,
     colorName: color.name,
     code,
+    displayCode:
+      level === "container"
+        ? code.replace(/^(?:container|box)\s+/iu, "")
+        : undefined,
     title,
     subtitle: "",
     room: roomHeader,
@@ -582,7 +569,14 @@ function makeLocationLabel(
   };
 }
 
-function makeItemLabel(
+export function getPrintableIoioLabelColor(
+  label: IoioLabelData,
+  chosenColor: string | null
+) {
+  return label.variant === "section" ? label.color : chosenColor ?? label.color;
+}
+
+export function makeItemLabel(
   item: ItemRecord,
   locationsById: Map<string, LocationRecord>
 ): IoioLabelData {
@@ -653,7 +647,7 @@ function sourceTypeTitle(type: LabelType) {
     : typeLabel(type);
 }
 
-function getLabelPdfTitle(labels: IoioLabelData[], type: LabelType) {
+export function getLabelPdfTitle(labels: IoioLabelData[], type: LabelType) {
   const sourceType = sourceTypeTitle(type);
   const label = labels[0];
   let title = sourceType;
@@ -667,10 +661,10 @@ function getLabelPdfTitle(labels: IoioLabelData[], type: LabelType) {
         title = `${typeLabel(variant)} ${label.code}`;
         break;
       case "box":
-        title = `Container ${label.code}`;
+        title = label.code;
         break;
       case "container":
-        title = `Container ${label.code}`;
+        title = label.code;
         break;
       default:
         title = label.title.trim() || sourceType;
@@ -740,7 +734,6 @@ export default function LabelsPage() {
     ? getEffectiveIoioLocationColor({
         location: initialPath[initialPath.length - 1],
         locations: [...locationsById.values()],
-        locationType: initialLocationType,
       }).color
     : null;
   const [labelType, setLabelType] = useState<LabelType>(initialLabelType);
@@ -751,27 +744,34 @@ export default function LabelsPage() {
   const [sectionId, setSectionId] = useState(initialPath[1]?.id ?? "");
   const [shelfId, setShelfId] = useState(initialPath[2]?.id ?? "");
   const [containerId, setContainerId] = useState(initialPath[3]?.id ?? "");
-  const [batchLocationIds, setBatchLocationIds] = useState<string[]>(() =>
-    initialLocationLabelLevel
-      ? initialLocationIds.filter(
-          (id) =>
-            locationLevel(getPath(id, locationsById)) ===
-            initialLocationLabelLevel
-        )
-      : []
-  );
-  const [selectedItemIds, setSelectedItemIds] = useState<string[]>(
-    initialItemIds.length
-      ? initialItemIds
-      : item?.kind === "asset"
-      ? [item.id]
-      : []
-  );
+  const [labelQueue, setLabelQueue] = useState<IoioLabelQueueEntry[]>(() => {
+    const queued = new Map<string, IoioLabelQueueEntry>();
+    const add = (entry: IoioLabelQueueEntry) => queued.set(entry.id, entry);
+
+    if (initialLocationLabelLevel) {
+      for (const id of initialLocationIds) {
+        if (
+          locationLevel(getPath(id, locationsById)) ===
+          initialLocationLabelLevel
+        ) {
+          add({ type: initialLocationLabelLevel, id });
+        }
+      }
+    }
+
+    for (const id of initialItemIds) {
+      const candidate = assets.find((asset) => asset.id === id);
+      if (candidate) {
+        add({ type: candidate.kind === "kit" ? "kit" : "item", id });
+      }
+    }
+    if (item) {
+      add({ type: item.kind === "kit" ? "kit" : "item", id: item.id });
+    }
+    return [...queued.values()];
+  });
   const [selectedKitSourceId, setSelectedKitSourceId] = useState(
     item?.kind === "kit" ? item.productId ?? item.id : ""
-  );
-  const [selectedKitUnitIds, setSelectedKitUnitIds] = useState<string[]>(
-    item?.kind === "kit" ? [item.id] : []
   );
   const [itemSearch, setItemSearch] = useState("");
   const [qrOverrides, setQrOverrides] = useState<
@@ -798,8 +798,13 @@ export default function LabelsPage() {
   });
   const closeUpCanvasRef = useRef<HTMLDivElement>(null);
 
+  const hasQueuedQrLabels = labelQueue.some((entry) => {
+    if (entry.type === "section" || entry.type === "shelf") return false;
+    return qrOverrides[entry.type] ?? getIoioDefaultQrEnabled(entry.type);
+  });
+
   useEffect(() => {
-    if (!includeQr) {
+    if (!hasQueuedQrLabels) {
       setQrLogoHref(undefined);
       setQrLogoLoadError(null);
       return;
@@ -823,7 +828,7 @@ export default function LabelsPage() {
     return () => {
       active = false;
     };
-  }, [includeQr]);
+  }, [hasQueuedQrLabels]);
 
   const childrenByParentId = useMemo(() => {
     const result = new Map<string, LocationRecord[]>();
@@ -867,19 +872,22 @@ export default function LabelsPage() {
     if (item) byId.set(item.id, item);
     return [...byId.values()];
   }, [assets, kitUnits, item]);
-  const selectedItemKind =
-    labelType === "item" ? "asset" : labelType === "kit" ? "kit" : null;
-  const selectedIds =
-    labelType === "kit" ? selectedKitUnitIds : selectedItemIds;
-  const selectedItems = selectedIds
-    .map((id) =>
+  const selectedKitUnitIds = labelQueue
+    .filter((entry) => entry.type === "kit")
+    .map((entry) => entry.id);
+  const selectedItems = labelQueue
+    .filter((entry) => entry.type === labelType)
+    .map((entry) =>
       allItems.find(
         (candidate) =>
-          candidate.id === id && candidate.kind === selectedItemKind
+          candidate.id === entry.id &&
+          (labelType === "kit"
+            ? candidate.kind === "kit"
+            : candidate.kind === "asset")
       )
     )
     .filter((candidate): candidate is ItemRecord => Boolean(candidate));
-  const selectedItem = selectedItems[0];
+  const selectedItem = selectedItems.at(-1);
   const selectedKitSource = kits.find(
     (candidate) => candidate.id === selectedKitSourceId
   );
@@ -949,19 +957,20 @@ export default function LabelsPage() {
   useEffect(() => {
     const source =
       labelType === "item" || labelType === "kit" ? selectedItem : null;
-    setLabelColorWasChosen(false);
-    setLabelColor(
-      source
-        ? getItemDefaultLabelColor(source, locationsById)
-        : getIoioLabelColor(
-            selectedLocationId
-              ? getEffectiveIoioLocationColor({
-                  location: locationsById.get(selectedLocationId),
-                  locations: [...locationsById.values()],
-                }).color
-              : "#1565C0"
-          ).color
-    );
+    if (!labelColorWasChosen) {
+      setLabelColor(
+        source
+          ? getItemDefaultLabelColor(source, locationsById)
+          : getIoioLabelColor(
+              selectedLocationId
+                ? getEffectiveIoioLocationColor({
+                    location: locationsById.get(selectedLocationId),
+                    locations: [...locationsById.values()],
+                  }).color
+                : "#1565C0"
+            ).color
+      );
+    }
     if (source?.locationId) {
       const path = getPath(source.locationId, locationsById);
       setRoomId(path[0]?.id ?? "");
@@ -969,62 +978,91 @@ export default function LabelsPage() {
       setShelfId(path[2]?.id ?? "");
       setContainerId(path[3]?.id ?? "");
     }
-  }, [labelType, locationsById, selectedItem, selectedLocationId]);
-
-  const labels = useMemo(() => {
-    if (labelType === "item" || labelType === "kit") {
-      return selectedItems.map((candidate) =>
-        makeItemLabel(candidate, locationsById)
-      );
-    }
-    const ids = batchLocationIds.length
-      ? batchLocationIds
-      : [selectedLocationId];
-    return ids
-      .map((id) => locationsById.get(id))
-      .filter((location): location is LocationRecord => Boolean(location))
-      .sort((left, right) =>
-        shortLocationName(left.name).localeCompare(
-          shortLocationName(right.name),
-          undefined,
-          { numeric: true, sensitivity: "base" }
-        )
-      )
-      .map((location) =>
-        makeLocationLabel(location, locationsById, labelType, appBaseUrl)
-      );
   }, [
-    appBaseUrl,
-    batchLocationIds,
+    labelColorWasChosen,
     labelType,
     locationsById,
-    selectedItems,
+    selectedItem,
     selectedLocationId,
   ]);
+
+  const queuedLabels = useMemo(
+    () =>
+      labelQueue.flatMap((entry) => {
+        if (
+          entry.type === "room" ||
+          entry.type === "section" ||
+          entry.type === "shelf" ||
+          entry.type === "container"
+        ) {
+          const location = locationsById.get(entry.id);
+          return location
+            ? [
+                {
+                  entry,
+                  label: makeLocationLabel(
+                    location,
+                    locationsById,
+                    entry.type,
+                    appBaseUrl
+                  ),
+                },
+              ]
+            : [];
+        }
+
+        const candidate = allItems.find(
+          (value) =>
+            value.id === entry.id &&
+            value.kind === (entry.type === "kit" ? "kit" : "asset")
+        );
+        return candidate
+          ? [{ entry, label: makeItemLabel(candidate, locationsById) }]
+          : [];
+      }),
+    [allItems, appBaseUrl, labelQueue, locationsById]
+  );
 
   const normalizedCustomText = normalizeIoioCustomLabelText(labelCustomText);
   const printableLabels = useMemo(
     () =>
-      labels.map((label) => ({
-        ...label,
-        ...(normalizedCustomText ? { customText: normalizedCustomText } : {}),
-        color: labelColorWasChosen ? labelColor : label.color,
-        colorName: getIoioLabelColor(
-          labelColorWasChosen ? labelColor : label.color
-        ).name,
-        showTypeLabel,
-        ...(includeQr ? {} : { qrValue: undefined }),
-      })),
+      queuedLabels.map(({ entry, label }) => {
+        const color = getPrintableIoioLabelColor(
+          label,
+          labelColorWasChosen ? labelColor : null
+        );
+        const includeEntryQr =
+          entry.type !== "section" &&
+          entry.type !== "shelf" &&
+          (qrOverrides[entry.type] ?? getIoioDefaultQrEnabled(entry.type));
+        return {
+          entry,
+          ...label,
+          ...(normalizedCustomText ? { customText: normalizedCustomText } : {}),
+          color,
+          colorName: getIoioLabelColor(color).name,
+          showTypeLabel,
+          qrIncluded: includeEntryQr,
+          ...(includeEntryQr ? {} : { qrValue: undefined }),
+          dimensions: getIoioPrintDimensions(
+            label.layout,
+            printSizeKey,
+            entry.type
+          ),
+        };
+      }),
     [
-      includeQr,
       labelColor,
       labelColorWasChosen,
-      labels,
       normalizedCustomText,
+      printSizeKey,
+      qrOverrides,
+      queuedLabels,
       showTypeLabel,
     ]
   );
-  const currentLabel = printableLabels[0];
+  const currentLabelEntry = printableLabels[0];
+  const currentLabel = currentLabelEntry;
   const labelLayout =
     currentLabel?.layout ??
     (labelType === "section" ? "section" : "horizontal");
@@ -1036,16 +1074,13 @@ export default function LabelsPage() {
   const printDimensionsError = getIoioPrintDimensionsError(printDimensions);
   const qrGenerationError = useMemo(
     () =>
-      includeQr
-        ? printableLabels
-            .map((label) => getIoioLabelQrError(label, printDimensions))
-            .find((message): message is string => Boolean(message)) ?? null
-        : null,
-    [includeQr, printableLabels, printDimensions]
+      printableLabels
+        .filter((label) => label.qrIncluded)
+        .map((label) => getIoioLabelQrError(label, label.dimensions))
+        .find((message): message is string => Boolean(message)) ?? null,
+    [printableLabels]
   );
-  const a4PreviewScale = getIoioA4PreviewScale(printDimensions);
-  const a4Capacity = getIoioA4Capacity(printDimensions);
-  const previewLabels = printDimensionsError ? [] : printableLabels;
+  const previewLabels = printableLabels;
   useEffect(() => {
     const canvas = closeUpCanvasRef.current;
     if (!canvas || typeof ResizeObserver === "undefined") return;
@@ -1061,49 +1096,32 @@ export default function LabelsPage() {
     return () => observer.disconnect();
   }, []);
 
-  const closeUpLabelSize = getIoioCloseUpPreviewSize(
-    closeUpStageSize.width,
-    closeUpStageSize.height,
-    printDimensions
+  const invalidQueuedDimensions = printableLabels.find(
+    (label) =>
+      getIoioPrintDimensionsError(label.dimensions) ||
+      !fitsIoioA4Portrait(label.dimensions)
   );
-  const fitsA4 = fitsIoioA4Portrait(printDimensions);
-  const printUnavailableReason = printDimensionsError
-    ? printDimensionsError
+  const printUnavailableReason = invalidQueuedDimensions
+    ? getIoioPrintDimensionsError(invalidQueuedDimensions.dimensions) ??
+      "A selected label size does not fit inside the print-safe A4 area."
     : qrGenerationError
     ? qrGenerationError
-    : includeQr && !qrLogoHref
+    : hasQueuedQrLabels && !qrLogoHref
     ? qrLogoLoadError ?? "Loading IOIO label branding…"
-    : fitsA4
-    ? null
-    : "This size does not fit the current A4 sheet layout. The preview remains to scale, but Print / PDF is unavailable for this preset.";
-  const labelPages =
-    !fitsA4 || printDimensionsError
-      ? []
-      : Array.from(
-          {
-            length: Math.max(
-              1,
-              Math.ceil(previewLabels.length / a4Capacity.capacity)
-            ),
-          },
-          (_, pageIndex) =>
-            previewLabels.slice(
-              pageIndex * a4Capacity.capacity,
-              (pageIndex + 1) * a4Capacity.capacity
-            )
-        );
+    : null;
+  const labelPages = useMemo(
+    () =>
+      packIoioLabelsForA4(
+        previewLabels.map((label) => ({
+          value: label,
+          dimensions: label.dimensions,
+        }))
+      ),
+    [previewLabels]
+  );
   function chooseType(nextType: LabelType) {
     setLabelType(nextType);
-    setPrintSizeKey(getIoioDefaultPrintSize(nextType));
-    if (nextType === "item" || nextType === "kit") {
-      if (nextType !== labelType) setSelectedItemIds([]);
-      if (nextType === "kit" && nextType !== labelType) {
-        setSelectedKitSourceId("");
-        setSelectedKitUnitIds([]);
-      }
-      setBatchLocationIds([]);
-      return;
-    }
+    if (nextType === "item" || nextType === "kit") return;
     const nextLocationId =
       nextType === "room"
         ? roomId
@@ -1112,7 +1130,11 @@ export default function LabelsPage() {
         : nextType === "shelf"
         ? shelfId
         : containerId;
-    setBatchLocationIds(nextLocationId ? [nextLocationId] : []);
+    if (nextLocationId) {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: nextType, id: nextLocationId })
+      );
+    }
   }
 
   function stepPrintSize(direction: -1 | 1) {
@@ -1129,25 +1151,41 @@ export default function LabelsPage() {
     setSectionId("");
     setShelfId("");
     setContainerId("");
-    setBatchLocationIds(nextId ? [nextId] : []);
+    if (nextId && labelType === "room") {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: "room", id: nextId })
+      );
+    }
   }
 
   function chooseSection(nextId: string) {
     setSectionId(nextId);
     setShelfId("");
     setContainerId("");
-    setBatchLocationIds(nextId ? [nextId] : []);
+    if (nextId && labelType === "section") {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: "section", id: nextId })
+      );
+    }
   }
 
   function chooseShelf(nextId: string) {
     setShelfId(nextId);
     setContainerId("");
-    setBatchLocationIds(nextId ? [nextId] : []);
+    if (nextId && labelType === "shelf") {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: "shelf", id: nextId })
+      );
+    }
   }
 
   function chooseContainer(nextId: string) {
     setContainerId(nextId);
-    setBatchLocationIds(nextId ? [nextId] : []);
+    if (nextId && labelType === "container") {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: "container", id: nextId })
+      );
+    }
   }
 
   function chooseKitSource(nextId: string) {
@@ -1155,21 +1193,56 @@ export default function LabelsPage() {
     const firstUnit = kitUnits.find(
       (candidate) => candidate.productId === nextId
     );
-    setSelectedKitUnitIds(firstUnit ? [firstUnit.id] : []);
+    if (firstUnit) {
+      setLabelQueue((current) =>
+        addIoioLabelToQueue(current, { type: "kit", id: firstUnit.id })
+      );
+    }
   }
 
   function toggleBatchLocation(id: string) {
-    setBatchLocationIds((current) =>
-      current.includes(id)
-        ? current.filter((value) => value !== id)
-        : [...current, id]
+    if (
+      labelType !== "room" &&
+      labelType !== "section" &&
+      labelType !== "shelf" &&
+      labelType !== "container"
+    ) {
+      return;
+    }
+    setLabelQueue((current) =>
+      toggleIoioLabelInQueue(current, { type: labelType, id })
     );
+  }
+
+  function toggleKitUnit(id: string) {
+    setLabelQueue((current) =>
+      toggleIoioLabelInQueue(current, { type: "kit", id })
+    );
+  }
+
+  function selectAllUnitsForCurrentKit() {
+    const sourceUnitIds = kitUnitsForSource.map((unit) => unit.id);
+    setLabelQueue((current) => {
+      if (allKitUnitsSelected) {
+        return sourceUnitIds.reduce(
+          (queue, id) => removeIoioLabelFromQueue(queue, { type: "kit", id }),
+          current
+        );
+      }
+      return sourceUnitIds.reduce(
+        (queue, id) => addIoioLabelToQueue(queue, { type: "kit", id }),
+        current
+      );
+    });
   }
 
   function printLabels() {
     if (!currentLabel || printUnavailableReason) return;
     const previousTitle = document.title;
-    document.title = getLabelPdfTitle(printableLabels, labelType);
+    document.title =
+      printableLabels.length > 1
+        ? `IOIO labels (${printableLabels.length})`
+        : getLabelPdfTitle([currentLabel], currentLabel.entry.type);
     let titleRestoreTimeout: number | undefined;
     const restoreTitle = () => {
       document.title = previousTitle;
@@ -1181,6 +1254,17 @@ export default function LabelsPage() {
     window.addEventListener("afterprint", restoreTitle, { once: true });
     titleRestoreTimeout = window.setTimeout(restoreTitle, 60_000);
     window.print();
+  }
+
+  function queueLabelName(entry: IoioLabelQueueEntry) {
+    const label = printableLabels.find(
+      (candidate) =>
+        candidate.entry.type === entry.type && candidate.entry.id === entry.id
+    );
+    if (!label) return entry.id;
+    return entry.type === "item" || entry.type === "kit"
+      ? normalizeIoioLabelText(label.title)
+      : normalizeIoioLabelText(label.code);
   }
 
   return (
@@ -1268,13 +1352,7 @@ export default function LabelsPage() {
                           </legend>
                           <button
                             type="button"
-                            onClick={() =>
-                              setSelectedKitUnitIds(
-                                allKitUnitsSelected
-                                  ? []
-                                  : kitUnitsForSource.map((unit) => unit.id)
-                              )
-                            }
+                            onClick={selectAllUnitsForCurrentKit}
                             className="mb-1 rounded-md p-1 text-xs font-bold text-red-700 hover:bg-red-50"
                           >
                             {allKitUnitsSelected
@@ -1297,13 +1375,7 @@ export default function LabelsPage() {
                                     }
                                   )}`}
                                   checked={selectedKitUnitIds.includes(unit.id)}
-                                  onChange={(event) =>
-                                    setSelectedKitUnitIds((current) =>
-                                      event.target.checked
-                                        ? [...current, unit.id]
-                                        : current.filter((id) => id !== unit.id)
-                                    )
-                                  }
+                                  onChange={() => toggleKitUnit(unit.id)}
                                   className="size-4 shrink-0 accent-red-700"
                                 />
                                 <span className="font-bold text-gray-900">
@@ -1322,10 +1394,16 @@ export default function LabelsPage() {
                               </p>
                             ) : null}
                           </div>
-                          {selectedKitUnitIds.length > 1 ? (
+                          {kitUnitsForSource.filter((unit) =>
+                            selectedKitUnitIds.includes(unit.id)
+                          ).length > 1 ? (
                             <p className="mt-2 text-xs font-semibold text-gray-600">
-                              {selectedKitUnitIds.length} physical units
-                              selected for batch printing.
+                              {
+                                kitUnitsForSource.filter((unit) =>
+                                  selectedKitUnitIds.includes(unit.id)
+                                ).length
+                              }{" "}
+                              physical units selected for batch printing.
                             </p>
                           ) : null}
                         </fieldset>
@@ -1336,12 +1414,18 @@ export default function LabelsPage() {
                       <label className="block text-sm font-semibold text-gray-800">
                         Individual item
                         <select
-                          value={selectedItems[0]?.id ?? ""}
-                          onChange={(event) =>
-                            setSelectedItemIds(
-                              event.target.value ? [event.target.value] : []
-                            )
-                          }
+                          value={selectedItems.at(-1)?.id ?? ""}
+                          onChange={(event) => {
+                            const id = event.target.value;
+                            if (id) {
+                              setLabelQueue((current) =>
+                                addIoioLabelToQueue(current, {
+                                  type: "item",
+                                  id,
+                                })
+                              );
+                            }
+                          }}
                           className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-normal text-gray-900 outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100"
                         >
                           <option value="">Select item</option>
@@ -1450,7 +1534,11 @@ export default function LabelsPage() {
                           >
                             <input
                               type="checkbox"
-                              checked={batchLocationIds.includes(location.id)}
+                              checked={labelQueue.some(
+                                (entry) =>
+                                  entry.type === labelType &&
+                                  entry.id === location.id
+                              )}
                               onChange={() => toggleBatchLocation(location.id)}
                               className="size-4 accent-red-700"
                             />
@@ -1471,20 +1559,26 @@ export default function LabelsPage() {
               <div className="mt-2 space-y-1.5">
                 <label className="block text-sm font-semibold text-gray-800">
                   Label colour
-                  <select
-                    value={labelColor}
-                    onChange={(event) => {
-                      setLabelColorWasChosen(true);
-                      setLabelColor(event.target.value);
-                    }}
-                    className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-normal text-gray-900 outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100"
-                  >
-                    {IOIO_LABEL_COLORS.map((color) => (
-                      <option key={color.color} value={color.color}>
-                        {color.name} {color.color}
-                      </option>
-                    ))}
-                  </select>
+                  {labelType === "section" ? (
+                    <span className="mt-1 block text-sm font-normal text-gray-600">
+                      Section labels use each Section's assigned color.
+                    </span>
+                  ) : (
+                    <select
+                      value={labelColor}
+                      onChange={(event) => {
+                        setLabelColorWasChosen(true);
+                        setLabelColor(event.target.value);
+                      }}
+                      className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-normal text-gray-900 outline-none focus:border-red-500 focus:ring-2 focus:ring-red-100"
+                    >
+                      {IOIO_LABEL_COLORS.map((color) => (
+                        <option key={color.color} value={color.color}>
+                          {color.name} {color.color}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </label>
                 <label className="block text-sm font-semibold text-gray-800">
                   Label text (optional)
@@ -1620,15 +1714,66 @@ export default function LabelsPage() {
                 </p>
               ) : (
                 <p className="mt-2 text-[11px] leading-4 text-gray-500">
-                  A4 estimate: {a4Capacity.columns} × {a4Capacity.rows} labels
-                  per sheet with {IOIO_A4.gapMm} mm gaps. Print at 100% or
-                  Actual size.
+                  Mixed sizes are packed by their actual dimensions with{" "}
+                  {IOIO_A4.gapMm} mm gaps inside 10 mm A4 margins. Print at 100%
+                  or Actual size.
                 </p>
               )}
             </section>
           </aside>
 
           <main className="ioio-label-preview-column min-w-0 lg:sticky lg:top-4">
+            <section
+              className="ioio-label-controls mb-3 rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
+              aria-label="Selected labels"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-bold text-gray-950">
+                  Selected labels ({labelQueue.length})
+                </h2>
+                <button
+                  type="button"
+                  disabled={labelQueue.length === 0}
+                  onClick={() =>
+                    setLabelQueue((current) => clearIoioLabelQueue(current))
+                  }
+                  className="rounded-md px-2 py-1 text-xs font-bold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:text-gray-400"
+                >
+                  Clear selection
+                </button>
+              </div>
+              {labelQueue.length ? (
+                <ul className="mt-2 flex flex-wrap gap-2">
+                  {labelQueue.map((entry) => (
+                    <li
+                      key={`${entry.type}:${entry.id}`}
+                      className="inline-flex max-w-full items-center gap-1 rounded-full border border-gray-200 bg-gray-50 py-1 pl-3 pr-1 text-xs font-semibold text-gray-800"
+                    >
+                      <span className="max-w-64 truncate">
+                        {queueLabelName(entry)}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${queueLabelName(entry)}`}
+                        onClick={() =>
+                          setLabelQueue((current) =>
+                            removeIoioLabelFromQueue(current, entry)
+                          )
+                        }
+                        className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-white hover:text-red-700"
+                      >
+                        <span aria-hidden="true">×</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-xs text-gray-500">
+                  Add labels from the source panel. Your selection stays here as
+                  you switch types.
+                </p>
+              )}
+            </section>
             <div className="ioio-label-controls mb-2 flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-lg font-bold text-gray-950">Preview</h2>
               <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1669,61 +1814,7 @@ export default function LabelsPage() {
               </div>
             </div>
             <div className="ioio-label-preview-scroll-area">
-              {fitsA4 && !printDimensionsError ? (
-                labelPages.map((page, pageIndex) => (
-                  <div
-                    key={`label-page-${pageIndex}`}
-                    className={`ioio-label-sheet ioio-label-a4-paper ${
-                      previewMode === "close-up"
-                        ? "ioio-label-preview-a4-hidden"
-                        : ""
-                    } ${
-                      pageIndex < labelPages.length - 1
-                        ? "ioio-label-sheet-page"
-                        : ""
-                    }`}
-                    style={
-                      {
-                        "--ioio-print-columns": a4Capacity.columns,
-                        "--ioio-print-label-width": `${printDimensions.widthMm}mm`,
-                        "--ioio-print-label-height": `${printDimensions.heightMm}mm`,
-                        "--ioio-label-gap": `${IOIO_A4.gapMm}mm`,
-                        "--ioio-a4-columns":
-                          page.length === 1 ? 1 : a4Capacity.columns,
-                        "--ioio-a4-label-width": `${a4PreviewScale.widthPercent}%`,
-                        "--ioio-a4-label-height": `${a4PreviewScale.heightPercent}%`,
-                        "--ioio-a4-gap-x": `${a4PreviewScale.gapXPercent}%`,
-                        "--ioio-a4-gap-y": `${a4PreviewScale.gapYPercent}%`,
-                      } as CSSProperties
-                    }
-                  >
-                    {page.length ? (
-                      page.map((label, index) => (
-                        <div
-                          key={`${label.code}-${pageIndex}-${index}`}
-                          className="ioio-print-label ioio-a4-label"
-                        >
-                          <IoioLabelPreview
-                            label={label}
-                            size={printDimensions}
-                            logoHref={qrLogoHref}
-                            logoError={qrLogoLoadError}
-                          />
-                        </div>
-                      ))
-                    ) : (
-                      <div className="ioio-label-a4-empty">
-                        {printDimensionsError ??
-                          "Choose a label type and source on the left."}
-                      </div>
-                    )}
-                  </div>
-                ))
-              ) : printDimensionsError ? (
-                <div className="ioio-label-a4-paper ioio-label-a4-empty">
-                  {printDimensionsError}
-                </div>
-              ) : (
+              {invalidQueuedDimensions ? (
                 <div
                   className={`ioio-label-a4-comparison-viewport ${
                     previewMode === "close-up"
@@ -1731,49 +1822,108 @@ export default function LabelsPage() {
                       : ""
                   }`}
                 >
-                  {previewLabels[0] ? (
-                    <div
-                      className="ioio-label-a4-comparison-stage"
-                      style={
-                        {
-                          width: `${
-                            Math.max(IOIO_A4.widthMm, printDimensions.widthMm) *
-                            2
-                          }px`,
-                          height: `${
-                            Math.max(
-                              IOIO_A4.heightMm,
-                              printDimensions.heightMm
-                            ) * 2
-                          }px`,
-                          "--ioio-a4-outline-width": `${IOIO_A4.widthMm * 2}px`,
-                          "--ioio-a4-outline-height": `${
-                            IOIO_A4.heightMm * 2
-                          }px`,
-                          "--ioio-a4-label-width": `${
-                            printDimensions.widthMm * 2
-                          }px`,
-                          "--ioio-a4-label-height": `${
-                            printDimensions.heightMm * 2
-                          }px`,
-                        } as CSSProperties
-                      }
-                    >
-                      <div className="ioio-label-a4-comparison-paper" />
-                      <div className="ioio-label-a4-comparison-label">
-                        <IoioLabelPreview
-                          label={previewLabels[0]}
-                          size={printDimensions}
-                          logoHref={qrLogoHref}
-                          logoError={qrLogoLoadError}
-                        />
+                  <div
+                    className="ioio-label-a4-comparison-stage"
+                    style={
+                      {
+                        width: `${
+                          Math.max(
+                            IOIO_A4.widthMm,
+                            invalidQueuedDimensions.dimensions.widthMm
+                          ) * 2
+                        }px`,
+                        height: `${
+                          Math.max(
+                            IOIO_A4.heightMm,
+                            invalidQueuedDimensions.dimensions.heightMm
+                          ) * 2
+                        }px`,
+                        "--ioio-a4-outline-width": `${IOIO_A4.widthMm * 2}px`,
+                        "--ioio-a4-outline-height": `${IOIO_A4.heightMm * 2}px`,
+                        "--ioio-a4-label-width": `${
+                          invalidQueuedDimensions.dimensions.widthMm * 2
+                        }px`,
+                        "--ioio-a4-label-height": `${
+                          invalidQueuedDimensions.dimensions.heightMm * 2
+                        }px`,
+                      } as CSSProperties
+                    }
+                  >
+                    <div className="ioio-label-a4-comparison-paper" />
+                    <div className="ioio-label-a4-comparison-label">
+                      <IoioLabelPreview
+                        label={invalidQueuedDimensions}
+                        size={invalidQueuedDimensions.dimensions}
+                        logoHref={qrLogoHref}
+                        logoError={qrLogoLoadError}
+                      />
+                    </div>
+                  </div>
+                  <p
+                    className="mt-2 text-center text-sm font-semibold text-red-700"
+                    role="alert"
+                  >
+                    {printUnavailableReason}
+                  </p>
+                </div>
+              ) : labelPages.length ? (
+                labelPages.map((page, pageIndex) => (
+                  <div
+                    key={`label-page-${pageIndex}`}
+                    className={`ioio-label-sheet ioio-label-a4-paper ${
+                      previewMode === "close-up"
+                        ? "ioio-label-preview-a4-hidden"
+                        : ""
+                    }`}
+                    style={
+                      {
+                        "--ioio-label-gap": `${IOIO_A4.gapMm}mm`,
+                        "--ioio-a4-sheet-height": `${IOIO_A4_PRINTABLE_AREA.heightMm}mm`,
+                        "--ioio-a4-gap-x": `${
+                          (IOIO_A4.gapMm / IOIO_A4.widthMm) * 100
+                        }%`,
+                        "--ioio-a4-gap-y": `${
+                          (IOIO_A4.gapMm / IOIO_A4.heightMm) * 100
+                        }%`,
+                      } as CSSProperties
+                    }
+                  >
+                    {page.rows.map((row, rowIndex) => (
+                      <div
+                        key={`label-row-${pageIndex}-${rowIndex}`}
+                        className="ioio-label-sheet-row"
+                      >
+                        {row.labels.map(({ value: label }) => (
+                          <div
+                            key={`${label.entry.type}:${label.entry.id}`}
+                            className="ioio-print-label ioio-a4-label"
+                            style={
+                              {
+                                "--ioio-print-label-width": `${label.dimensions.widthMm}mm`,
+                                "--ioio-print-label-height": `${label.dimensions.heightMm}mm`,
+                                "--ioio-a4-label-width": `${
+                                  (label.dimensions.widthMm / IOIO_A4.widthMm) *
+                                  100
+                                }%`,
+                                "--ioio-a4-label-aspect": `${label.dimensions.widthMm} / ${label.dimensions.heightMm}`,
+                              } as CSSProperties
+                            }
+                          >
+                            <IoioLabelPreview
+                              label={label}
+                              size={label.dimensions}
+                              logoHref={qrLogoHref}
+                              logoError={qrLogoLoadError}
+                            />
+                          </div>
+                        ))}
                       </div>
-                    </div>
-                  ) : (
-                    <div className="ioio-label-a4-empty">
-                      Choose a label type and source on the left.
-                    </div>
-                  )}
+                    ))}
+                  </div>
+                ))
+              ) : (
+                <div className="ioio-label-a4-paper ioio-label-a4-empty">
+                  Choose a label type and source on the left.
                 </div>
               )}
               <div
@@ -1794,13 +1944,25 @@ export default function LabelsPage() {
                           : ""
                       }`}
                       style={{
-                        width: `${closeUpLabelSize.width}px`,
-                        height: `${closeUpLabelSize.height}px`,
+                        width: `${
+                          getIoioCloseUpPreviewSize(
+                            closeUpStageSize.width,
+                            closeUpStageSize.height,
+                            label.dimensions
+                          ).width
+                        }px`,
+                        height: `${
+                          getIoioCloseUpPreviewSize(
+                            closeUpStageSize.width,
+                            closeUpStageSize.height,
+                            label.dimensions
+                          ).height
+                        }px`,
                       }}
                     >
                       <IoioLabelPreview
                         label={label}
-                        size={printDimensions}
+                        size={label.dimensions}
                         logoHref={qrLogoHref}
                         logoError={qrLogoLoadError}
                       />
@@ -1815,9 +1977,7 @@ export default function LabelsPage() {
               </div>
               {previewMode === "a4" ? (
                 <p className="ioio-label-a4-caption" aria-label="A4 paper size">
-                  {fitsA4
-                    ? "A4 · 210 × 297 mm"
-                    : "A4 outline at the same scale · label exceeds the sheet"}
+                  A4 · 210 × 297 mm · 10 mm page margins
                 </p>
               ) : null}
             </div>

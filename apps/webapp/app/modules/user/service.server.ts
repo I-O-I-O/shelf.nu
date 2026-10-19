@@ -64,7 +64,7 @@ import {
   getPublicFileURL,
   parseFileFormData,
 } from "~/utils/storage.server";
-import { randomUsernameFromEmail } from "~/utils/user";
+import { randomUsernameFromEmail, resolveUserDisplayName } from "~/utils/user";
 import type { MergeInclude } from "~/utils/utils";
 import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import { type UpdateUserPayload, USER_STATIC_INCLUDE } from "./types";
@@ -464,10 +464,17 @@ export async function createUserOrAttachOrg({
     }
 
     /** If the user already exists, we just attach the new org to it */
-    await createUserOrgAssociation(db, {
-      userId: shelfUser.id,
-      organizationIds: [organizationId],
-      roles,
+    await db.$transaction(async (tx) => {
+      await createUserOrgAssociation(tx, {
+        userId: shelfUser.id,
+        organizationIds: [organizationId],
+        roles,
+      });
+      await ensureUserTeamMember(tx, {
+        userId: shelfUser.id,
+        organizationId,
+        name: resolveUserDisplayName(shelfUser) || "Shelf member",
+      });
     });
 
     await ensureAssetIndexModeForRole({
@@ -1148,6 +1155,18 @@ export async function createUser(
             }),
         ]);
 
+        // A workspace grant also needs Shelf's organization-scoped
+        // TeamMember mapping for booking custody. This mirrors the membership
+        // just granted above and does not grant additional workspace access.
+        if (organizationId && roles?.length) {
+          await ensureUserTeamMember(tx, {
+            userId: user.id,
+            organizationId,
+            name:
+              [firstName, lastName].filter(Boolean).join(" ") || "Shelf member",
+          });
+        }
+
         const initialIoioTeam = bootstrapIoioTeamOnFreshSignup
           ? await ensureInitialIoioTeamForUser({ tx, userId: user.id })
           : null;
@@ -1175,6 +1194,13 @@ export async function createUser(
                 userId: user.id,
                 organizationIds: [team.id],
                 roles: [OrganizationRoles.SELF_SERVICE],
+              });
+              await ensureUserTeamMember(tx, {
+                userId: user.id,
+                organizationId: team.id,
+                name:
+                  [firstName, lastName].filter(Boolean).join(" ") ||
+                  "Shelf member",
               });
               ioioStudentOrganizationId = team.id;
               await tx.user.update({
@@ -1267,10 +1293,19 @@ export async function createUser(
           organizationId &&
           !existingUser.organizations.some((org) => org.id === organizationId)
         ) {
-          await createUserOrgAssociation(db, {
-            userId,
-            organizationIds: [organizationId],
-            roles: roles ?? [],
+          await db.$transaction(async (tx) => {
+            await createUserOrgAssociation(tx, {
+              userId,
+              organizationIds: [organizationId],
+              roles: roles ?? [],
+            });
+            await ensureUserTeamMember(tx, {
+              userId,
+              organizationId,
+              name:
+                [firstName, lastName].filter(Boolean).join(" ") ||
+                "Shelf member",
+            });
           });
           existingUser.organizations.push({ id: organizationId });
         }

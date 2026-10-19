@@ -147,6 +147,9 @@ type CodeScannerProps = {
 
   /** Saved camera device ID from user preferences (cookie) */
   savedCameraId?: string;
+
+  /** Optional friendly camera error callback for embedded scanner dialogs. */
+  onCameraError?: (message: string) => void;
 };
 
 type Mode = "camera" | "scanner";
@@ -172,6 +175,7 @@ export const CodeScanner = ({
   forceMode,
   overlayPosition = "fullscreen",
   savedCameraId,
+  onCameraError,
 }: CodeScannerProps) => {
   const [isLoading, setIsLoading] = useState(false);
   const { isMd } = useViewportHeight();
@@ -338,6 +342,7 @@ export const CodeScanner = ({
             onDevicesEnumerated={handleDevicesEnumerated}
             currentDeviceId={currentDeviceId}
             savedCameraId={savedCameraId}
+            onCameraError={onCameraError}
           />
         )}
         {paused && (
@@ -596,6 +601,7 @@ function CameraMode({
   onDevicesEnumerated,
   currentDeviceId,
   savedCameraId,
+  onCameraError,
 }: {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
@@ -611,6 +617,7 @@ function CameraMode({
   currentDeviceId?: string | null;
   /** Saved camera ID from user preferences - used for initial constraint */
   savedCameraId?: string;
+  onCameraError?: (message: string) => void;
 }) {
   const videoRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -760,10 +767,17 @@ function CameraMode({
           ? (cameraError as { message?: string }).message ?? String(cameraError)
           : String(cameraError);
 
-      setError(`Camera error: ${errorMessage}`);
+      const userMessage =
+        errorName === "NotAllowedError" || errorName === "PermissionDeniedError"
+          ? "Camera access is required to scan QR codes. Allow camera access in your browser settings, then scan again."
+          : errorName === "NotFoundError"
+          ? "No camera was found. Connect or enable a camera, then scan again."
+          : `Camera error: ${errorMessage}`;
+      if (onCameraError) onCameraError(userMessage);
+      else setError(userMessage);
       setIsLoading(false);
     },
-    [hasRetriedConstraints, setIsLoading]
+    [hasRetriedConstraints, onCameraError, setIsLoading]
   );
 
   // Synchronizes the animation loop with the `paused` state and the

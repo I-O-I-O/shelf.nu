@@ -6,7 +6,14 @@ import type {
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import Header from "~/components/layout/header";
-import { IOIO_LOCATION_COLOR_VALUES } from "~/components/location/ioio-location-colors";
+import {
+  getFirstAvailableIoioColor,
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+  getUsedIoioRoomColors,
+  getUsedIoioSectionColors,
+  IOIO_LOCATION_COLOR_VALUES,
+} from "~/components/location/ioio-location-colors";
 import { IoioLocationCreationForm } from "~/components/location/ioio-location-creation-form";
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
@@ -43,7 +50,7 @@ const IoioLocationCreationSchema = z.object({
     .transform((value) => (value === undefined ? undefined : value || null))
     .refine(
       (value) => !value || IOIO_LOCATION_COLOR_VALUES.includes(value),
-      "Choose a supported room color."
+      "Choose a supported location color."
     ),
 });
 
@@ -126,6 +133,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
             id: true,
             name: true,
             parentId: true,
+            color: true,
             parent: { select: { parentId: true } },
           },
         })
@@ -146,8 +154,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const siblingLocations = await db.location.findMany({
       where: { organizationId, parentId: parentId ?? null },
-      select: { name: true },
+      select: { id: true, name: true, parentId: true, color: true },
     });
+    const colorLocations = parent
+      ? [...siblingLocations, parent]
+      : siblingLocations;
     const duplicate = findDuplicateIoioSiblingName(
       siblingLocations.map(({ name: siblingName }) => siblingName),
       finalName
@@ -161,7 +172,36 @@ export async function action({ context, request }: ActionFunctionArgs) {
       );
     }
 
-    const color = locationType === "room" ? submittedColor ?? "#455A64" : null;
+    const color =
+      locationType === "room"
+        ? submittedColor ??
+          getFirstAvailableIoioColor(
+            getUsedIoioRoomColors({ locations: siblingLocations })
+          )
+        : locationType === "section"
+        ? submittedColor ??
+          getFirstAvailableIoioColor(
+            getUsedIoioSectionColors({
+              locations: colorLocations,
+              parentId,
+            })
+          )
+        : null;
+    if (locationType === "room") {
+      const colorError = getIoioRoomColorError({
+        color,
+        locations: colorLocations,
+      });
+      if (colorError) throwLocationValidationError(colorError);
+    }
+    if (locationType === "section") {
+      const colorError = getIoioSectionColorError({
+        color,
+        locations: colorLocations,
+        parentId,
+      });
+      if (colorError) throwLocationValidationError(colorError);
+    }
 
     const location = await createLocation({
       name: finalName,
@@ -171,6 +211,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
       organizationId,
       parentId,
       color,
+      ioioColorType:
+        locationType === "room" || locationType === "section"
+          ? locationType
+          : undefined,
     });
 
     await updateLocationImage({

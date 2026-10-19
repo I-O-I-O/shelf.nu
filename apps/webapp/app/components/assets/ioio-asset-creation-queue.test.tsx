@@ -4,6 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
   requests: [] as string[],
+  locationRequests: [] as Array<{
+    intent: string;
+    title: string;
+    locationId: string;
+  }>,
   failCreateOnceFor: "",
 }));
 
@@ -39,11 +44,16 @@ vi.mock("./ioio-asset-create-form", () => ({
           required
           minLength={2}
           defaultValue={props.title ?? ""}
+          disabled={props.assetQueueSaving}
         />
       </label>
       <label>
         Quantity {props.assetQueueDraftId}
-        <input name="quantity" defaultValue={props.quantity ?? ""} />
+        <input
+          name="quantity"
+          defaultValue={props.quantity ?? ""}
+          disabled={props.assetQueueSaving}
+        />
       </label>
       <label>
         Image {props.assetQueueDraftId}
@@ -51,11 +61,27 @@ vi.mock("./ioio-asset-create-form", () => ({
       </label>
       <label>
         Category {props.assetQueueDraftId}
-        <input name="category" defaultValue={props.categoryId ?? ""} />
+        <input
+          name="category"
+          defaultValue={props.categoryId ?? ""}
+          disabled={props.assetQueueSaving}
+        />
+      </label>
+      <label>
+        Location {props.assetQueueDraftId}
+        <input
+          name="newLocationId"
+          defaultValue={props.locationId ?? ""}
+          disabled={props.assetQueueSaving}
+        />
       </label>
       <label>
         Advanced option {props.assetQueueDraftId}
-        <input name="customField" defaultValue="" />
+        <input
+          name="customField"
+          defaultValue=""
+          disabled={props.assetQueueSaving}
+        />
       </label>
       <button
         type="button"
@@ -90,7 +116,13 @@ async function renderQueue() {
           const formData = await request.formData();
           const draftTitle = String(formData.get("title") ?? "");
           const intent = String(formData.get("assetQueueIntent") ?? "");
+          const locationId = String(formData.get("newLocationId") ?? "");
           mocked.requests.push(`${intent}:${draftTitle}`);
+          mocked.locationRequests.push({
+            intent,
+            title: draftTitle,
+            locationId,
+          });
 
           if (intent === "validate") {
             return draftTitle.length >= 2
@@ -127,6 +159,7 @@ function getDraftItem(title: string) {
 describe("IOIO Staff asset creation queue", () => {
   beforeEach(() => {
     mocked.requests.length = 0;
+    mocked.locationRequests.length = 0;
     mocked.failCreateOnceFor = "";
   });
 
@@ -172,6 +205,38 @@ describe("IOIO Staff asset creation queue", () => {
       (screen.getByLabelText("Image asset-draft-1") as HTMLInputElement)
         .files?.[0]
     ).toBe(image);
+  });
+
+  it("submits each queued draft with its own selected Location ID", async () => {
+    const router = await renderQueue();
+    fireEvent.change(screen.getByLabelText("Name asset-draft-1"), {
+      target: { value: "Asset A" },
+    });
+    fireEvent.change(screen.getByLabelText("Location asset-draft-1"), {
+      target: { value: "container-a-id" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add another" }));
+    fireEvent.change(screen.getByLabelText("Name asset-draft-2"), {
+      target: { value: "Asset B" },
+    });
+    fireEvent.change(screen.getByLabelText("Location asset-draft-2"), {
+      target: { value: "container-b-id" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save all (2)" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/assets"));
+
+    expect(mocked.locationRequests).toEqual([
+      { intent: "validate", title: "Asset A", locationId: "container-a-id" },
+      { intent: "validate", title: "Asset B", locationId: "container-b-id" },
+      { intent: "create", title: "Asset A", locationId: "container-a-id" },
+      { intent: "create", title: "Asset B", locationId: "container-b-id" },
+    ]);
+    expect(
+      mocked.locationRequests
+        .filter(({ intent }) => intent === "create")
+        .map(({ title }) => title)
+    ).toEqual(["Asset A", "Asset B"]);
   });
 
   it("allows incomplete drafts, validates every draft before creating, and removes only the selected draft", async () => {

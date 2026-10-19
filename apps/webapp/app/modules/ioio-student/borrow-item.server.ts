@@ -41,7 +41,7 @@ import {
   enforceIoioBorrowRateLimit,
   IOIO_BORROW_OPERATION,
 } from "./rate-limit.server";
-import { requireStudentRead } from "./route.server";
+import { requireIoioBorrowerAccess } from "./route.server";
 
 type Context = Pick<LoaderFunctionArgs, "context" | "request">;
 type BorrowOperationStatus =
@@ -255,7 +255,7 @@ export async function resolvePhysicalUnitNumber(
   },
   { context, request }: Context
 ) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   const requestedAsset = await loadBorrowAsset(assetId, auth.organizationId);
   if (!requestedAsset) {
@@ -417,7 +417,7 @@ export async function getBorrowItemAvailability(
   },
   { context, request }: Context
 ) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   const parsedFrom = from ? new Date(from) : null;
   const parsedTo = to ? new Date(to) : null;
@@ -468,7 +468,7 @@ export async function getBorrowItemAvailability(
   };
 }
 
-async function resolveStudentTeamMember({
+async function resolveBorrowerTeamMember({
   userId,
   organizationId,
   role,
@@ -477,38 +477,45 @@ async function resolveStudentTeamMember({
   organizationId: string;
   role: string;
 }) {
-  const teamMember = await db.teamMember.findFirst({
-    where: { userId, organizationId, deletedAt: null },
-    select: { id: true },
-  });
-  if (teamMember) return teamMember.id;
+  const teamMemberId = await db.$transaction(async (tx) => {
+    // TeamMember has no unique constraint on (userId, organizationId). Lock the
+    // already-authorized membership row so concurrent borrow requests cannot
+    // create duplicate borrower mappings. This never creates organization
+    // membership; it only repairs the custodian mapping for a real member.
+    const memberships = await tx.$queryRaw<{ id: string; roles: string[] }[]>`
+      SELECT id, roles FROM "UserOrganization"
+      WHERE "userId" = ${userId} AND "organizationId" = ${organizationId}
+      FOR UPDATE
+    `;
+    const membership = memberships[0];
+    if (!membership || !membership.roles.includes(role)) return null;
 
-  // Some Staff accounts were created before Shelf linked every authenticated
-  // user to a TeamMember row. Staff borrowing still uses the canonical
-  // custodian relation required by Shelf bookings, so provision that missing
-  // workspace-scoped mapping on first Staff borrow. Students retain the
-  // existing strict mapping requirement.
-  if (role === "ADMIN" || role === "OWNER") {
-    const user = await db.user.findFirst({
-      where: {
-        id: userId,
-        userOrganizations: { some: { organizationId } },
-      },
+    const existing = await tx.teamMember.findFirst({
+      where: { userId, organizationId, deletedAt: null },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+
+    const user = await tx.user.findFirst({
+      where: { id: userId },
       select: { displayName: true, firstName: true, lastName: true },
     });
-    const created = await db.teamMember.create({
+    if (!user) return null;
+
+    const created = await tx.teamMember.create({
       data: {
-        name: resolveUserDisplayName(user) || "Staff",
-        organization: { connect: { id: organizationId } },
-        user: { connect: { id: userId } },
+        name: resolveUserDisplayName(user) || "Shelf member",
+        organizationId,
+        userId,
       },
       select: { id: true },
     });
     return created.id;
-  }
+  });
 
+  if (teamMemberId) return teamMemberId;
   throw borrowError(
-    "Your Shelf account has no active team-member mapping for borrowing.",
+    "Your active workspace membership could not be linked to a borrowing record. Ask workspace staff to review your account access.",
     409
   );
 }
@@ -589,7 +596,7 @@ export async function prepareBorrowItem(
   draft: BorrowProposalDraft,
   { context, request }: Context
 ): Promise<PreparedBorrowProposal> {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   await assertAnnualAccessApproved({
     organizationId: auth.organizationId,
@@ -818,7 +825,7 @@ export async function prepareBorrowItem(
       "Select one physical unit for each individual item you want to borrow."
     );
   }
-  await resolveStudentTeamMember({
+  await resolveBorrowerTeamMember({
     userId: auth.userId,
     organizationId: auth.organizationId,
     role: auth.role,
@@ -893,7 +900,7 @@ export async function acknowledgeBorrowItemStaffReservation(
   confirmationToken: string,
   { context, request }: Context
 ) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   const operation = await db.ioioWriteOperation.findUnique({
     where: { idempotencyKey: confirmationToken },
@@ -1008,7 +1015,7 @@ export async function requestPreparationForItem(
   },
   { context, request }: Context
 ) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   await assertAnnualAccessApproved({
     organizationId: auth.organizationId,
@@ -1232,7 +1239,7 @@ export async function requestPreparationForItem(
     userId: auth.userId,
     organizationId: auth.organizationId,
   });
-  await resolveStudentTeamMember({
+  await resolveBorrowerTeamMember({
     userId: auth.userId,
     organizationId: auth.organizationId,
     role: auth.role,
@@ -1304,7 +1311,7 @@ export async function cancelBorrowItem(
   token: string,
   { context, request }: Context
 ) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   const operation = await db.ioioWriteOperation.findUnique({
     where: { idempotencyKey: token },
@@ -1374,7 +1381,7 @@ export async function borrowItem(
   { context, request }: Context
 ) {
   const startedAt = Date.now();
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   assertBorrowRole(auth.role);
   const operation = await db.ioioWriteOperation.findUnique({
     where: { idempotencyKey: confirmationToken },
@@ -1644,7 +1651,7 @@ export async function borrowItem(
         data: { from: parsedFrom, to: parsedTo },
       });
     }
-    const teamMemberId = await resolveStudentTeamMember({
+    const teamMemberId = await resolveBorrowerTeamMember({
       userId: auth.userId,
       organizationId: auth.organizationId,
       role: auth.role,

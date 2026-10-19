@@ -144,8 +144,8 @@ export const LocationForm = ({
   const validateFile = ioioMode ? validateAssetImage : validateDefaultFile;
   const [clearImage, setClearImage] = useState(false);
   const [selectedParentId, setSelectedParentId] = useState(parentId);
-  const [selectedColor, setSelectedColor] = useState(
-    color && IOIO_LOCATION_COLOR_VALUES.includes(color) ? color : "#455A64"
+  const [selectedColor, setSelectedColor] = useState<string | undefined>(
+    color && IOIO_LOCATION_COLOR_VALUES.includes(color) ? color : undefined
   );
   const [, updateName] = useAtom(updateDynamicTitleAtom);
 
@@ -276,13 +276,18 @@ export const LocationForm = ({
               value={selectedParentId ?? ""}
               readOnly
             />
-            {locationType === "room" ? (
-              <FormRow rowLabel="Room color">
+            {locationType === "room" || locationType === "section" ? (
+              <FormRow
+                rowLabel={
+                  locationType === "room" ? "Room color" : "Section color"
+                }
+              >
                 <IoioLocationColorPicker
                   locations={locations ?? []}
                   currentLocationId={excludeLocationId}
+                  parentId={selectedParentId}
                   value={selectedColor}
-                  locationType="room"
+                  locationType={locationType}
                   onChange={setSelectedColor}
                 />
               </FormRow>

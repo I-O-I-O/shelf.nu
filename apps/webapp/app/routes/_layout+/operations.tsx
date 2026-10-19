@@ -1655,7 +1655,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
         }
         try {
           await completeSubmittedReturn(
-            { operationId },
+            {
+              operationId,
+              keepProblemReportOpen: intent === "return-issue-to-service-bulk",
+            },
             { context, request, auth: staffAuth }
           );
           if (intent === "return-issue-to-service-bulk") {
@@ -1715,7 +1718,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
           operationType: "RETURN_ITEM",
           status: "SUBMITTED",
         },
-        select: { id: true, assetId: true },
+        select: { id: true, assetId: true, bookingAssetId: true },
       });
       const issueReport = await db.ioioWriteOperation.findFirst({
         where: {
@@ -1725,12 +1728,18 @@ export async function action({ context, request }: ActionFunctionArgs) {
           source: "IOIO_STUDENT_RETURN",
           status: "SUCCEEDED",
         },
-        select: { id: true, assetId: true, reportType: true },
+        select: {
+          id: true,
+          assetId: true,
+          bookingAssetId: true,
+          reportType: true,
+        },
       });
       if (
         !operation?.assetId ||
         !issueReport ||
-        issueReport.assetId !== operation.assetId
+        issueReport.assetId !== operation.assetId ||
+        issueReport.bookingAssetId !== operation.bookingAssetId
       ) {
         return data({
           ok: false as const,
@@ -1739,7 +1748,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
         });
       }
       await completeSubmittedReturn(
-        { operationId },
+        {
+          operationId,
+          keepProblemReportOpen: intent === "return-issue-to-service",
+        },
         { context, request, auth: staffAuth }
       );
       if (intent === "return-issue-to-service") {
@@ -2701,13 +2713,7 @@ function ReturnedIssueActions({ task }: { task: Task }) {
       : null;
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-      <Link
-        to={task.href}
-        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-300 hover:text-red-800"
-      >
-        Review return
-      </Link>
+    <div className="ml-auto flex shrink-0 items-center gap-3">
       <fetcher.Form method="post">
         <input type="hidden" name="intent" value="return-issue-to-service" />
         <input type="hidden" name="operationId" value={task.operationId} />
@@ -2719,7 +2725,7 @@ function ReturnedIssueActions({ task }: { task: Task }) {
         <button
           type="submit"
           disabled={fetcher.state !== "idle"}
-          className="rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
+          className="inline-flex h-10 w-full items-center justify-center whitespace-nowrap rounded-lg bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50 md:w-auto"
         >
           Return to service
         </button>
@@ -2728,13 +2734,16 @@ function ReturnedIssueActions({ task }: { task: Task }) {
         <button
           type="button"
           onClick={() => setRemoveOpen(true)}
-          className="rounded-lg border border-red-300 px-3 py-2 text-sm font-bold text-red-800 hover:bg-red-50"
+          className="inline-flex h-10 w-full items-center justify-center whitespace-nowrap rounded-lg border border-red-300 px-4 text-sm font-bold text-red-800 hover:bg-red-50 md:w-auto"
         >
           Remove from service
         </button>
       ) : null}
       {errorMessage ? (
-        <p role="alert" className="w-full text-right text-sm text-red-700">
+        <p
+          role="alert"
+          className="text-sm text-red-700 sm:basis-full sm:text-right"
+        >
           {errorMessage}
         </p>
       ) : null}
@@ -5184,6 +5193,8 @@ export default function OperationsPage() {
                     className={
                       view === "all" && task.kind === "ready-for-pickup"
                         ? "flex min-w-0 flex-1 flex-wrap items-center gap-3 p-3"
+                        : task.kind === "returned-with-issues"
+                        ? "flex min-w-0 flex-1 flex-wrap items-center gap-3"
                         : task.kind === "to-prepare" && task.operationId
                         ? "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 md:grid-cols-[auto_minmax(160px,1fr)_minmax(160px,1fr)_auto] md:gap-x-4 xl:grid-cols-[auto_minmax(220px,1.2fr)_minmax(200px,1.1fr)_minmax(140px,0.75fr)_minmax(112px,0.6fr)_auto] xl:gap-x-5 xl:gap-y-0"
                         : task.kind === "ready-for-pickup"
@@ -5422,6 +5433,8 @@ export default function OperationsPage() {
                         className={
                           task.kind === "broken" || task.kind === "general"
                             ? "grid min-w-0 flex-1 grid-cols-[auto_3rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 lg:grid-cols-[auto_3.5rem_minmax(0,1.35fr)_minmax(0,0.9fr)] lg:gap-x-4"
+                            : task.kind === "returned-with-issues"
+                            ? "contents"
                             : "flex min-w-0 flex-1 items-center gap-3"
                         }
                       >
@@ -5544,14 +5557,12 @@ export default function OperationsPage() {
                                 ))}
                             </div>
                           </>
-                        ) : (task.kind === "returns" ||
-                            task.kind === "returned-with-issues") &&
+                        ) : task.kind === "returned-with-issues" &&
                           task.operationId ? (
                           <>
                             {view === "all" ? (
                               allViewCheckbox(task)
-                            ) : task.kind === "returned-with-issues" &&
-                              view === "returned-with-issues" ? (
+                            ) : view === "returned-with-issues" ? (
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${task.title} returned issue`}
@@ -5569,9 +5580,71 @@ export default function OperationsPage() {
                                 className="size-4 shrink-0 rounded border-gray-300 text-red-700"
                               />
                             ) : null}
-                            {view === "returns" &&
-                            task.kind === "returns" &&
-                            task.returnCheckEligible ? (
+                            {task.assetImage && task.assetId ? (
+                              <Link
+                                to={`/assets/${task.assetId}`}
+                                aria-label={`Open asset: ${task.title}`}
+                                className="size-12 shrink-0 overflow-hidden rounded-lg bg-gray-100"
+                              >
+                                <AssetImage
+                                  asset={task.assetImage}
+                                  alt=""
+                                  className="size-full object-cover"
+                                />
+                              </Link>
+                            ) : (
+                              <span
+                                aria-hidden="true"
+                                className="size-12 shrink-0 rounded-lg bg-gray-100"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <div>
+                                <h2 className="truncate font-bold text-gray-950">
+                                  {task.assetId ? (
+                                    <Link
+                                      to={`/assets/${task.assetId}`}
+                                      className="hover:text-red-800 hover:underline"
+                                    >
+                                      {task.quantity && task.quantity > 1
+                                        ? `${task.quantity}x `
+                                        : ""}
+                                      {task.title}
+                                    </Link>
+                                  ) : (
+                                    task.title
+                                  )}
+                                </h2>
+                                <p className="mt-0.5 text-sm text-gray-700">
+                                  {task.borrowerName ?? "Shelf user"}
+                                </p>
+                                <p className="text-sm text-gray-600">
+                                  Returned{" "}
+                                  {formatOperationsDate(task.createdAt)}
+                                  {task.returnLocation
+                                    ? ` · ${task.returnLocation}`
+                                    : ""}
+                                </p>
+                              </div>
+                              <div className="min-w-0 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm">
+                                <p className="font-bold text-amber-950">
+                                  Returned with issue · awaiting TA review
+                                </p>
+                                <p className="mt-0.5 whitespace-pre-wrap break-words text-amber-900">
+                                  “{task.returnIssue}”
+                                </p>
+                              </div>
+                            </div>
+                            {task.returnIssueOperationId ? (
+                              <ReturnedIssueActions task={task} />
+                            ) : null}
+                          </>
+                        ) : task.kind === "returns" && task.operationId ? (
+                          <>
+                            {view === "all" ? (
+                              allViewCheckbox(task)
+                            ) : view === "returns" &&
+                              task.returnCheckEligible ? (
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${task.title} for return check`}
@@ -5632,16 +5705,6 @@ export default function OperationsPage() {
                                   ? ` · ${task.returnLocation}`
                                   : ""}
                               </p>
-                              {task.kind === "returned-with-issues" ? (
-                                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
-                                  <p className="font-bold text-amber-950">
-                                    Returned with issue · awaiting TA review
-                                  </p>
-                                  <p className="mt-1 whitespace-pre-wrap text-amber-950">
-                                    “{task.returnIssue}”
-                                  </p>
-                                </div>
-                              ) : null}
                               {task.returnIssue ? (
                                 task.kind === "returns" ? (
                                   <p className="mt-1 text-sm font-semibold text-amber-900">
@@ -5733,20 +5796,14 @@ export default function OperationsPage() {
                         )}
                       </div>
                     )}
-                    {task.kind === "returned-with-issues" &&
-                    task.operationId &&
-                    task.returnIssueOperationId ? (
-                      <ReturnedIssueActions task={task} />
-                    ) : task.kind === "cancelled-pickups" &&
-                      task.operationId ? (
+                    {task.kind === "returned-with-issues" ? null : task.kind ===
+                        "cancelled-pickups" && task.operationId ? (
                       <CancelledPickupActions task={task} />
                     ) : task.kind === "returns" &&
                       task.returnCheckEligible &&
                       task.operationId ? (
                       <ReturnTaskActions task={task} />
-                    ) : (task.kind === "returns" ||
-                        task.kind === "returned-with-issues") &&
-                      task.operationId ? (
+                    ) : task.kind === "returns" && task.operationId ? (
                       <div className="flex shrink-0 items-center gap-2">
                         <Link
                           to={task.href}

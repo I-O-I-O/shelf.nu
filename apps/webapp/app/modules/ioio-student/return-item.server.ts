@@ -377,7 +377,10 @@ async function loadReturnTarget({
 
 /** Complete a submitted Return Zone request after Staff has checked it. */
 export async function completeSubmittedReturn(
-  { operationId }: { operationId: string },
+  {
+    operationId,
+    keepProblemReportOpen = false,
+  }: { operationId: string; keepProblemReportOpen?: boolean },
   { context, request, auth: providedAuth }: Context
 ) {
   const auth = await getIoioAuth({ context, request, auth: providedAuth });
@@ -454,7 +457,10 @@ export async function completeSubmittedReturn(
       bookingId: result.booking.id,
     },
   });
-  if (operation.reportType !== IOIO_RETURN_OPERATION) {
+  if (
+    operation.reportType !== IOIO_RETURN_OPERATION &&
+    !keepProblemReportOpen
+  ) {
     await db.ioioWriteOperation.updateMany({
       where: {
         organizationId: auth.organizationId,

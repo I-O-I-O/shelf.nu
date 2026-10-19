@@ -130,7 +130,14 @@ const IOIO_PRINT_PRESETS_BY_TYPE: Record<IoioLabelType, IoioPrintPresetMap> = {
 export const IOIO_A4 = {
   widthMm: 210,
   heightMm: 297,
+  marginMm: 10,
   gapMm: 6,
+  printSafetyMm: 1,
+};
+
+export const IOIO_A4_PRINTABLE_AREA = {
+  widthMm: IOIO_A4.widthMm - IOIO_A4.marginMm * 2,
+  heightMm: IOIO_A4.heightMm - IOIO_A4.marginMm * 2 - IOIO_A4.printSafetyMm,
 };
 
 export const IOIO_SHELF_DEFAULT_DIMENSIONS = IOIO_SHELF_PRINT_PRESETS.m;
@@ -166,8 +173,8 @@ export function getIoioPrintDimensionsError(
 
 export function fitsIoioA4Portrait(dimensions: IoioPrintDimensions) {
   return (
-    dimensions.widthMm <= IOIO_A4.widthMm &&
-    dimensions.heightMm <= IOIO_A4.heightMm
+    dimensions.widthMm <= IOIO_A4_PRINTABLE_AREA.widthMm &&
+    dimensions.heightMm <= IOIO_A4_PRINTABLE_AREA.heightMm
   );
 }
 
@@ -205,16 +212,18 @@ export function getIoioA4Capacity(dimensions: IoioPrintDimensions) {
     return { columns: 0, rows: 0, capacity: 0 };
   }
 
+  const printableWidth = IOIO_A4_PRINTABLE_AREA.widthMm;
+  const printableHeight = IOIO_A4_PRINTABLE_AREA.heightMm;
   const columns = Math.max(
     1,
     Math.floor(
-      (IOIO_A4.widthMm + IOIO_A4.gapMm) / (dimensions.widthMm + IOIO_A4.gapMm)
+      (printableWidth + IOIO_A4.gapMm) / (dimensions.widthMm + IOIO_A4.gapMm)
     )
   );
   const rows = Math.max(
     1,
     Math.floor(
-      (IOIO_A4.heightMm + IOIO_A4.gapMm) / (dimensions.heightMm + IOIO_A4.gapMm)
+      (printableHeight + IOIO_A4.gapMm) / (dimensions.heightMm + IOIO_A4.gapMm)
     )
   );
   return { columns, rows, capacity: columns * rows };

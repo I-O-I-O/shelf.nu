@@ -70,10 +70,20 @@ type DraftSummary = {
 
 type QueueDraftHandle = {
   submitIntent: (
-    intent: "validate" | "create"
+    intent: "validate" | "create",
+    formDataSnapshot?: FormData
   ) => Promise<QueueActionData | undefined>;
+  snapshotFormData: () => FormData | undefined;
   readSummary: () => DraftSummary;
 };
+
+function cloneFormData(source: FormData) {
+  const clone = new FormData();
+  for (const [key, value] of source.entries()) {
+    clone.append(key, value);
+  }
+  return clone;
+}
 
 const EMPTY_SUMMARY: DraftSummary = {
   title: "",
@@ -178,7 +188,7 @@ function QueueDraftForm(
   }, [fetcher.data, fetcher.state]);
 
   const submitIntent = useCallback(
-    (intent: "validate" | "create") =>
+    (intent: "validate" | "create", formDataSnapshot?: FormData) =>
       new Promise<QueueActionData | undefined>((resolve) => {
         const form = formRef.current;
         if (!form) {
@@ -186,7 +196,9 @@ function QueueDraftForm(
           return;
         }
 
-        const formData = new FormData(form);
+        const formData = formDataSnapshot
+          ? cloneFormData(formDataSnapshot)
+          : new FormData(form);
         formData.set("assetQueueIntent", intent);
         pendingResolve.current = resolve;
         void fetcher.submit(formData, {
@@ -201,11 +213,16 @@ function QueueDraftForm(
     () => (formRef.current ? readDraftSummary(formRef.current) : EMPTY_SUMMARY),
     []
   );
+  const snapshotFormData = useCallback(
+    () => (formRef.current ? new FormData(formRef.current) : undefined),
+    []
+  );
 
-  useImperativeHandle(ref, () => ({ submitIntent, readSummary }), [
-    readSummary,
-    submitIntent,
-  ]);
+  useImperativeHandle(
+    ref,
+    () => ({ submitIntent, snapshotFormData, readSummary }),
+    [readSummary, snapshotFormData, submitIntent]
+  );
 
   const actionError =
     fetcher.data && "error" in fetcher.data ? fetcher.data.error : undefined;
@@ -355,6 +372,15 @@ export function IoioAssetCreationQueue({
 
   const saveAll = async () => {
     if (savingRef.current || draftIds.length === 0) return;
+    // Keep successful controls in the exact payload used for both validation
+    // and creation. Setting `saving` disables the form inputs; disabled HTML
+    // controls disappear from a later `new FormData(form)` call.
+    const formDataSnapshots = new Map(
+      draftIds.map((draftId) => [
+        draftId,
+        handles.current.get(draftId)?.snapshotFormData(),
+      ])
+    );
     savingRef.current = true;
     setSaving(true);
     setMessage(undefined);
@@ -364,7 +390,7 @@ export function IoioAssetCreationQueue({
     for (const draftId of idsToSave) {
       const result = await handles.current
         .get(draftId)
-        ?.submitIntent("validate");
+        ?.submitIntent("validate", formDataSnapshots.get(draftId));
       if (!result?.assetQueueValidated) {
         setActiveDraftId(draftId);
         setDynamicTitle(summaries[draftId]?.title ?? "");
@@ -377,7 +403,9 @@ export function IoioAssetCreationQueue({
 
     const notices: string[] = [];
     for (const draftId of idsToSave) {
-      const result = await handles.current.get(draftId)?.submitIntent("create");
+      const result = await handles.current
+        .get(draftId)
+        ?.submitIntent("create", formDataSnapshots.get(draftId));
       if (!result?.assetQueueCreated) {
         setActiveDraftId(draftId);
         setDynamicTitle(summaries[draftId]?.title ?? "");

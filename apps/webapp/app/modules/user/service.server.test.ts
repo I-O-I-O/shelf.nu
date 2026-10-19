@@ -59,6 +59,12 @@ vitest.mock("~/database/db.server", () => ({
     userOrganization: {
       upsert: vitest.fn().mockResolvedValue({}),
     },
+    // why: borrowing custody uses Shelf's canonical organization-scoped member
+    // row, and signup tests verify that provisioning stays transactional.
+    teamMember: {
+      findFirst: vitest.fn().mockResolvedValue(null),
+      create: vitest.fn().mockResolvedValue({ id: "member-a" }),
+    },
   },
 }));
 
@@ -473,6 +479,15 @@ describe(createUserOrAttachOrg.name, () => {
 
     expect(result.id).toBe(USER_ID);
     expect(db.userOrganization.upsert).toHaveBeenCalled();
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Existing User",
+          organizationId: ORGANIZATION_ID,
+          userId: USER_ID,
+        },
+      })
+    );
     expect(db.user.create).not.toHaveBeenCalled();
   });
 
@@ -715,6 +730,15 @@ describe(createUser.name, () => {
         }),
       })
     );
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Jane Student",
+          organizationId: "ioio-team-1",
+          userId: USER_ID,
+        },
+      })
+    );
     expect(db.user.update).toHaveBeenCalledWith({
       where: { id: USER_ID },
       data: {
@@ -727,6 +751,28 @@ describe(createUser.name, () => {
       organizationId: "ioio-team-1",
       role: OrganizationRoles.SELF_SERVICE,
     });
+  });
+
+  it("provisions a Shelf team-member row alongside a new organization role", async () => {
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      firstName: "Staff",
+      lastName: "Member",
+      organizationId: ORGANIZATION_ID,
+      roles: [OrganizationRoles.ADMIN],
+    });
+
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Staff Member",
+          organizationId: ORGANIZATION_ID,
+          userId: USER_ID,
+        },
+      })
+    );
   });
 
   it("marks the first IOIO account onboarded after Shelf creates its OWNER Team", async () => {

@@ -208,6 +208,10 @@ describe("IOIO label sizing", () => {
   it("calculates physical A4 scale and batch capacity", () => {
     const scale = getIoioA4PreviewScale({ widthMm: 100, heightMm: 55 });
     const capacity = getIoioA4Capacity({ widthMm: 60, heightMm: 30 });
+    const shelfSheetCapacity = getIoioA4Capacity({
+      widthMm: 90,
+      heightMm: 120,
+    });
     const oversizeCapacity = getIoioA4Capacity({
       widthMm: 240,
       heightMm: 110,
@@ -215,9 +219,12 @@ describe("IOIO label sizing", () => {
 
     expect(scale.widthPercent).toBeCloseTo((100 / IOIO_A4.widthMm) * 100);
     expect(scale.heightPercent).toBeCloseTo((55 / IOIO_A4.heightMm) * 100);
-    expect(capacity).toEqual({ columns: 3, rows: 8, capacity: 24 });
+    expect(capacity).toEqual({ columns: 2, rows: 7, capacity: 14 });
+    expect(shelfSheetCapacity).toEqual({ columns: 2, rows: 2, capacity: 4 });
     expect(oversizeCapacity).toEqual({ columns: 0, rows: 0, capacity: 0 });
-    expect(fitsIoioA4Portrait({ widthMm: 200, heightMm: 110 })).toBe(true);
+    expect(fitsIoioA4Portrait({ widthMm: 190, heightMm: 276 })).toBe(true);
+    expect(fitsIoioA4Portrait({ widthMm: 190, heightMm: 277 })).toBe(false);
+    expect(fitsIoioA4Portrait({ widthMm: 190.1, heightMm: 110 })).toBe(false);
     expect(fitsIoioA4Portrait({ widthMm: 240, heightMm: 110 })).toBe(false);
   });
 
@@ -262,32 +269,43 @@ describe("IOIO label sizing", () => {
     expect(markup).not.toContain("B4-77");
   });
 
-  it("renders Section labels with a colored field and outlined white footer box", () => {
-    const markup = renderIoioLabelSvgMarkup(
-      {
-        ...labelBase,
-        variant: "section",
-        code: "A",
-        title: "SECTION",
-        qrValue: undefined,
-      },
-      { widthMm: 150, heightMm: 210 }
-    );
-    const sectionFooterText = markup.match(
-      /<text x="75" y="[\d.]+"[^>]*font-weight="800" fill="#1565C0"><tspan x="75" y="([\d.]+)">SECTION/u
-    );
+  it.each(["Section A", "Seciton A", "Section B", "Section C"])(
+    "renders %s as a dominant identifier with a white footer box",
+    (sectionName) => {
+      const markup = renderIoioLabelSvgMarkup(
+        {
+          ...labelBase,
+          variant: "section",
+          code: sectionName,
+          title: "SECTION",
+          customText: "Section",
+          qrValue: undefined,
+        },
+        { widthMm: 150, heightMm: 210 }
+      );
+      const sectionFooterText = markup.match(
+        /<text x="75" y="[\d.]+"[^>]*font-weight="800" fill="#1565C0"><tspan x="75" y="([\d.]+)">SECTION/u
+      );
 
-    expect(markup).toContain(
-      '<rect x="0" y="184.8" width="150" height="25.2" fill="#ffffff"/>'
-    );
-    expect(markup).toContain(
-      '<path d="M0.85 184.8H149.15V207.5Q149.15 209.15 147.5 209.15H2.5Q0.85 209.15 0.85 207.5Z" fill="none" stroke="#1565C0" stroke-width="0.9"/>'
-    );
-    expect(sectionFooterText).not.toBeNull();
-    expect(Number(sectionFooterText?.[1])).toBeGreaterThan(184.8);
-    expect(Number(sectionFooterText?.[1])).toBeLessThan(210);
-    expect(markup).toContain(">A</tspan>");
-  });
+      expect(markup).toContain(
+        '<rect x="0" y="184.8" width="150" height="25.2" fill="#ffffff"/>'
+      );
+      expect(markup).toContain(
+        '<path d="M0.85 184.8H149.15V207.5Q149.15 209.15 147.5 209.15H2.5Q0.85 209.15 0.85 207.5Z" fill="none" stroke="#1565C0" stroke-width="0.9"/>'
+      );
+      expect(sectionFooterText).not.toBeNull();
+      expect(Number(sectionFooterText?.[1])).toBeGreaterThan(184.8);
+      expect(Number(sectionFooterText?.[1])).toBeLessThan(210);
+      expect(markup).not.toContain(">Section</tspan>");
+      expect(markup).toContain(`>${sectionName.at(-1)}</tspan>`);
+      const identifierFontSize = Number(
+        markup.match(
+          /font-size="([\d.]+)" font-weight="900" fill="#ffffff"><tspan/u
+        )?.[1]
+      );
+      expect(identifierFontSize).toBeGreaterThan(100);
+    }
+  );
 
   it("renders Shelf labels with an adaptive outlined white footer box", () => {
     const markup = renderIoioLabelSvgMarkup(
@@ -307,6 +325,79 @@ describe("IOIO label sizing", () => {
     expect(shelfText).not.toBeNull();
     expect(Number(shelfText?.[2])).toBeGreaterThan(103.2);
     expect(Number(shelfText?.[2])).toBeLessThan(118);
+  });
+
+  it.each([
+    ["A1", "A1"],
+    ["Shelf A1", "A1"],
+    ["A1 Shelf", "A1"],
+    ["Shelf", "Shelf"],
+  ])(
+    "renders shelf name %s as %s without a redundant heading",
+    (name, expected) => {
+      const markup = renderIoioLabelSvgMarkup(
+        {
+          ...labelBase,
+          variant: "shelf",
+          code: name,
+          title: "SHELF",
+          showTypeLabel: true,
+        },
+        { widthMm: 90, heightMm: 120 }
+      );
+
+      expect(markup).toContain(`>${expected}</tspan>`);
+      expect(markup).toContain(">SHELF</tspan>");
+      if (expected === "A1") {
+        expect(markup).not.toContain(">Shelf</tspan>");
+        expect(markup).not.toContain(">Shelf A1</tspan>");
+      }
+    }
+  );
+
+  it("does not remove shelf when it is part of another word", () => {
+    const markup = renderIoioLabelSvgMarkup(
+      { ...labelBase, variant: "shelf", code: "BookShelf A1" },
+      { widthMm: 90, heightMm: 120 }
+    );
+
+    expect(markup).toContain("BookShelf");
+    expect(markup).toContain(">A1</tspan>");
+  });
+
+  it("scales longer shelf identifiers down while keeping short identifiers dominant", () => {
+    const mainFontSize = (code: string) => {
+      const markup = renderIoioLabelSvgMarkup(
+        { ...labelBase, variant: "shelf", code },
+        { widthMm: 90, heightMm: 120 }
+      );
+      return Number(
+        markup.match(
+          /font-size="([\d.]+)" font-weight="900" fill="#ffffff"><tspan/u
+        )?.[1]
+      );
+    };
+
+    expect(mainFontSize("A1")).toBeGreaterThan(
+      mainFontSize("Equipment Shelf A1 with a Long Identifier")
+    );
+  });
+
+  it("omits the shelf type footer when Show type label is off", () => {
+    const markup = renderIoioLabelSvgMarkup(
+      {
+        ...labelBase,
+        variant: "shelf",
+        code: "Shelf A1",
+        title: "SHELF",
+        showTypeLabel: false,
+      },
+      { widthMm: 90, heightMm: 120 }
+    );
+
+    expect(markup).toContain(">A1</tspan>");
+    expect(markup).not.toContain(">SHELF</tspan>");
+    expect(markup).not.toContain(">Shelf</tspan>");
   });
 
   it("scales Section and Shelf footer typography with physical size", () => {
@@ -441,7 +532,7 @@ describe("IOIO label sizing", () => {
     expect(roomMarkup).toContain("International");
     expect(locationMarkup).toContain("Measurement");
     expect(shelfMarkup).toContain(">SHELF</tspan>");
-    expect(shelfMarkup).toContain(">Shelf A1 with a Long Measurement</tspan>");
+    expect(shelfMarkup).toContain(">A1 with a Long Measurement</tspan>");
     expect(shelfMarkup).toContain(">and Electronics Name</tspan>");
     expect(shelfMarkup).not.toContain("…");
     expect(assetMarkup).toContain(">#001</tspan>");
@@ -473,7 +564,11 @@ describe("IOIO label sizing", () => {
       );
       const mainText = [...markup.matchAll(/<text [^>]*>(.*?)<\/text>/gu)]
         .map(([, content]) => content)
-        .find((content) => content.includes(displayName.split(/\s+/u)[0]));
+        .find((content) =>
+          content
+            .toUpperCase()
+            .includes(displayName.split(/\s+/u)[0].toUpperCase())
+        );
       const lines = [
         ...(mainText ?? "").matchAll(/<tspan[^>]*>(.*?)<\/tspan>/gu),
       ]
@@ -501,7 +596,7 @@ describe("IOIO label sizing", () => {
         ),
         name
       ).toEqual(expectedLines[displayName]);
-      expect(lines, name).toBe(displayName);
+      expect(lines.toUpperCase(), name).toBe(displayName);
       expect(mainText, name).not.toContain("…");
       expect(
         [...mainText!.matchAll(/<tspan /gu)].length,
@@ -703,14 +798,21 @@ describe("IOIO label sizing", () => {
     );
   });
 
-  it("keeps Container identifiers next to a separate QR and omits category text", () => {
+  it("keeps only the identifier and type on Container labels", () => {
     const markup = renderIoioLabelSvgMarkup(
-      { ...labelBase, variant: "box", code: "A1-13", title: "CONTAINER" },
+      {
+        ...labelBase,
+        variant: "box",
+        code: "A1-1.1",
+        title: "Container",
+        customText: "Container",
+      },
       { widthMm: 90, heightMm: 55 }
     );
 
-    expect(markup).toContain(">A1-13</tspan>");
+    expect(markup).toContain(">A1-1.1</tspan>");
     expect(markup).toContain(">CONTAINER</tspan>");
+    expect(markup).not.toContain(">Container</tspan>");
     expect(markup).toContain('data-ioio-qr="true"');
     expect(markup).not.toContain("Boards &amp; Embedded");
   });

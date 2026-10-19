@@ -35,8 +35,6 @@
  * @see {@link file://../../../../packages/database/prisma/migrations/20260519143054_add_asset_location_pivot/migration.sql}
  */
 
-import type { Prisma } from "@prisma/client";
-
 import type { ErrorLabel } from "~/utils/error";
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
@@ -44,18 +42,33 @@ import { Logger } from "~/utils/logger";
 const label: ErrorLabel = "Assets";
 
 /**
- * Minimal client surface this module reads through — the `assetLocation`
- * delegate only. A `Pick` so both the root `db` client and an interactive
- * transaction client satisfy it without a cast, letting callers thread their
- * active `tx` straight in (the reconcile MUST commit with the stock decrease).
+ * Minimal client surface this module reads through — only the manual
+ * placement query and the two writes used by reconciliation. Keeping the
+ * query argument and projection exact lets both the root `db` client and an
+ * interactive transaction client satisfy it while callers thread their active
+ * `tx` straight in (the reconcile MUST commit with the stock decrease).
  */
+type ManualPlacementRecord = {
+  id: string;
+  locationId: string;
+  quantity: number;
+};
+
+/** The exact projection both placement checks read from Prisma. */
+type ManualPlacementQuery = {
+  where: { assetId: string; assetKitId: null };
+  select: { id: true; locationId: true; quantity: true };
+  orderBy?: { createdAt: "asc" };
+};
+
 export type PlacementReconcileTxClient = {
   assetLocation: {
-    findMany: (
-      args: Prisma.AssetLocationFindManyArgs
-    ) => Promise<Array<{ id: string; locationId: string; quantity: number }>>;
-    update: (args: Prisma.AssetLocationUpdateArgs) => Promise<unknown>;
-    delete: (args: Prisma.AssetLocationDeleteArgs) => Promise<unknown>;
+    findMany(args: ManualPlacementQuery): Promise<ManualPlacementRecord[]>;
+    update(args: {
+      where: { id: string };
+      data: { quantity: number };
+    }): Promise<unknown>;
+    delete(args: { where: { id: string } }): Promise<unknown>;
   };
 };
 

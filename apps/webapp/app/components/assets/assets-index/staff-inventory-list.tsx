@@ -66,7 +66,7 @@ import { EmptyState } from "~/components/list/empty-state";
 import { SearchForm } from "~/components/list/filters/search-form";
 import { Pagination } from "~/components/list/pagination";
 import { IoioLocationCascadeSelect } from "~/components/location/ioio-location-cascade-select";
-import { getIoioLocationColor } from "~/components/location/ioio-location-colors";
+import { getEffectiveIoioLocationColor } from "~/components/location/ioio-location-colors";
 import { LocationBadge } from "~/components/location/location-badge";
 import { Badge } from "~/components/shared/badge";
 import { Button } from "~/components/shared/button";
@@ -439,7 +439,7 @@ function StaffInventoryFilters() {
   );
   const selectedLocationCount = searchParams.getAll("location").length;
   const selectedLocationColor = selectedLocation
-    ? getIoioLocationColor({ name: selectedLocation.name })
+    ? getEffectiveIoioLocationColor({ location: selectedLocation, locations })
     : null;
   const clearLocation = useClearValueFromParams("location");
   const hasAdditionalFilters = ["status", "category", "assetKitFilter"].some(

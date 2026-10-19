@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMock = vi.hoisted(() => ({
+  $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
   asset: { findFirst: vi.fn(), findMany: vi.fn() },
   qr: { findFirst: vi.fn() },
   bookingAsset: { findMany: vi.fn() },
@@ -17,7 +19,7 @@ const dbMock = vi.hoisted(() => ({
     updateMany: vi.fn(),
   },
 }));
-const requireStudentReadMock = vi.hoisted(() => vi.fn());
+const requireIoioBorrowerAccessMock = vi.hoisted(() => vi.fn());
 const getIoioAvailabilityMock = vi.hoisted(() => vi.fn());
 const enforceBorrowRateLimitMock = vi.hoisted(() => vi.fn());
 const createBookingMock = vi.hoisted(() => vi.fn());
@@ -31,7 +33,7 @@ vi.mock("~/database/db.server", () => ({ db: dbMock }));
 // why: authorization is supplied as a controlled fixture so these tests can
 // exercise the service's own organization/role checks.
 vi.mock("./route.server", () => ({
-  requireStudentRead: requireStudentReadMock,
+  requireIoioBorrowerAccess: requireIoioBorrowerAccessMock,
 }));
 // why: live availability is a database concern covered by integration tests;
 // unit cases need deterministic available/over-capacity values.
@@ -119,7 +121,11 @@ const to = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 describe("IOIO borrow_item", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    requireStudentReadMock.mockResolvedValue(auth);
+    requireIoioBorrowerAccessMock.mockResolvedValue(auth);
+    dbMock.$transaction.mockImplementation((callback) => callback(dbMock));
+    dbMock.$queryRaw.mockResolvedValue([
+      { id: "membership-a", roles: ["SELF_SERVICE"] },
+    ]);
     dbMock.asset.findFirst.mockResolvedValue(asset);
     dbMock.asset.findMany.mockResolvedValue([]);
     dbMock.ioioArchivedItem.findMany.mockResolvedValue([]);
@@ -883,7 +889,10 @@ describe("IOIO borrow_item", () => {
   });
 
   it("lets Staff borrow approval-required assets directly", async () => {
-    requireStudentReadMock.mockResolvedValue({ ...auth, role: "ADMIN" });
+    requireIoioBorrowerAccessMock.mockResolvedValue({ ...auth, role: "ADMIN" });
+    dbMock.$queryRaw.mockResolvedValue([
+      { id: "membership-a", roles: ["ADMIN"] },
+    ]);
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
       requiresBorrowApproval: true,
@@ -930,38 +939,92 @@ describe("IOIO borrow_item", () => {
       })
     );
     expect(createBookingMock).toHaveBeenCalled();
-  });
-
-  it("creates the missing Shelf team-member mapping for Staff borrowing", async () => {
-    requireStudentReadMock.mockResolvedValue({ ...auth, role: "ADMIN" });
-    dbMock.teamMember.findFirst.mockResolvedValue(null);
-    dbMock.user.findFirst.mockResolvedValue({
-      displayName: "IOIO Staff",
-      firstName: null,
-      lastName: null,
-    });
-    dbMock.teamMember.create.mockResolvedValue({ id: "staff-team-member" });
-
-    await prepareBorrowItem(
-      {
-        asset_id: asset.id,
-        kit_id: null,
-        quantity: 1,
-        from,
-        to,
-      },
-      { context, request }
-    );
-
-    expect(dbMock.teamMember.create).toHaveBeenCalledWith(
+    expect(createBookingMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({
-          name: "IOIO Staff",
-          organization: { connect: { id: auth.organizationId } },
-          user: { connect: { id: auth.userId } },
+        booking: expect.objectContaining({
+          creatorId: auth.userId,
+          custodianUserId: auth.userId,
+          custodianTeamMemberId: "team-a",
+          organizationId: auth.organizationId,
         }),
+        assetIds: [asset.id],
       })
     );
+  });
+
+  it.each([
+    {
+      role: "SELF_SERVICE",
+      name: "IOIO Student",
+      teamMemberId: "student-team-member",
+    },
+    { role: "ADMIN", name: "IOIO Staff", teamMemberId: "staff-team-member" },
+  ])(
+    "creates an authorized $role borrower's missing Shelf team-member mapping",
+    async ({ role, name, teamMemberId }) => {
+      const borrowerAuth = { ...auth, role };
+      requireIoioBorrowerAccessMock.mockResolvedValue(borrowerAuth);
+      dbMock.$queryRaw.mockResolvedValue([
+        { id: "membership-a", roles: [role] },
+      ]);
+      dbMock.teamMember.findFirst.mockResolvedValue(null);
+      dbMock.user.findFirst.mockResolvedValue({
+        displayName: name,
+        firstName: null,
+        lastName: null,
+      });
+      dbMock.teamMember.create.mockResolvedValue({ id: teamMemberId });
+
+      await prepareBorrowItem(
+        {
+          asset_id: asset.id,
+          kit_id: null,
+          quantity: 1,
+          from,
+          to,
+        },
+        { context, request }
+      );
+
+      expect(dbMock.teamMember.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            name,
+            organizationId: auth.organizationId,
+            userId: auth.userId,
+          }),
+        })
+      );
+      expect(dbMock.$queryRaw).toHaveBeenCalled();
+    }
+  );
+
+  it("does not create a borrow mapping for a user whose active membership lacks the role", async () => {
+    dbMock.teamMember.findFirst.mockResolvedValue(null);
+    dbMock.$queryRaw.mockResolvedValue([
+      { id: "membership-a", roles: ["ADMIN"] },
+    ]);
+
+    await expect(
+      prepareBorrowItem(
+        { asset_id: asset.id, kit_id: null, quantity: 1, from, to },
+        { context, request }
+      )
+    ).rejects.toThrow("active workspace membership could not be linked");
+    expect(dbMock.teamMember.create).not.toHaveBeenCalled();
+  });
+
+  it("does not create a borrow mapping when there is no active workspace membership", async () => {
+    dbMock.teamMember.findFirst.mockResolvedValue(null);
+    dbMock.$queryRaw.mockResolvedValue([]);
+
+    await expect(
+      prepareBorrowItem(
+        { asset_id: asset.id, kit_id: null, quantity: 1, from, to },
+        { context, request }
+      )
+    ).rejects.toThrow("active workspace membership could not be linked");
+    expect(dbMock.teamMember.create).not.toHaveBeenCalled();
   });
 
   it("requires an exact QR unit for every individually tracked product", async () => {

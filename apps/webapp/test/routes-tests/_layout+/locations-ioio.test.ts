@@ -116,6 +116,33 @@ function actionArgs(
   } as ActionFunctionArgs;
 }
 
+function getActionErrorMessage(result: unknown): string {
+  if (typeof result !== "object" || result === null || !("data" in result)) {
+    throw new Error("Expected an action data response");
+  }
+
+  const responseData = result.data;
+  if (
+    typeof responseData !== "object" ||
+    responseData === null ||
+    !("error" in responseData)
+  ) {
+    throw new Error("Expected an action error response");
+  }
+
+  const error = responseData.error;
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("message" in error) ||
+    typeof error.message !== "string"
+  ) {
+    throw new Error("Expected an action error message");
+  }
+
+  return error.message;
+}
+
 const locationTree = [
   { id: "room-1", name: "IOIO Lab", parentId: null, color: "#455A64" },
   { id: "section-1", name: "Section A", parentId: "room-1", color: "#1565C0" },
@@ -257,6 +284,7 @@ describe("IOIO Locations routes", () => {
         id: true,
         name: true,
         parentId: true,
+        color: true,
         parent: { select: { parentId: true } },
       },
     });
@@ -355,6 +383,7 @@ describe("IOIO Locations routes", () => {
     formData.set("locationType", "section");
     formData.set("parentId", "room-1");
     formData.set("name", "Section D");
+    formData.set("color", "#1565C0");
     const result = await locationsIndexAction(
       actionArgs("https://example.com/locations", formData)
     );
@@ -365,6 +394,7 @@ describe("IOIO Locations routes", () => {
         id: true,
         name: true,
         parentId: true,
+        color: true,
         parent: { select: { parentId: true } },
       },
     });
@@ -375,12 +405,77 @@ describe("IOIO Locations routes", () => {
       userId: "staff-1",
       organizationId: "org-1",
       parentId: "room-1",
-      color: null,
+      color: "#1565C0",
+      ioioColorType: "section",
     });
     expect(result.data).toMatchObject({
       success: true,
       location: { id: "section-new", name: "Section D", parentId: "room-1" },
     });
+  });
+
+  it("rejects an inline Section color already assigned in the same Room", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab - B477",
+      parentId: null,
+      parent: null,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([
+      {
+        id: "section-1",
+        name: "Section A",
+        parentId: "room-1",
+        color: "#1565C0",
+      },
+    ] as never);
+    const formData = new FormData();
+    formData.set("intent", "inline-create");
+    formData.set("locationType", "section");
+    formData.set("parentId", "room-1");
+    formData.set("name", "Section B");
+    formData.set("color", "#1565C0");
+
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations", formData)
+    );
+
+    expect(createLocationMock).not.toHaveBeenCalled();
+    expect(getActionErrorMessage(result)).toMatch(/already used/u);
+  });
+
+  it("rejects moving a Section into a Room with its color", async () => {
+    findManyLocationsMock
+      .mockResolvedValueOnce([
+        { id: "room-1", name: "Room 1", parentId: null, color: null },
+        { id: "room-2", name: "Room 2", parentId: null, color: null },
+        {
+          id: "section-a",
+          name: "Section A",
+          parentId: "room-1",
+          color: "#1565C0",
+        },
+      ] as never)
+      .mockResolvedValueOnce([
+        {
+          id: "section-b",
+          name: "Section B",
+          parentId: "room-2",
+          color: "#1565C0",
+        },
+      ] as never);
+    const formData = new FormData();
+    formData.set("intent", "move-location");
+    formData.set("locationId", "section-a");
+    formData.set("locationType", "section");
+    formData.set("parentId", "room-2");
+
+    const result = await locationsIndexAction(
+      actionArgs("https://example.com/locations?index", formData)
+    );
+
+    expect(updateLocationMock).not.toHaveBeenCalled();
+    expect(getActionErrorMessage(result)).toMatch(/already used/u);
   });
 
   it("moves the existing location record under the selected organization parent", async () => {
@@ -416,6 +511,7 @@ describe("IOIO Locations routes", () => {
       userId: "staff-1",
       organizationId: "org-1",
       parentId: "room-1",
+      ioioColorType: "section",
     });
     expect(findActiveAssignmentsMock).not.toHaveBeenCalled();
     expect(result.data).toMatchObject({
@@ -508,6 +604,7 @@ describe("IOIO Locations routes", () => {
       formData.set("locationType", locationType);
       formData.set("parentId", parentId ?? "");
       formData.set("name", name);
+      if (locationType === "section") formData.set("color", "#1565C0");
       const result = await locationsIndexAction(
         actionArgs("https://example.com/locations?index", formData)
       );
@@ -519,6 +616,7 @@ describe("IOIO Locations routes", () => {
             id: true,
             name: true,
             parentId: true,
+            color: true,
             parent: { select: { parentId: true } },
           },
         });
@@ -532,7 +630,16 @@ describe("IOIO Locations routes", () => {
         userId: "staff-1",
         organizationId: "org-1",
         parentId,
-        color: locationType === "room" ? "#455A64" : null,
+        color:
+          locationType === "room"
+            ? "#1565C0"
+            : locationType === "section"
+            ? "#1565C0"
+            : null,
+        ioioColorType:
+          locationType === "room" || locationType === "section"
+            ? locationType
+            : undefined,
       });
       expect(result.data).toMatchObject({
         success: true,
@@ -654,7 +761,7 @@ describe("IOIO Locations routes", () => {
     );
   });
 
-  it("creates a child location without persisting a separate color", async () => {
+  it("stores a Section color on the Section record", async () => {
     findFirstLocationMock.mockResolvedValue({
       id: "room-1",
       name: "IOIO Lab",
@@ -684,13 +791,66 @@ describe("IOIO Locations routes", () => {
       userId: "staff-1",
       organizationId: "org-1",
       parentId: "room-1",
-      color: null,
+      color: "#1565C0",
+      ioioColorType: "section",
     });
     expect(result).toBeInstanceOf(Response);
     expect((result as Response).status).toBe(302);
     expect((result as Response).headers.get("Location")).toBe(
       "/locations?selectedLocation=section-new&created=1"
     );
+  });
+
+  it("rejects a duplicate Section color in the full New location action", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab",
+      parentId: null,
+      parent: null,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([
+      {
+        id: "section-1",
+        name: "Section A",
+        parentId: "room-1",
+        color: "#1565C0",
+      },
+    ] as never);
+    const formData = new FormData();
+    formData.set("locationType", "section");
+    formData.set("name", "Section B");
+    formData.set("parentId", "room-1");
+    formData.set("color", "#1565C0");
+
+    const result = await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+    expect(createLocationMock).not.toHaveBeenCalled();
+    expect(getActionErrorMessage(result)).toMatch(/already used/u);
+  });
+
+  it("rejects the effective color of a legacy Section without a stored color", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab",
+      parentId: null,
+      color: "#1565C0",
+      parent: null,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([
+      { id: "legacy", name: "Seciton A", parentId: "room-1", color: null },
+    ] as never);
+    const formData = new FormData();
+    formData.set("locationType", "section");
+    formData.set("name", "Section D");
+    formData.set("parentId", "room-1");
+    formData.set("color", "#1565C0");
+
+    const result = await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+    expect(getActionErrorMessage(result)).toMatch(/Seciton A/u);
+    expect(createLocationMock).not.toHaveBeenCalled();
   });
 
   it("preserves the selected Section as the parent when creating a Shelf", async () => {
@@ -877,7 +1037,7 @@ describe("IOIO Locations routes", () => {
         id: "section-1",
         organizationId: "org-1",
         parentId: "room-1",
-        color: null,
+        color: "#2E7D32",
         name: "Section A updated",
       })
     );
@@ -887,6 +1047,42 @@ describe("IOIO Locations routes", () => {
         organizationId: "org-1",
       })
     );
+  });
+
+  it("rejects a Section edit that takes another Section's color", async () => {
+    getLocationMock.mockResolvedValue({
+      location: { id: "section-1", name: "Section A", parentId: "room-1" },
+    } as never);
+    getLocationsForCreateAndEditMock.mockResolvedValue({
+      locations: locationTree,
+      totalLocations: locationTree.length,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([
+      {
+        id: "section-1",
+        name: "Section A",
+        parentId: "room-1",
+        color: "#1565C0",
+      },
+      {
+        id: "section-2",
+        name: "Section B",
+        parentId: "room-1",
+        color: "#C62828",
+      },
+    ] as never);
+    const formData = new FormData();
+    formData.set("name", "Section A");
+    formData.set("description", "Section description");
+    formData.set("address", "");
+    formData.set("parentId", "room-1");
+    formData.set("color", "#C62828");
+
+    const result = await editLocationAction(
+      actionArgs("https://example.com/locations/section-1/edit", formData)
+    );
+    expect(updateLocationMock).not.toHaveBeenCalled();
+    expect(getActionErrorMessage(result)).toMatch(/already used/u);
   });
 
   it("updates the selected Room theme color", async () => {

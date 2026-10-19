@@ -220,15 +220,11 @@
 
 .ioio-label-a4-paper {
   position: relative;
-  display: grid;
-  grid-template-columns: repeat(
-    var(--ioio-a4-columns, 1),
-    var(--ioio-a4-label-width, 42.86%)
-  );
-  grid-auto-rows: var(--ioio-a4-label-height, 14.48%);
-  column-gap: var(--ioio-a4-gap-x, 2.86%);
-  row-gap: var(--ioio-a4-gap-y, 2.02%);
-  place-content: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ioio-a4-gap-y, 2.02%);
   width: min(100%, 420px);
   aspect-ratio: 210 / 297;
   margin: 0 auto;
@@ -240,8 +236,10 @@
 }
 
 .ioio-a4-label {
-  width: 100%;
-  height: 100%;
+  flex: none;
+  width: var(--ioio-a4-label-width, 42.86%);
+  height: auto;
+  aspect-ratio: var(--ioio-a4-label-aspect, 90 / 120);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -262,13 +260,21 @@
 }
 
 .ioio-label-a4-empty {
-  grid-column: 1 / -1;
   align-self: center;
-  justify-self: center;
+  justify-content: center;
   max-width: 75%;
   color: #657188;
   font-size: 0.875rem;
   text-align: center;
+}
+
+.ioio-label-sheet-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ioio-a4-gap-x, 2.86%);
+  max-width: 100%;
 }
 
 .ioio-label-a4-caption {
@@ -630,12 +636,12 @@
 @media print {
   @page {
     size: A4;
-    margin: 0;
+    margin: 10mm;
   }
 
   html:has(.ioio-label-route-surface),
   body:has(.ioio-label-route-surface) {
-    width: 210mm !important;
+    width: 190mm !important;
     height: auto !important;
     min-height: 0 !important;
     margin: 0 !important;
@@ -647,7 +653,7 @@
 
   #main-content:has(.ioio-label-route-surface) {
     display: block !important;
-    width: 210mm !important;
+    width: 190mm !important;
     height: auto !important;
     max-height: none !important;
     min-height: 0 !important;
@@ -662,7 +668,7 @@
   .ioio-label-preview-column,
   .ioio-label-preview-scroll-area {
     display: block !important;
-    width: 210mm !important;
+    width: 190mm !important;
     height: auto !important;
     max-height: none !important;
     min-height: 0 !important;
@@ -689,7 +695,7 @@
 
   .ioio-label-workspace {
     display: block !important;
-    width: 210mm !important;
+    width: 190mm !important;
     max-width: none !important;
     height: auto !important;
     min-height: 0 !important;
@@ -740,31 +746,31 @@
   }
 
   .ioio-label-sheet {
-    display: grid !important;
-    grid-template-columns: repeat(
-      var(--ioio-print-columns, 1),
-      var(--ioio-print-label-width)
-    );
-    grid-auto-rows: var(--ioio-print-label-height);
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     gap: var(--ioio-label-gap, 6mm) !important;
-    align-content: start;
-    justify-content: start;
     box-sizing: border-box;
-    width: 210mm;
-    height: 297mm;
+    width: 190mm;
+    height: var(--ioio-a4-sheet-height, 276mm);
     min-height: 0;
-    max-height: 297mm;
+    max-height: var(--ioio-a4-sheet-height, 276mm);
     border: 0 !important;
     background: transparent !important;
+    break-inside: avoid-page;
+    page-break-inside: avoid;
+    break-before: auto;
+    page-break-before: auto;
     break-after: auto;
     page-break-after: auto;
   }
 
   .ioio-label-a4-paper {
-    width: 210mm !important;
-    height: 297mm !important;
+    width: 190mm !important;
+    height: var(--ioio-a4-sheet-height, 276mm) !important;
     min-height: 0 !important;
-    max-height: 297mm !important;
+    max-height: var(--ioio-a4-sheet-height, 276mm) !important;
     aspect-ratio: auto;
     box-sizing: border-box;
     border: 0 !important;
@@ -774,7 +780,7 @@
   }
 
   .ioio-label-preview-a4-hidden {
-    display: grid !important;
+    display: flex !important;
   }
 
   .ioio-label-preview-close-up-hidden,
@@ -787,13 +793,16 @@
     display: none;
   }
 
-  .ioio-label-sheet-page {
-    break-after: page;
-    page-break-after: always !important;
-  }
-
   .ioio-label-sheet > * {
     margin-top: 0 !important;
+  }
+
+  .ioio-label-sheet-row {
+    display: flex !important;
+    gap: var(--ioio-label-gap, 6mm) !important;
+    max-width: 190mm;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
   .ioio-print-label {

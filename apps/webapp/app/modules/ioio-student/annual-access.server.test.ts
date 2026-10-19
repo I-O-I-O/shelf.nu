@@ -155,6 +155,43 @@ describe("configurable Student access approval periods", () => {
     expect(dbMock.annualAccessApproval.findMany).not.toHaveBeenCalled();
   });
 
+  it("blocks Student borrowing while the current approval is pending", async () => {
+    dbMock.ioioLabTA.findFirst.mockResolvedValue(null);
+    dbMock.organization.findUnique.mockResolvedValue({
+      accessApprovalRequired: true,
+      accessApprovalRenewalMode: ACCESS_APPROVAL_RENEWAL_MODE.ACADEMIC_YEAR,
+      accessApprovalRenewalMonth: 9,
+      accessApprovalCustomMonths: null,
+      accessApprovalStudentMessage: null,
+    });
+    dbMock.annualAccessApproval.findMany.mockResolvedValue([
+      {
+        id: "approval-pending",
+        status: "PENDING",
+        approvalYear: 2026,
+        requestedAt: new Date("2026-10-01T00:00:00.000Z"),
+        approvedAt: null,
+        validUntil: null,
+        reviewedAt: null,
+        staffComment: null,
+      },
+    ]);
+
+    await expect(
+      assertAnnualAccessApproved({
+        organizationId: "org-1",
+        userId: "student-1",
+        role: "SELF_SERVICE",
+        now: new Date("2026-10-19T12:00:00.000Z"),
+      })
+    ).rejects.toMatchObject({ status: 403 });
+    expect(dbMock.annualAccessApproval.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { organizationId: "org-1", userId: "student-1" },
+      })
+    );
+  });
+
   it("rejects new Student borrowing when required approval has expired", async () => {
     dbMock.ioioLabTA.findFirst.mockResolvedValue(null);
     dbMock.organization.findUnique.mockResolvedValue({
@@ -400,23 +437,23 @@ describe("configurable Student access approval periods", () => {
         }),
       })
     );
-    expect(
-      dbMock.annualAccessApprovalNotification.upsert
-    ).toHaveBeenCalledWith({
-      where: {
-        approvalId_eventAt: {
+    expect(dbMock.annualAccessApprovalNotification.upsert).toHaveBeenCalledWith(
+      {
+        where: {
+          approvalId_eventAt: {
+            approvalId: "approval-1",
+            eventAt: expect.any(Date),
+          },
+        },
+        create: {
+          organizationId: "org-1",
+          userId: "student-1",
           approvalId: "approval-1",
           eventAt: expect.any(Date),
         },
-      },
-      create: {
-        organizationId: "org-1",
-        userId: "student-1",
-        approvalId: "approval-1",
-        eventAt: expect.any(Date),
-      },
-      update: {},
-    });
+        update: {},
+      }
+    );
     expect(dbMock.annualAccessApproval.create).not.toHaveBeenCalled();
   });
 
@@ -451,9 +488,7 @@ describe("configurable Student access approval periods", () => {
       })
     ).resolves.toMatchObject({ approvedCount: 1, failedCount: 0 });
 
-    expect(
-      dbMock.annualAccessApprovalNotification.upsert
-    ).toHaveBeenCalledWith(
+    expect(dbMock.annualAccessApprovalNotification.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
           organizationId: "org-1",
@@ -575,9 +610,7 @@ describe("configurable Student access approval periods", () => {
         }),
       })
     );
-    expect(
-      dbMock.annualAccessApprovalNotification.upsert
-    ).toHaveBeenCalledWith(
+    expect(dbMock.annualAccessApprovalNotification.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
           organizationId: "org-1",

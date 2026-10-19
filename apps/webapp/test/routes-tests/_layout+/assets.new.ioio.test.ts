@@ -79,7 +79,7 @@ function createFormData() {
   formData.set("title", "Test inventory item");
   formData.set("description", "");
   formData.set("category", "category-1");
-  formData.set("newLocationId", "location-1");
+  formData.set("newLocationId", "container-d1-15-id");
   formData.set("type", "QUANTITY_TRACKED");
   formData.set("quantity", "2");
   formData.set("consumptionType", "TWO_WAY");
@@ -153,7 +153,7 @@ describe("IOIO /assets/new route", () => {
         title: "Test inventory item",
         description: "",
         categoryId: "category-1",
-        locationId: "location-1",
+        locationId: "container-d1-15-id",
         type: "QUANTITY_TRACKED",
         quantity: 2,
       })
@@ -191,6 +191,24 @@ describe("IOIO /assets/new route", () => {
     expect(createAsset).not.toHaveBeenCalled();
   });
 
+  it("preserves Shelf's optional-location rule when no Location is selected", async () => {
+    const formData = createFormData();
+    formData.delete("newLocationId");
+    const response = await action(
+      routeArgs(
+        new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: formData,
+        })
+      )
+    );
+
+    expect(createAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ locationId: undefined })
+    );
+    expect(response).toMatchObject({ status: 302 });
+  });
+
   it("creates a queued draft through the existing asset pipeline without redirecting", async () => {
     const formData = createFormData();
     formData.set("assetQueueIntent", "create");
@@ -208,7 +226,7 @@ describe("IOIO /assets/new route", () => {
       expect.objectContaining({
         title: "Test inventory item",
         categoryId: "category-1",
-        locationId: "location-1",
+        locationId: "container-d1-15-id",
         type: "QUANTITY_TRACKED",
         quantity: 2,
       })

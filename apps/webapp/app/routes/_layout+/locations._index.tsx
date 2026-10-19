@@ -8,6 +8,13 @@ import { z } from "zod";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
+import {
+  getFirstAvailableIoioColor,
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+  getUsedIoioRoomColors,
+  getUsedIoioSectionColors,
+} from "~/components/location/ioio-location-colors";
 import { IoioLocationHierarchy } from "~/components/location/ioio-location-hierarchy";
 import { db } from "~/database/db.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
@@ -49,6 +56,7 @@ const inlineCreateSchema = z.object({
     .optional()
     .transform((value) => (value ? value : null)),
   name: z.string().trim().min(1, "A name is required."),
+  color: z.string().optional(),
 });
 
 const moveLocationSchema = z.object({
@@ -156,7 +164,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       );
       const locations = await db.location.findMany({
         where: { organizationId },
-        select: { id: true, name: true, parentId: true },
+        select: { id: true, name: true, parentId: true, color: true },
       });
       const moveError = validateIoioLocationMove({
         locationId,
@@ -177,7 +185,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       const location = locations.find((entry) => entry.id === locationId);
       const siblings = await db.location.findMany({
         where: { organizationId, parentId },
-        select: { id: true, name: true },
+        select: { id: true, name: true, parentId: true, color: true },
       });
       const duplicateName = findDuplicateIoioSiblingName(
         siblings
@@ -195,11 +203,36 @@ export async function action({ context, request }: ActionFunctionArgs) {
         });
       }
 
+      if (locationType === "section" && location?.color) {
+        const colorError = getIoioSectionColorError({
+          color: location.color,
+          locations: [
+            ...siblings,
+            ...locations.filter((entry) => entry.id === parentId),
+          ],
+          parentId,
+          currentLocationId: locationId,
+        });
+        if (colorError) {
+          throw new ShelfError({
+            cause: null,
+            message: `${colorError} Edit the section to choose another color before moving it.`,
+            label: "Location",
+            status: 400,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
       const movedLocation = await updateLocation({
         id: locationId,
         userId,
         organizationId,
         parentId,
+        ioioColorType:
+          locationType === "room" || locationType === "section"
+            ? locationType
+            : undefined,
       });
 
       return data(
@@ -220,7 +253,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       entity: PermissionEntity.location,
       action: PermissionAction.create,
     });
-    const { locationType, parentId, name } = parseData(
+    const { locationType, parentId, name, color } = parseData(
       formData,
       inlineCreateSchema,
       { additionalData: { userId, organizationId } }
@@ -233,6 +266,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
             id: true,
             name: true,
             parentId: true,
+            color: true,
             parent: { select: { parentId: true } },
           },
         })
@@ -260,8 +294,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const siblings = await db.location.findMany({
       where: { organizationId, parentId },
-      select: { name: true },
+      select: { id: true, name: true, parentId: true, color: true },
     });
+    const colorLocations = parent ? [...siblings, parent] : siblings;
     const duplicateName = findDuplicateIoioSiblingName(
       siblings.map(({ name: siblingName }) => siblingName),
       name
@@ -276,6 +311,50 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
+    const selectedColor =
+      locationType === "room"
+        ? color ??
+          getFirstAvailableIoioColor(
+            getUsedIoioRoomColors({ locations: siblings })
+          )
+        : locationType === "section"
+        ? color ??
+          getFirstAvailableIoioColor(
+            getUsedIoioSectionColors({ locations: colorLocations, parentId })
+          )
+        : null;
+    if (locationType === "room") {
+      const colorError = getIoioRoomColorError({
+        color: selectedColor,
+        locations: colorLocations,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+    if (locationType === "section") {
+      const colorError = getIoioSectionColorError({
+        color: selectedColor,
+        locations: colorLocations,
+        parentId,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+
     const location = await createLocation({
       name,
       description: "",
@@ -283,7 +362,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
       userId,
       organizationId,
       parentId,
-      color: locationType === "room" ? "#455A64" : null,
+      color: selectedColor,
+      ioioColorType:
+        locationType === "room" || locationType === "section"
+          ? locationType
+          : undefined,
     });
 
     return data(payload({ success: true, location }));

@@ -70,7 +70,8 @@ export function IoioLocationCreationForm({ locations }: Props) {
   const [parentId, setParentId] = useState<string>();
   const [itemLocationId, setItemLocationId] = useState<string>();
   const [locationName, setLocationName] = useState("");
-  const [roomColor, setRoomColor] = useState("#455A64");
+  const [roomColor, setRoomColor] = useState<string>();
+  const [sectionColor, setSectionColor] = useState<string>();
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [isChoosingRoom, setIsChoosingRoom] = useState(false);
   const navigation = useNavigation();
@@ -105,6 +106,7 @@ export function IoioLocationCreationForm({ locations }: Props) {
   const selectRoom = (nextRoomId?: string) => {
     if (!nextRoomId) return;
     setRoomId(nextRoomId);
+    setSectionColor(undefined);
     // The room is the stable part of this flow. A room change invalidates the
     // old descendants, but it should not make staff choose the operation again.
     setParentId(undefined);
@@ -214,7 +216,9 @@ export function IoioLocationCreationForm({ locations }: Props) {
               name="locationType"
               value={activeCreationType ?? ""}
             />
-            <input type="hidden" name="color" value={derivedColor.color} />
+            {activeCreationType === "section" ? null : (
+              <input type="hidden" name="color" value={derivedColor.color} />
+            )}
 
             {!room ? (
               <div>
@@ -365,6 +369,16 @@ export function IoioLocationCreationForm({ locations }: Props) {
                       required
                       disabled={disabled}
                     />
+
+                    {activeCreationType === "section" ? (
+                      <IoioLocationColorPicker
+                        locations={locations}
+                        parentId={roomId}
+                        value={sectionColor}
+                        locationType="section"
+                        onChange={setSectionColor}
+                      />
+                    ) : null}
 
                     <div>
                       <p className="mb-2 text-sm font-semibold text-gray-900">

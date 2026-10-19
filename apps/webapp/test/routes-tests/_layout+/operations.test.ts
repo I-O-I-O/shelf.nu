@@ -1139,7 +1139,7 @@ describe("Operations loader", () => {
     expect(screen.queryByRole("link", { name: "Review return" })).toBeNull();
   });
 
-  it("offers issue assessment and service removal for a returned issue", () => {
+  it("shows only service resolution actions and the issue report for a returned issue", () => {
     mocks.useLoaderData.mockReturnValue({
       header: { title: "Operations" },
       view: "returned-with-issues",
@@ -1165,6 +1165,122 @@ describe("Operations loader", () => {
           returnToServiceEligible: true,
           assetId: "unit-2",
           href: "/bookings/return-check/return-op-1",
+          borrowerName: "Michael Jordan",
+          returnLocation: "Broken Zone",
+          returnIssue: "jj",
+        },
+      ],
+      annualAccessApprovals: { pending: [], access: [] },
+    });
+
+    render(createElement(OperationsPage));
+
+    expect(screen.queryByRole("link", { name: "Review return" })).toBeNull();
+    expect(screen.getByText("Makey Kit #002")).toBeTruthy();
+    expect(screen.getByText("Michael Jordan")).toBeTruthy();
+    expect(screen.getByText(/Returned .* · Broken Zone/)).toBeTruthy();
+    expect(
+      screen.getByText("Returned with issue · awaiting TA review")
+    ).toBeTruthy();
+    expect(screen.getByText("“jj”")).toBeTruthy();
+
+    const issuePanel = screen.getByText(
+      "Returned with issue · awaiting TA review"
+    ).parentElement;
+    expect(issuePanel?.className).toContain("rounded-xl");
+    const returnToService = screen.getByRole("button", {
+      name: "Return to service",
+    });
+    const removeFromService = screen.getByRole("button", {
+      name: "Remove from service",
+    });
+    expect(returnToService.className).toContain("h-10");
+    expect(returnToService.className).toContain("bg-red-700");
+    expect(removeFromService.className).toContain("h-10");
+    expect(removeFromService.className).toContain("border-red-300");
+    const actionGroup = returnToService.parentElement?.parentElement;
+    expect(actionGroup?.className).toContain("ml-auto");
+    expect(actionGroup?.className).toContain("shrink-0");
+    expect(actionGroup?.className).toContain("items-center");
+    expect(actionGroup?.parentElement?.className).toBe("contents");
+    expect(actionGroup?.parentElement?.parentElement?.className).toContain(
+      "flex-wrap items-center"
+    );
+  });
+
+  it("does not show Review return for returned issues in the combined Lab status view", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "all",
+      summary: {
+        overdue: 0,
+        returns: 0,
+        "returned-with-issues": 1,
+        broken: 0,
+        general: 0,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: [
+        {
+          id: "return-issue-1",
+          kind: "returned-with-issues",
+          title: "Makey Kit #002",
+          detail: "Returned with issue · Student",
+          createdAt: new Date("2026-10-07T10:00:00Z"),
+          operationId: "return-op-1",
+          returnIssueOperationId: "report-op-1",
+          returnToServiceEligible: true,
+          assetId: "unit-2",
+          href: "/bookings/return-check/return-op-1",
+          actionLabel: "Review return",
+          borrowerName: "Michael Jordan",
+          returnLocation: "Broken Zone",
+          returnIssue: "jj",
+        },
+      ],
+      annualAccessApprovals: { pending: [], access: [] },
+    });
+
+    render(createElement(OperationsPage));
+
+    expect(screen.queryByRole("link", { name: "Review return" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Return to service" })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove from service" })
+    ).toBeTruthy();
+  });
+
+  it("keeps Review return for Returns to check items that need manual review", () => {
+    mocks.useLoaderData.mockReturnValue({
+      header: { title: "Operations" },
+      view: "returns",
+      summary: {
+        overdue: 0,
+        returns: 1,
+        "returned-with-issues": 0,
+        broken: 0,
+        "to-prepare": 0,
+        "cancelled-pickups": 0,
+        "ready-for-pickup": 0,
+        "access-approvals": 0,
+      },
+      tasks: [
+        {
+          id: "return-manual-review",
+          kind: "returns",
+          title: "Makey Kit #003",
+          detail: "Return submitted by Michael Jordan",
+          createdAt: new Date("2026-10-19T10:00:00Z"),
+          operationId: "return-op-manual-review",
+          returnCheckEligible: false,
+          quantity: 1,
+          href: "/bookings/return-check/return-op-manual-review",
+          borrowerName: "Michael Jordan",
         },
       ],
       annualAccessApprovals: { pending: [], access: [] },
@@ -1173,12 +1289,6 @@ describe("Operations loader", () => {
     render(createElement(OperationsPage));
 
     expect(screen.getByRole("link", { name: "Review return" })).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "Return to service" })
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "Remove from service" })
-    ).toBeTruthy();
   });
 
   it("shows Mark checked and Remove from service in the bulk toolbar", () => {
@@ -1400,6 +1510,57 @@ describe("Operations loader", () => {
     });
     expect(result).toMatchObject({
       data: { ok: true, intent: "return-to-service" },
+    });
+  });
+
+  it("keeps a returned problem report open until its exact service resolution", async () => {
+    mocks.methods.findFirst
+      .mockResolvedValueOnce({
+        id: "return-1",
+        assetId: "physical-unit-1",
+        bookingAssetId: "booking-asset-1",
+      })
+      .mockResolvedValueOnce({
+        id: "return-report-1",
+        assetId: "physical-unit-1",
+        bookingAssetId: "booking-asset-1",
+        reportType: "ITEM_DAMAGED",
+      });
+
+    const result = await action(
+      createActionArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request(
+          "http://localhost/operations?view=returned-with-issues",
+          {
+            method: "POST",
+            body: new URLSearchParams({
+              intent: "return-issue-to-service",
+              operationId: "return-1",
+              reportOperationId: "return-report-1",
+            }),
+          }
+        ),
+      })
+    );
+
+    expect(mocks.completeSubmittedReturn).toHaveBeenCalledWith(
+      { operationId: "return-1", keepProblemReportOpen: true },
+      expect.objectContaining({
+        auth: { organizationId: "org-1", userId: "staff-1", role: "OWNER" },
+      })
+    );
+    expect(mocks.returnBrokenAssetToService).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      operationId: "return-report-1",
+      staffUserId: "staff-1",
+    });
+    expect(result).toMatchObject({
+      data: {
+        ok: true,
+        intent: "return-issue-to-service",
+        operationId: "return-1",
+      },
     });
   });
 

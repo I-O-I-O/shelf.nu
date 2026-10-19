@@ -11,7 +11,14 @@ import {
   LocationForm,
   NewLocationFormSchema,
 } from "~/components/location/form";
-import { IOIO_LOCATION_COLOR_VALUES } from "~/components/location/ioio-location-colors";
+import {
+  getFirstAvailableIoioColor,
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+  getUsedIoioRoomColors,
+  IOIO_LOCATION_COLOR_VALUES,
+} from "~/components/location/ioio-location-colors";
+import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import {
   getLocation,
@@ -271,19 +278,29 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       locations,
     });
     const submittedColor = formData.get("color");
-    if (
-      locationType === "room" &&
-      typeof submittedColor === "string" &&
-      submittedColor.length > 0 &&
-      !IOIO_LOCATION_COLOR_VALUES.includes(submittedColor)
-    ) {
-      throw new ShelfError({
-        cause: null,
-        message: "Choose a supported room color.",
-        label: "Location",
-        status: 400,
-        shouldBeCaptured: false,
+    if (locationType === "section") {
+      const siblings = await db.location.findMany({
+        where: { organizationId, parentId },
+        select: { id: true, name: true, parentId: true, color: true },
       });
+      const colorError = getIoioSectionColorError({
+        color: typeof submittedColor === "string" ? submittedColor : null,
+        locations: [
+          ...siblings,
+          ...locations.filter((entry) => entry.id === parentId),
+        ],
+        parentId,
+        currentLocationId: id,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
     }
     const color =
       locationType === "room"
@@ -293,8 +310,35 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           : location.color &&
             IOIO_LOCATION_COLOR_VALUES.includes(location.color)
           ? location.color
-          : "#455A64"
+          : getFirstAvailableIoioColor(
+              getUsedIoioRoomColors({
+                locations,
+                currentLocationId: id,
+              })
+            )
+        : locationType === "section"
+        ? (submittedColor as string)
         : null;
+    if (locationType === "room") {
+      const rooms = await db.location.findMany({
+        where: { organizationId, parentId: null },
+        select: { id: true, name: true, parentId: true, color: true },
+      });
+      const colorError = getIoioRoomColorError({
+        color,
+        locations: rooms,
+        currentLocationId: id,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
 
     const updatedLocation = await updateLocation({
       id,
@@ -305,6 +349,10 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       organizationId,
       parentId,
       color,
+      ioioColorType:
+        locationType === "room" || locationType === "section"
+          ? locationType
+          : undefined,
     });
     const hasNewImage =
       formData.get("image") instanceof File &&

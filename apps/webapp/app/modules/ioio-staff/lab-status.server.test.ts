@@ -508,6 +508,7 @@ describe("returnBrokenAssetToService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     database.$transaction.mockImplementation((callback) => callback(database));
+    database.ioioWriteOperation.findMany.mockResolvedValue([]);
     database.ioioWriteOperation.findFirst.mockResolvedValue(null);
     database.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
     database.asset.findFirst.mockResolvedValue({
@@ -559,6 +560,7 @@ describe("returnBrokenAssetToService", () => {
     expect(database.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
+          id: "broken-report-1",
           organizationId: "org-1",
           operationType: "REPORT_PROBLEM",
           status: "SUCCEEDED",
@@ -589,6 +591,175 @@ describe("returnBrokenAssetToService", () => {
         }),
       })
     );
+  });
+
+  it("resolves the reviewed return report but keeps an unrelated open report blocking", async () => {
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id === "return-issue-report"
+          ? {
+              id: "return-issue-report",
+              assetId: "unit-002",
+              reportType: "ITEM_DAMAGED",
+            }
+          : where.operationType === "REPORT_PROBLEM"
+          ? {
+              id: "unrelated-problem-report",
+              assetId: "unit-002",
+              reportType: "ITEM_NOT_WORKING",
+              status: "SUCCEEDED",
+            }
+          : null
+      )
+    );
+
+    await expect(
+      returnBrokenAssetToService({
+        organizationId: "org-1",
+        operationId: "return-issue-report",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+
+    expect(database.ioioWriteOperation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          operationType: "REPORT_PROBLEM",
+          id: { not: "return-issue-report" },
+        }),
+      })
+    );
+    expect(database.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+    expect(database.asset.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps an active loan blocked while resolving a returned issue", async () => {
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id === "return-issue-report"
+          ? {
+              id: "return-issue-report",
+              assetId: "unit-002",
+              reportType: "ITEM_DAMAGED",
+            }
+          : null
+      )
+    );
+    database.bookingAsset.findFirst.mockResolvedValue({ id: "active-loan" });
+
+    await expect(
+      returnBrokenAssetToService({
+        organizationId: "org-1",
+        operationId: "return-issue-report",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+
+    expect(database.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+    expect(database.asset.update).not.toHaveBeenCalled();
+  });
+
+  it("returns a reported unit after its loan ended despite a stale cancelled pickup", async () => {
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id === "returned-issue-report"
+          ? {
+              id: "returned-issue-report",
+              assetId: "unit-002",
+              reportType: "ITEM_DAMAGED",
+            }
+          : where.operationType === "IOIO_PREPARATION" &&
+            where.status.in.includes("CANCELLED_PICKUP")
+          ? { id: "stale-cancelled-pickup" }
+          : null
+      )
+    );
+    database.ioioWriteOperation.findMany.mockResolvedValue([
+      { bookingAssetId: "returned-booking-asset" },
+    ]);
+    database.bookingAsset.findFirst.mockResolvedValue(null);
+
+    await expect(
+      returnBrokenAssetToService({
+        organizationId: "org-1",
+        operationId: "returned-issue-report",
+        staffUserId: "staff-1",
+      })
+    ).resolves.toMatchObject({
+      assetId: "unit-002",
+      status: "AVAILABLE",
+    });
+
+    expect(database.bookingAsset.findFirst).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ["returned-booking-asset"] },
+          assetId: "unit-002",
+          checkedInAt: null,
+          booking: {
+            organizationId: "org-1",
+            status: { in: ["RESERVED", "CANCELLED"] },
+          },
+        }),
+      })
+    );
+    expect(database.asset.update).toHaveBeenCalledWith({
+      where: { id: "unit-002", organizationId: "org-1" },
+      data: { availableToBook: true },
+    });
+  });
+
+  it("keeps a cancelled pickup blocked while its reserved unit is still staged", async () => {
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id === "returned-issue-report"
+          ? {
+              id: "returned-issue-report",
+              assetId: "unit-002",
+              reportType: "ITEM_DAMAGED",
+            }
+          : null
+      )
+    );
+    database.ioioWriteOperation.findMany.mockResolvedValue([
+      { bookingAssetId: "staged-booking-asset" },
+    ]);
+    database.bookingAsset.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.id?.in?.includes("staged-booking-asset")
+          ? { id: "staged-booking-asset" }
+          : null
+      )
+    );
+
+    await expect(
+      returnBrokenAssetToService({
+        organizationId: "org-1",
+        operationId: "returned-issue-report",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+
+    expect(database.bookingAsset.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ["staged-booking-asset"] },
+          checkedInAt: null,
+          booking: {
+            organizationId: "org-1",
+            status: { in: ["RESERVED", "CANCELLED"] },
+          },
+        }),
+      })
+    );
+    expect(database.asset.update).not.toHaveBeenCalled();
   });
 
   it("resolves a broken report while leaving its exact unit unavailable", async () => {
@@ -660,6 +831,73 @@ describe("returnBrokenAssetToService", () => {
       data: { availableToBook: true },
     });
     expect(database.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("returns a checked-in unit despite its historical assigned request", async () => {
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "IOIO_PREPARATION" &&
+          !where.NOT?.source &&
+          where.status.in.includes("ASSIGNED")
+          ? { id: "historical-assigned-request" }
+          : null
+      )
+    );
+
+    await expect(
+      (await import("./lab-status.server")).returnResolvedAssetToService({
+        organizationId: "org-1",
+        assetId: "unit-004",
+        staffUserId: "staff-1",
+      })
+    ).resolves.toMatchObject({ assetId: "unit-004", status: "AVAILABLE" });
+
+    expect(database.ioioWriteOperation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          operationType: "IOIO_PREPARATION",
+          NOT: { source: "IOIO_PREPARATION_REQUEST", status: "ASSIGNED" },
+        }),
+      })
+    );
+    expect(database.asset.update).toHaveBeenCalledWith({
+      where: { id: "unit-004", organizationId: "org-1" },
+      data: { availableToBook: true },
+    });
+  });
+
+  it("keeps an active physical preparation task blocking return to service", async () => {
+    database.asset.findFirst.mockResolvedValue({
+      id: "unit-004",
+      title: "Makey Kit #004",
+      status: "AVAILABLE",
+      availableToBook: false,
+    });
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "IOIO_PREPARATION" &&
+          where.status.in.includes("READY_FOR_PICKUP")
+          ? { id: "active-physical-preparation" }
+          : null
+      )
+    );
+
+    await expect(
+      (await import("./lab-status.server")).returnResolvedAssetToService({
+        organizationId: "org-1",
+        assetId: "unit-004",
+        staffUserId: "staff-1",
+      })
+    ).rejects.toThrow(
+      "Resolve the remaining loan, preparation, report, or archive hold"
+    );
+    expect(database.asset.update).not.toHaveBeenCalled();
   });
 
   it("does not return a unit while another blocking issue remains open", async () => {

@@ -19,6 +19,7 @@ export type IoioLabelData = {
   color: string;
   colorName: string;
   code: string;
+  displayCode?: string;
   title: string;
   subtitle: string;
   customText?: string;
@@ -199,7 +200,7 @@ function wrapSvgText(
   return visibleLines;
 }
 
-function wrapSvgTextWithoutEllipsis(
+function wrapExactLocationName(
   value: string,
   maxWidth: number,
   fontSize: number
@@ -220,6 +221,33 @@ function wrapSvgTextWithoutEllipsis(
 
   if (line) lines.push(line);
   return lines;
+}
+
+function fitExactLocationName(
+  value: string,
+  width: number,
+  height: number,
+  preferredFontSize: number,
+  maxLines: number
+) {
+  let fontSize = preferredFontSize;
+  let lines = wrapExactLocationName(value, width, fontSize);
+
+  for (let pass = 0; pass < 50; pass += 1) {
+    const textHeight =
+      fontSize + Math.max(0, lines.length - 1) * fontSize * 1.08;
+    if (
+      lines.length <= maxLines &&
+      textHeight <= height &&
+      lines.every((line) => measuredSvgTextWidth(line, fontSize) <= width)
+    ) {
+      return { fontSize, lines };
+    }
+    fontSize *= 0.88;
+    lines = wrapExactLocationName(value, width, fontSize);
+  }
+
+  return { fontSize, lines };
 }
 
 export function getIoioLocationIdentifier(
@@ -381,48 +409,6 @@ function fitSvgText(
     lines = wrapSvgText(value, width, fontSize, maxLines);
   }
   return { fontSize, lines };
-}
-
-function fitLocationLabelText(
-  value: string,
-  width: number,
-  height: number,
-  preferredFontSize: number,
-  maxLines: number
-) {
-  const getLayout = (fontSize: number) => {
-    const lines = wrapSvgTextWithoutEllipsis(value, width, fontSize);
-    const textHeight =
-      fontSize + Math.max(0, lines.length - 1) * fontSize * 1.08;
-    const fits =
-      lines.length <= maxLines &&
-      textHeight <= height &&
-      lines.every((line) => measuredSvgTextWidth(line, fontSize) <= width);
-    return { fontSize, lines, fits };
-  };
-
-  const preferred = getLayout(preferredFontSize);
-  if (preferred.fits) return preferred;
-
-  let smallest = getLayout(1.25);
-  if (!smallest.fits) {
-    return fitSvgText(value, width, height, preferredFontSize, maxLines);
-  }
-
-  let low = smallest.fontSize;
-  let high = preferredFontSize;
-  for (let pass = 0; pass < 20; pass += 1) {
-    const middle = (low + high) / 2;
-    const candidate = getLayout(middle);
-    if (candidate.fits) {
-      smallest = candidate;
-      low = middle;
-    } else {
-      high = middle;
-    }
-  }
-
-  return smallest;
 }
 
 function renderKitTextBlock(
@@ -709,19 +695,31 @@ export function renderIoioLabelSvgMarkup(
       clamp(width * 0.052, 4, 8),
       3
     );
+    const sectionText = label.code
+      .replace(/\b(?:section|seciton)\b/giu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    const shelfText = label.code
+      .replace(/\bshelf\b/giu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
     const mainText =
-      variant === "room" ? label.title || label.code : label.code;
+      variant === "section"
+        ? sectionText || label.code
+        : variant === "shelf"
+        ? shelfText || label.code
+        : label.code;
     const mainY = headerHeight + padding * 0.3;
-    const captionHeight = customText ? clamp(height * 0.06, 5, 9) : 0;
+    const captionHeight =
+      variant !== "section" && customText ? clamp(height * 0.06, 5, 9) : 0;
     const mainHeight =
       height - headerHeight - footerHeight - padding * 0.7 - captionHeight;
     const mainWidth = width - padding * 2;
-    const mainFont = fitLocationLabelText(
+    const mainFont = fitExactLocationName(
       mainText,
       mainWidth,
       mainHeight * 0.92,
-      mainHeight *
-        (variant === "section" ? 0.82 : variant === "shelf" ? 0.72 : 0.84),
+      mainHeight * (variant === "section" || variant === "shelf" ? 0.82 : 0.84),
       2
     );
     const mainTextHeight =
@@ -807,6 +805,7 @@ export function renderIoioLabelSvgMarkup(
         fill: "#ffffff",
         fontWeight: 900,
         textAnchor: "middle",
+        normalizeDashes: false,
       })}
       ${renderCustomLabelCaption(
         customText,
@@ -871,7 +870,7 @@ export function renderIoioLabelSvgMarkup(
     primaryText = "";
     secondaryText = "";
   } else if (variant === "box") {
-    primaryText = label.code;
+    primaryText = label.displayCode ?? label.code;
     secondaryText = label.showTypeLabel === false ? "" : "CONTAINER";
   } else if (variant === "item") {
     const unitNumber = label.title.match(/(?:^|\s)(#\d+)\s*$/u)?.[1];
@@ -884,21 +883,37 @@ export function renderIoioLabelSvgMarkup(
     }
   }
 
-  const captionHeight = customText ? clamp(bodyHeight * 0.16, 4, 8) : 0;
+  const captionHeight =
+    variant !== "box" && customText ? clamp(bodyHeight * 0.16, 4, 8) : 0;
   const contentBodyHeight = Math.max(1, bodyHeight - captionHeight);
   const primaryAreaHeight =
     contentBodyHeight *
-    (secondaryText ? (variant === "item" ? 0.5 : 0.62) : 0.76);
+    (secondaryText
+      ? variant === "item"
+        ? 0.5
+        : variant === "box"
+        ? 0.72
+        : 0.62
+      : 0.76);
   const secondaryAreaHeight = secondaryText
     ? contentBodyHeight * (variant === "item" ? 0.34 : 0.18)
     : 0;
-  const primaryFont = fitSvgText(
-    primaryText,
-    textWidth,
-    primaryAreaHeight,
-    bodyHeight * 0.64,
-    2
-  );
+  const isLocationLabel = ["room", "section", "shelf", "box"].includes(variant);
+  const primaryFont = isLocationLabel
+    ? fitExactLocationName(
+        primaryText,
+        textWidth,
+        primaryAreaHeight,
+        bodyHeight * 0.64,
+        4
+      )
+    : fitSvgText(
+        primaryText,
+        textWidth,
+        primaryAreaHeight,
+        bodyHeight * 0.64,
+        2
+      );
   const primaryHeight =
     primaryFont.fontSize +
     Math.max(0, primaryFont.lines.length - 1) * primaryFont.fontSize * 1.08;
@@ -977,15 +992,21 @@ export function renderIoioLabelSvgMarkup(
           )
         : renderSvgTextBlock({
             value: primaryText,
+            lines: primaryFont.lines,
             x: padding + textWidth / 2,
             y: textY,
             width: textWidth,
             height: primaryHeight,
             fontSize: primaryFont.fontSize,
-            maxLines: 2,
+            maxLines: isLocationLabel ? 4 : 2,
             fill: "#0c162d",
             fontWeight: 900,
             textAnchor: "middle",
+            normalizeDashes: ["room", "section", "shelf", "box"].includes(
+              variant
+            )
+              ? false
+              : undefined,
           })
     }
     ${
@@ -1005,7 +1026,7 @@ export function renderIoioLabelSvgMarkup(
         : ""
     }
     ${
-      variant !== "kit"
+      variant !== "kit" && variant !== "box"
         ? renderCustomLabelCaption(
             customText,
             padding,

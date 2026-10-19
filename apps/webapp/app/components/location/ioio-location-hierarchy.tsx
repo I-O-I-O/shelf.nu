@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { ChevronDown, ChevronRight, Plus, Search, X } from "lucide-react";
 import { useFetcher } from "react-router";
 import type { FetcherWithComponents } from "react-router";
+import { IoioLocationColorPicker } from "~/components/location/ioio-location-color-picker";
 import { LocationMoveDialog } from "~/components/location/location-move-dialog";
 import LocationQuickActions from "~/components/location/location-quick-actions";
 import { Button } from "~/components/shared/button";
@@ -171,15 +172,18 @@ function LevelHeader({
 function InlineLocationForm({
   locationType,
   parentId,
+  locations,
   fetcher,
   onCancel,
 }: {
   locationType: CreationType;
   parentId: string | null;
+  locations: IoioLocation[];
   fetcher: FetcherWithComponents<InlineActionData>;
   onCancel: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [selectedColor, setSelectedColor] = useState<string>();
   const busy = fetcher.state !== "idle";
   const label = `${locationType[0]?.toUpperCase()}${locationType.slice(1)}`;
 
@@ -220,6 +224,17 @@ function InlineLocationForm({
         }}
         className="ioio-identifier h-9 min-w-48 flex-1 rounded-md border border-gray-300 bg-white px-3 text-sm text-gray-950 placeholder:text-gray-400 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-100"
       />
+      {locationType === "section" || locationType === "room" ? (
+        <div className="basis-full">
+          <IoioLocationColorPicker
+            locations={locations}
+            parentId={parentId}
+            locationType={locationType}
+            value={selectedColor}
+            onChange={setSelectedColor}
+          />
+        </div>
+      ) : null}
       <Button type="submit" size="sm" disabled={busy}>
         {busy ? "Adding…" : "Add"}
       </Button>
@@ -493,6 +508,7 @@ export function IoioLocationHierarchy({
           }-${lastCreatedLocationId}`}
           locationType={creating.locationType}
           parentId={creating.parentId}
+          locations={locations}
           fetcher={fetcher}
           onCancel={() => setCreating(null)}
         />

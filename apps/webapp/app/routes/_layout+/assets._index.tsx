@@ -10,6 +10,7 @@ import { z } from "zod";
 import { StaffInventoryList } from "~/components/assets/assets-index/staff-inventory-list";
 import { ImportButton } from "~/components/assets/import-button";
 import { NewAssetDropdown } from "~/components/assets/new-asset-dropdown";
+import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import Header from "~/components/layout/header";
 import When from "~/components/when/when";
 import { db } from "~/database/db.server";
@@ -483,27 +484,29 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 export default function AssetIndexPage() {
   const { roles } = useUserRoleHelper();
   const { canImportAssets } = useLoaderData<typeof loader>();
+  const canCreateAssets = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.create,
+  });
 
   return (
     <div className="relative">
       <Header hideQuickFind hidePageDescription />
       <StaffInventoryList
         headerActions={
-          <When
-            truthy={userHasPermission({
-              roles,
-              entity: PermissionEntity.asset,
-              action: PermissionAction.create,
-            })}
-          >
-            <>
+          <>
+            {canCreateAssets ? (
               <ImportButton
                 canImportAssets={canImportAssets}
                 to="/staff/import"
               />
+            ) : null}
+            <InventoryQrScanner audience="staff" />
+            <When truthy={canCreateAssets}>
               <NewAssetDropdown canImportAssets={canImportAssets} />
-            </>
-          </When>
+            </When>
+          </>
         }
         customEmptyStateContent={{
           title: "No assets yet",

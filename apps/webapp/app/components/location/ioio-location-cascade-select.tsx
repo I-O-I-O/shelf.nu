@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Location } from "@prisma/client";
 import type { ModelFilterItem } from "~/hooks/use-model-filters";
 import {
@@ -125,6 +125,18 @@ export function IoioLocationCascadeSelect({
     shelfId: initialPath[2]?.id,
     containerId: initialPath[3]?.id,
   }));
+
+  // A location can be reparented while this form stays mounted. Keep the
+  // visible cascade aligned with the current parent chain for the selected
+  // Location ID; the ID itself remains the submitted value.
+  useEffect(() => {
+    setSelection({
+      roomId: initialPath[0]?.id,
+      sectionId: initialPath[1]?.id,
+      shelfId: initialPath[2]?.id,
+      containerId: initialPath[3]?.id,
+    });
+  }, [initialPath]);
 
   const rooms = useMemo(
     () => locations.filter((location) => !location.parentId),
