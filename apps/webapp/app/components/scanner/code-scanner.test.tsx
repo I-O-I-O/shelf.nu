@@ -57,6 +57,17 @@ let CodeScanner: typeof CodeScannerModule.CodeScanner;
 let handleScannerInputValue: typeof CodeScannerModule.handleScannerInputValue;
 
 const originalNavigator = globalThis.navigator;
+const originalIsSecureContext = Object.getOwnPropertyDescriptor(
+  window,
+  "isSecureContext"
+);
+
+function setIsSecureContext(isSecureContext: boolean) {
+  Object.defineProperty(window, "isSecureContext", {
+    configurable: true,
+    value: isSecureContext,
+  });
+}
 
 beforeAll(async () => {
   const module = await import("~/components/scanner/code-scanner");
@@ -71,6 +82,7 @@ beforeEach(() => {
     ...existingNavigator,
     mediaDevices: {
       enumerateDevices: vi.fn().mockResolvedValue([]),
+      getUserMedia: vi.fn(),
     },
   } as unknown as Navigator;
 
@@ -78,6 +90,7 @@ beforeEach(() => {
     configurable: true,
     value: navigatorWithMediaDevices,
   });
+  setIsSecureContext(true);
 });
 
 afterEach(() => {
@@ -86,6 +99,11 @@ afterEach(() => {
     configurable: true,
     value: originalNavigator,
   });
+  if (originalIsSecureContext) {
+    Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
+  } else {
+    Reflect.deleteProperty(window, "isSecureContext");
+  }
   webcamMockProps.current = null;
 });
 
@@ -229,5 +247,75 @@ describe("CodeScanner", () => {
 
     expect(enumerateDevicesMock).toHaveBeenCalled();
     expect(screen.queryByText(/Camera error/i)).not.toBeInTheDocument();
+  });
+
+  it("shows an HTTPS requirement and skips react-webcam in an insecure context", async () => {
+    setIsSecureContext(false);
+
+    const Scanner = CodeScanner!;
+
+    render(
+      <Scanner
+        onCodeDetectionSuccess={() => {}}
+        paused={false}
+        setPaused={() => {}}
+        forceMode="camera"
+      />
+    );
+
+    expect(
+      await screen.findByText(
+        "Camera scanning requires a secure HTTPS connection."
+      )
+    ).toBeInTheDocument();
+    expect(webcamMockProps.current).toBeNull();
+  });
+
+  it("mounts react-webcam in a secure context with getUserMedia", async () => {
+    const Scanner = CodeScanner!;
+
+    render(
+      <Scanner
+        onCodeDetectionSuccess={() => {}}
+        paused={false}
+        setPaused={() => {}}
+        forceMode="camera"
+      />
+    );
+
+    await waitFor(() => {
+      expect(webcamMockProps.current).toBeTruthy();
+    });
+  });
+
+  it("shows an unsupported-browser message when secure but getUserMedia is missing", async () => {
+    const existingNavigator = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        ...existingNavigator,
+        mediaDevices: {
+          enumerateDevices: vi.fn().mockResolvedValue([]),
+        },
+      },
+    });
+
+    const Scanner = CodeScanner!;
+
+    render(
+      <Scanner
+        onCodeDetectionSuccess={() => {}}
+        paused={false}
+        setPaused={() => {}}
+        forceMode="camera"
+      />
+    );
+
+    expect(
+      await screen.findByText(
+        "Camera scanning is not supported in this browser. Use a supported browser with camera access."
+      )
+    ).toBeInTheDocument();
+    expect(webcamMockProps.current).toBeNull();
   });
 });
