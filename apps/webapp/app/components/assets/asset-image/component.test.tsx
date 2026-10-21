@@ -133,6 +133,33 @@ describe("AssetImage thumbnail resilience", () => {
     );
   });
 
+  it("renders a replacement image after the same asset reloads with new URLs", () => {
+    const { rerender } = render(
+      <AssetImage
+        asset={createAssetNeedingThumbnail({
+          thumbnailImage: "https://storage.example/old-thumbnail.webp",
+          mainImage: "https://storage.example/old.webp",
+        })}
+        alt="Motor"
+      />
+    );
+
+    rerender(
+      <AssetImage
+        asset={createAssetNeedingThumbnail({
+          thumbnailImage: "https://storage.example/replacement-thumbnail.webp",
+          mainImage: "https://storage.example/replacement.webp",
+        })}
+        alt="Motor"
+      />
+    );
+
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      "https://storage.example/replacement-thumbnail.webp"
+    );
+  });
+
   it("uses Shelf's placeholder when the asset and its model have no image", () => {
     render(<AssetImage asset={createAssetWithoutImage()} alt="Motor Small" />);
 

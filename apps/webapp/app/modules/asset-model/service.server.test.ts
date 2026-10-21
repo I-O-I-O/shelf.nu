@@ -383,6 +383,32 @@ describe("getAssetModel", () => {
     });
   });
 
+  it("resolves a replaced canonical image path when the model is loaded again", async () => {
+    const replacementModel = createAssetModelFactory({
+      image: null,
+      thumbnailImage: null,
+      imageStoragePath: "org-123/asset-models/model-1/replacement.webp",
+      thumbnailImageStoragePath:
+        "org-123/asset-models/model-1/replacement-thumbnail.webp",
+    });
+    // why: the database read returns canonical storage paths; the mocked
+    // Supabase public URL builder verifies the read path resolves those fields.
+    // @ts-expect-error mock setup
+    db.assetModel.findFirstOrThrow.mockResolvedValue(replacementModel);
+
+    const result = await getAssetModel({
+      id: "asset-model-123",
+      organizationId: "org-123",
+    });
+
+    expect(result.image).toContain(
+      "/object/public/files/org-123/asset-models/model-1/replacement.webp"
+    );
+    expect(result.thumbnailImage).toContain(
+      "/object/public/files/org-123/asset-models/model-1/replacement-thumbnail.webp"
+    );
+  });
+
   it("throws ShelfError when asset model is not found", async () => {
     // @ts-expect-error mock setup
     db.assetModel.findFirstOrThrow.mockRejectedValue(
@@ -815,9 +841,11 @@ describe("bulkDeleteAssetModels", () => {
 describe("updateAssetModelImage", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue(null);
   });
 
-  it("stores public urls for the image and its thumbnail, scoped to the org", async () => {
+  it("stores the new canonical paths and public urls, scoped to the org", async () => {
     const withImage = new FormData();
     withImage.set(
       "image",
@@ -842,8 +870,63 @@ describe("updateAssetModelImage", () => {
       data: {
         image: expect.stringContaining("abc.jpg"),
         thumbnailImage: expect.stringContaining("abc-thumbnail.jpg"),
+        imageStoragePath: "org-1/asset-models/model-1/abc.jpg",
+        thumbnailImageStoragePath:
+          "org-1/asset-models/model-1/abc-thumbnail.jpg",
       },
     });
+  });
+
+  it("replaces canonical image paths before deleting old storage objects", async () => {
+    const withImage = new FormData();
+    withImage.set(
+      "image",
+      JSON.stringify({
+        originalPath: "org-1/asset-models/model-1/new.webp",
+        thumbnailPath: "org-1/asset-models/model-1/new-thumbnail.webp",
+      })
+    );
+    vitest.mocked(parseFileFormData).mockResolvedValue(withImage);
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue({
+      image:
+        "https://xyz.supabase.co/storage/v1/object/public/files/org-1/asset-models/model-1/old.webp",
+      thumbnailImage:
+        "https://xyz.supabase.co/storage/v1/object/public/files/org-1/asset-models/model-1/old-thumbnail.webp",
+      imageStoragePath: "org-1/asset-models/model-1/old.webp",
+      thumbnailImageStoragePath:
+        "org-1/asset-models/model-1/old-thumbnail.webp",
+    });
+
+    await updateAssetModelImage({
+      request: new Request("http://localhost", { method: "POST" }),
+      assetModelId: "model-1",
+      organizationId: "org-1",
+    });
+
+    expect(db.assetModel.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          imageStoragePath: "org-1/asset-models/model-1/new.webp",
+          thumbnailImageStoragePath:
+            "org-1/asset-models/model-1/new-thumbnail.webp",
+        }),
+      })
+    );
+    expect(removeStorageImageObject).toHaveBeenCalledTimes(2);
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "files",
+      objectPath: "org-1/asset-models/model-1/old.webp",
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "files",
+      objectPath: "org-1/asset-models/model-1/old-thumbnail.webp",
+    });
+    expect(
+      vitest.mocked(db.assetModel.update).mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      vitest.mocked(removeStorageImageObject).mock.invocationCallOrder[0]
+    );
   });
 
   // why: a plain "Save" on the model form posts an empty file input; it must not
@@ -877,6 +960,8 @@ describe("updateAssetModelImage", () => {
       data: {
         image: expect.stringContaining("abc.jpg"),
         thumbnailImage: null,
+        imageStoragePath: "org-1/asset-models/model-1/abc.jpg",
+        thumbnailImageStoragePath: null,
       },
     });
   });

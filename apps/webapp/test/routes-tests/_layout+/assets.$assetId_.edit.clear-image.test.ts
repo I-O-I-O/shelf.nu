@@ -13,10 +13,15 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
+  getAllEntriesForCreateAndEdit,
   getAsset,
   updateAsset,
   updateAssetMainImage,
 } from "~/modules/asset/service.server";
+import {
+  getAssetModel,
+  getAssetModels,
+} from "~/modules/asset-model/service.server";
 
 const dbMock = vi.hoisted(() => ({
   asset: { findFirst: vi.fn(), findMany: vi.fn() },
@@ -26,7 +31,7 @@ const dbMock = vi.hoisted(() => ({
 // delegating each unit update to the asset service.
 vi.mock("~/database/db.server", () => ({ db: dbMock }));
 
-import { action } from "~/routes/_layout+/assets.$assetId_.edit";
+import { action, loader } from "~/routes/_layout+/assets.$assetId_.edit";
 
 // why: the route pulls the whole asset service graph (Prisma client, Supabase
 // storage, permissions); stubbing at the module boundary keeps this a unit test
@@ -216,5 +221,62 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
     expect(updateAsset).toHaveBeenCalledWith(
       expect.not.objectContaining({ mainImage: null })
     );
+  });
+
+  it("returns the reloaded canonical product image in the edit loader", async () => {
+    const replacementImage =
+      "https://xyz.supabase.co/storage/v1/object/public/files/org-1/asset-models/model-1/replacement.webp";
+    vi.mocked(getAsset).mockResolvedValue({
+      id: "asset-1",
+      title: "Makey Kit #001",
+      type: "INDIVIDUAL",
+      assetModelId: "model-1",
+      categoryId: "category-1",
+      assetLocations: [],
+      qrCodes: [],
+      tags: [],
+      customFields: [],
+      assetKits: [],
+    } as never);
+    vi.mocked(getAssetModel).mockResolvedValue({
+      id: "model-1",
+      name: "Makey Kit",
+      image: replacementImage,
+      thumbnailImage: `${replacementImage}?thumb=1`,
+      description: "Kit",
+    } as never);
+    vi.mocked(getAllEntriesForCreateAndEdit).mockResolvedValue({
+      categories: [],
+      totalCategories: 0,
+      tags: [],
+      locations: [],
+      totalLocations: 0,
+    } as never);
+    vi.mocked(getAssetModels).mockResolvedValue({
+      assetModels: [],
+      totalAssetModels: 0,
+    } as never);
+    dbMock.asset.findMany.mockResolvedValue([
+      {
+        id: "asset-1",
+        title: "Makey Kit #001",
+        status: "AVAILABLE",
+        assetLocations: [],
+        qrCodes: [],
+      },
+    ] as never);
+
+    const result = await loader({
+      request: new Request(
+        "http://localhost/assets/asset-1/edit?productGroup=1"
+      ),
+      params: { assetId: "asset-1" },
+      context: { getSession: () => ({ userId: "user-1" }) },
+    } as never);
+
+    if (result instanceof Response) {
+      throw new Error("Expected the edit loader to return its product data");
+    }
+    expect(result.productGroup?.image).toBe(replacementImage);
   });
 });
