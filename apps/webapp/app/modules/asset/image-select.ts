@@ -35,10 +35,18 @@
 /**
  * Spread into an asset `select` alongside `mainImage` / `thumbnailImage`.
  *
- * Two columns off a `LEFT JOIN`-able to-one relation — Prisma batches it into a
- * single `WHERE id IN (...)` round trip per page, and the resulting URLs are
- * public and shared, so N assets of one model render from one cached object.
+ * The legacy URLs and canonical Storage paths off a `LEFT JOIN`-able to-one
+ * relation — Prisma batches it into a single `WHERE id IN (...)` round trip per
+ * page, and the resulting URLs are public and shared, so N assets of one model
+ * render from one cached object.
  */
 export const ASSET_MODEL_IMAGE_SELECT = {
-  assetModel: { select: { image: true, thumbnailImage: true } },
+  assetModel: {
+    select: {
+      image: true,
+      thumbnailImage: true,
+      imageStoragePath: true,
+      thumbnailImageStoragePath: true,
+    },
+  },
 } as const;

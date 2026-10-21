@@ -75,6 +75,13 @@ function renderCompletion() {
   );
 }
 
+function getReportedUnitLabel() {
+  return screen.getByText(
+    (_content, element) =>
+      element?.tagName === "P" && element.textContent?.trim() === "Unit #003"
+  );
+}
+
 describe("IOIO Student report completion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -117,7 +124,7 @@ describe("IOIO Student report completion", () => {
     expect(
       await screen.findByRole("heading", { name: "Makey Kit" })
     ).toBeTruthy();
-    expect(screen.getByText("Unit #003")).toBeTruthy();
+    expect(getReportedUnitLabel()).toBeTruthy();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Thanks for reporting the damaged item. Staff will review it."
     );
@@ -191,7 +198,7 @@ describe("IOIO Student report completion", () => {
     const image = await screen.findByAltText("Image of Makey Kit #003");
     expect(image.getAttribute("src")).toBe(ASSET_IMAGE_PLACEHOLDER);
     expect(image.className).toContain("object-contain");
-    expect(screen.getByText("Unit #003")).toBeTruthy();
+    expect(getReportedUnitLabel()).toBeTruthy();
   });
 
   it("shows the location-specific acknowledgement for Wrong location", async () => {
@@ -215,8 +222,10 @@ describe("IOIO Student report completion", () => {
     expect(
       await screen.findByRole("heading", { name: "Makey Kit" })
     ).toBeTruthy();
-    expect(screen.getByText("Unit #003")).toBeTruthy();
+    expect(getReportedUnitLabel()).toBeTruthy();
     expect(screen.getByText("Reported location")).toBeTruthy();
+    // This is the location recorded with the report, not the item's current
+    // inventory location; keep the report's historical context intact.
     expect(screen.getByText("IOIO Lab - B477 · Container A1-13")).toBeTruthy();
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Thanks for reporting the location issue. Staff will review it."

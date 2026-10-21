@@ -1,6 +1,7 @@
 import {
   buildStaffInventoryDisplayRows,
   deduplicateStaffInventoryRows,
+  findStaffInventoryImageCandidate,
   groupStaffInventoryCandidates,
   getStaffInventoryEditTarget,
   getStaffInventoryActionTargets,
@@ -212,6 +213,43 @@ describe("staff inventory presentation helpers", () => {
       isExpandable: true,
       duplicateRecordCount: 2,
     });
+  });
+
+  it("uses an image-bearing unit when the canonical group member has no image", () => {
+    const imageCandidate = findStaffInventoryImageCandidate([
+      {
+        id: "canonical-unit",
+        title: "Motor Small #001",
+        type: "INDIVIDUAL",
+        mainImage: null,
+        mainImageStoragePath: null,
+        assetModel: { id: "motor-model", name: "Motor Small", image: null },
+      },
+      {
+        id: "pictured-unit",
+        title: "Motor Small #002",
+        type: "INDIVIDUAL",
+        mainImage: "https://storage.example/motor-small.jpg",
+        mainImageStoragePath: "org/assets/motor-small.jpg",
+        assetModel: { id: "motor-model", name: "Motor Small", image: null },
+      },
+    ]);
+
+    expect(imageCandidate?.id).toBe("pictured-unit");
+  });
+
+  it("selects a path-only image before Shelf resolves it to a URL", () => {
+    const imageCandidate = findStaffInventoryImageCandidate([
+      {
+        id: "path-only-unit",
+        title: "Motor Small #001",
+        type: "INDIVIDUAL",
+        mainImage: null,
+        mainImageStoragePath: "org/assets/motor-small.jpg",
+      },
+    ]);
+
+    expect(imageCandidate?.id).toBe("path-only-unit");
   });
 
   it("hides a retired zero-quantity source when active physical units exist", () => {

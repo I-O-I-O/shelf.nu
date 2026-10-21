@@ -13,10 +13,15 @@ import { getIoioCategoryColor } from "~/components/ioio-staff/ioio-category-pres
 import {
   addIoioLabelToQueue,
   clearIoioLabelQueue,
+  readIoioLabelQueue,
+  reconcileIoioLabelQueue,
+  resolveIoioQueuedLocation,
   packIoioLabelsForA4,
   removeIoioLabelFromQueue,
   toggleIoioLabelInQueue,
   type IoioLabelQueueEntry,
+  type IoioLocationLabelType,
+  writeIoioLabelQueue,
 } from "~/components/ioio-staff/ioio-label-queue";
 import {
   fitsIoioA4Portrait,
@@ -470,6 +475,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     return data(
       payload({
         header: { title: "Labels" },
+        organizationId,
         locations,
         appBaseUrl: SERVER_URL,
         assets: orderedAssets,
@@ -494,21 +500,24 @@ function getPath(id: string, locationsById: Map<string, LocationRecord>) {
   const path: LocationRecord[] = [];
   const seen = new Set<string>();
   let current = locationsById.get(id);
-  while (current && !seen.has(current.id)) {
+  while (current) {
+    if (seen.has(current.id)) return [];
     seen.add(current.id);
     path.unshift(current);
-    current = current.parentId
-      ? locationsById.get(current.parentId)
-      : undefined;
+    if (!current.parentId) break;
+    current = locationsById.get(current.parentId);
+    if (!current) return [];
   }
   return path;
 }
 
 function locationLevel(path: LocationRecord[]) {
-  if (path.length <= 1) return "room" as const;
+  if (path.length === 0) return null;
+  if (path.length === 1) return "room" as const;
   if (path.length === 2) return "section" as const;
   if (path.length === 3) return "shelf" as const;
-  return "container" as const;
+  if (path.length >= 4) return "container" as const;
+  return null;
 }
 
 export function makeLocationLabel(
@@ -518,7 +527,7 @@ export function makeLocationLabel(
   appBaseUrl: string
 ): IoioLabelData {
   const path = getPath(location.id, locationsById);
-  const actualLevel = locationLevel(path);
+  const actualLevel = locationLevel(path) ?? "room";
   const level = overrideLevel ?? actualLevel;
   const roomHeader = path[0]
     ? formatIoioRoomHeader(path[0].name)
@@ -693,6 +702,7 @@ function locationOptionLabel(location: LocationRecord, isRoom = false) {
 
 export default function LabelsPage() {
   const {
+    organizationId,
     locations,
     appBaseUrl,
     initialLocationIds,
@@ -706,12 +716,20 @@ export default function LabelsPage() {
     () => new Map(locations.map((location) => [location.id, location])),
     [locations]
   );
+  const currentLocationTypes = useMemo(
+    () =>
+      new Map<string, IoioLocationLabelType | null>(
+        locations.map((location) => [
+          location.id,
+          locationLevel(getPath(location.id, locationsById)),
+        ])
+      ),
+    [locations, locationsById]
+  );
   const initialPath = initialLocationIds[0]
     ? getPath(initialLocationIds[0], locationsById)
     : [];
-  const initialLocationType = initialPath.length
-    ? locationLevel(initialPath)
-    : "shelf";
+  const initialLocationType = locationLevel(initialPath) ?? "shelf";
   const requestedInitialLabelType: LabelType = item
     ? item.kind === "asset"
       ? "item"
@@ -744,7 +762,7 @@ export default function LabelsPage() {
   const [sectionId, setSectionId] = useState(initialPath[1]?.id ?? "");
   const [shelfId, setShelfId] = useState(initialPath[2]?.id ?? "");
   const [containerId, setContainerId] = useState(initialPath[3]?.id ?? "");
-  const [labelQueue, setLabelQueue] = useState<IoioLabelQueueEntry[]>(() => {
+  const initialLabelQueue = useMemo(() => {
     const queued = new Map<string, IoioLabelQueueEntry>();
     const add = (entry: IoioLabelQueueEntry) => queued.set(entry.id, entry);
 
@@ -769,7 +787,51 @@ export default function LabelsPage() {
       add({ type: item.kind === "kit" ? "kit" : "item", id: item.id });
     }
     return [...queued.values()];
-  });
+  }, [
+    assets,
+    initialItemIds,
+    initialLocationIds,
+    initialLocationLabelLevel,
+    item,
+    locationsById,
+  ]);
+  const [labelQueue, setLabelQueue] =
+    useState<IoioLabelQueueEntry[]>(initialLabelQueue);
+  const [labelQueueReadyOrganizationId, setLabelQueueReadyOrganizationId] =
+    useState<string | null>(null);
+  const hydratedQueueOrganizationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const organizationChanged =
+      hydratedQueueOrganizationIdRef.current !== organizationId;
+
+    setLabelQueue((current) => {
+      const queue = organizationChanged
+        ? readIoioLabelQueue(window.localStorage, organizationId).reduce(
+            (restored, entry) => addIoioLabelToQueue(restored, entry),
+            initialLabelQueue
+          )
+        : current;
+
+      return reconcileIoioLabelQueue(queue, currentLocationTypes);
+    });
+    hydratedQueueOrganizationIdRef.current = organizationId;
+    setLabelQueueReadyOrganizationId(organizationId);
+  }, [currentLocationTypes, initialLabelQueue, organizationId]);
+
+  useEffect(() => {
+    if (labelQueueReadyOrganizationId !== organizationId) return;
+    writeIoioLabelQueue(
+      window.localStorage,
+      organizationId,
+      reconcileIoioLabelQueue(labelQueue, currentLocationTypes)
+    );
+  }, [
+    currentLocationTypes,
+    labelQueue,
+    labelQueueReadyOrganizationId,
+    organizationId,
+  ]);
   const [selectedKitSourceId, setSelectedKitSourceId] = useState(
     item?.kind === "kit" ? item.productId ?? item.id : ""
   );
@@ -929,6 +991,25 @@ export default function LabelsPage() {
       : labelType === "shelf"
       ? shelves
       : boxes;
+
+  useEffect(() => {
+    const path = [containerId, shelfId, sectionId, roomId]
+      .filter(Boolean)
+      .map((id) => getPath(id, locationsById))
+      .find((candidate) => candidate.length > 0);
+    const nextIds = {
+      roomId: path?.[0]?.id ?? "",
+      sectionId: path?.[1]?.id ?? "",
+      shelfId: path?.[2]?.id ?? "",
+      containerId: path?.[3]?.id ?? "",
+    };
+
+    if (roomId !== nextIds.roomId) setRoomId(nextIds.roomId);
+    if (sectionId !== nextIds.sectionId) setSectionId(nextIds.sectionId);
+    if (shelfId !== nextIds.shelfId) setShelfId(nextIds.shelfId);
+    if (containerId !== nextIds.containerId)
+      setContainerId(nextIds.containerId);
+  }, [containerId, locationsById, roomId, sectionId, shelfId]);
   const filteredItems = allItems
     .filter((candidate) => candidate.kind === "asset")
     .filter((candidate) =>
@@ -995,15 +1076,19 @@ export default function LabelsPage() {
           entry.type === "shelf" ||
           entry.type === "container"
         ) {
-          const location = locationsById.get(entry.id);
-          return location
+          const resolvedLocation = resolveIoioQueuedLocation(
+            entry,
+            locationsById,
+            currentLocationTypes
+          );
+          return resolvedLocation
             ? [
                 {
                   entry,
                   label: makeLocationLabel(
-                    location,
+                    resolvedLocation.location,
                     locationsById,
-                    entry.type,
+                    resolvedLocation.type,
                     appBaseUrl
                   ),
                 },
@@ -1020,7 +1105,7 @@ export default function LabelsPage() {
           ? [{ entry, label: makeItemLabel(candidate, locationsById) }]
           : [];
       }),
-    [allItems, appBaseUrl, labelQueue, locationsById]
+    [allItems, appBaseUrl, currentLocationTypes, labelQueue, locationsById]
   );
 
   const normalizedCustomText = normalizeIoioCustomLabelText(labelCustomText);

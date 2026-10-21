@@ -129,7 +129,14 @@ describe("/api/assets", () => {
           thumbnailImage: true,
           // The model's cover image is selected so the loader can resolve the
           // image cascade server-side (see `serializeAssetImage`).
-          assetModel: { select: { image: true, thumbnailImage: true } },
+          assetModel: {
+            select: {
+              image: true,
+              thumbnailImage: true,
+              imageStoragePath: true,
+              thumbnailImageStoragePath: true,
+            },
+          },
         },
         orderBy: {
           title: "asc",
@@ -216,7 +223,14 @@ describe("/api/assets", () => {
           thumbnailImage: true,
           // The model's cover image is selected so the loader can resolve the
           // image cascade server-side (see `serializeAssetImage`).
-          assetModel: { select: { image: true, thumbnailImage: true } },
+          assetModel: {
+            select: {
+              image: true,
+              thumbnailImage: true,
+              imageStoragePath: true,
+              thumbnailImageStoragePath: true,
+            },
+          },
         },
         orderBy: {
           title: "asc",
@@ -252,7 +266,14 @@ describe("/api/assets", () => {
           thumbnailImage: true,
           // The model's cover image is selected so the loader can resolve the
           // image cascade server-side (see `serializeAssetImage`).
-          assetModel: { select: { image: true, thumbnailImage: true } },
+          assetModel: {
+            select: {
+              image: true,
+              thumbnailImage: true,
+              imageStoragePath: true,
+              thumbnailImageStoragePath: true,
+            },
+          },
         },
         orderBy: {
           title: "asc",
@@ -293,7 +314,14 @@ describe("/api/assets", () => {
           thumbnailImage: true,
           // The model's cover image is selected so the loader can resolve the
           // image cascade server-side (see `serializeAssetImage`).
-          assetModel: { select: { image: true, thumbnailImage: true } },
+          assetModel: {
+            select: {
+              image: true,
+              thumbnailImage: true,
+              imageStoragePath: true,
+              thumbnailImageStoragePath: true,
+            },
+          },
         },
         orderBy: {
           title: "asc",
@@ -417,7 +445,14 @@ describe("/api/assets", () => {
             thumbnailImage: true,
             // The model's cover image is selected so the loader can resolve
             // the image cascade server-side (see `serializeAssetImage`).
-            assetModel: { select: { image: true, thumbnailImage: true } },
+            assetModel: {
+              select: {
+                image: true,
+                thumbnailImage: true,
+                imageStoragePath: true,
+                thumbnailImageStoragePath: true,
+              },
+            },
           },
         })
       );

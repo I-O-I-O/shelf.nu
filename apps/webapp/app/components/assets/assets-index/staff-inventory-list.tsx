@@ -89,6 +89,7 @@ import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import {
   buildStaffInventoryDisplayRows,
+  findStaffInventoryImageCandidate,
   getStaffInventoryActionTargets,
   getStaffInventoryEditTarget,
   type StaffInventoryDisplayRow,
@@ -737,6 +738,7 @@ function StaffInventoryRow({
   const location = getPrimaryLocation(item);
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
+  const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
   const [expanded, setExpanded] = useState(false);
   const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
     string[]
@@ -763,12 +765,12 @@ function StaffInventoryRow({
           <div className="flex items-center gap-3">
             <AssetImage
               asset={{
-                id: item.id,
-                mainImage: item.mainImage,
-                thumbnailImage: item.thumbnailImage,
-                mainImageExpiration: item.mainImageExpiration,
-                assetModel: item.assetModel ?? null,
-                kitImage: item.assetKits?.[0]?.kit?.image ?? null,
+                id: imageItem.id,
+                mainImage: imageItem.mainImage,
+                thumbnailImage: imageItem.thumbnailImage,
+                mainImageExpiration: imageItem.mainImageExpiration,
+                assetModel: imageItem.assetModel ?? null,
+                kitImage: imageItem.assetKits?.[0]?.kit?.image ?? null,
               }}
               alt={`Image of ${item.logicalTitle}`}
               useThumbnail={false}
@@ -1496,6 +1498,7 @@ function StaffInventoryMobileRow({
   const location = getPrimaryLocation(item);
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
+  const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
   const [expanded, setExpanded] = useState(false);
   const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
     string[]
@@ -1519,12 +1522,12 @@ function StaffInventoryMobileRow({
         />
         <AssetImage
           asset={{
-            id: item.id,
-            mainImage: item.mainImage,
-            thumbnailImage: item.thumbnailImage,
-            mainImageExpiration: item.mainImageExpiration,
-            assetModel: item.assetModel ?? null,
-            kitImage: item.assetKits?.[0]?.kit?.image ?? null,
+            id: imageItem.id,
+            mainImage: imageItem.mainImage,
+            thumbnailImage: imageItem.thumbnailImage,
+            mainImageExpiration: imageItem.mainImageExpiration,
+            assetModel: imageItem.assetModel ?? null,
+            kitImage: imageItem.assetKits?.[0]?.kit?.image ?? null,
           }}
           alt={`Image of ${item.logicalTitle}`}
           useThumbnail={false}

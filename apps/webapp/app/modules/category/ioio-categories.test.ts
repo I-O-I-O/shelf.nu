@@ -5,23 +5,27 @@ import {
 } from "./ioio-categories";
 
 describe("IOIO initial category defaults", () => {
-  it("defines the 11 recommended categories in the requested order", () => {
+  it("defines the recommended lab inventory categories in the requested order", () => {
     expect(IOIO_INITIAL_CATEGORY_DEFAULTS.map(({ name }) => name)).toEqual([
       "Electronics",
-      "Computers & accessories",
-      "Audio & video",
-      "Tools & machinery",
-      "Prototyping & making",
-      "Cables & adapters",
-      "Furniture",
-      "Office equipment",
-      "Supplies & consumables",
-      "Safety equipment",
+      "Motors & Actuators",
+      "Sensors",
+      "Computing",
+      "Power & Batteries",
+      "Cables & Adapters",
+      "Mechanical",
+      "Tools",
+      "Prototyping",
       "Other",
     ]);
     expect(
       IOIO_INITIAL_CATEGORY_DEFAULTS.map(({ name }) => name)
     ).not.toContain("Kits");
+
+    const normalizedNames = IOIO_INITIAL_CATEGORY_DEFAULTS.map(({ name }) =>
+      name.trim().toLocaleLowerCase("en")
+    );
+    expect(new Set(normalizedNames).size).toBe(normalizedNames.length);
   });
 
   it("keeps the requested order for the untouched database default set", () => {

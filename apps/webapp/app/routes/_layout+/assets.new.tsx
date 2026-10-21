@@ -141,7 +141,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         organizationId,
         request,
         tagUseFor: TagUseFor.ASSET,
-        includeAllLocations: true,
+        includeAllLocations: false,
       }),
       getActiveCustomFields({
         organizationId,

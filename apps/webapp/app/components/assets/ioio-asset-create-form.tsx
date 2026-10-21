@@ -71,8 +71,7 @@ import Input from "../forms/input";
 import { RefererRedirectInput } from "../forms/referer-redirect-input";
 import InlineEntityCreationDialog from "../inline-entity-creation-dialog/inline-entity-creation-dialog";
 import { IoioImagePicker } from "../ioio/ioio-image-picker";
-import { IoioLocationCascadeSelect } from "../location/ioio-location-cascade-select";
-import type { IoioLocationOption } from "../location/ioio-location-cascade-select";
+import { LocationSelect } from "../location/location-select";
 import { Button } from "../shared/button";
 import { ButtonGroup } from "../shared/button-group";
 import { Card } from "../shared/card";
@@ -200,7 +199,6 @@ export type IoioAssetFormLoaderData = {
       "id" | "name" | "helpText" | "required" | "type" | "options" | "active"
     >
   >;
-  locations: IoioLocationOption[];
   assetModels?: Array<
     Pick<
       AssetModel,
@@ -360,11 +358,8 @@ export const IoioAssetCreateForm = ({
 }: Props) => {
   const navigation = useNavigation();
   const navigate = useNavigate();
-  const {
-    customFields: loaderCustomFields,
-    locations,
-    assetModels,
-  } = useLoaderData<IoioAssetFormLoaderData>();
+  const { customFields: loaderCustomFields, assetModels } =
+    useLoaderData<IoioAssetFormLoaderData>();
   const formCustomFields =
     assetQueueMode && assetQueueCustomFields
       ? assetQueueCustomFields
@@ -1546,7 +1541,7 @@ export const IoioAssetCreateForm = ({
             </div>
           </When>
 
-          <FormRow rowLabel="Main image" className="pt-[10px]">
+          <FormRow rowLabel="Main image (optional)" className="pt-[10px]">
             <input
               type="hidden"
               name="clearMainImage"
@@ -1689,7 +1684,9 @@ export const IoioAssetCreateForm = ({
             rowLabel="Location"
             subHeading={
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-600">
-                <span>Choose a room, section, then shelf.</span>
+                <span>
+                  Search and select a room, section, shelf, or container.
+                </span>
                 <Button
                   to="/locations/new"
                   className="text-gray-600 underline"
@@ -1708,17 +1705,18 @@ export const IoioAssetCreateForm = ({
                 location here moves all active physical units there.
               </p>
             ) : null}
-            <input
-              type="hidden"
-              name="currentLocationId"
-              value={locationId || ""}
-            />
-            <IoioLocationCascadeSelect
-              locations={locations}
-              value={locationId}
-              fieldName="newLocationId"
+            <LocationSelect
+              isBulk={false}
+              locationId={locationId}
+              placeholder={
+                productGroup?.locationIsMixed
+                  ? "Multiple locations"
+                  : "Without location"
+              }
+              hideCurrentLocationInput={!id}
+              hideExtraContent
               disabled={disabled}
-              showQuickLocation
+              forceServerSearch
             />
           </FormRow>
 

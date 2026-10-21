@@ -52,7 +52,7 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
   sendNotification: vi.fn(),
 }));
 
-import { updateAsset } from "~/modules/asset/service.server";
+import { getAsset, updateAsset } from "~/modules/asset/service.server";
 import { requirePermission } from "~/utils/roles.server";
 
 /**
@@ -91,6 +91,7 @@ function updateAssetPayload() {
 describe("assets.$assetId_.edit — barcodes without the add-on", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getAsset).mockResolvedValue({ assetKits: [] } as never);
     vi.mocked(updateAsset).mockResolvedValue({
       id: "asset-1",
       title: "An asset",

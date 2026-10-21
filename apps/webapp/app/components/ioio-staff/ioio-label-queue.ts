@@ -17,6 +17,80 @@ export type IoioLabelQueueEntry = {
   id: string;
 };
 
+export type IoioLocationLabelType = Extract<
+  IoioQueuedLabelType,
+  "room" | "section" | "shelf" | "container"
+>;
+
+type IoioLabelQueueStorage = Pick<Storage, "getItem" | "setItem">;
+
+const LOCATION_LABEL_TYPES = new Set<IoioQueuedLabelType>([
+  "room",
+  "section",
+  "shelf",
+  "container",
+]);
+const QUEUED_LABEL_TYPES = new Set<IoioQueuedLabelType>([
+  ...LOCATION_LABEL_TYPES,
+  "item",
+  "kit",
+]);
+
+export function getIoioLabelQueueStorageKey(organizationId: string) {
+  return `ioio-label-queue:v1:${organizationId}`;
+}
+
+/** Read only canonical IDs and label types; names and other label data stay live. */
+export function readIoioLabelQueue(
+  storage: IoioLabelQueueStorage,
+  organizationId: string
+) {
+  try {
+    const value = storage.getItem(getIoioLabelQueueStorageKey(organizationId));
+    if (!value) return [];
+
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.reduce<IoioLabelQueueEntry[]>((queue, candidate) => {
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        "type" in candidate &&
+        typeof candidate.type === "string" &&
+        QUEUED_LABEL_TYPES.has(candidate.type as IoioQueuedLabelType) &&
+        "id" in candidate &&
+        typeof candidate.id === "string" &&
+        candidate.id.length > 0
+      ) {
+        return addIoioLabelToQueue(queue, {
+          type: candidate.type as IoioQueuedLabelType,
+          id: candidate.id,
+        });
+      }
+      return queue;
+    }, []);
+  } catch {
+    return [];
+  }
+}
+
+export function writeIoioLabelQueue(
+  storage: IoioLabelQueueStorage,
+  organizationId: string,
+  queue: IoioLabelQueueEntry[]
+) {
+  try {
+    storage.setItem(
+      getIoioLabelQueueStorageKey(organizationId),
+      JSON.stringify(queue)
+    );
+  } catch {
+    // Storage can be unavailable in restricted browser contexts. The in-page
+    // queue remains usable even when persistence cannot be written.
+  }
+}
+
 export type IoioSizedLabel<T> = {
   value: T;
   dimensions: IoioPrintDimensions;
@@ -53,6 +127,35 @@ export function removeIoioLabelFromQueue(
 
 export function clearIoioLabelQueue(queue: IoioLabelQueueEntry[]) {
   return queue.length === 0 ? queue : [];
+}
+
+/** Drop missing/broken location paths and update queued level after reparenting. */
+export function reconcileIoioLabelQueue(
+  queue: IoioLabelQueueEntry[],
+  currentLocationTypes: ReadonlyMap<string, IoioLocationLabelType | null>
+) {
+  return queue.reduce<IoioLabelQueueEntry[]>((reconciled, entry) => {
+    if (!LOCATION_LABEL_TYPES.has(entry.type)) {
+      return addIoioLabelToQueue(reconciled, entry);
+    }
+
+    const currentType = currentLocationTypes.get(entry.id);
+    if (!currentType) return reconciled;
+    return addIoioLabelToQueue(reconciled, { type: currentType, id: entry.id });
+  }, []);
+}
+
+/** Returns the current Shelf row, never a label snapshot from queue storage. */
+export function resolveIoioQueuedLocation<T extends { id: string }>(
+  entry: IoioLabelQueueEntry,
+  locationsById: ReadonlyMap<string, T>,
+  currentLocationTypes: ReadonlyMap<string, IoioLocationLabelType | null>
+) {
+  if (!LOCATION_LABEL_TYPES.has(entry.type)) return undefined;
+
+  const type = currentLocationTypes.get(entry.id);
+  const location = locationsById.get(entry.id);
+  return type && location ? { location, type } : undefined;
 }
 
 export function toggleIoioLabelInQueue(

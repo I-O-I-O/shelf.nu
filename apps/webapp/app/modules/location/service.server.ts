@@ -49,6 +49,7 @@ import {
   removePublicFile,
   removePublicFiles,
 } from "~/utils/storage.server";
+import { MAX_LOCATION_HIERARCHY_DEPTH } from "./picker-select.server";
 import {
   formatLocationLink,
   buildAssetListMarkup,
@@ -73,7 +74,7 @@ import { createNote } from "../note/service.server";
 import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Location";
-const MAX_LOCATION_DEPTH = 12;
+const MAX_LOCATION_DEPTH = MAX_LOCATION_HIERARCHY_DEPTH;
 
 type IoioLocationColorTransaction = {
   $queryRaw<T = unknown>(

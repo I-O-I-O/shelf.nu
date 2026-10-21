@@ -28,6 +28,31 @@ export type StaffInventoryCandidateGroup<T extends StaffInventoryCandidate> =
 export type StaffInventoryDisplayRow<T extends StaffInventoryCandidate> =
   InventoryDisplayRow<T>;
 
+type StaffInventoryImageCandidate = {
+  id: string;
+  mainImage?: string | null;
+  mainImageStoragePath?: string | null;
+  assetModel?: {
+    image?: string | null;
+    imageStoragePath?: string | null;
+  } | null;
+};
+
+/** Find the first asset in a logical product group that has an image. */
+export function findStaffInventoryImageCandidate<
+  T extends StaffInventoryImageCandidate,
+>(candidates: readonly T[]): T | null {
+  return (
+    candidates.find(
+      (candidate) =>
+        candidate.mainImage ||
+        candidate.mainImageStoragePath ||
+        candidate.assetModel?.image ||
+        candidate.assetModel?.imageStoragePath
+    ) ?? null
+  );
+}
+
 /** Open grouped products in the standard Asset editor's product-level mode. */
 export function getStaffInventoryEditTarget({
   assetId,

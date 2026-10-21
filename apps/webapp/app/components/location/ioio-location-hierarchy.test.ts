@@ -12,10 +12,10 @@ function location(
   return {
     id: name,
     name,
-    parentId: parent ? `parent-${parent.name}` : null,
+    parentId: parent?.name ?? null,
     parent: parent
       ? {
-          id: `parent-${parent.name}`,
+          id: parent.name,
           name: parent.name,
           parentId: parent.parentId,
           _count: { children: 0 },

@@ -32,6 +32,7 @@ import {
   createSignedUrl,
   parseFileFormData,
   removeStorageImageObject,
+  resolveStorageImageUrl,
 } from "~/utils/storage.server";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
 import {
@@ -60,6 +61,7 @@ import {
   parseAssetValuation,
   placeUnplacedUnits,
   refreshExpiredAssetImages,
+  resolveAssetImagesForPresentation,
   releaseQuantity,
   replaceAssetPlacements,
   relinkAssetQrCode,
@@ -336,6 +338,9 @@ vitest.mock("~/utils/storage.server", async () => {
   return {
     ...actual,
     createSignedUrl: vitest.fn(),
+    // why: return deterministic URLs while testing the resolver's path/legacy
+    // field selection without making a Supabase Storage request.
+    resolveStorageImageUrl: vitest.fn(),
     // why: exercise the asset image DB write and failure cleanup without
     // sending this service unit test through the separate Storage HTTP tests.
     parseFileFormData: vitest.fn(),
@@ -1223,6 +1228,48 @@ describe("refreshExpiredAssetImages", () => {
     expect(result[0].mainImage).toBe("https://new-signed-url.com");
 
     await vi.waitFor(() => expect(mockUpdateMany).toHaveBeenCalled());
+  });
+});
+
+describe("resolveAssetImagesForPresentation", () => {
+  const mockResolveStorageImageUrl = resolveStorageImageUrl as ReturnType<
+    typeof vitest.fn
+  >;
+
+  beforeEach(() => {
+    mockResolveStorageImageUrl.mockImplementation(
+      ({ bucketName, objectPath, legacyUrl }) =>
+        Promise.resolve(
+          objectPath ? `${bucketName}:${objectPath}` : legacyUrl ?? null
+        )
+    );
+  });
+
+  it("resolves path-only asset and model images through Shelf Storage URLs", async () => {
+    const [asset] = await resolveAssetImagesForPresentation([
+      {
+        id: "asset-1",
+        mainImage: null,
+        thumbnailImage: null,
+        mainImageStoragePath: "org/assets/motor-small.jpg",
+        thumbnailImageStoragePath: "org/assets/motor-small-thumb.jpg",
+        assetModel: {
+          image: null,
+          thumbnailImage: null,
+          imageStoragePath: "org/models/motor-small.jpg",
+          thumbnailImageStoragePath: "org/models/motor-small-thumb.jpg",
+        },
+      },
+    ]);
+
+    expect(asset.mainImage).toBe("assets:org/assets/motor-small.jpg");
+    expect(asset.thumbnailImage).toBe(
+      "assets:org/assets/motor-small-thumb.jpg"
+    );
+    expect(asset.assetModel?.image).toBe("files:org/models/motor-small.jpg");
+    expect(asset.assetModel?.thumbnailImage).toBe(
+      "files:org/models/motor-small-thumb.jpg"
+    );
   });
 });
 
@@ -6267,14 +6314,11 @@ describe("bulkUpdateAssetLocation — location activity notes", () => {
     vitest.clearAllMocks();
   });
 
-  it("names only the assets the update actually moved", async () => {
-    // A QUANTITY_TRACKED asset is skipped by this path (placements need a
-    // per-location quantity), so the location's timeline must not claim it
-    // arrived. Asserted through the note, which is the only place a reader
-    // ever sees this list.
-    // why: the selection under test — one INDIVIDUAL and one
-    // QUANTITY_TRACKED asset is the only shape that separates "selected" from
-    // "actually moved", which is what the note is asserted on.
+  it("names individual and quantity-pool assets whose locations were moved", async () => {
+    // Quantity-pool moves update each placement with its per-location count;
+    // both tracking types should appear in the location activity notes.
+    // why: the mixed tracking fixture exercises the two canonical placement
+    // paths while keeping the note assertion focused on what actually moved.
     (db.asset.findMany as ReturnType<typeof vitest.fn>).mockResolvedValue([
       {
         id: "asset-individual",
@@ -6334,11 +6378,9 @@ describe("bulkUpdateAssetLocation — location activity notes", () => {
       createSystemLocationNote as ReturnType<typeof vitest.fn>
     ).mock.calls.map((c) => (c[0] as { content: string }).content);
 
-    expect(contents.length).toBeGreaterThan(0);
-    for (const content of contents) {
-      expect(content).toContain("asset-individual");
-      expect(content).not.toContain("asset-qty");
-    }
+    const allContents = contents.join(" ");
+    expect(allContents).toContain("asset-individual");
+    expect(allContents).toContain("asset-qty");
   });
 });
 

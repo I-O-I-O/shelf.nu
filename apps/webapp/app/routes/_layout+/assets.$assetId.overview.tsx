@@ -88,11 +88,15 @@ import {
   moveAssetLocationUnits,
   parseAssetValuation,
   placeUnplacedUnits,
+  resolveAssetImagesForPresentation,
   setIndividualAssetAvailability,
   updateAsset,
   updateAssetBookingAvailability,
 } from "~/modules/asset/service.server";
-import { getStaffInventoryEditTarget } from "~/modules/asset/staff-inventory-view";
+import {
+  findStaffInventoryImageCandidate,
+  getStaffInventoryEditTarget,
+} from "~/modules/asset/staff-inventory-view";
 import type { ShelfAssetCustomFieldValueType } from "~/modules/asset/types";
 import {
   getPrimaryKit,
@@ -284,6 +288,17 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             },
           })
         : [];
+    const individualProductImageCandidate =
+      individualProductUnits.length > 1
+        ? findStaffInventoryImageCandidate(individualProductUnits)
+        : null;
+    const individualProductImage = individualProductImageCandidate
+      ? (
+          await resolveAssetImagesForPresentation([
+            individualProductImageCandidate,
+          ])
+        )[0]
+      : null;
     const individualUnitIds = individualProductUnits.map((unit) => unit.id);
     const [individualAvailability, physicalUnitOperations] = await Promise.all([
       individualUnitIds.length
@@ -405,10 +420,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         ? {
             total: individualProductUnits.length,
             available: individualAvailability.available,
-            image:
-              individualProductUnits.find(
-                (unit) => unit.mainImage || unit.thumbnailImage
-              ) ?? null,
+            image: individualProductImage,
           }
         : null;
 

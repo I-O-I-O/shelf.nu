@@ -82,6 +82,7 @@ import {
 } from "~/modules/custom-field/service.server";
 import type { CustomFieldDraftPayload } from "~/modules/custom-field/types";
 import { bulkAssignKitCustody } from "~/modules/kit/service.server";
+import { LOCATION_PICKER_INCLUDE } from "~/modules/location/picker-select.server";
 import {
   createLocationChangeNote,
   createLocationsIfNotExists,
@@ -5888,7 +5889,7 @@ export async function getAllEntriesForCreateAndEdit({
     location?: string | null;
   };
   tagUseFor?: TagUseFor;
-  /** Load the full location tree for the shared Staff asset form cascade. */
+  /** Load every location only for callers that need a complete local list. */
   includeAllLocations?: boolean;
 }) {
   const searchParams = getCurrentSearchParams(request);
@@ -10436,9 +10437,11 @@ export async function getLocationsForCreateAndEdit({
           where: { organizationId, id: { not: locationSelected } },
           take:
             includeAll || getAllEntries.includes("location") ? undefined : 12,
+          include: LOCATION_PICKER_INCLUDE,
         }),
         db.location.findMany({
           where: { organizationId, id: locationSelected },
+          include: LOCATION_PICKER_INCLUDE,
         }),
         db.location.count({ where: { organizationId } }),
       ]);

@@ -309,7 +309,10 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             : getPrimaryLocation(asset)?.id ?? null,
         },
         tagUseFor: TagUseFor.ASSET,
-        includeAllLocations: true,
+        // Edit uses Shelf's searchable LocationSelect, so seed only its normal
+        // selected row + first page. Searches must read current DB records
+        // instead of keeping the entire location tree in client state.
+        includeAllLocations: false,
       }),
       getAssetModels({ organizationId, page: 1, perPage: 100 }),
     ]);
@@ -841,7 +844,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     /** Extract barcode data from form */
     const barcodes = canUseBarcodes
       ? extractBarcodesFromFormData(formData)
-      : [];
+      : undefined;
 
     /**
      * A kit-linked asset cannot receive a second manual placement when it is

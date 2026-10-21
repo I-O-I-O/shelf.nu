@@ -189,7 +189,14 @@ describe("/api/kits", () => {
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
                   // image cascade server-side (see `serializeAssetImage`).
-                  assetModel: { select: { image: true, thumbnailImage: true } },
+                  assetModel: {
+                    select: {
+                      image: true,
+                      thumbnailImage: true,
+                      imageStoragePath: true,
+                      thumbnailImageStoragePath: true,
+                    },
+                  },
                   category: {
                     select: {
                       name: true,
@@ -295,7 +302,14 @@ describe("/api/kits", () => {
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
                   // image cascade server-side (see `serializeAssetImage`).
-                  assetModel: { select: { image: true, thumbnailImage: true } },
+                  assetModel: {
+                    select: {
+                      image: true,
+                      thumbnailImage: true,
+                      imageStoragePath: true,
+                      thumbnailImageStoragePath: true,
+                    },
+                  },
                   category: {
                     select: {
                       name: true,
@@ -350,7 +364,14 @@ describe("/api/kits", () => {
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
                   // image cascade server-side (see `serializeAssetImage`).
-                  assetModel: { select: { image: true, thumbnailImage: true } },
+                  assetModel: {
+                    select: {
+                      image: true,
+                      thumbnailImage: true,
+                      imageStoragePath: true,
+                      thumbnailImageStoragePath: true,
+                    },
+                  },
                   category: {
                     select: {
                       name: true,
@@ -410,7 +431,14 @@ describe("/api/kits", () => {
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
                   // image cascade server-side (see `serializeAssetImage`).
-                  assetModel: { select: { image: true, thumbnailImage: true } },
+                  assetModel: {
+                    select: {
+                      image: true,
+                      thumbnailImage: true,
+                      imageStoragePath: true,
+                      thumbnailImageStoragePath: true,
+                    },
+                  },
                   category: {
                     select: {
                       name: true,

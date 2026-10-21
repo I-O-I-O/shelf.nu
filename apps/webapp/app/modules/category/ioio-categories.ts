@@ -10,61 +10,56 @@ export const IOIO_INITIAL_CATEGORY_DEFAULTS: readonly IoioCategoryDefinition[] =
     {
       name: "Electronics",
       description:
-        "Arduino boards, sensors, electronic components, power supplies and similar equipment.",
+        "Electronic components, circuit boards and other general electronic equipment.",
       color: "#2563eb",
     },
     {
-      name: "Computers & accessories",
+      name: "Motors & Actuators",
       description:
-        "Computers, monitors, keyboards, mice, hubs and related computer equipment.",
+        "Motors, servos, actuators and equipment used to create movement.",
       color: "#4338ca",
     },
     {
-      name: "Audio & video",
+      name: "Sensors",
       description:
-        "Cameras, microphones, speakers, projectors and other media equipment.",
+        "Sensors and modules used to measure or detect physical conditions.",
       color: "#7c3aed",
     },
     {
-      name: "Tools & machinery",
+      name: "Computing",
       description:
-        "Hand tools, power tools, soldering equipment and workshop machinery.",
+        "Computers, microcontrollers, single-board computers and accessories.",
       color: "#b45309",
     },
     {
-      name: "Prototyping & making",
+      name: "Power & Batteries",
       description:
-        "Equipment and materials used for prototyping, physical computing and making.",
+        "Batteries, power supplies, chargers and power management equipment.",
       color: "#ea580c",
     },
     {
-      name: "Cables & adapters",
+      name: "Cables & Adapters",
       description:
         "Power, USB, HDMI, Ethernet and other cables, chargers and adapters.",
       color: "#0f766e",
     },
     {
-      name: "Furniture",
-      description: "Tables, chairs, shelves, cabinets and other lab furniture.",
+      name: "Mechanical",
+      description:
+        "Mechanical parts, structural components and fabrication materials.",
       color: "#65a30d",
     },
     {
-      name: "Office equipment",
+      name: "Tools",
       description:
-        "Printers, scanners, label makers and general office equipment.",
+        "Hand tools, power tools and equipment used to build or repair items.",
       color: "#64748b",
     },
     {
-      name: "Supplies & consumables",
+      name: "Prototyping",
       description:
-        "Items intended to be consumed or replaced, such as paper, tape, batteries and filament.",
+        "Prototyping kits, development boards and materials used to make early designs.",
       color: "#ca8a04",
-    },
-    {
-      name: "Safety equipment",
-      description:
-        "Protective and safety-related equipment such as goggles, gloves and first-aid items.",
-      color: "#dc2626",
     },
     {
       name: "Other",

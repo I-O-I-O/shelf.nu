@@ -183,7 +183,14 @@ export const getAssetOverviewFields = (canUseBarcodes: boolean = false) => {
     assetKits: {
       select: {
         quantity: true,
-        kit: { select: { id: true, name: true, status: true } },
+        kit: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            image: true,
+          },
+        },
       },
     },
     bookingAssets: {
@@ -261,6 +268,14 @@ export const assetIndexFields = ({
     // its own. Two columns off a batched to-one relation read; every
     // inheriting asset on the page then shares one public, cacheable URL.
     ...ASSET_MODEL_IMAGE_SELECT,
+    // The staff inventory actions also use the linked model id as the edit
+    // target for general items.
+    assetModel: {
+      select: {
+        id: true,
+        ...ASSET_MODEL_IMAGE_SELECT.assetModel.select,
+      },
+    },
     assetLocations: ASSET_LOCATIONS_INCLUDE,
     custody: {
       // Ordered so `getPrimaryCustody` picks the same row every time;

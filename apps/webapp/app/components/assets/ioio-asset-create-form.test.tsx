@@ -40,8 +40,26 @@ vi.mock("~/components/ioio/ioio-image-picker", () => ({
     <input aria-label="Main image upload" name={name} type="file" />
   ),
 }));
-vi.mock("~/components/location/ioio-location-cascade-select", () => ({
-  IoioLocationCascadeSelect: () => <div aria-label="Location selector" />,
+vi.mock("../location/location-select", () => ({
+  LocationSelect: ({
+    locationId,
+    forceServerSearch,
+    hideCurrentLocationInput,
+    disabled,
+  }: {
+    locationId?: string | null;
+    forceServerSearch?: boolean;
+    hideCurrentLocationInput?: boolean;
+    disabled?: boolean;
+  }) => (
+    <div
+      aria-label="Shelf location selector"
+      data-location-id={locationId ?? ""}
+      data-force-server-search={String(forceServerSearch)}
+      data-hide-current-location-input={String(hideCurrentLocationInput)}
+      data-disabled={String(disabled)}
+    />
+  ),
 }));
 vi.mock("~/components/forms/referer-redirect-input", () => ({
   RefererRedirectInput: () => null,
@@ -92,14 +110,23 @@ describe("IOIO asset creation form", () => {
       })
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Quantity")).toBeInTheDocument();
+    expect(screen.getByText("Main image (optional)")).toBeInTheDocument();
     expect(screen.getByLabelText("Main image upload")).toHaveAttribute(
       "name",
       "mainImage"
     );
+    expect(screen.getByLabelText("Main image upload")).not.toBeRequired();
     expect(
       screen.getByRole("button", { name: "Category" })
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Location selector")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-force-server-search",
+      "true"
+    );
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-hide-current-location-input",
+      "true"
+    );
     expect(screen.getByText("Advanced options")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Save" })).toHaveLength(1);
     expect(screen.getAllByRole("link", { name: "Cancel" })).toHaveLength(1);
@@ -110,6 +137,35 @@ describe("IOIO asset creation form", () => {
     expect(screen.getAllByRole("button", { name: "Add another" })).toHaveLength(
       1
     );
+  });
+
+  it("uses Shelf's searchable selector with the current location when editing", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Makey Kit"
+        locationId="container-1"
+        showAssetModel={false}
+      />
+    );
+
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-location-id",
+      "container-1"
+    );
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-force-server-search",
+      "true"
+    );
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-hide-current-location-input",
+      "false"
+    );
+    expect(
+      screen.getByText(
+        "Search and select a room, section, shelf, or container."
+      )
+    ).toBeInTheDocument();
   });
 
   it("keeps expanded advanced options inside the fluid queue form card", () => {

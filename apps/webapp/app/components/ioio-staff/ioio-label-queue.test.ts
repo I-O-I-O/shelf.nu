@@ -2,12 +2,30 @@ import { describe, expect, it } from "vitest";
 import {
   addIoioLabelToQueue,
   clearIoioLabelQueue,
+  getIoioLabelQueueStorageKey,
+  readIoioLabelQueue,
+  reconcileIoioLabelQueue,
+  resolveIoioQueuedLocation,
   packIoioLabelsForA4,
   removeIoioLabelFromQueue,
   toggleIoioLabelInQueue,
   type IoioSizedLabel,
+  writeIoioLabelQueue,
 } from "./ioio-label-queue";
 import { IOIO_A4, IOIO_A4_PRINTABLE_AREA } from "./ioio-label-sizing";
+
+function createMemoryStorage() {
+  // why: this browser storage adapter makes persistence deterministic without
+  // sharing the test runner's localStorage between tests.
+  const values = new Map<string, string>();
+  return {
+    values,
+    storage: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    },
+  };
+}
 
 describe("IOIO label print queue", () => {
   it("accumulates selections across label types without duplicates", () => {
@@ -38,6 +56,124 @@ describe("IOIO label print queue", () => {
     ).toEqual([queue[0], queue[2]]);
     expect(toggleIoioLabelInQueue(queue, queue[0])).toEqual(queue.slice(1));
     expect(clearIoioLabelQueue(queue)).toEqual([]);
+  });
+
+  it("restores a valid queued location after reload", () => {
+    const { storage } = createMemoryStorage();
+    const queue = [{ type: "section" as const, id: "section-a" }];
+    const currentLocationTypes = new Map([
+      ["room-a", "room" as const],
+      ["section-a", "section" as const],
+    ]);
+
+    writeIoioLabelQueue(storage, "org-a", queue);
+
+    expect(getIoioLabelQueueStorageKey("org-a")).toBe(
+      "ioio-label-queue:v1:org-a"
+    );
+    expect(
+      reconcileIoioLabelQueue(
+        readIoioLabelQueue(storage, "org-a"),
+        currentLocationTypes
+      )
+    ).toEqual(queue);
+  });
+
+  it("prunes deleted locations and updates a queued level after reparenting", () => {
+    const queue = [
+      { type: "section" as const, id: "moved-location" },
+      { type: "container" as const, id: "deleted-location" },
+      { type: "shelf" as const, id: "broken-path" },
+    ];
+    const currentLocationTypes = new Map([
+      ["room-a", "room" as const],
+      ["section-a", "section" as const],
+      ["moved-location", "shelf" as const],
+      ["broken-path", null],
+    ]);
+
+    expect(reconcileIoioLabelQueue(queue, currentLocationTypes)).toEqual([
+      { type: "shelf", id: "moved-location" },
+    ]);
+  });
+
+  it("resolves renamed queued locations from current Shelf data", () => {
+    const { storage } = createMemoryStorage();
+    const queued = [{ type: "section" as const, id: "section-a" }];
+    writeIoioLabelQueue(storage, "org-a", queued);
+    const currentSection = {
+      id: "section-a",
+      name: "Renamed Section",
+      parentId: "room-a",
+      color: "#345678",
+    };
+    const currentLocationTypes = new Map([
+      ["room-a", "room" as const],
+      ["section-a", "section" as const],
+    ]);
+
+    const resolved = resolveIoioQueuedLocation(
+      readIoioLabelQueue(storage, "org-a")[0],
+      new Map([[currentSection.id, currentSection]]),
+      currentLocationTypes
+    );
+
+    expect(resolved).toEqual({ location: currentSection, type: "section" });
+  });
+
+  it("does not resolve a queued location with a missing hierarchy path", () => {
+    const queue = [{ type: "container" as const, id: "orphaned" }];
+    const locationsById = new Map([
+      [
+        "orphaned",
+        {
+          id: "orphaned",
+          name: "Old Container",
+          parentId: "deleted-shelf",
+        },
+      ],
+    ]);
+    const currentLocationTypes = new Map([["orphaned", null]]);
+
+    expect(
+      resolveIoioQueuedLocation(queue[0], locationsById, currentLocationTypes)
+    ).toBeUndefined();
+  });
+
+  it("keeps valid queue entries that are hidden by the current UI filter", () => {
+    const queue = [
+      { type: "shelf" as const, id: "shelf-a" },
+      { type: "shelf" as const, id: "shelf-b" },
+    ];
+    const allCurrentLocationTypes = new Map([
+      ["room-a", "room" as const],
+      ["section-a", "section" as const],
+      ["shelf-a", "shelf" as const],
+      ["shelf-b", "shelf" as const],
+    ]);
+    const visibleInCurrentFilter = new Set(["shelf-a"]);
+
+    expect(visibleInCurrentFilter.has("shelf-b")).toBe(false);
+    expect(reconcileIoioLabelQueue(queue, allCurrentLocationTypes)).toEqual(
+      queue
+    );
+  });
+
+  it("deduplicates persisted entries by canonical ID", () => {
+    const { storage, values } = createMemoryStorage();
+    values.set(
+      getIoioLabelQueueStorageKey("org-a"),
+      JSON.stringify([
+        { type: "section", id: "same-id" },
+        { type: "container", id: "same-id" },
+        { type: "shelf", id: "shelf-a" },
+      ])
+    );
+
+    expect(readIoioLabelQueue(storage, "org-a")).toEqual([
+      { type: "section", id: "same-id" },
+      { type: "shelf", id: "shelf-a" },
+    ]);
   });
 });
 

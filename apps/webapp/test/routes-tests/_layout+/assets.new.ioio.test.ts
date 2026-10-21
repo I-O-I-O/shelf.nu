@@ -126,7 +126,7 @@ describe("IOIO /assets/new route", () => {
       })
     );
     expect(getAllEntriesForCreateAndEdit).toHaveBeenCalledWith(
-      expect.objectContaining({ includeAllLocations: true })
+      expect.objectContaining({ includeAllLocations: false })
     );
     expect(result).toMatchObject({
       categories: [],

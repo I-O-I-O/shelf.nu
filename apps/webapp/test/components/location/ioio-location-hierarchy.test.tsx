@@ -570,6 +570,7 @@ describe("IOIO Location Explorer", () => {
         locationType: type,
         parentId: parentId ?? "",
         name,
+        ...(type === "room" || type === "section" ? { color: "#1565C0" } : {}),
       });
       const formAction = new URL(form!.action);
       expect(formAction.pathname).toBe("/locations");

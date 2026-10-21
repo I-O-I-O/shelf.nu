@@ -71,6 +71,22 @@ describe("DynamicSelect", () => {
   });
 
   describe("Basic rendering and selection (backwards compatibility)", () => {
+    it("passes forced server search through to the model filter hook", () => {
+      render(
+        <DynamicSelect
+          model={{ name: "location", queryKey: "name" }}
+          initialDataKey="locations"
+          countKey="totalLocations"
+          contentLabel="Locations"
+          forceServerSearch
+        />
+      );
+
+      expect(mockUseModelFilters).toHaveBeenCalledWith(
+        expect.objectContaining({ forceServerSearch: true })
+      );
+    });
+
     it("renders without withoutValueItem prop", () => {
       render(
         <DynamicSelect

@@ -21,6 +21,28 @@ type IsNotBulk = {
 
 type BulkProps = IsBulk | IsNotBulk;
 
+type LocationHierarchyItem = {
+  name: string;
+  parent?: LocationHierarchyItem | null;
+};
+
+/** Returns a root-to-leaf path from Shelf's parent relation. */
+export function getLocationHierarchyPath(
+  location: LocationHierarchyItem
+): string[] {
+  const path: string[] = [];
+  const visited = new Set<LocationHierarchyItem>();
+  let current: LocationHierarchyItem | null | undefined = location;
+
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    path.unshift(current.name);
+    current = current.parent;
+  }
+
+  return path;
+}
+
 /**
  * Shared props for rendering the location selector in bulk or single-item contexts.
  */
@@ -49,6 +71,10 @@ type LocationSelectProps = BulkProps & {
    * Used to prevent nested creation buttons when LocationSelect is used inside LocationForm.
    */
   hideExtraContent?: boolean;
+  /** Always query Shelf's current location records while searching. */
+  forceServerSearch?: boolean;
+  /** Disable interaction while the containing form is saving. */
+  disabled?: boolean;
 };
 
 /**
@@ -65,6 +91,8 @@ export const LocationSelect = ({
   hideCurrentLocationInput = false,
   excludeIds,
   hideExtraContent = false,
+  forceServerSearch = false,
+  disabled: formDisabled = false,
   ...restProps
 }: LocationSelectProps) => {
   const navigation = useNavigation();
@@ -72,7 +100,7 @@ export const LocationSelect = ({
   const locationIdToUse = !restProps.isBulk ? restProps.locationId : undefined;
   const initialLocationId = defaultValue ?? locationIdToUse;
   const [locationId, setLocationId] = useState(initialLocationId ?? undefined);
-  const disabled = isFormProcessing(navigation.state);
+  const disabled = formDisabled || isFormProcessing(navigation.state);
   const showCurrentLocationInput =
     !restProps.isBulk && !hideCurrentLocationInput;
 
@@ -99,6 +127,7 @@ export const LocationSelect = ({
           placeholder={placeholder || "Without location"}
           initialDataKey="locations"
           countKey="totalLocations"
+          forceServerSearch={forceServerSearch}
           closeOnSelect
           allowClear
           excludeItems={excludeIds}
@@ -131,18 +160,35 @@ export const LocationSelect = ({
                   />
                 )
           }
-          renderItem={({ name, metadata }) => (
-            <div className="flex items-center gap-2">
-              {metadata?.thumbnailUrl ? (
-                <ImageWithPreview
-                  thumbnailUrl={metadata.thumbnailUrl}
-                  alt={metadata.name}
-                  className="size-6 rounded-[2px]"
-                />
-              ) : null}
-              <div>{name}</div>
-            </div>
-          )}
+          renderItem={({ name, metadata }) => {
+            const ancestors = getLocationHierarchyPath({
+              name,
+              parent: metadata?.parent,
+            }).slice(0, -1);
+
+            return (
+              <div className="flex min-w-0 items-center gap-2">
+                {metadata?.thumbnailUrl ? (
+                  <ImageWithPreview
+                    thumbnailUrl={metadata.thumbnailUrl}
+                    alt={metadata.name}
+                    className="size-6 rounded-[2px]"
+                  />
+                ) : null}
+                <div className="min-w-0">
+                  <div className="truncate">{name}</div>
+                  {ancestors.length ? (
+                    <div
+                      className="truncate text-xs text-gray-500"
+                      title={ancestors.join(" › ")}
+                    >
+                      {ancestors.join(" › ")}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            );
+          }}
         />
 
         {hideClearButton ? null : (
@@ -151,7 +197,7 @@ export const LocationSelect = ({
             type="button"
             className="p-3.5"
             onClick={() => setLocationId(undefined)}
-            disabled={!locationId}
+            disabled={!locationId || disabled}
           >
             <XIcon />
           </Button>
