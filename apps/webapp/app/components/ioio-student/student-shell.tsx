@@ -62,7 +62,11 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-export function StudentBorrowListIndicator() {
+export function StudentBorrowListIndicator({
+  showLabel = false,
+}: {
+  showLabel?: boolean;
+}) {
   const { items, recentlyAdded } = useStudentCheckout();
   const countLabel = items.length
     ? `, ${items.length} selected item${items.length === 1 ? "" : "s"}`
@@ -73,11 +77,21 @@ export function StudentBorrowListIndicator() {
     <div className="relative">
       <Link
         to="/ioio/checkout"
-        aria-label={`Open borrowing list${countLabel}`}
+        aria-label={`${
+          showLabel ? "Open Basket" : "Open borrowing list"
+        }${countLabel}`}
         title={
-          items.length ? `Borrow list (${items.length})` : "Open borrowing list"
+          showLabel
+            ? items.length
+              ? `Basket (${items.length})`
+              : "Open Basket"
+            : items.length
+            ? `Borrow list (${items.length})`
+            : "Open borrowing list"
         }
-        className={`relative inline-flex size-10 items-center justify-center rounded-xl border bg-white text-gray-700 transition-[transform,background-color,border-color,box-shadow,color] duration-300 hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+        className={`relative inline-flex h-10 items-center justify-center gap-2 rounded-xl border bg-white text-sm font-bold text-gray-700 transition-[transform,background-color,border-color,box-shadow,color] duration-300 hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+          showLabel ? "px-3" : "w-10"
+        } ${
           justAdded
             ? "ioio-borrow-list-pop border-red-300 bg-red-50 text-red-800 shadow-sm"
             : "border-gray-200"
@@ -94,6 +108,7 @@ export function StudentBorrowListIndicator() {
           <path d="M4 9h16l-1.1 10.1a1 1 0 0 1-1 .9H6.1a1 1 0 0 1-1-.9L4 9Z" />
           <path d="M8 9V7a4 4 0 0 1 8 0v2M8.5 13v3M12 13v3M15.5 13v3" />
         </svg>
+        {showLabel ? <span>Basket</span> : null}
         {items.length ? (
           <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
             {items.length}

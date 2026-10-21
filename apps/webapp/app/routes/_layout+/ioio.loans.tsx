@@ -64,7 +64,7 @@ import {
   submitReturnItem,
   type PreparedReturnProposal,
 } from "~/modules/ioio-student/return-item.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
+import { requireIoioBorrowerAccess } from "~/modules/ioio-student/route.server";
 import { getMyStudentLoans } from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { normalizeQrScanValue } from "~/modules/qr/normalize-scan-value";
@@ -118,7 +118,7 @@ const loanActionSchema = z.discriminatedUnion("intent", [
 export const meta: MetaFunction<typeof loader> = () => [{ title: "My loans" }];
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
-  const { userId, organizationId } = await requireStudentRead({
+  const { userId, organizationId } = await requireIoioBorrowerAccess({
     context,
     request,
   });
@@ -569,7 +569,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 }
 
 export async function action({ context, request }: ActionFunctionArgs) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   const { userId } = auth;
   try {
     const parsed = loanActionSchema.parse(

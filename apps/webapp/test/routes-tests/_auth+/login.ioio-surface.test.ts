@@ -134,8 +134,17 @@ describe("login redirects to the authenticated IOIO surface", () => {
     expect(setSelectedOrganizationIdCookie).toHaveBeenCalledWith("ioio-team-1");
   });
 
-  it("keeps staff out of Student routes after login", async () => {
+  it("preserves the Staff personal-loans deep link after login", async () => {
     const response = await loginForRole(OrganizationRoles.OWNER, "/ioio/loans");
+
+    expect(response.headers.get("Location")).toBe("/ioio/loans");
+  });
+
+  it("keeps Staff out of the Student inventory surface after login", async () => {
+    const response = await loginForRole(
+      OrganizationRoles.OWNER,
+      "/ioio/browse"
+    );
 
     expect(response.headers.get("Location")).toBe("/home");
   });

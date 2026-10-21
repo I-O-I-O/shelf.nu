@@ -7,7 +7,7 @@ describe("IOIO My Loans navigation", () => {
     expect(getMyLoansPath("student")).toBe("/ioio/loans");
   });
 
-  it("opens staff personal loans in Shelf booking management", () => {
-    expect(getMyLoansPath("staff")).toBe("/bookings?mine=1");
+  it("opens staff personal loans in the shared IOIO borrower flow", () => {
+    expect(getMyLoansPath("staff")).toBe("/ioio/loans");
   });
 });

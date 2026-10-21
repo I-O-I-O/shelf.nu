@@ -481,6 +481,28 @@ describe("student catalog source selectors", () => {
 });
 
 describe("student Loans quantity representation", () => {
+  it("scopes personal loans to the supplied Staff borrower identity", async () => {
+    vi.mocked(db.teamMember.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.booking.findMany).mockResolvedValue([] as never);
+
+    await getMyStudentLoans({
+      organizationId: "org-1",
+      userId: "staff-1",
+      includePast: true,
+    });
+
+    expect(db.booking.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "org-1",
+          AND: expect.arrayContaining([
+            expect.objectContaining({ OR: [{ custodianUserId: "staff-1" }] }),
+          ]),
+        }),
+      })
+    );
+  });
+
   it("keeps repeated same-item preparation reservations as separate loan requests", async () => {
     const from = new Date("2026-10-20T09:00:00.000Z");
     const to = new Date("2026-11-20T17:00:00.000Z");

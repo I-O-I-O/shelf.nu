@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  requireStudentRead: vi.fn(),
+  requireIoioBorrowerAccess: vi.fn(),
   submitReturnItem: vi.fn(),
   cancelReturnItem: vi.fn(),
   prepareReturnItem: vi.fn(),
@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 // why: a route action needs an authenticated borrower, while session setup is
 // outside the navigation behavior covered here.
 vi.mock("~/modules/ioio-student/route.server", () => ({
-  requireStudentRead: mocks.requireStudentRead,
+  requireIoioBorrowerAccess: mocks.requireIoioBorrowerAccess,
 }));
 // why: the durable Shelf return mutation is tested in return-item.server.test;
 // this route test checks that navigation follows its actual success or failure.
@@ -40,7 +40,7 @@ function returnRequest(intent: "finish-return" | "cancel-return") {
 describe("student guided return navigation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.requireStudentRead.mockResolvedValue({
+    mocks.requireIoioBorrowerAccess.mockResolvedValue({
       userId: "student-1",
       organizationId: "org-1",
       role: "SELF_SERVICE",
@@ -91,5 +91,23 @@ describe("student guided return navigation", () => {
     );
     expect(mocks.submitReturnItem).not.toHaveBeenCalled();
     expect((response as Response).headers.get("Location")).toBe("/ioio/loans");
+  });
+
+  it("returns a Staff borrower's successful return to personal My Loans", async () => {
+    mocks.requireIoioBorrowerAccess.mockResolvedValue({
+      userId: "staff-1",
+      organizationId: "org-1",
+      role: "ADMIN",
+    });
+
+    const response = await action({
+      context: { getSession: () => ({ userId: "staff-1" }) },
+      request: returnRequest("finish-return"),
+    } as never);
+
+    expect(mocks.submitReturnItem).toHaveBeenCalledOnce();
+    expect((response as Response).headers.get("Location")).toBe(
+      "/ioio/loans?return=submitted"
+    );
   });
 });

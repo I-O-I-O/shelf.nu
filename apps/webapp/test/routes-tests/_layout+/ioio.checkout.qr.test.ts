@@ -36,7 +36,10 @@ vi.mock("lottie-react", () => ({ default: () => null }));
 
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import type { StudentCheckoutItem } from "~/components/ioio-student/checkout-context";
-import IoioCheckout, { action } from "~/routes/_layout+/ioio.checkout";
+import IoioCheckout, {
+  action,
+  loader as checkoutLoader,
+} from "~/routes/_layout+/ioio.checkout";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -329,6 +332,21 @@ it("shows only one concise availability summary without preparation", async () =
   expect(screen.getAllByText(/Maximum 45 days · Return by/)).toHaveLength(1);
   expect(screen.queryByText(/Ready to borrow/)).toBeNull();
   expect(screen.queryByText("Available: 5")).toBeNull();
+});
+
+it("supports quantity changes and removal through the shared borrower checkout", async () => {
+  renderBorrowingList(false, { itemType: "QUANTITY_TRACKED" });
+
+  await screen.findByRole("heading", { name: "Motor" });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Increase quantity for motor" })
+  );
+  expect(screen.getByLabelText("quantity for Motor 2")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("heading", { name: "Motor" })).toBeNull();
+  });
 });
 
 it("omits the empty proposal container for a normal asset", async () => {
@@ -744,6 +762,24 @@ it("allows Staff through the shared checkout route to the canonical borrow servi
     }),
     expect.any(Object)
   );
+  expect(mocks.requireIoioBorrowerAccess).toHaveBeenCalledOnce();
+});
+
+it("loads the shared checkout page for Staff without a student-only redirect", async () => {
+  mocks.requireIoioBorrowerAccess.mockResolvedValue({
+    userId: "staff-1",
+    organizationId: "ioio-dev",
+    role: "ADMIN",
+  });
+
+  const result = await checkoutLoader({
+    context: { getSession: () => ({ userId: "staff-1" }) } as never,
+    request: new Request("http://localhost/ioio/checkout"),
+    params: {},
+  } as never);
+
+  expect(mocks.requireIoioBorrowerAccess).toHaveBeenCalledOnce();
+  expect(result.data).toEqual({ error: null, userId: "staff-1" });
 });
 
 it.each([

@@ -32,7 +32,7 @@ import {
   submitReturnItem,
   type PreparedReturnProposal,
 } from "~/modules/ioio-student/return-item.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
+import { requireIoioBorrowerAccess } from "~/modules/ioio-student/route.server";
 import {
   getIoioKitDisplayName,
   getIoioPhysicalUnitDisplayName,
@@ -168,7 +168,7 @@ function findDestinationLocation(
 }
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
-  const auth = await requireStudentRead({ context, request });
+  const auth = await requireIoioBorrowerAccess({ context, request });
   const parsedParams = querySchema.safeParse(
     Object.fromEntries(new URL(request.url).searchParams)
   );
@@ -369,8 +369,7 @@ type ReturnActionData =
   | { ok: false; error: string };
 
 export async function action({ context, request }: ActionFunctionArgs) {
-  const auth = await requireStudentRead({ context, request });
-  const isIoioStaff = auth.role === "ADMIN" || auth.role === "OWNER";
+  const auth = await requireIoioBorrowerAccess({ context, request });
   try {
     const parsed = actionSchema.parse(
       Object.fromEntries(await request.formData())
@@ -408,7 +407,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         request,
         auth,
       });
-      return redirect(isIoioStaff ? "/home" : "/ioio/loans");
+      return redirect("/ioio/loans");
     }
 
     await submitReturnItem(
@@ -418,7 +417,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       },
       { context, request, auth }
     );
-    return redirect(isIoioStaff ? "/home" : "/ioio/loans?return=submitted");
+    return redirect("/ioio/loans?return=submitted");
   } catch (cause) {
     const reason = makeShelfError(cause, { userId: auth.userId });
     return data(

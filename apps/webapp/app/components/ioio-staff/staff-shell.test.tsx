@@ -8,6 +8,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it } from "vitest";
+import type { StudentCheckoutItemDraft } from "~/components/ioio-student/checkout-context";
+import { StudentCheckoutButton } from "~/components/ioio-student/student-ui";
 import StaffShell, {
   DEFAULT_STAFF_NAVIGATION_ORDER,
   StaffNavigation,
@@ -17,10 +19,12 @@ function renderStaffShell({
   initialEntry = "/home",
   userId = "staff-1",
   organizationId = "org-1",
+  includeBorrowAction = false,
 }: {
   initialEntry?: string;
   userId?: string;
   organizationId?: string;
+  includeBorrowAction?: boolean;
 } = {}) {
   const layoutData = {
     isIoioStaff: true,
@@ -38,7 +42,17 @@ function renderStaffShell({
         loader: () => layoutData,
         children: [
           { path: "home", Component: () => null },
-          { path: "assets", Component: () => null },
+          {
+            path: "assets",
+            Component: () =>
+              includeBorrowAction ? (
+                <StudentCheckoutButton asset={staffBorrowableItem} />
+              ) : null,
+          },
+          {
+            path: "ioio/checkout",
+            Component: () => <p>Shared IOIO checkout route</p>,
+          },
           { path: "settings", Component: () => null },
         ],
       },
@@ -53,6 +67,25 @@ function renderStaffShell({
 
   return render(<RouterProvider router={router} />);
 }
+
+const staffBorrowableItem: StudentCheckoutItemDraft = {
+  id: "motor-1",
+  title: "Motor",
+  type: "QUANTITY_TRACKED",
+  isKit: false,
+  mainImage: null,
+  thumbnailImage: null,
+  quantity: 5,
+  borrowQuantity: 1,
+  assetModel: null,
+  availableQuantity: 5,
+  availableToBook: true,
+  status: "AVAILABLE",
+  maxBorrowDays: 45,
+  requiresStaffPreparation: false,
+  location: "Container A1-1",
+  candidateAssetIds: ["motor-1"],
+};
 
 function navigationLabels(nav: HTMLElement) {
   return within(nav)
@@ -117,13 +150,21 @@ describe("IOIO staff Loans navigation active state", () => {
 
     expectSelected(screen.getByRole("link", { name: "Loans" }), true);
     expectSelected(screen.getByRole("link", { name: "My Loans" }), false);
+    expect(screen.getByRole("link", { name: "Loans" })).toHaveAttribute(
+      "href",
+      "/bookings"
+    );
+    expect(screen.getByRole("link", { name: "My Loans" })).toHaveAttribute(
+      "href",
+      "/ioio/loans"
+    );
   });
 
-  it("selects My Loans for mine=1 while keeping the Loans group expanded", () => {
+  it("keeps the legacy filtered booking list separate from personal My Loans", () => {
     renderNavigation("/bookings?mine=1");
 
     expectSelected(screen.getByRole("link", { name: "Loans" }), false);
-    expectSelected(screen.getByRole("link", { name: "My Loans" }), true);
+    expectSelected(screen.getByRole("link", { name: "My Loans" }), false);
     expect(
       screen.getByRole("button", { name: "Collapse Loans" })
     ).toHaveAttribute("aria-expanded", "true");
@@ -136,11 +177,11 @@ describe("IOIO staff Loans navigation active state", () => {
     expectSelected(screen.getByRole("link", { name: "My Loans" }), false);
   });
 
-  it("does not highlight staff loan links on the student loans route", () => {
+  it("selects personal My Loans on the shared IOIO loans route", () => {
     renderNavigation("/ioio/loans");
 
     expectSelected(screen.getByRole("link", { name: "Loans" }), false);
-    expectSelected(screen.getByRole("link", { name: "My Loans" }), false);
+    expectSelected(screen.getByRole("link", { name: "My Loans" }), true);
     expect(
       screen.getByRole("button", { name: "Collapse Loans" })
     ).toHaveAttribute("aria-expanded", "true");
@@ -324,9 +365,34 @@ describe("StaffShell account controls", () => {
       })
     ).toBeInTheDocument();
     expect(
-      within(header).getByRole("link", { name: /Open borrowing list/ })
+      within(header).getByRole("link", { name: /Open Basket/ })
     ).toBeInTheDocument();
+    expect(within(header).getByText("Basket")).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveClass("pt-2");
+  });
+
+  it("adds a staff inventory item to the shared basket and opens checkout", async () => {
+    window.sessionStorage.clear();
+    const user = userEvent.setup();
+    renderStaffShell({ initialEntry: "/assets", includeBorrowAction: true });
+
+    await user.click(
+      screen.getByRole("button", { name: "Add to borrow list" })
+    );
+    const basketLink = await screen.findByRole("link", {
+      name: /Open Basket, 1 selected item/,
+    });
+    expect(within(basketLink).getByText("1")).toBeInTheDocument();
+
+    await user.click(basketLink);
+    expect(
+      await screen.findByText("Shared IOIO checkout route")
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.sessionStorage.getItem("ioio-student-checkout")).toContain(
+        '"id":"motor-1"'
+      );
+    });
   });
 
   it("does not expose workspace switching or workspace management", async () => {

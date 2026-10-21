@@ -6,13 +6,20 @@ import type {
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { redirect, data, useLoaderData, Outlet } from "react-router";
+import {
+  redirect,
+  data,
+  useLoaderData,
+  Outlet,
+  useRouteLoaderData,
+} from "react-router";
 import { z } from "zod";
 import { createSetReminderSchema } from "~/components/asset-reminder/set-or-edit-reminder-dialog";
 import ActionsDropdown from "~/components/assets/actions-dropdown";
 import { AssetImage } from "~/components/assets/asset-image/component";
 import { AssetStatusBadge } from "~/components/assets/asset-status-badge";
 import BookingActionsDropdown from "~/components/assets/booking-actions-dropdown";
+import { StaffAssetDetailShell } from "~/components/ioio-staff/staff-asset-detail-shell";
 
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -41,6 +48,7 @@ import {
   trashIoioItems,
 } from "~/modules/ioio-staff/archive.server";
 import { getTeamMembersForQuantityCustody } from "~/modules/team-member/service.server";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import assetCss from "~/styles/asset.css?url";
 
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -596,8 +604,18 @@ export const links: LinksFunction = () => [
 
 export default function AssetDetailsPage() {
   const { asset } = useLoaderData<typeof loader>();
-
   const { roles } = useUserRoleHelper();
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+
+  if (layoutData?.isIoioStaff) {
+    return (
+      <StaffAssetDetailShell bookAction={<BookingActionsDropdown />}>
+        <Outlet />
+      </StaffAssetDetailShell>
+    );
+  }
 
   const items = [
     { to: "overview", content: "Overview" },

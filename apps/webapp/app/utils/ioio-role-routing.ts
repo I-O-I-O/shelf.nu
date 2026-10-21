@@ -1,5 +1,18 @@
 export type IoioAccountSurface = "staff" | "student";
 
+const ioioPersonalBorrowerRoutes = new Set([
+  "/ioio/checkout",
+  "/ioio/loans",
+  "/ioio/return",
+]);
+
+/** Staff may use the shared IOIO flow for their own basket, loans, and returns
+ * without entering the student-only inventory surface. */
+export function isIoioPersonalBorrowerRoute(pathname: string) {
+  const normalizedPath = pathname.replace(/\/+$/u, "") || "/";
+  return ioioPersonalBorrowerRoutes.has(normalizedPath);
+}
+
 type IoioOrganizationMembership = {
   organizationId: string;
   roles: readonly string[];
@@ -107,7 +120,7 @@ export function enforceIoioRoleDestination(
     surface === "staff" &&
     (pathname === "/ioio" || pathname.startsWith("/ioio/"))
   ) {
-    return "/home";
+    return isIoioPersonalBorrowerRoute(pathname) ? destination : "/home";
   }
   if (surface === "student" && !isIoioStudentRoute(pathname)) {
     return "/ioio";

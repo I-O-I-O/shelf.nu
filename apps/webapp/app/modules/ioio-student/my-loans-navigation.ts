@@ -1,7 +1,7 @@
 /**
  * My Loans is a distinct route on each authenticated IOIO surface. Students
- * use their IOIO workflow; staff use Shelf's booking list with a self filter.
+ * use the same IOIO personal borrowing workflow regardless of Staff role.
  */
-export function getMyLoansPath(surface: "student" | "staff") {
-  return surface === "student" ? "/ioio/loans" : "/bookings?mine=1";
+export function getMyLoansPath(_surface: "student" | "staff") {
+  return "/ioio/loans";
 }

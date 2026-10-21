@@ -34,7 +34,6 @@ import DynamicSelect from "~/components/dynamic-select/dynamic-select";
 import Input from "~/components/forms/input";
 import { Switch } from "~/components/forms/switch";
 import Icon from "~/components/icons/icon";
-import { AskAboutItemButton } from "~/components/ioio/ask-about-item-button";
 import { StaffItemDetail } from "~/components/ioio-staff/staff-item-detail";
 import { StudentCheckoutButton } from "~/components/ioio-student/student-ui";
 import ContextualModal from "~/components/layout/contextual-modal";
@@ -1264,14 +1263,6 @@ export default function AssetOverview() {
               borrowLabel="Borrow"
             />
           ) : null
-        }
-        assistantAction={
-          <AskAboutItemButton
-            itemName={inventoryDetailTitle}
-            assetId={asset.id}
-            locationId={location?.id}
-            to="/staff/ask"
-          />
         }
         actions={
           <>

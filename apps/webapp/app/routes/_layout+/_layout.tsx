@@ -68,6 +68,7 @@ import { isLikeShelfError, makeShelfError, ShelfError } from "~/utils/error";
 import { isRouteError } from "~/utils/http";
 import { payload, error } from "~/utils/http.server";
 import {
+  isIoioPersonalBorrowerRoute,
   isIoioStudentRoute,
   resolveIoioAccountMembership,
   resolveIoioAccountSurface,
@@ -329,7 +330,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     }
     if (
       accountSurface === "staff" &&
-      (pathname === "/ioio" || pathname.startsWith("/ioio/"))
+      (pathname === "/ioio" || pathname.startsWith("/ioio/")) &&
+      !isIoioPersonalBorrowerRoute(pathname)
     ) {
       return redirect("/home");
     }

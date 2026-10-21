@@ -22,7 +22,6 @@ export type StaffItemDetailProps = {
   additionalFields?: AssetDetailField[];
   borrowAction?: ReactNode;
   actions?: ReactNode;
-  assistantAction?: ReactNode;
   contents?: ReactNode;
   qrLifecycle?: ReactNode;
   physicalUnits?: PhysicalUnitAvailabilityRow[];
@@ -46,7 +45,6 @@ export function StaffItemDetail({
   additionalFields,
   borrowAction,
   actions,
-  assistantAction,
   contents,
   qrLifecycle,
   physicalUnits,
@@ -80,7 +78,6 @@ export function StaffItemDetail({
         <>
           {borrowAction}
           {actions}
-          {assistantAction}
         </>
       }
       availableQuantity={availableQuantity}

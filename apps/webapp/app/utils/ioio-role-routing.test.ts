@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   enforceIoioRoleDestination,
   resolveIoioAccountMembership,
+  isIoioPersonalBorrowerRoute,
   isIoioStaffRoute,
   isIoioStudentRoute,
   resolveIoioAccountDestination,
@@ -169,6 +170,12 @@ describe("IOIO account surface routing", () => {
       )
     ).toBe("/ioio");
     expect(resolveIoioAccountDestination(["OWNER"], "/ioio/loans")).toBe(
+      "/ioio/loans"
+    );
+    expect(resolveIoioAccountDestination(["ADMIN"], "/ioio/checkout")).toBe(
+      "/ioio/checkout"
+    );
+    expect(resolveIoioAccountDestination(["ADMIN"], "/ioio/browse")).toBe(
       "/home"
     );
     expect(resolveIoioAccountDestination(["SELF_SERVICE"], "/ioio/loans")).toBe(
@@ -199,6 +206,15 @@ describe("IOIO account surface routing", () => {
   it("does not classify Student routes as staff routes", () => {
     expect(isIoioStaffRoute("/ioio/loans")).toBe(false);
     expect(isIoioStaffRoute("/ioio/settings")).toBe(false);
+  });
+
+  it("opens only the personal basket, loans, and return routes to Staff", () => {
+    expect(isIoioPersonalBorrowerRoute("/ioio/checkout")).toBe(true);
+    expect(isIoioPersonalBorrowerRoute("/ioio/loans")).toBe(true);
+    expect(isIoioPersonalBorrowerRoute("/ioio/return")).toBe(true);
+    expect(isIoioPersonalBorrowerRoute("/ioio/browse")).toBe(false);
+    expect(isIoioPersonalBorrowerRoute("/ioio/settings")).toBe(false);
+    expect(isIoioPersonalBorrowerRoute("/ioio/loans/extra")).toBe(false);
   });
 
   it("keeps only student routes inside the Student shell", () => {

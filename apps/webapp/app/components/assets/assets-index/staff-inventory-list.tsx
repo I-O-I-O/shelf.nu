@@ -51,6 +51,10 @@ import {
   InventoryViewSelect,
   INVENTORY_FILTER_TRIGGER_CLASS_NAME,
 } from "~/components/assets/assets-index/inventory-view-select";
+import {
+  STAFF_INVENTORY_UPDATED_AT_HEADING,
+  StaffInventoryUpdatedAt,
+} from "~/components/assets/assets-index/staff-inventory-updated-at";
 import BulkArchiveDialog from "~/components/assets/bulk-archive-dialog";
 import BulkCategoryUpdateDialog from "~/components/assets/bulk-category-update-dialog";
 import BulkDownloadQrDialog from "~/components/assets/bulk-download-qr-dialog";
@@ -70,7 +74,6 @@ import { getEffectiveIoioLocationColor } from "~/components/location/ioio-locati
 import { LocationBadge } from "~/components/location/location-badge";
 import { Badge } from "~/components/shared/badge";
 import { Button } from "~/components/shared/button";
-import { DateS } from "~/components/shared/date";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -85,6 +88,7 @@ import {
   useSearchParams,
   useSearchParamHasValue,
 } from "~/hooks/search-params";
+import { useDateFormatter } from "~/hooks/use-date-formatter";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import {
@@ -107,6 +111,7 @@ import {
   getIoioPhysicalUnitDisplayName,
 } from "~/modules/kit/ioio-kit-presentation";
 import type { AssetIndexLoaderData } from "~/routes/_layout+/assets._index";
+import type { ResolvedFormatPrefs } from "~/utils/date-format";
 import { IOIO_KIT_CATEGORY_FILTER } from "~/utils/list";
 import {
   PermissionAction,
@@ -172,6 +177,7 @@ export function StaffInventoryList({
   const removeSelectedItems = useSetAtom(removeSelectedBulkItemsAtom);
   const openBulkDialog = useSetAtom(openBulkDialogAtom);
   const navigate = useNavigate();
+  const { prefs } = useDateFormatter();
   const { roles } = useUserRoleHelper();
   const canBulkUpdate = userHasPermission({
     roles,
@@ -358,7 +364,9 @@ export function StaffInventoryList({
                     <Th className="w-[17%] md:px-3">Category</Th>
                     <Th className="w-[17%] md:px-3">Location</Th>
                     <Th className="w-[11%] px-1 md:px-2">Quantity</Th>
-                    <Th className="w-[14%] md:px-3">Last updated</Th>
+                    <Th className="w-[14%] md:px-3">
+                      {STAFF_INVENTORY_UPDATED_AT_HEADING}
+                    </Th>
                     <Th className="w-[18%] md:px-3">Actions</Th>
                   </tr>
                 </thead>
@@ -367,6 +375,7 @@ export function StaffInventoryList({
                     <StaffInventoryRow
                       key={item.id}
                       item={item}
+                      prefs={prefs}
                       selected={isInventoryRowSelected(item)}
                       onToggle={() => toggleInventoryRow(item)}
                     />
@@ -379,6 +388,7 @@ export function StaffInventoryList({
                 <StaffInventoryMobileRow
                   key={item.id}
                   item={item}
+                  prefs={prefs}
                   selected={isInventoryRowSelected(item)}
                   onToggle={() => toggleInventoryRow(item)}
                 />
@@ -739,10 +749,12 @@ function getStaffInventoryUnitState(item: StaffInventorySourceItem) {
 
 function StaffInventoryRow({
   item,
+  prefs,
   selected,
   onToggle,
 }: {
   item: StaffInventoryItem;
+  prefs: ResolvedFormatPrefs;
   selected: boolean;
   onToggle: () => void;
 }) {
@@ -866,9 +878,7 @@ function StaffInventoryRow({
           </div>
         </Td>
         <Td className="whitespace-nowrap text-sm text-gray-600">
-          <time dateTime={new Date(item.updatedAt).toISOString()}>
-            <DateS date={item.updatedAt} includeTime />
-          </time>
+          <StaffInventoryUpdatedAt value={item.updatedAt} prefs={prefs} />
         </Td>
         <Td className="md:px-3">
           <StaffInventoryActions
@@ -1499,10 +1509,12 @@ function getUnitLabel(title: string): string {
 
 function StaffInventoryMobileRow({
   item,
+  prefs,
   selected,
   onToggle,
 }: {
   item: StaffInventoryItem;
+  prefs: ResolvedFormatPrefs;
   selected: boolean;
   onToggle: () => void;
 }) {
@@ -1627,13 +1639,8 @@ function StaffInventoryMobileRow({
           </dd>
         </div>
         <div>
-          <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">
-            Last updated
-          </dt>
-          <dd className="mt-1 text-sm text-gray-600">
-            <time dateTime={new Date(item.updatedAt).toISOString()}>
-              <DateS date={item.updatedAt} includeTime />
-            </time>
+          <dd className="text-sm text-gray-600">
+            <StaffInventoryUpdatedAt value={item.updatedAt} prefs={prefs} />
           </dd>
         </div>
       </dl>

@@ -100,9 +100,7 @@ export function StaffNavigation({
       return pathMatches && queryMatches;
     })
     .sort((left, right) => right.to.length - left.to.length)[0]?.to;
-  const isStaffMyLoansActive =
-    location.pathname === "/bookings" &&
-    new URLSearchParams(location.search).get("mine") === "1";
+  const isStaffMyLoansActive = location.pathname === getMyLoansPath("staff");
 
   return (
     <nav aria-label="IOIO staff navigation" className="space-y-0.5">
@@ -391,7 +389,7 @@ export default function StaffShell() {
                       : undefined
                   }
                 />
-                <StudentBorrowListIndicator />
+                <StudentBorrowListIndicator showLabel />
                 <button
                   type="button"
                   aria-expanded={mobileMenuOpen}

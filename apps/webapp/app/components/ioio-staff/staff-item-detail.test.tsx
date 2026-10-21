@@ -6,7 +6,7 @@ import { StaffItemDetail } from "./staff-item-detail";
 describe("StaffItemDetail", () => {
   afterEach(() => cleanup());
 
-  it("places Borrow, Edit, and Ask IOIO in the detail action row", () => {
+  it("places Borrow and Edit in the detail action row without Ask IOIO", () => {
     const router = createMemoryRouter(
       [
         {
@@ -19,7 +19,6 @@ describe("StaffItemDetail", () => {
               locationPath={[]}
               borrowAction={<button type="button">Borrow</button>}
               actions={<a href="/assets/item-1/edit">Edit</a>}
-              assistantAction={<a href="/staff/ask">Ask IOIO</a>}
             />
           ),
         },
@@ -30,14 +29,10 @@ describe("StaffItemDetail", () => {
 
     const borrow = screen.getByRole("button", { name: "Borrow" });
     const edit = screen.getByRole("link", { name: "Edit" });
-    const ask = screen.getByRole("link", { name: "Ask IOIO" });
-
     expect(
       borrow.compareDocumentPosition(edit) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
-    expect(
-      edit.compareDocumentPosition(ask) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+    expect(screen.queryByText(/Ask IOIO about this item/u)).toBeNull();
   });
 
   it("omits the Borrow action when the route has no available item", () => {
