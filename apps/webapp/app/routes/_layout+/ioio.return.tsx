@@ -418,7 +418,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       },
       { context, request, auth }
     );
-    return redirect(isIoioStaff ? "/home" : "/ioio?return=submitted");
+    return redirect(isIoioStaff ? "/home" : "/ioio/loans?return=submitted");
   } catch (cause) {
     const reason = makeShelfError(cause, { userId: auth.userId });
     return data(

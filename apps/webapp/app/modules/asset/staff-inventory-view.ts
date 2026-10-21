@@ -66,6 +66,28 @@ export function getStaffInventoryEditTarget({
     : `/assets/${encodeURIComponent(assetId)}/edit`;
 }
 
+/**
+ * Staff detail actions use the quantity already calculated by Shelf's
+ * availability services. For individual units, that quantity also includes
+ * IOIO's live reservation, preparation, and issue-report state, so it is the
+ * canonical gate even when the representative asset itself is unavailable.
+ */
+export function isStaffInventoryItemBorrowable({
+  availableQuantity,
+  assetStatus,
+  availableToBook,
+  individualUnitAvailabilityIsCanonical = false,
+}: {
+  availableQuantity: number;
+  assetStatus: string;
+  availableToBook: boolean;
+  individualUnitAvailabilityIsCanonical?: boolean;
+}) {
+  if (availableQuantity <= 0) return false;
+  if (individualUnitAvailabilityIsCanonical) return true;
+  return assetStatus === "AVAILABLE" && availableToBook;
+}
+
 /** Expand a logical row to its actual Asset records before bulk mutations. */
 export function getStaffInventoryActionTargets<
   T extends StaffInventoryCandidate,

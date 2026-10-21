@@ -12,27 +12,6 @@ export type StudentInventoryItem = StudentAsset & {
   sourceAssetIds: string[];
 };
 
-/** Keep the student home page focused while prioritizing items that can be borrowed now. */
-export function selectStudentInventoryPreview(
-  assets: StudentInventoryItem[],
-  limit = 6
-): StudentInventoryItem[] {
-  return [...assets]
-    .sort((left, right) => {
-      const leftAvailable = Boolean(
-        left.availableToBook && left.availableQuantity
-      );
-      const rightAvailable = Boolean(
-        right.availableToBook && right.availableQuantity
-      );
-      return (
-        Number(rightAvailable) - Number(leftAvailable) ||
-        left.title.localeCompare(right.title)
-      );
-    })
-    .slice(0, limit);
-}
-
 export type StudentLabAreaFilter = {
   key: string;
   label: string;

@@ -6,7 +6,17 @@ import { CodeScanner } from "~/components/scanner/code-scanner";
 import { Button } from "~/components/shared/button";
 import type { QrScanAudience } from "~/modules/ioio/scan-qr";
 
-export function InventoryQrScanner({ audience }: { audience: QrScanAudience }) {
+export function InventoryQrScanner({
+  audience,
+  buttonClassName,
+  buttonLabel = "Scan QR code",
+  showIcon = true,
+}: {
+  audience: QrScanAudience;
+  buttonClassName?: string;
+  buttonLabel?: string;
+  showIcon?: boolean;
+}) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -67,10 +77,16 @@ export function InventoryQrScanner({ audience }: { audience: QrScanAudience }) {
         type="button"
         variant="secondary"
         size="sm"
+        className={buttonClassName}
         onClick={() => setOpen(true)}
       >
-        <ScanQrCode aria-hidden="true" className="mr-2 size-4" />
-        Scan QR code
+        {showIcon ? (
+          <ScanQrCode
+            aria-hidden="true"
+            className={buttonClassName ? "size-4 shrink-0" : "mr-2 size-4"}
+          />
+        ) : null}
+        {buttonLabel}
       </Button>
       <DialogPortal>
         <Dialog

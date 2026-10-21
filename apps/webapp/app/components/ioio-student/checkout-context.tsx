@@ -22,11 +22,21 @@ export type StudentCheckoutItem = {
   candidateAssetIds: string[];
 };
 
+export type StudentCheckoutItemDraft = Omit<
+  StudentCheckoutItem,
+  "preparationSubmissionToken"
+> &
+  Pick<StudentAsset, "availableToBook" | "status">;
+
 type StudentCheckoutContextValue = {
   items: StudentCheckoutItem[];
   recentlyAdded: { id: string; title: string; addedAt: number } | null;
   addItem: (
-    asset: StudentAsset | StudentInventoryItem | StudentCheckoutItem
+    asset:
+      | StudentAsset
+      | StudentInventoryItem
+      | StudentCheckoutItem
+      | StudentCheckoutItemDraft
   ) => void;
   removeItem: (assetId: string) => void;
   setBorrowQuantity: (assetId: string, quantity: number) => void;

@@ -5,6 +5,7 @@ import {
   groupStaffInventoryCandidates,
   getStaffInventoryEditTarget,
   getStaffInventoryActionTargets,
+  isStaffInventoryItemBorrowable,
   normalizeInventoryTitle,
   selectCanonicalInventoryCandidate,
   summarizeStaffInventory,
@@ -28,6 +29,38 @@ describe("staff inventory presentation helpers", () => {
     expect(getStaffInventoryEditTarget({ assetId: "single-asset" })).toBe(
       "/assets/single-asset/edit"
     );
+  });
+
+  it("only offers borrowing when canonical availability is positive", () => {
+    expect(
+      isStaffInventoryItemBorrowable({
+        availableQuantity: 2,
+        assetStatus: "AVAILABLE",
+        availableToBook: true,
+      })
+    ).toBe(true);
+    expect(
+      isStaffInventoryItemBorrowable({
+        availableQuantity: 0,
+        assetStatus: "AVAILABLE",
+        availableToBook: true,
+      })
+    ).toBe(false);
+    expect(
+      isStaffInventoryItemBorrowable({
+        availableQuantity: 2,
+        assetStatus: "BROKEN",
+        availableToBook: true,
+      })
+    ).toBe(false);
+    expect(
+      isStaffInventoryItemBorrowable({
+        availableQuantity: 2,
+        assetStatus: "IN_CUSTODY",
+        availableToBook: false,
+        individualUnitAvailabilityIsCanonical: true,
+      })
+    ).toBe(true);
   });
 
   it("selects one operational representative without summing quantities", () => {

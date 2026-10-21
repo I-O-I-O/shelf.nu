@@ -110,7 +110,7 @@ export default function IoioAssetDetail() {
   return (
     <IoioAssetDetailLayout
       backTo="/ioio"
-      backLabel="Back to Inventory"
+      backLabel="Back to inventory"
       title={formatStudentTitle(asset.title, asset.type)}
       description={asset.description}
       image={
@@ -131,8 +131,8 @@ export default function IoioAssetDetail() {
         return {
           path: locationPath?.names ?? [location.name],
           href: browseLocationId
-            ? `/ioio/browse?location=${encodeURIComponent(browseLocationId)}`
-            : "/ioio/browse",
+            ? `/ioio?location=${encodeURIComponent(browseLocationId)}`
+            : "/ioio",
         };
       })}
       availableQuantity={availableQuantity}

@@ -5,11 +5,13 @@ import { AssetImage } from "~/components/assets/asset-image";
 import { ErrorContent } from "~/components/errors";
 import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import {
+  filterStudentInventory,
+  getStudentLocationPath,
   groupStudentAssets,
-  selectStudentInventoryPreview,
 } from "~/components/ioio-student/inventory-presentation";
 import {
   AssetCard,
+  InventoryFilterControls,
   formatStudentDateOnly,
   formatStudentLabel,
   formatStudentTitle,
@@ -28,8 +30,12 @@ import {
   withIoioStudentLoadStage,
 } from "~/modules/ioio-student/load-diagnostics.server";
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
-import type { StudentAsset } from "~/modules/ioio-student/service.server";
-import { getStudentAssets } from "~/modules/ioio-student/service.server";
+import {
+  getStudentAssets,
+  getStudentCategories,
+  getStudentLocations,
+  type StudentAsset,
+} from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { makeShelfError } from "~/utils/error";
@@ -54,7 +60,70 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const params = new URL(request.url).searchParams;
   const returnSubmitted = params.get("return") === "submitted";
   try {
-    const [preparationOperations, allAssets] = await Promise.all([
+    const [inventory, preparationOperations] = await Promise.all([
+      withIoioStudentLoadStage(
+        "4 home inventory query and filters",
+        diagnosticRequest,
+        async () => {
+          const requestedCategory = params.get("category");
+          const requestedItemType = params.get("itemType");
+          const requestedAvailability = params.get("availability");
+          const availability =
+            requestedAvailability === "available" ||
+            requestedAvailability === "unavailable"
+              ? requestedAvailability
+              : null;
+          const itemType =
+            requestedItemType === "quantity" ||
+            requestedItemType === "individual"
+              ? requestedItemType
+              : null;
+          const [categories, locations] = await Promise.all([
+            getStudentCategories({ organizationId }),
+            getStudentLocations({ organizationId }),
+          ]);
+          const categoryId = categories.some(
+            (category) => category.id === requestedCategory
+          )
+            ? requestedCategory
+            : null;
+          const requestedLocation = params.get("location");
+          const locationId = requestedLocation
+            ? getStudentLocationPath(requestedLocation, locations)
+              ? requestedLocation
+              : null
+            : null;
+          const allAssets = await getStudentAssets({
+            organizationId,
+            query: params.get("q"),
+            categoryId,
+            locationId,
+          });
+          const assets = filterStudentInventory(groupStudentAssets(allAssets), {
+            categoryId,
+            itemType,
+            availability,
+          });
+
+          return {
+            assets,
+            categories,
+            locations,
+            query: params.get("q") ?? "",
+            categoryId,
+            itemType,
+            availability,
+            locationId,
+            hasSearchOrFilters: Boolean(
+              params.get("q")?.trim() ||
+                categoryId ||
+                itemType ||
+                locationId ||
+                availability
+            ),
+          };
+        }
+      ),
       withIoioStudentLoadStage(
         "4 home active preparation statuses",
         diagnosticRequest,
@@ -81,17 +150,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             },
           })
       ),
-      withIoioStudentLoadStage(
-        "4 home inventory preview (archive, asset, and availability queries)",
-        diagnosticRequest,
-        () => getStudentAssets({ organizationId })
-      ),
     ]);
-    const assets = await withIoioStudentLoadStage(
-      "4 home inventory preview presentation",
-      diagnosticRequest,
-      () => selectStudentInventoryPreview(groupStudentAssets(allAssets))
-    );
     const studentTeamMembers = await db.teamMember.findMany({
       where: { organizationId, userId, deletedAt: null },
       select: { id: true },
@@ -358,7 +417,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       .filter((item): item is NonNullable<typeof item> => item !== null);
     return data(
       payload({
-        assets,
+        ...inventory,
         readyForPickup: readyForPickup.filter(
           (item): item is NonNullable<typeof item> => item !== null
         ),
@@ -378,27 +437,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 }
 
 export const ErrorBoundary = () => <ErrorContent />;
-
-function AssistantMark() {
-  return (
-    <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-700">
-      <svg
-        aria-hidden="true"
-        className="size-5"
-        fill="none"
-        viewBox="0 0 24 24"
-      >
-        <path
-          d="M12 3v3M5.6 5.6l2.1 2.1M3 12h3M5.6 18.4l2.1-2.1M18.4 5.6l-2.1 2.1M21 12h-3M18.4 18.4l-2.1-2.1"
-          stroke="currentColor"
-          strokeLinecap="round"
-          strokeWidth="1.8"
-        />
-        <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.8" />
-      </svg>
-    </span>
-  );
-}
 
 type AttentionImageAsset = {
   id: string;
@@ -429,8 +467,20 @@ type PreparingItem = {
 };
 
 export default function IoioHome() {
-  const { assets, readyForPickup, preparing, returnSubmitted } =
-    useLoaderData<typeof loader>();
+  const {
+    assets,
+    categories,
+    query,
+    categoryId,
+    itemType,
+    availability,
+    locationId,
+    locations,
+    hasSearchOrFilters,
+    readyForPickup,
+    preparing,
+    returnSubmitted,
+  } = useLoaderData<typeof loader>();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
@@ -449,35 +499,6 @@ export default function IoioHome() {
         <h1 className="text-3xl font-black tracking-tight text-gray-950 sm:text-5xl">
           Find what you need in the lab.
         </h1>
-
-        <form action="/ioio/ask" method="get">
-          <label htmlFor="home-question" className="sr-only">
-            Ask IOIO about equipment
-          </label>
-          <div className="rounded-[1.75rem] border border-gray-200 bg-white p-3 shadow-sm focus-within:border-red-300 focus-within:ring-4 focus-within:ring-red-50 sm:p-4">
-            <div className="flex items-center gap-3">
-              <AssistantMark />
-              <input
-                id="home-question"
-                name="q"
-                autoComplete="off"
-                placeholder="Ask IOIO what you need..."
-                className="min-h-11 min-w-0 flex-1 border-0 bg-transparent text-base text-gray-950 outline-none placeholder:text-gray-500 sm:text-lg"
-              />
-              <button
-                type="submit"
-                aria-label="Ask IOIO"
-                className="flex min-h-11 min-w-11 items-center justify-center rounded-xl bg-red-700 px-3 text-xl font-black text-white transition hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-              >
-                →
-              </button>
-            </div>
-            <p className="mt-3 pl-12 text-xs leading-5 text-gray-500 sm:text-sm">
-              Ask about equipment, locations, borrowing, or what to use for a
-              project.
-            </p>
-          </div>
-        </form>
       </section>
 
       <NeedsYourAttention
@@ -489,44 +510,79 @@ export default function IoioHome() {
         workingHours={layoutData?.workingHours}
       />
 
-      <section aria-labelledby="inventory-heading" className="space-y-4">
+      <section
+        aria-labelledby="inventory-heading"
+        className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
+      >
         <div>
           <h2
             id="inventory-heading"
-            className="text-2xl font-black tracking-tight text-gray-950 sm:text-3xl"
+            className="text-xl font-black tracking-tight text-gray-950 sm:text-2xl"
           >
-            Equipment to explore
+            Explore inventory
           </h2>
-          <p className="mt-1 text-sm text-gray-600">
-            A few items to get you started. Browse the full list to find more.
+          <p className="mt-1 max-w-2xl text-sm text-gray-600">
+            Browse available equipment, filter by category or lab area, and add
+            items to your borrow list.
           </p>
         </div>
-
+        <div className="mt-4 min-w-0">
+          <div
+            role="group"
+            aria-label="Inventory search and filters"
+            className="min-w-0"
+          >
+            <InventoryFilterControls
+              basePath="/ioio"
+              categories={categories}
+              locations={locations}
+              query={query}
+              locationId={locationId}
+              categoryId={categoryId}
+              itemType={itemType}
+              availability={availability}
+              scanAction={
+                <InventoryQrScanner
+                  audience="student"
+                  buttonClassName="min-h-11 shrink-0 flex-row whitespace-nowrap rounded-xl border-gray-300 bg-white px-3 text-sm font-bold text-gray-800 shadow-none hover:border-red-200 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-600"
+                  buttonLabel="Scan QR"
+                  showIcon={false}
+                />
+              }
+            />
+          </div>
+        </div>
+        <p className="mt-4 text-sm text-gray-600" aria-live="polite">
+          Showing {assets.length} {assets.length === 1 ? "item" : "items"}
+        </p>
         {assets.length ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
             {assets.map((asset) => (
-              <AssetCard key={asset.id} asset={asset} compact />
+              <AssetCard key={asset.id} asset={asset} />
             ))}
           </div>
         ) : (
-          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-6 text-center">
-            <p className="font-semibold text-gray-950">
-              No equipment is listed yet.
+          <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-center sm:p-8">
+            <h3 className="font-bold text-gray-950">
+              {hasSearchOrFilters
+                ? "No equipment matches your search"
+                : "No equipment is listed yet"}
+            </h3>
+            <p className="mx-auto mt-2 max-w-md text-sm text-gray-600">
+              {hasSearchOrFilters
+                ? "Try a different search or clear your filters to see more equipment."
+                : "Check back later, or ask a lab assistant for help."}
             </p>
-            <p className="mt-2 text-sm text-gray-600">
-              Ask a lab assistant if you need help finding what you need.
-            </p>
+            {hasSearchOrFilters ? (
+              <Link
+                to="/ioio"
+                className="mt-4 inline-flex min-h-10 items-center rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+              >
+                Clear search and filters
+              </Link>
+            ) : null}
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-2">
-          <Link
-            to="/ioio/browse"
-            className="inline-flex min-h-11 items-center rounded-xl bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-          >
-            Browse all equipment
-          </Link>
-          <InventoryQrScanner audience="student" />
-        </div>
       </section>
     </div>
   );

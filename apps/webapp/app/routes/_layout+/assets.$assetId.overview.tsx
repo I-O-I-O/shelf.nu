@@ -36,6 +36,7 @@ import { Switch } from "~/components/forms/switch";
 import Icon from "~/components/icons/icon";
 import { AskAboutItemButton } from "~/components/ioio/ask-about-item-button";
 import { StaffItemDetail } from "~/components/ioio-staff/staff-item-detail";
+import { StudentCheckoutButton } from "~/components/ioio-student/student-ui";
 import ContextualModal from "~/components/layout/contextual-modal";
 import type { HeaderData } from "~/components/layout/header/types";
 import { LocationBadge } from "~/components/location/location-badge";
@@ -96,6 +97,7 @@ import {
 import {
   findStaffInventoryImageCandidate,
   getStaffInventoryEditTarget,
+  isStaffInventoryItemBorrowable,
 } from "~/modules/asset/staff-inventory-view";
 import type { ShelfAssetCustomFieldValueType } from "~/modules/asset/types";
 import {
@@ -1132,6 +1134,12 @@ export default function AssetOverview() {
     : asset.status === AssetStatus.AVAILABLE && asset.availableToBook
     ? 1
     : 0;
+  const inventoryCanBorrow = isStaffInventoryItemBorrowable({
+    availableQuantity: inventoryAvailableQuantity,
+    assetStatus: asset.status,
+    availableToBook: asset.availableToBook,
+    individualUnitAvailabilityIsCanonical: asset.type === AssetType.INDIVIDUAL,
+  });
   const inventoryDetailTitle = individualProductSummary
     ? asset.assetModel?.name ?? asset.title.replace(/\s+#\d+$/u, "")
     : asset.title;
@@ -1234,6 +1242,35 @@ export default function AssetOverview() {
             }${asset.requiresReturnPhoto ? "; photo required" : ""}`,
           },
         ]}
+        borrowAction={
+          inventoryCanBorrow ? (
+            <StudentCheckoutButton
+              asset={{
+                id: asset.id,
+                title: inventoryDetailTitle,
+                type: asset.type,
+                isKit: asset.assetKits.length > 0,
+                mainImage: inventoryImage.mainImage,
+                thumbnailImage: inventoryImage.thumbnailImage,
+                quantity: individualProductSummary
+                  ? physicalUnitRows.length
+                  : Math.max(0, asset.quantity ?? 1),
+                borrowQuantity: 1,
+                assetModel: asset.assetModel ?? null,
+                availableQuantity: inventoryAvailableQuantity,
+                maxBorrowDays: asset.maxBorrowDays ?? 45,
+                requiresBorrowApproval: asset.requiresBorrowApproval,
+                requiresStaffPreparation: asset.requiresStaffPreparation,
+                location: location?.name ?? null,
+                candidateAssetIds: inventoryLabelAssetIds,
+                availableToBook: inventoryCanBorrow,
+                status: AssetStatus.AVAILABLE,
+              }}
+              primary
+              borrowLabel="Borrow"
+            />
+          ) : null
+        }
         assistantAction={
           <AskAboutItemButton
             itemName={inventoryDetailTitle}

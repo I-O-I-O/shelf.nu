@@ -126,6 +126,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       include: {
         // Model cover image for an asset with no image of its own
         ...ASSET_MODEL_IMAGE_SELECT,
+        assetModel: {
+          select: {
+            name: true,
+            ...ASSET_MODEL_IMAGE_SELECT.assetModel.select,
+          },
+        },
         // Explicit select rather than `include: { custodian: true }`: the
         // include returned every `Custody` scalar, `teamMemberId` among them —
         // a stable per-holder identifier that survives redaction (which only

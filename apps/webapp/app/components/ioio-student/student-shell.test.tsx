@@ -134,6 +134,7 @@ describe("StudentShell account controls", () => {
         href
       );
     }
+    expect(screen.queryByRole("link", { name: "Browse inventory" })).toBeNull();
 
     const visibleDestinations = screen
       .getAllByRole("link")

@@ -24,14 +24,9 @@ import {
   StudentAssetPlaceholder,
 } from "~/components/ioio-student/student-ui";
 import { CodeScanner } from "~/components/scanner/code-scanner";
-import { SettingHelpLabel } from "~/components/shared/setting-help-label";
 import { db } from "~/database/db.server";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
-import {
-  formatPickupHours,
-  IOIO_OPENING_HOURS_GUIDANCE,
-} from "~/modules/ioio-staff/preparation";
 import {
   borrowItem,
   acknowledgeBorrowItemStaffReservation,
@@ -1132,84 +1127,87 @@ function CheckoutLine({
           </p>
         </div>
       ) : proposal ? (
-        <div className="mt-3 rounded-xl bg-gray-50 px-3 py-2.5">
-          {needExactUnits ? (
-            <div className="mb-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-950">
-              <p className="font-semibold">
-                {quantity === 1
-                  ? "Correct kit"
-                  : `${selectedUnits.length} of ${quantity} kits confirmed`}
-              </p>
-              <ul className="mt-1 space-y-1">
-                {selectedUnits.map((unit) => (
-                  <li
-                    key={unit.id}
-                    className="flex items-center justify-between gap-3"
-                  >
-                    <span className="min-w-0 truncate">
-                      <span aria-hidden="true" className="mr-1 font-bold">
-                        ✓
-                      </span>
-                      <span className="ioio-identifier">
-                        {getIoioPhysicalUnitDisplayName({
-                          logicalProductName: item.title,
-                          unitNumber: unit.unitNumber,
-                          missingUnitLabel: "Unit number missing",
-                        })}
-                      </span>{" "}
-                      confirmed
-                    </span>
-                    <button
-                      type="button"
-                      className="shrink-0 text-xs font-bold underline"
-                      onClick={() => removeSelectedUnit(unit.id)}
-                    >
-                      Change kit
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {proposal.staffReservationWarning ? (
-            <div className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
-              <p className="font-bold">Course reservation overlaps</p>
-              <p className="mt-1">
-                {proposal.staffReservationWarning.reservedCount} of{" "}
-                {proposal.staffReservationWarning.totalCount} units are reserved
-                from {formatReadableDate(proposal.staffReservationWarning.from)}{" "}
-                to {formatReadableDate(proposal.staffReservationWarning.to)}.
-              </p>
-              <p className="mt-1">
-                Only continue if you have permission to borrow them.
-              </p>
-              {reservationAcknowledged ? (
-                <p className="mt-2 font-semibold">
-                  Continue anyway is selected.
+        needExactUnits || proposal.staffReservationWarning ? (
+          <div className="mt-3 rounded-xl bg-gray-50 px-3 py-2.5">
+            {needExactUnits ? (
+              <div className="mb-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-950">
+                <p className="font-semibold">
+                  {quantity === 1
+                    ? "Correct kit"
+                    : `${selectedUnits.length} of ${quantity} kits confirmed`}
                 </p>
-              ) : (
-                <button
-                  type="button"
-                  className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
-                  onClick={() => {
-                    void fetcher.submit(
-                      {
-                        intent: "acknowledge-reservation",
-                        confirmationToken: proposal.confirmationToken,
-                      },
-                      { method: "post" }
-                    );
-                  }}
-                  disabled={fetcher.state !== "idle"}
-                >
-                  {fetcher.state !== "idle"
-                    ? "Saving permission…"
-                    : "Continue anyway"}
-                </button>
-              )}
-            </div>
-          ) : null}
-        </div>
+                <ul className="mt-1 space-y-1">
+                  {selectedUnits.map((unit) => (
+                    <li
+                      key={unit.id}
+                      className="flex items-center justify-between gap-3"
+                    >
+                      <span className="min-w-0 truncate">
+                        <span aria-hidden="true" className="mr-1 font-bold">
+                          ✓
+                        </span>
+                        <span className="ioio-identifier">
+                          {getIoioPhysicalUnitDisplayName({
+                            logicalProductName: item.title,
+                            unitNumber: unit.unitNumber,
+                            missingUnitLabel: "Unit number missing",
+                          })}
+                        </span>{" "}
+                        confirmed
+                      </span>
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs font-bold underline"
+                        onClick={() => removeSelectedUnit(unit.id)}
+                      >
+                        Change kit
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {proposal.staffReservationWarning ? (
+              <div className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
+                <p className="font-bold">Course reservation overlaps</p>
+                <p className="mt-1">
+                  {proposal.staffReservationWarning.reservedCount} of{" "}
+                  {proposal.staffReservationWarning.totalCount} units are
+                  reserved from{" "}
+                  {formatReadableDate(proposal.staffReservationWarning.from)} to{" "}
+                  {formatReadableDate(proposal.staffReservationWarning.to)}.
+                </p>
+                <p className="mt-1">
+                  Only continue if you have permission to borrow them.
+                </p>
+                {reservationAcknowledged ? (
+                  <p className="mt-2 font-semibold">
+                    Continue anyway is selected.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
+                    onClick={() => {
+                      void fetcher.submit(
+                        {
+                          intent: "acknowledge-reservation",
+                          confirmationToken: proposal.confirmationToken,
+                        },
+                        { method: "post" }
+                      );
+                    }}
+                    disabled={fetcher.state !== "idle"}
+                  >
+                    {fetcher.state !== "idle"
+                      ? "Saving permission…"
+                      : "Continue anyway"}
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null
       ) : (
         <>
           {needExactUnits ? (
@@ -1326,49 +1324,12 @@ function CheckoutLine({
             </div>
           ) : null}
           <div className="mt-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                {requestPreparation ? (
-                  <>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                      <span className="font-semibold text-amber-900">
-                        {["Preparation required"].filter(Boolean).join(" · ")}
-                      </span>
-                    </div>
-                    {requestPreparation ? (
-                      <p className="mt-0.5 text-xs text-gray-600">
-                        A TA will prepare the equipment and notify you when it
-                        is ready for pickup.
-                      </p>
-                    ) : null}
-                  </>
-                ) : (
-                  <span
-                    className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
-                      requiresBorrowApproval
-                        ? "bg-amber-50 text-amber-900"
-                        : "bg-green-50 text-green-800"
-                    }`}
-                  >
-                    {requiresBorrowApproval
-                      ? "TA approval required"
-                      : "Ready to borrow"}
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-              <p className="text-xs text-gray-600">
-                Maximum {maxBorrowDays} days · Return by{" "}
-                {formatLatestReturnDate(maxBorrowDays)}
+            {canUseStaffReservationOverlap && availabilityData ? (
+              <p className="text-xs font-semibold text-amber-900">
+                A course reservation overlaps; details appear before
+                confirmation.
               </p>
-              {canUseStaffReservationOverlap && availabilityData ? (
-                <p className="text-xs font-semibold text-amber-900">
-                  A course reservation overlaps; details appear before
-                  confirmation.
-                </p>
-              ) : null}
-            </div>
+            ) : null}
             {!requestPreparation ? (
               <p className="mt-2 text-xs font-semibold text-gray-600">
                 {availabilityFetcher.state !== "idle"
@@ -1454,9 +1415,6 @@ export default function IoioCheckout() {
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
-  const pickupHours = layoutData?.workingHours
-    ? formatPickupHours(layoutData.workingHours)
-    : "the IOIO Lab opening hours";
   const annualApprovalRequired =
     !layoutData?.isIoioStaff &&
     !layoutData?.isIoioTA &&
@@ -1736,29 +1694,6 @@ export default function IoioCheckout() {
         title="Borrowing list"
         text="Choose a borrowing option for each item, then confirm."
       />
-      <div className="mb-4 grid gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm sm:grid-cols-3">
-        <div className="min-w-0">
-          <p className="font-semibold text-gray-900">
-            <SettingHelpLabel
-              label="Opening hours"
-              help={IOIO_OPENING_HOURS_GUIDANCE}
-            />
-          </p>
-          <p className="mt-0.5 text-gray-700">{pickupHours}</p>
-        </div>
-        <div className="min-w-0">
-          <p className="font-semibold text-gray-900">Preparation & pickup</p>
-          <p className="mt-0.5 text-gray-700">
-            {layoutData?.workingHours?.enabled
-              ? "Normally during opening hours."
-              : "Ask a TA about timing."}
-          </p>
-        </div>
-        <div className="min-w-0">
-          <p className="font-semibold text-gray-900">Extensions</p>
-          <p className="mt-0.5 text-gray-700">Require approval.</p>
-        </div>
-      </div>
       {preparationRequestTitles.length ? (
         <div
           className="mb-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-950"

@@ -78,9 +78,9 @@ export function StaffItemDetail({
       image={image}
       actions={
         <>
-          {assistantAction}
-          {actions}
           {borrowAction}
+          {actions}
+          {assistantAction}
         </>
       }
       availableQuantity={availableQuantity}

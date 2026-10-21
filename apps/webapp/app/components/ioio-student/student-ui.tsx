@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Form, Link, useNavigation, useRouteLoaderData } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
 import {
@@ -11,7 +11,10 @@ import type {
   StudentLocation,
 } from "~/modules/ioio-student/service.server";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
-import { useStudentCheckout } from "./checkout-context";
+import {
+  useStudentCheckout,
+  type StudentCheckoutItemDraft,
+} from "./checkout-context";
 import {
   type StudentInventoryItem,
   getStudentLabAreaFilters,
@@ -150,6 +153,7 @@ export function InventoryFilterControls({
   categoryId,
   itemType,
   availability,
+  scanAction,
 }: {
   basePath: string;
   categories: StudentCategory[];
@@ -159,6 +163,7 @@ export function InventoryFilterControls({
   categoryId: string | null;
   itemType: string | null;
   availability: string | null;
+  scanAction?: ReactNode;
 }) {
   const navigation = useNavigation();
   const searching = navigation.state !== "idle";
@@ -238,8 +243,15 @@ export function InventoryFilterControls({
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-        <Form method="get" action={basePath} className="flex min-w-0 gap-2">
+      <div
+        data-testid="inventory-controls-row"
+        className="flex flex-wrap items-center gap-2"
+      >
+        <Form
+          method="get"
+          action={basePath}
+          className="flex min-w-0 flex-1 basis-80 gap-2"
+        >
           <label
             htmlFor={`${basePath.replaceAll("/", "-")}-search`}
             className="sr-only"
@@ -262,14 +274,16 @@ export function InventoryFilterControls({
           <button
             type="submit"
             disabled={searching}
-            className="min-h-11 rounded-xl border border-gray-300 bg-white px-4 text-sm font-bold text-gray-800 hover:border-red-200 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-600"
+            className="min-h-11 shrink-0 whitespace-nowrap rounded-xl border border-gray-300 bg-white px-3 text-sm font-bold text-gray-800 hover:border-red-200 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-600"
           >
             {searching ? "Searching…" : "Search"}
           </button>
         </Form>
 
-        <details className="relative rounded-xl border border-gray-200 bg-white">
-          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-center gap-2 px-4 text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-red-600">
+        {scanAction}
+
+        <details className="relative shrink-0">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-gray-300 bg-white px-3 text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-red-600">
             Filters
             {activeFilterCount ? (
               <span className="rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] text-white">
@@ -479,7 +493,11 @@ export function AssetCard({
     : "Location not recorded";
 
   return (
-    <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm">
+    <article
+      className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm ${
+        variant === "assistant" ? "h-full" : "self-start"
+      }`}
+    >
       <Link
         to={`/ioio/browse/${asset.id}`}
         aria-label={`View ${formatStudentTitle(asset.title, asset.type)}`}
@@ -488,9 +506,11 @@ export function AssetCard({
         <StudentAssetPlaceholder asset={asset} />
       </Link>
       <div
-        className={`flex min-w-0 flex-1 flex-col ${compact ? "p-3" : "p-4"}`}
+        className={`flex min-w-0 flex-col ${
+          variant === "assistant" ? `flex-1 ${compact ? "p-3" : "p-4"}` : "p-3"
+        }`}
       >
-        <div className="min-h-10">
+        <div className={variant === "assistant" ? "min-h-10" : ""}>
           <Link
             to={`/ioio/browse/${asset.id}`}
             className="line-clamp-2 font-bold leading-5 text-gray-950 underline-offset-4 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700"
@@ -521,10 +541,10 @@ export function AssetCard({
           </>
         ) : (
           <>
-            <p className="mt-3 line-clamp-2 min-h-10 text-xs leading-4 text-gray-500">
+            <p className="mt-1 line-clamp-2 text-xs leading-4 text-gray-500">
               {locationSummary}
             </p>
-            <div className="mt-auto flex flex-col items-start gap-2 pt-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+            <div className="mt-2 flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-2">
               <p
                 className={`text-sm font-bold ${
                   availableNow ? "text-green-800" : "text-gray-600"
@@ -532,7 +552,7 @@ export function AssetCard({
               >
                 {availability}
               </p>
-              <StudentCheckoutButton asset={asset} compact={compact} />
+              <StudentCheckoutButton asset={asset} compact={compact} primary />
             </div>
           </>
         )}
@@ -546,11 +566,13 @@ export function StudentCheckoutButton({
   compact = false,
   availabilityOverride,
   primary = false,
+  borrowLabel = "Add to borrow list",
 }: {
-  asset: StudentAsset | StudentInventoryItem;
+  asset: StudentAsset | StudentInventoryItem | StudentCheckoutItemDraft;
   compact?: boolean;
   availabilityOverride?: number;
   primary?: boolean;
+  borrowLabel?: string;
 }) {
   const { addItem, hasItem, removeItem } = useStudentCheckout();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
@@ -600,7 +622,7 @@ export function StudentCheckoutButton({
     <button
       type="button"
       aria-pressed={inCheckout}
-      aria-label={inCheckout ? "In borrow list" : "Add to borrow list"}
+      aria-label={inCheckout ? "In borrow list" : borrowLabel}
       onClick={() => {
         if (inCheckout) {
           removeItem(asset.id);
@@ -637,7 +659,7 @@ export function StudentCheckoutButton({
           {justAdded ? "Added" : "In borrow list"}
         </span>
       ) : (
-        "Add to borrow list"
+        borrowLabel
       )}
     </button>
   );

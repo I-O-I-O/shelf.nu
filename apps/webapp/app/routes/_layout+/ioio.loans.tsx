@@ -828,6 +828,8 @@ export default function IoioLoans() {
   const { activeLoans, pendingLoanGroups, pastLoans } =
     splitStudentLoanSections(loans, pendingReturns);
   const location = useLocation();
+  const returnSubmitted =
+    new URLSearchParams(location.search).get("return") === "submitted";
   const view =
     new URLSearchParams(location.search).get("view") === "past"
       ? "past"
@@ -916,6 +918,15 @@ export default function IoioLoans() {
         title="My loans"
         text="Only bookings assigned to your own Shelf account are shown here."
       />
+      {returnSubmitted ? (
+        <div
+          role="status"
+          className="mb-4 rounded-2xl border border-green-200 bg-green-50 p-4 text-sm font-semibold text-green-900"
+        >
+          Return submitted. A TA will check the item before it becomes available
+          again.
+        </div>
+      ) : null}
       <nav
         aria-label="Loan history"
         className="mb-6 flex gap-2 border-b border-gray-200"

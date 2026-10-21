@@ -9,7 +9,6 @@ import {
   getStudentLocationPath,
   requestsStudentAssistantAssetCards,
   selectStudentAssistantDisplayAssets,
-  selectStudentInventoryPreview,
 } from "./inventory-presentation";
 
 function asset(overrides: Partial<StudentAsset>): StudentAsset {
@@ -88,22 +87,6 @@ describe("student inventory presentation", () => {
       "Container 4",
     ]);
     expect(getStudentLocationPath("missing", locations)).toBeNull();
-  });
-
-  it("prioritizes borrowable equipment in the short home preview", () => {
-    const items = groupStudentAssets([
-      asset({
-        id: "unavailable",
-        title: "A unavailable",
-        availableQuantity: 0,
-      }),
-      asset({ id: "ready-b", title: "B ready" }),
-      asset({ id: "ready-a", title: "A ready" }),
-    ]);
-
-    expect(selectStudentInventoryPreview(items, 2).map(({ id }) => id)).toEqual(
-      ["ready-a", "ready-b"]
-    );
   });
 
   it("filters availability using both quantity and IOIO borrowability", () => {

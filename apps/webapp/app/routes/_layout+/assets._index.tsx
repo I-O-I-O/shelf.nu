@@ -502,7 +502,11 @@ export default function AssetIndexPage() {
                 to="/staff/import"
               />
             ) : null}
-            <InventoryQrScanner audience="staff" />
+            <InventoryQrScanner
+              audience="staff"
+              buttonLabel="Scan QR"
+              showIcon={false}
+            />
             <When truthy={canCreateAssets}>
               <NewAssetDropdown canImportAssets={canImportAssets} />
             </When>

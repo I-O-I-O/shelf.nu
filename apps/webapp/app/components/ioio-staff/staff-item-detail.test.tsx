@@ -6,6 +6,63 @@ import { StaffItemDetail } from "./staff-item-detail";
 describe("StaffItemDetail", () => {
   afterEach(() => cleanup());
 
+  it("places Borrow, Edit, and Ask IOIO in the detail action row", () => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/assets/item-1/overview",
+          element: (
+            <StaffItemDetail
+              title="Motor Small"
+              image={<div>Motor image</div>}
+              availableQuantity={2}
+              locationPath={[]}
+              borrowAction={<button type="button">Borrow</button>}
+              actions={<a href="/assets/item-1/edit">Edit</a>}
+              assistantAction={<a href="/staff/ask">Ask IOIO</a>}
+            />
+          ),
+        },
+      ],
+      { initialEntries: ["/assets/item-1/overview"] }
+    );
+    render(<RouterProvider router={router} />);
+
+    const borrow = screen.getByRole("button", { name: "Borrow" });
+    const edit = screen.getByRole("link", { name: "Edit" });
+    const ask = screen.getByRole("link", { name: "Ask IOIO" });
+
+    expect(
+      borrow.compareDocumentPosition(edit) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      edit.compareDocumentPosition(ask) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it("omits the Borrow action when the route has no available item", () => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/assets/item-1/overview",
+          element: (
+            <StaffItemDetail
+              title="Motor Small"
+              image={<div>Motor image</div>}
+              availableQuantity={0}
+              locationPath={[]}
+              actions={<a href="/assets/item-1/edit">Edit</a>}
+            />
+          ),
+        },
+      ],
+      { initialEntries: ["/assets/item-1/overview"] }
+    );
+    render(<RouterProvider router={router} />);
+
+    expect(screen.queryByRole("button", { name: "Borrow" })).toBeNull();
+  });
+
   it("keeps the general item title separate from its physical units", () => {
     const router = createMemoryRouter(
       [
