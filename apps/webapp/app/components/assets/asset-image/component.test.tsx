@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssetImage } from "./component";
+import { AssetDetailImage } from "./detail-image";
 import type { AssetForPreview, AssetForThumbnail } from "./types";
 
 // why: the dialog/button/spinner children pull in Radix + router context that is
@@ -58,6 +59,12 @@ const createExpiredPreviewAsset = (): AssetForPreview =>
     assetModel: null,
   }) as unknown as AssetForPreview;
 
+const createAssetWithoutImage = (): AssetForThumbnail => ({
+  id: "asset-without-image",
+  thumbnailImage: null,
+  assetModel: null,
+});
+
 describe("AssetImage thumbnail resilience", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -93,6 +100,98 @@ describe("AssetImage thumbnail resilience", () => {
     // It must NOT use the single-fetch `.data` suffix (which is what the route
     // rate-limiter throttles and what crashes the UI on 429).
     expect(calledUrl).not.toContain(".data");
+  });
+
+  it("renders the resolved Shelf URL and falls back to the model image when it fails", async () => {
+    // why: fetch is the external refresh boundary; return an unavailable URL
+    // so the test can verify the shared display fallback without storage access.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(null, { status: 404 })
+    );
+    const asset = createAssetNeedingThumbnail({
+      assetModel: {
+        image: "https://storage.example/model.jpg",
+        thumbnailImage: "https://storage.example/model-thumb.jpg",
+      },
+    });
+
+    render(<AssetImage asset={asset} alt="Makey Kit" />);
+    const image = screen.getByAltText("Makey Kit");
+
+    expect(image).toHaveAttribute(
+      "src",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t"
+    );
+
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/model-thumb.jpg"
+    );
+  });
+
+  it("uses Shelf's placeholder when the asset and its model have no image", () => {
+    render(<AssetImage asset={createAssetWithoutImage()} alt="Motor Small" />);
+
+    expect(screen.getByAltText("Motor Small")).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
+  });
+
+  it("renders the same resolved URL through the Shelf detail image frame", () => {
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImageExpiration: new Date("2099-01-01T00:00:00.000Z"),
+    };
+    render(<AssetDetailImage asset={asset} alt="Makey Kit" withPreview />);
+
+    expect(screen.getAllByAltText("Makey Kit")).toHaveLength(2);
+    expect(
+      screen
+        .getAllByAltText("Makey Kit")
+        .map((image) => image.getAttribute("src"))
+    ).toEqual([
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t",
+    ]);
+  });
+
+  it("falls back to Shelf's placeholder when both asset and model images fail", async () => {
+    // why: fetch is the external refresh boundary; simulate a missing asset
+    // object so the model and static placeholder fallback can be exercised.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(null, { status: 404 })
+    );
+    const asset = createAssetNeedingThumbnail({
+      assetModel: {
+        image: "https://storage.example/model.jpg",
+        thumbnailImage: "https://storage.example/model-thumb.jpg",
+      },
+    });
+
+    render(<AssetImage asset={asset} alt="Makey Kit" />);
+    const image = screen.getByAltText("Makey Kit");
+
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/model-thumb.jpg"
+    );
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
   });
 
   it("does not crash when thumbnail generation is rate-limited (429)", async () => {

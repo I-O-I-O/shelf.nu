@@ -5,6 +5,7 @@ import { getAssetAvailabilityBatch } from "~/modules/asset/availability.server";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
+import { getIoioAvailability } from "./availability.server";
 import {
   getMyStudentLoans,
   getStudentAssets,
@@ -24,8 +25,11 @@ vi.mock("~/database/db.server", () => ({
 vi.mock("~/modules/asset/availability.server", () => ({
   getAssetAvailabilityBatch: vi.fn(),
 }));
-vi.mock("~/modules/asset/individual-product-quantity.server", () => ({
-  getIndividualUnitAvailability: vi.fn(() => Promise.resolve({ available: 1 })),
+vi.mock("./availability.server", () => ({
+  getIoioAvailability: vi.fn(() =>
+    Promise.resolve({ availableUnitIdsWithoutStaffReservations: ["unit-001"] })
+  ),
+  IOIO_STAFF_RESERVATION_DESCRIPTION: "IOIO staff reservation",
 }));
 vi.mock("~/modules/asset/service.server", () => ({
   resolveAssetImagesForPresentation: vi.fn((rows) => Promise.resolve(rows)),
@@ -288,6 +292,73 @@ describe("student catalog source selectors", () => {
       kitImage: "https://storage.example/makey/kit-cover.jpg",
       kits: [{ image: "https://storage.example/makey/kit-cover.jpg" }],
     });
+  });
+
+  it("uses the shared IOIO availability for the same physical kit units shown by Staff", async () => {
+    const rows = ["001", "002", "003", "004", "005"].map((unit) => ({
+      id: `unit-${unit}`,
+      organizationId: "org-1",
+      title: `Makey Kit #${unit}`,
+      description: null,
+      mainImage: null,
+      mainImageExpiration: null,
+      thumbnailImage: null,
+      mainImageStoragePath: null,
+      thumbnailImageStoragePath: null,
+      updatedAt: new Date("2026-09-01T00:00:00.000Z"),
+      assetModelId: "makey-model",
+      assetModel: {
+        id: "makey-model",
+        name: "Makey Kit",
+        organizationId: "org-1",
+        image: null,
+        thumbnailImage: null,
+        imageStoragePath: null,
+        thumbnailImageStoragePath: null,
+      },
+      status: "AVAILABLE",
+      type: "INDIVIDUAL",
+      quantity: null,
+      availableToBook: true,
+      maxBorrowDays: 45,
+      sequentialId: null,
+      category: null,
+      assetLocations: [],
+      assetKits: [],
+      qrCodes: [],
+    }));
+    vi.mocked(db.asset.findMany).mockResolvedValue(rows as never);
+    vi.mocked(getIoioAvailability).mockResolvedValue({
+      availableUnitIdsWithoutStaffReservations: [
+        "unit-001",
+        "unit-002",
+        "unit-003",
+      ],
+    } as never);
+
+    const assets = await getStudentAssets({ organizationId: "org-1" });
+
+    expect(getIoioAvailability).toHaveBeenCalledTimes(1);
+    expect(getIoioAvailability).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      productId: "unit-001",
+      candidateAssetIds: rows.map(({ id }) => id),
+      from: expect.any(Date),
+      to: expect.any(Date),
+    });
+    expect(assets.map(({ availableQuantity }) => availableQuantity)).toEqual([
+      1, 1, 1, 0, 0,
+    ]);
+
+    vi.mocked(getIoioAvailability).mockResolvedValue({
+      availableUnitIdsWithoutStaffReservations: rows.map(({ id }) => id),
+    } as never);
+    const allAvailableAssets = await getStudentAssets({
+      organizationId: "org-1",
+    });
+    expect(
+      allAvailableAssets.map(({ availableQuantity }) => availableQuantity)
+    ).toEqual([1, 1, 1, 1, 1]);
   });
 
   it("builds Student locations from current hierarchical rows, images, and active asset placements", async () => {

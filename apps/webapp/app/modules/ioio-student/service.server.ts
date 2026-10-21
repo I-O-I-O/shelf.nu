@@ -7,7 +7,6 @@ import {
 import type { AssetStatus, Organization } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { getAssetAvailabilityBatch } from "~/modules/asset/availability.server";
-import { getIndividualUnitAvailability } from "~/modules/asset/individual-product-quantity.server";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { getActiveCategoriesForOrganization } from "~/modules/category/service.server";
 import {
@@ -21,7 +20,10 @@ import { refreshExpiredKitImages } from "~/modules/kit/service.server";
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
 import { resolveStorageImageUrl } from "~/utils/storage.server";
-import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "./availability.server";
+import {
+  getIoioAvailability,
+  IOIO_STAFF_RESERVATION_DESCRIPTION,
+} from "./availability.server";
 import { resolveFuzzyInventoryCandidates } from "./inventory-search.shared";
 
 const ASSET_SELECT = {
@@ -219,23 +221,40 @@ async function shapeAssets(
   const availability = new Map(
     availabilityByWindow.flatMap((result) => [...result.entries()])
   );
-  const individualAvailability = new Map(
-    await Promise.all(
-      currentRows
-        .filter((asset) => asset.type === AssetType.INDIVIDUAL)
-        .map(async (asset) => {
-          const maxBorrowDays =
-            asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45;
-          return [
-            asset.id,
-            await getIndividualUnitAvailability({
-              organizationId,
-              assetIds: [asset.id],
-              window: getImmediateBorrowingWindow(maxBorrowDays, now),
-            }),
-          ] as const;
-        })
-    )
+  const individualProducts = new Map<
+    string,
+    { productId: string; assetIds: string[]; maxBorrowDays: number }
+  >();
+  for (const asset of currentRows) {
+    if (asset.type !== AssetType.INDIVIDUAL) continue;
+    const maxBorrowDays =
+      asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45;
+    const productKey = asset.assetModelId ?? asset.id;
+    const key = `${productKey}:${maxBorrowDays}`;
+    const product = individualProducts.get(key);
+    if (product) {
+      product.assetIds.push(asset.id);
+    } else {
+      individualProducts.set(key, {
+        productId: asset.id,
+        assetIds: [asset.id],
+        maxBorrowDays,
+      });
+    }
+  }
+  const individualAvailability = new Set(
+    (
+      await Promise.all(
+        [...individualProducts.values()].map(async (product) =>
+          getIoioAvailability({
+            organizationId,
+            productId: product.productId,
+            candidateAssetIds: product.assetIds,
+            ...getImmediateBorrowingWindow(product.maxBorrowDays, now),
+          })
+        )
+      )
+    ).flatMap((result) => result.availableUnitIdsWithoutStaffReservations)
   );
 
   return currentRows.map((asset) => {
@@ -283,7 +302,9 @@ async function shapeAssets(
                 currentAvailability?.physicalAvailable ?? asset.quantity ?? 0
               )
             )
-          : individualAvailability.get(asset.id)?.available ?? 0,
+          : individualAvailability.has(asset.id)
+          ? 1
+          : 0,
       availableToBook: asset.availableToBook,
       maxBorrowDays:
         asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45,

@@ -194,4 +194,74 @@ describe("getIoioAvailability", () => {
     expect(result.availableWithoutStaffReservations).toBe(1);
     expect(dbMock.ioioWriteOperation.findMany).not.toHaveBeenCalled();
   });
+
+  it("keeps soft staff reservations acknowledgeable while retaining real holds", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      id: "unit-001",
+      type: AssetType.INDIVIDUAL,
+      quantity: null,
+      availableToBook: true,
+      assetModelId: "model-a",
+    });
+    dbMock.asset.findMany.mockResolvedValue(
+      ["001", "002", "003", "004", "005"].map((unit) => ({
+        id: `unit-${unit}`,
+        status: "AVAILABLE",
+        availableToBook: true,
+      }))
+    );
+    dbMock.bookingAsset.findMany.mockResolvedValue([
+      {
+        assetId: "unit-001",
+        bookingId: "staff-reservation",
+        quantity: 1,
+        booking: { from, to },
+      },
+      {
+        assetId: "unit-002",
+        bookingId: "staff-reservation",
+        quantity: 1,
+        booking: { from, to },
+      },
+    ]);
+    getIndividualUnitAvailabilityMock
+      .mockResolvedValueOnce({
+        total: 5,
+        available: 1,
+        availableUnitIds: ["unit-003"],
+      })
+      .mockResolvedValueOnce({
+        total: 5,
+        available: 3,
+        availableUnitIds: ["unit-001", "unit-002", "unit-003"],
+      });
+
+    const result = await getIoioAvailability({
+      organizationId: "org-a",
+      productId: "unit-001",
+      candidateAssetIds: [
+        "unit-001",
+        "unit-002",
+        "unit-003",
+        "unit-004",
+        "unit-005",
+      ],
+      from,
+      to,
+    });
+
+    expect(result.availableCount).toBe(1);
+    expect(result.availableWithoutStaffReservations).toBe(3);
+    expect(result.availableUnitIdsWithoutStaffReservations).toEqual([
+      "unit-001",
+      "unit-002",
+      "unit-003",
+    ]);
+    expect(getIndividualUnitAvailabilityMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        organizationId: "org-a",
+        excludeBookingIds: ["staff-reservation"],
+      })
+    );
+  });
 });

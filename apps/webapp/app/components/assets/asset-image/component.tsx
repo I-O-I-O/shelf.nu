@@ -10,7 +10,10 @@ import {
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
 import { Button } from "~/components/shared/button";
 import { Spinner } from "~/components/shared/spinner";
-import { resolveAssetImage } from "~/modules/asset/image-resolution";
+import {
+  ASSET_IMAGE_PLACEHOLDER,
+  resolveAssetImage,
+} from "~/modules/asset/image-resolution";
 import { DIALOG_CLOSE_SHORTCUT } from "~/utils/constants";
 import { tw } from "~/utils/tw";
 import type { AssetImageProps } from "./types";
@@ -54,11 +57,13 @@ type AssetImageState = {
   refreshedMainImage: string | null;
   /** Fresh thumbnail URL returned by the refresh or generate endpoint, if any. */
   refreshedThumbnailImage: string | null;
+  /** URLs already rejected by the browser, so the image cascade can advance. */
+  failedImageUrls: string[];
 };
 
 type AssetImageAction =
   | { type: "load_success" }
-  | { type: "load_error" }
+  | { type: "load_error"; imageUrl: string }
   | { type: "clear_error" }
   | { type: "asset_changed" }
   | { type: "mark_refresh_attempted" }
@@ -81,6 +86,7 @@ const INITIAL_ASSET_IMAGE_STATE: AssetImageState = {
   isFetchingImage: false,
   refreshedMainImage: null,
   refreshedThumbnailImage: null,
+  failedImageUrls: [],
 };
 
 function assetImageReducer(
@@ -91,7 +97,14 @@ function assetImageReducer(
     case "load_success":
       return { ...state, isLoading: false, isImageError: false };
     case "load_error":
-      return { ...state, isLoading: false, isImageError: true };
+      return {
+        ...state,
+        isLoading: false,
+        isImageError: true,
+        failedImageUrls: state.failedImageUrls.includes(action.imageUrl)
+          ? state.failedImageUrls
+          : [...state.failedImageUrls, action.imageUrl],
+      };
     case "clear_error":
       return { ...state, isImageError: false };
     case "asset_changed":
@@ -106,6 +119,7 @@ function assetImageReducer(
         hasAttemptedRefresh: false,
         refreshedMainImage: null,
         refreshedThumbnailImage: null,
+        failedImageUrls: [],
       };
     case "mark_refresh_attempted":
       return { ...state, hasAttemptedRefresh: true };
@@ -131,6 +145,10 @@ function assetImageReducer(
         refreshedMainImage: action.mainImage ?? state.refreshedMainImage,
         refreshedThumbnailImage:
           action.thumbnailImage ?? state.refreshedThumbnailImage,
+        failedImageUrls:
+          action.mainImage != null || action.thumbnailImage != null
+            ? []
+            : state.failedImageUrls,
       };
     case "thumbnail_generated":
       return {
@@ -167,6 +185,7 @@ export const AssetImage = ({
     isFetchingImage,
     refreshedMainImage,
     refreshedThumbnailImage,
+    failedImageUrls,
   } = state;
 
   // Track if we've already tried refreshing to prevent loops.
@@ -226,14 +245,47 @@ export const AssetImage = ({
     ? refreshedMainImage ?? resolved.fullUrl
     : resolved.fullUrl;
 
-  // Only add cache-buster if we've had an error and attempted refresh
+  const modelImageUrl = useThumbnail
+    ? asset.assetModel?.thumbnailImage ?? asset.assetModel?.image ?? null
+    : asset.assetModel?.image ?? asset.assetModel?.thumbnailImage ?? null;
+  const imageCandidates = [
+    useThumbnail ? currentThumbnail : currentMainImage,
+    useThumbnail ? currentMainImage : currentThumbnail,
+    ...(resolved.source === "asset" ? [modelImageUrl] : []),
+    ...(resolved.source === "model"
+      ? [
+          useThumbnail
+            ? asset.assetModel?.image
+            : asset.assetModel?.thumbnailImage,
+        ]
+      : []),
+    ASSET_IMAGE_PLACEHOLDER,
+  ].filter(
+    (url, index, urls): url is string =>
+      Boolean(url) && urls.indexOf(url) === index
+  );
+  const activeImageUrl =
+    imageCandidates.find((url) => !failedImageUrls.includes(url)) ??
+    ASSET_IMAGE_PLACEHOLDER;
   const imageUrl =
-    (useThumbnail ? currentThumbnail : currentMainImage) +
-    (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+    activeImageUrl + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
 
-  // For preview dialog, always use the full-size image
+  // For preview dialog, always use the full-size image before its fallbacks.
+  const previewCandidates = [
+    currentMainImage,
+    ...(resolved.source === "asset"
+      ? [asset.assetModel?.image, asset.assetModel?.thumbnailImage]
+      : []),
+    ASSET_IMAGE_PLACEHOLDER,
+  ].filter(
+    (url, index, urls): url is string =>
+      Boolean(url) && urls.indexOf(url) === index
+  );
+  const activePreviewUrl =
+    previewCandidates.find((url) => !failedImageUrls.includes(url)) ??
+    ASSET_IMAGE_PLACEHOLDER;
   const previewImageUrl =
-    currentMainImage + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+    activePreviewUrl + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
 
   /**
    * Refreshes the asset's signed main-image (and thumbnail) URLs.
@@ -358,14 +410,18 @@ export const AssetImage = ({
     dispatch({ type: "load_success" });
   };
 
-  const handleImageError = () => {
-    // Only set error state and trigger refresh once — and only for an image the
-    // asset owns; an inherited or placeholder image has nothing to refresh.
-    if (canRepairImage && !isImageError && !hasAttemptedRefreshRef.current) {
-      dispatch({ type: "load_error" });
+  const handleImageError = (failedUrl: string) => {
+    // Only the asset-owned URL can be repaired. The rendered source advances
+    // to the model image and then Shelf's placeholder after a load failure.
+    if (
+      canRepairImage &&
+      [currentThumbnail, currentMainImage].includes(failedUrl) &&
+      !hasAttemptedRefreshRef.current
+    ) {
+      dispatch({ type: "load_error", imageUrl: failedUrl });
       void refreshImage();
     } else {
-      dispatch({ type: "load_error" });
+      dispatch({ type: "load_error", imageUrl: failedUrl });
     }
   };
 
@@ -537,7 +593,7 @@ export const AssetImage = ({
           }
           alt={alt}
           onLoad={handleImageLoad}
-          onError={handleImageError}
+          onError={() => handleImageError(activeImageUrl)}
           loading="lazy"
           decoding="async"
           {...rest}
@@ -569,6 +625,7 @@ export const AssetImage = ({
                   src={previewImageUrl}
                   className="max-h-full max-w-full object-contain"
                   alt={alt}
+                  onError={() => handleImageError(activePreviewUrl)}
                 />
               </div>
               <div className="flex w-full justify-center gap-3 px-6 py-3 md:justify-end">

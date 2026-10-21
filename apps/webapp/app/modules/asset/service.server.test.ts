@@ -1270,6 +1270,18 @@ describe("resolveAssetImagesForPresentation", () => {
     expect(asset.assetModel?.thumbnailImage).toBe(
       "files:org/models/motor-small-thumb.jpg"
     );
+    expect(mockResolveStorageImageUrl).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: "org/assets/motor-small.jpg",
+      legacyUrl: null,
+      isPublic: false,
+    });
+    expect(mockResolveStorageImageUrl).toHaveBeenCalledWith({
+      bucketName: "files",
+      objectPath: "org/models/motor-small.jpg",
+      legacyUrl: null,
+      isPublic: true,
+    });
   });
 });
 
