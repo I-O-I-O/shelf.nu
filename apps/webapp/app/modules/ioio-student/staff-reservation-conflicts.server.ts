@@ -175,7 +175,11 @@ export async function getIoioStaffReservationConflictSummary({
     : availability;
 
   const requested = quantity;
-  const available = availability.availableCount;
+  // IOIO staff calendar reservations are planning records. They remain
+  // visible in Shelf's booking history, but they do not consume the physical
+  // stock that another class reservation can plan against. Use the same
+  // soft-aware availability set for the displayed quantity and unit choices.
+  const available = availabilityWithoutSoftConflicts.availableCount;
   const shortfall = Math.max(0, requested - available);
   const loanConflictQuantity =
     product?.type === AssetType.INDIVIDUAL
@@ -191,8 +195,7 @@ export async function getIoioStaffReservationConflictSummary({
     conflicts,
     staffReservedCount: availability.staffReservedCount,
     staffReservationBookingIds: availability.staffReservationBookingIds,
-    availableAfterSoftConflicts:
-      availabilityWithoutSoftConflicts.availableCount,
+    availableAfterSoftConflicts: available,
     availableUnitIdsAfterSoftConflicts:
       availabilityWithoutSoftConflicts.availableUnitIds,
     loanBookingIds,

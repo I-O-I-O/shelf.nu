@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import {
   calculateUnitCheckinProgress,
   calculateBookingLifecycleProgress,
+  createBookingConflictConditions,
 } from "./utils.server";
 
 // why: pure function, no mocks needed — exercises real bucketing logic.
@@ -870,5 +871,41 @@ describe("calculateBookingLifecycleProgress (quantity-tracked)", () => {
     expect(p.partialCount).toBe(1);
     expect(p.checkedOutCount).toBe(0);
     expect(p.returnedCount).toBe(0);
+  });
+});
+
+describe("createBookingConflictConditions", () => {
+  it("uses the same half-open overlap as canonical availability", () => {
+    const from = new Date("2027-10-11T00:00:00.000Z");
+    const to = new Date("2027-10-17T23:59:59.999Z");
+    const conditions = createBookingConflictConditions({
+      currentBookingId: "new-reservation",
+      fromDate: from,
+      toDate: to,
+      ignoreBookingIds: ["soft-ioio-reservation"],
+    });
+
+    expect(conditions.where).toMatchObject({
+      booking: {
+        OR: [
+          {
+            status: BookingStatus.RESERVED,
+            id: { notIn: ["new-reservation", "soft-ioio-reservation"] },
+            from: { lt: to },
+            to: { gt: from },
+          },
+          {
+            status: BookingStatus.ONGOING,
+            id: { notIn: ["new-reservation", "soft-ioio-reservation"] },
+            from: { lt: to },
+            to: { gt: from },
+          },
+          {
+            status: BookingStatus.OVERDUE,
+            id: { notIn: ["new-reservation", "soft-ioio-reservation"] },
+          },
+        ],
+      },
+    });
   });
 });

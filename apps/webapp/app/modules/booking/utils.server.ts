@@ -850,35 +850,25 @@ export function createBookingConflictConditions({
     fromDate && toDate
       ? {
           OR: [
-            // Rule 1: RESERVED bookings always conflict
+            // Date ranges are half-open, matching the canonical availability
+            // sweep: a booking ending exactly when another starts does not
+            // overlap. OVERDUE remains a conflict for every future window
+            // because its actual return time is unknown.
             {
               status: BookingStatus.RESERVED,
               ...bookingIdFilter,
-              OR: [
-                {
-                  from: { lte: toDate },
-                  to: { gte: fromDate },
-                },
-                {
-                  from: { gte: fromDate },
-                  to: { lte: toDate },
-                },
-              ],
+              from: { lt: toDate },
+              to: { gt: fromDate },
             },
-            // Rule 2: ONGOING/OVERDUE bookings (filtered by asset status in helpers)
             {
-              status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
+              status: BookingStatus.ONGOING,
               ...bookingIdFilter,
-              OR: [
-                {
-                  from: { lte: toDate },
-                  to: { gte: fromDate },
-                },
-                {
-                  from: { gte: fromDate },
-                  to: { lte: toDate },
-                },
-              ],
+              from: { lt: toDate },
+              to: { gt: fromDate },
+            },
+            {
+              status: BookingStatus.OVERDUE,
+              ...bookingIdFilter,
             },
           ],
         }

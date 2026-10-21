@@ -235,7 +235,7 @@ export default function renderEventCard({ event }: EventCardProps) {
             {booking.isIoioReservation ? (
               <span className="inline-flex min-w-0 items-center gap-1">
                 <span className="truncate font-medium">
-                  {booking.assetNames?.join(", ") || "Equipment"}
+                  {booking.assetNames?.join(" + ") || "Equipment"}
                 </span>
                 {booking.name ? (
                   <span className="truncate opacity-75">· {booking.name}</span>
@@ -312,7 +312,11 @@ export function EventCardContent({
       <div className="mb-3 mt-2 flex items-center gap-2 ">
         <div className="text-text-md font-medium">
           {booking.assetNames?.length ? (
-            <div>{booking.assetNames.join(", ")}</div>
+            <div>
+              {booking.assetNames.join(
+                booking.isIoioReservation ? " + " : ", "
+              )}
+            </div>
           ) : null}
           <div>{booking.name}</div>
         </div>

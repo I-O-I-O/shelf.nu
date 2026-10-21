@@ -8,6 +8,21 @@ import {
 } from "@testing-library/react";
 import { createRoutesStub, useLocation } from "react-router";
 import { describe, expect, it, vi } from "vitest";
+import { createLoaderArgs } from "@mocks/remix";
+
+const calendarMocks = vi.hoisted(() => ({
+  getBookingsForCalendar: vi.fn(),
+  requirePermission: vi.fn(),
+}));
+
+// why: the loader test supplies canonical booking events directly so it can
+// verify IOIO event identity/grouping without database or permission setup.
+vi.mock("~/modules/booking/service.server", () => ({
+  getBookingsForCalendar: calendarMocks.getBookingsForCalendar,
+}));
+vi.mock("~/utils/roles.server", () => ({
+  requirePermission: calendarMocks.requirePermission,
+}));
 
 // why: FullCalendar's browser-only rendering is represented by a small
 // component that exposes the event list and its datesSet callback to the test.
@@ -128,7 +143,7 @@ vi.mock("remix-utils/client-only", () => ({
   ClientOnly: ({ children }: { children: () => ReactNode }) => children(),
 }));
 
-import Calendar from "~/routes/_layout+/calendar";
+import Calendar, { loader } from "~/routes/_layout+/calendar";
 
 function LocationProbe() {
   const location = useLocation();
@@ -145,6 +160,79 @@ function CalendarRoute() {
 }
 
 describe("IOIO Calendar page", () => {
+  it("renders one linked multi-day event per reservation ID with equipment quantities", async () => {
+    calendarMocks.requirePermission.mockResolvedValue({
+      currentOrganization: { type: "TEAM" },
+      organizationId: "org-1",
+      canSeeAllBookings: true,
+      canSeeAllCustody: true,
+      role: "OWNER",
+    });
+    const start = "2026-10-21T14:00:00.000Z";
+    const end = "2026-10-23T16:00:00.000Z";
+    const event = (
+      id: string,
+      assetNames: string[],
+      name = "TEI",
+      status = "RESERVED"
+    ) => ({
+      title: name,
+      start,
+      end,
+      extendedProps: {
+        id,
+        status,
+        name,
+        description: "IOIO staff reservation",
+        start,
+        end,
+        custodian: { name: "Teacher" },
+        creator: { name: "Teacher" },
+        tags: [],
+        assetNames,
+      },
+    });
+    calendarMocks.getBookingsForCalendar.mockResolvedValue([
+      event("booking-a", ["Makey Kit ×4"]),
+      event("booking-a", ["Makey Kit ×4"]),
+      event("booking-a", ["Makey Kit ×4"]),
+      event("booking-a", ["Makey Kit ×4"]),
+      event("booking-a", ["Motor ×2"]),
+      event("booking-b", ["Makey Kit ×2"], "Embedded Systems"),
+      event("draft-attempt", ["Makey Kit"], "TEI", "DRAFT"),
+    ]);
+
+    const result = await loader(
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) },
+        request: new Request("http://localhost/calendar"),
+      })
+    );
+
+    expect(result.events).toHaveLength(2);
+    expect(result.events.map(({ id }) => id)).not.toContain("draft-attempt");
+    expect(result.events[0]).toMatchObject({
+      id: "booking-a",
+      title: "Makey Kit ×4 + Motor ×2 · TEI",
+      start,
+      end,
+      extendedProps: {
+        id: "booking-a",
+        assetNames: ["Makey Kit ×4", "Motor ×2"],
+        name: "TEI",
+        url: "/calendar/new-reservation?bookingId=booking-a",
+      },
+    });
+    expect(result.events[1]).toMatchObject({
+      id: "booking-b",
+      extendedProps: {
+        id: "booking-b",
+        assetNames: ["Makey Kit ×2"],
+        name: "Embedded Systems",
+      },
+    });
+  });
+
   it("renders reservation events and updates the date range in the URL", async () => {
     const Stub = createRoutesStub([
       {

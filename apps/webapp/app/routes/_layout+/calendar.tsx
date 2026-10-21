@@ -9,7 +9,7 @@ import listPlugin from "@fullcalendar/list";
 import luxonPlugin from "@fullcalendar/luxon3";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
-import { type BookingStatus, type Tag } from "@prisma/client";
+import { BookingStatus, type Tag } from "@prisma/client";
 import { Plus } from "lucide-react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Link, Outlet, useLoaderData, useLocation } from "react-router";
@@ -101,7 +101,7 @@ export type CalendarExtendedProps = {
   /** Availability view only: ISO instant of the latest check-in among the
    * folded slices; null unless `returned`. */
   returnedAt?: string | null;
-  /** Calendar-only label details for IOIO staff reservations. */
+  /** Calendar-only product summaries for IOIO staff reservations (e.g. Kit ×4). */
   assetNames?: string[];
   isIoioReservation?: boolean;
 };
@@ -151,34 +151,68 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
     // IOIO Calendar is the staff reservation planner. Generic Shelf loans
     // remain available from Loans and should not be mixed into this view.
-    const events = allEvents
-      .filter(
-        (event) =>
-          event.extendedProps?.description ===
-          IOIO_STAFF_RESERVATION_DESCRIPTION
-      )
-      .map((event) => {
+    const reservationEventsByBookingId = new Map<
+      string,
+      (typeof allEvents)[number]
+    >();
+    for (const event of allEvents) {
+      const details = event.extendedProps;
+      // Shelf creates a DRAFT before reservation validation completes. It is
+      // not a confirmed planning reservation and failed attempts can leave
+      // these drafts behind, so keep them out of the IOIO reservation calendar.
+      if (
+        !details ||
+        details.description !== IOIO_STAFF_RESERVATION_DESCRIPTION ||
+        details.status === BookingStatus.DRAFT
+      ) {
+        continue;
+      }
+
+      const existing = reservationEventsByBookingId.get(details.id);
+      if (existing?.extendedProps) {
+        // A booking may have multiple membership-backed event candidates in
+        // upstream data. Fold their product summaries under the booking ID;
+        // keep the booking's original date range and reservation identity.
+        reservationEventsByBookingId.set(details.id, {
+          ...existing,
+          extendedProps: {
+            ...existing.extendedProps,
+            assetNames: [
+              ...new Set([
+                ...(existing.extendedProps.assetNames ?? []),
+                ...(details.assetNames ?? []),
+              ]),
+            ],
+          },
+        });
+      } else {
+        reservationEventsByBookingId.set(details.id, event);
+      }
+    }
+
+    const events = [...reservationEventsByBookingId.entries()].map(
+      ([bookingId, event]) => {
         const details = event.extendedProps;
         if (!details) return event;
 
         return {
           ...event,
-          title: [
-            ...(details.assetNames ?? []),
-            details.name,
-            details.creator.name,
-          ]
+          // FullCalendar and click handling use the canonical reservation ID,
+          // never a physical asset or BookingAsset membership ID.
+          id: bookingId,
+          title: [(details.assetNames ?? []).join(" + "), details.name]
             .filter(Boolean)
-            .join(" - "),
+            .join(" · "),
           extendedProps: {
             ...details,
             isIoioReservation: true,
             url: `/calendar/new-reservation?bookingId=${encodeURIComponent(
-              details.id
+              bookingId
             )}`,
           },
         };
-      });
+      }
+    );
 
     const modelName = {
       singular: "booking",

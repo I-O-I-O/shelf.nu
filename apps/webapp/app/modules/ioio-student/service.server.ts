@@ -17,6 +17,7 @@ import { getImmediateBorrowingWindow } from "~/modules/ioio-student/date-range";
 import { isKitAvailableToBook } from "~/modules/kit/availability";
 import { getIoioKitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
+import { getLocationDescendantIds } from "~/modules/location/descendants.server";
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
 import { resolveStorageImageUrl } from "~/utils/storage.server";
@@ -378,26 +379,10 @@ export async function getStudentAssets({
   ]);
   let locationIds: string[] | undefined;
   if (locationId) {
-    const allLocations = await db.location.findMany({
-      where: { organizationId },
-      select: { id: true, parentId: true },
+    locationIds = await getLocationDescendantIds({
+      organizationId,
+      locationId,
     });
-    const descendants = new Set([locationId]);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const location of allLocations) {
-        if (
-          location.parentId &&
-          descendants.has(location.parentId) &&
-          !descendants.has(location.id)
-        ) {
-          descendants.add(location.id);
-          changed = true;
-        }
-      }
-    }
-    locationIds = [...descendants];
   }
   const rows = await db.asset.findMany({
     where: {

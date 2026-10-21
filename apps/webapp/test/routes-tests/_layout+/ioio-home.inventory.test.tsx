@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRoutesStub } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -98,6 +98,24 @@ const locations: StudentLocation[] = [
       },
     ],
   },
+  {
+    id: "storage-room",
+    name: "Storage Room",
+    parentId: null,
+    imageUrl: null,
+    thumbnailUrl: null,
+    assetCount: 0,
+    children: [],
+  },
+  {
+    id: "soldering-room",
+    name: "Soldering Room",
+    parentId: null,
+    imageUrl: null,
+    thumbnailUrl: null,
+    assetCount: 0,
+    children: [],
+  },
 ];
 
 function makeStudentAsset(overrides: Partial<StudentAsset> = {}): StudentAsset {
@@ -134,7 +152,6 @@ const homeData = {
   query: "",
   categoryId: null,
   itemType: null,
-  availability: null,
   locationId: null,
   hasSearchOrFilters: false,
   readyForPickup: [],
@@ -198,11 +215,26 @@ describe("IOIO student Home inventory", () => {
       "placeholder",
       "Search by item name or description"
     );
-    await user.click(screen.getByText("Filters"));
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+    const filterPanel = screen.getByRole("dialog");
     expect(screen.getByLabelText("Category")).toBeInTheDocument();
-    expect(screen.getByText("Availability")).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "All categories" })
+    ).toBeInTheDocument();
     expect(screen.getByText("Item type")).toBeInTheDocument();
+    expect(screen.getByText("All items")).toBeInTheDocument();
+    expect(screen.getByText("Normal items")).toBeInTheDocument();
+    expect(screen.getByText("Kits")).toBeInTheDocument();
     expect(screen.getByText("Lab area")).toBeInTheDocument();
+    expect(screen.getByText("All areas")).toBeInTheDocument();
+    expect(screen.getByText("IOIO Lab")).toBeInTheDocument();
+    expect(screen.getByText("Storage Room")).toBeInTheDocument();
+    expect(screen.getByText("Soldering Room")).toBeInTheDocument();
+    expect(within(filterPanel).queryByText("Electronics Bay")).toBeNull();
+    expect(screen.queryByText("Availability")).toBeNull();
+    expect(screen.queryByText("Any availability")).toBeNull();
+    expect(screen.queryByText("Ready to borrow")).toBeNull();
+    expect(screen.queryByText("Not ready to borrow")).toBeNull();
     expect(
       screen.getByRole("button", { name: "Apply filters" })
     ).toBeInTheDocument();
@@ -218,7 +250,7 @@ describe("IOIO student Home inventory", () => {
     const scanner = await screen.findByRole("button", {
       name: "Scan QR",
     });
-    const filters = await screen.findByText("Filters");
+    const filters = await screen.findByRole("button", { name: "Filters" });
     expect(scanner).toHaveAttribute("data-audience", "student");
     expect(scanner).toHaveClass(
       "min-h-11",
@@ -233,9 +265,7 @@ describe("IOIO student Home inventory", () => {
     expect(scanner).toHaveAttribute("data-show-icon", "false");
     expect(screen.queryByTestId("inventory-qr-icon")).toBeNull();
     expect(searchButton).toHaveClass("min-h-11");
-    const filtersButton = filters.closest("summary");
-    if (!filtersButton) throw new Error("Expected Filters summary trigger");
-    expect(filtersButton).toHaveClass("min-h-11");
+    expect(filters).toHaveClass("min-h-11");
     expect(
       screen.getByRole("group", { name: "Inventory search and filters" })
     ).toBeInTheDocument();
@@ -272,15 +302,40 @@ describe("IOIO student Home inventory", () => {
       organizationId: "team-1",
       query: "Arduino",
       categoryId: "category-electronics",
-      locationId: "electronics-bay",
+      locationId: null,
     });
     expect(result.data).toMatchObject({
       query: "Arduino",
       categoryId: "category-electronics",
       itemType: "quantity",
-      locationId: "electronics-bay",
-      availability: "available",
+      locationId: null,
       assets: [{ id: "arduino-nano" }],
+    });
+    expect(result.data).not.toHaveProperty("availability");
+  });
+
+  it("accepts only a room-level location filter and combines it with category and item type", async () => {
+    const result = await homeLoader(
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "student-1" }) } as never,
+        request: new Request(
+          "http://localhost/ioio?category=category-electronics&itemType=quantity&location=lab"
+        ),
+      })
+    );
+
+    if (!("data" in result)) throw new Error("Expected Home loader data");
+    expect(mocks.getStudentAssets).toHaveBeenCalledWith({
+      organizationId: "team-1",
+      query: null,
+      categoryId: "category-electronics",
+      locationId: "lab",
+    });
+    expect(result.data).toMatchObject({
+      categoryId: "category-electronics",
+      itemType: "quantity",
+      locationId: "lab",
+      hasSearchOrFilters: true,
     });
   });
 });

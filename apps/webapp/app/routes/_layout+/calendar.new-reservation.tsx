@@ -7,6 +7,7 @@ import {
   type ActionFunctionArgs,
   type LoaderFunctionArgs,
   type MetaFunction,
+  redirect,
   useActionData,
   useFetcher,
   useLoaderData,
@@ -60,6 +61,13 @@ const reservationSchema = z.object({
   returnDate: z.string().date(),
 });
 
+const editReservationSchema = z.object({
+  bookingId: z.string().min(1),
+  name: z.string().trim().min(1).max(200),
+  startDate: z.string().date(),
+  returnDate: z.string().date(),
+});
+
 const availabilitySchema = reservationSchema.pick({
   assetId: true,
   candidateAssetIds: true,
@@ -86,61 +94,6 @@ type ReservationProduct = {
   isKit: boolean;
   searchText: string;
 };
-
-type StaffReservationSummary = Awaited<
-  ReturnType<typeof getIoioStaffReservationConflictSummary>
->;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isStaffLoanConflict(value: unknown): value is IoioStaffLoanConflict {
-  return (
-    isRecord(value) &&
-    typeof value.bookingId === "string" &&
-    typeof value.bookingAssetId === "string" &&
-    typeof value.assetId === "string" &&
-    typeof value.itemName === "string" &&
-    typeof value.borrowerName === "string" &&
-    typeof value.currentReturnDate === "string" &&
-    (value.status === "ONGOING" || value.status === "OVERDUE") &&
-    typeof value.quantity === "number"
-  );
-}
-
-function isStaffReservationSummary(
-  value: unknown
-): value is StaffReservationSummary {
-  if (!isRecord(value)) return false;
-
-  const numericFields = [
-    "total",
-    "available",
-    "requested",
-    "shortfall",
-    "loanConflictQuantity",
-    "staffReservedCount",
-    "availableAfterSoftConflicts",
-  ] as const;
-  const stringArrayFields = [
-    "staffReservationBookingIds",
-    "availableUnitIdsAfterSoftConflicts",
-    "loanBookingIds",
-    "softConflictBookingIds",
-  ] as const;
-
-  return (
-    numericFields.every((field) => typeof value[field] === "number") &&
-    Array.isArray(value.conflicts) &&
-    value.conflicts.every(isStaffLoanConflict) &&
-    stringArrayFields.every(
-      (field) =>
-        Array.isArray(value[field]) &&
-        value[field].every((item) => typeof item === "string")
-    )
-  );
-}
 
 type ExistingIoioReservation = {
   id: string;
@@ -275,6 +228,31 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         product.candidateAssetIds.some((id) => reservationAssetIds.has(id))
       )
     : undefined;
+  const reservationItems = new Map<
+    string,
+    { id: string; label: string; quantity: number; unitLabels: string[] }
+  >();
+  for (const membership of reservation?.bookingAssets ?? []) {
+    const asset = sourceAssetsById.get(membership.assetId);
+    const kit = asset?.kits[0];
+    const model = asset?.assetModel;
+    const productId = kit
+      ? `kit:${kit.id}`
+      : model
+      ? `model:${model.id}`
+      : `asset:${membership.assetId}`;
+    const product = reservationItems.get(productId) ?? {
+      id: productId,
+      label: kit?.name ?? model?.name ?? asset?.title ?? membership.assetId,
+      quantity: 0,
+      unitLabels: [],
+    };
+    product.quantity += membership.quantity;
+    if (asset?.sequentialId) {
+      product.unitLabels.push(`#${asset.sequentialId}`);
+    }
+    reservationItems.set(productId, product);
+  }
 
   return data(
     payload({
@@ -291,6 +269,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
               (total, asset) => total + asset.quantity,
               0
             ),
+            items: [...reservationItems.values()],
             creatorName:
               resolveUserDisplayName(reservation.creator) || "Staff member",
           }
@@ -323,9 +302,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
 
     if (intent === "edit") {
-      const parsed = reservationSchema
-        .extend({ bookingId: z.string().min(1) })
-        .parse(form);
+      const parsed = editReservationSchema.parse(form);
       const reservation = await getExistingIoioReservation({
         bookingId: parsed.bookingId,
         organizationId: auth.organizationId,
@@ -402,11 +379,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    const parsed = reservationSchema
-      .extend({
-        createAnyway: z.union([z.literal("true"), z.literal("on")]).optional(),
-      })
-      .parse(form);
+    const parsed = reservationSchema.parse(form);
     const from = dateOnlyToUtcStart(parsed.startDate);
     const to = dateOnlyToUtcEnd(parsed.returnDate);
     if (from <= new Date()) {
@@ -427,26 +400,18 @@ export async function action({ context, request }: ActionFunctionArgs) {
       to,
     });
 
-    const createAnyway =
-      parsed.createAnyway === "true" || parsed.createAnyway === "on";
     if (parsed.quantity > summary.available) {
-      if (
-        !createAnyway ||
-        parsed.quantity > summary.availableAfterSoftConflicts
-      ) {
-        return data(
-          {
-            ok: false as const,
-            intent: "create" as const,
-            error:
-              `Only ${summary.available} of ${summary.total} units are available for the full reservation period. ` +
-              `Requested: ${parsed.quantity}. Short by: ${summary.shortfall}.`,
-            availability: summary,
-            canCreateAnyway: summary.staffReservationBookingIds.length > 0,
-          },
-          { status: 409 }
-        );
-      }
+      return data(
+        {
+          ok: false as const,
+          intent: "create" as const,
+          error:
+            `Only ${summary.available} of ${summary.total} units are available for the full reservation period. ` +
+            `Requested: ${parsed.quantity}. Short by: ${summary.shortfall}.`,
+          availability: summary,
+        },
+        { status: 409 }
+      );
     }
     const teamMember = await db.teamMember.findFirst({
       where: {
@@ -500,13 +465,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
       isSelfServiceOrBase: false,
       tags: [],
       userId: auth.userId,
-      ignoreBookingIds: createAnyway ? summary.softConflictBookingIds : [],
+      // Marked IOIO planning reservations are soft by policy. Ignore only
+      // those IDs at Shelf's final conflict guard; active loans and all other
+      // hard conflicts remain in the eligible-unit calculation.
+      ignoreBookingIds: summary.softConflictBookingIds,
     });
-    return data({
-      ok: true as const,
-      intent: "create" as const,
-      bookingId: booking.id,
-    });
+    return redirect(`/calendar?start=${encodeURIComponent(parsed.startDate)}`);
   } catch (cause) {
     // Keep authorization failures as HTTP 403 responses instead of converting
     // them to generic 500 action data.
@@ -572,7 +536,6 @@ export default function NewIoioReservation() {
     String(reservation?.quantity ?? 1)
   );
   const [checkedAvailabilityKey, setCheckedAvailabilityKey] = useState("");
-  const [createAttemptKey, setCreateAttemptKey] = useState("");
   const quantity = Number(quantityInput);
   const quantityIsValid =
     Number.isInteger(quantity) && quantity >= 1 && quantity <= 1000;
@@ -613,25 +576,9 @@ export default function NewIoioReservation() {
     result.intent === "request-earlier-return";
   const earlierReturnBookingAssetId =
     result && "bookingAssetId" in result ? result.bookingAssetId : null;
-  const createConflictAvailability: StaffReservationSummary | null =
-    result &&
-    !result.ok &&
-    "intent" in result &&
-    result.intent === "create" &&
-    "canCreateAnyway" in result &&
-    result.canCreateAnyway &&
-    "availability" in result &&
-    isStaffReservationSummary(result.availability)
-      ? result.availability
-      : null;
-  const applicableConflictAvailability =
-    createAttemptKey === availabilityKey ? createConflictAvailability : null;
   const quantityMax = Math.max(
     1,
-    applicableConflictAvailability?.availableAfterSoftConflicts ??
-      liveAvailability?.available ??
-      selected?.availableQuantity ??
-      1
+    liveAvailability?.available ?? selected?.availableQuantity ?? 1
   );
   const quantityWithinAvailability = quantityIsValid && quantity <= quantityMax;
   const availabilityReady =
@@ -666,7 +613,8 @@ export default function NewIoioReservation() {
   }, [matchingProducts, selectedId]);
 
   useEffect(() => {
-    if (!selectedId || !startDate || !returnDate || !quantityIsValid) return;
+    if (isEdit || !selectedId || !startDate || !returnDate || !quantityIsValid)
+      return;
     setSelectedConflict(null);
     const timeout = window.setTimeout(() => {
       const formData = new FormData();
@@ -689,6 +637,7 @@ export default function NewIoioReservation() {
     selectedId,
     startDate,
     submitAvailability,
+    isEdit,
   ]);
 
   useEffect(() => {
@@ -731,25 +680,44 @@ export default function NewIoioReservation() {
             : "Reserve equipment for a class, workshop, or other lab activity."
         }
       />
-      <p className="mb-4 text-sm text-gray-600">
-        <Link
-          to="/calendar/ioio-requests"
-          className="font-semibold text-red-700 hover:underline"
-        >
-          Review pending IOIO requests
-        </Link>
-      </p>
       {reservation ? (
-        <p className="mb-4 text-sm text-gray-600">
-          Reserved by:{" "}
-          <span className="font-semibold text-gray-800">
-            {reservation.creatorName}
-          </span>
-        </p>
-      ) : null}
-      {result?.ok && "intent" in result && result.intent === "create" ? (
-        <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
-          Reservation created and added to the Shelf calendar.
+        <div className="mb-4 space-y-2 text-sm text-gray-600">
+          <p>
+            Reserved by:{" "}
+            <span className="font-semibold text-gray-800">
+              {reservation.creatorName}
+            </span>
+          </p>
+          <p>
+            Status:{" "}
+            <span className="font-semibold text-gray-800">
+              {reservation.status
+                .toLowerCase()
+                .replaceAll("_", " ")
+                .replace(/^./, (character) => character.toUpperCase())}
+            </span>
+          </p>
+          {reservation.items.length > 0 ? (
+            <div role="group" aria-label="Equipment in this reservation">
+              <p className="font-semibold text-gray-800">
+                Equipment in this reservation
+              </p>
+              <ul className="list-inside list-disc">
+                {reservation.items.map((item) => (
+                  <li key={item.id}>
+                    {item.label}
+                    {item.quantity > 1 ? ` ×${item.quantity}` : ""}
+                    {item.unitLabels.length > 0 ? (
+                      <span className="text-gray-500">
+                        {" "}
+                        (units {item.unitLabels.join(", ")})
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       ) : null}
       {result?.ok && "intent" in result && result.intent === "edit" ? (
@@ -781,7 +749,6 @@ export default function NewIoioReservation() {
       ) : null}
       <Form
         method="post"
-        onSubmit={() => setCreateAttemptKey(availabilityKey)}
         className="space-y-5 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
       >
         {isEdit ? <input type="hidden" name="intent" value="edit" /> : null}
@@ -799,100 +766,113 @@ export default function NewIoioReservation() {
             className="mt-1 min-h-11 w-full rounded-xl border border-gray-300 px-3 font-normal"
           />
         </label>
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-sm font-semibold text-gray-800">
-              Equipment
-            </span>
-            <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
-              {(
-                [
-                  ["all", "All"],
-                  ["kits", "Kits"],
-                  ["equipment", "Equipment"],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={productKind === value}
-                  onClick={() => setProductKind(value)}
-                  className={`min-h-8 rounded-md px-3 text-sm font-semibold ${
-                    productKind === value
-                      ? "bg-white text-red-800 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
+        {!isEdit ? (
+          <>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="text-sm font-semibold text-gray-800">
+                  Equipment
+                </span>
+                <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+                  {(
+                    [
+                      ["all", "All"],
+                      ["kits", "Kits"],
+                      ["equipment", "Equipment"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={productKind === value}
+                      onClick={() => setProductKind(value)}
+                      className={`min-h-8 rounded-md px-3 text-sm font-semibold ${
+                        productKind === value
+                          ? "bg-white text-red-800 shadow-sm"
+                          : "text-gray-600 hover:text-gray-900"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="block text-sm font-semibold text-gray-800">
+                <span className="sr-only">Search equipment</span>
+                <input
+                  type="search"
+                  value={productSearch}
+                  onChange={(event) => setProductSearch(event.target.value)}
+                  placeholder="Search equipment..."
+                  autoComplete="off"
+                  className="min-h-10 w-full rounded-xl border border-gray-300 px-3 font-normal"
+                />
+              </label>
+              <label className="block text-sm font-semibold text-gray-800">
+                <select
+                  name="assetId"
+                  value={selectedId}
+                  onChange={(event) => setSelectedId(event.target.value)}
+                  required
+                  className="mt-1 min-h-11 w-full rounded-xl border border-gray-300 px-3 font-normal"
                 >
-                  {label}
-                </button>
-              ))}
+                  <option value="" disabled>
+                    {matchingProducts.length
+                      ? "Select equipment"
+                      : "No matching equipment"}
+                  </option>
+                  {matchingProducts.map((product) => {
+                    const available =
+                      product.id === selectedId && liveAvailability
+                        ? liveAvailability.available
+                        : product.availableQuantity;
+                    return (
+                      <option key={product.id} value={product.id}>
+                        {product.isKit ? "Kit · " : "Equipment · "}
+                        {product.title} ({available} available)
+                      </option>
+                    );
+                  })}
+                </select>
+                <input
+                  type="hidden"
+                  name="candidateAssetIds"
+                  value={selected?.candidateAssetIds.join(",") ?? ""}
+                />
+              </label>
+              {products.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3 text-sm text-gray-600">
+                  No equipment is available to reserve yet. Add inventory first,
+                  then return here to plan a lab reservation.
+                </p>
+              ) : matchingProducts.length === 0 ? (
+                <p className="text-sm text-gray-600">
+                  No equipment matches this search. Try another name or
+                  category.
+                </p>
+              ) : null}
             </div>
-          </div>
-          <label className="block text-sm font-semibold text-gray-800">
-            <span className="sr-only">Search equipment</span>
-            <input
-              type="search"
-              value={productSearch}
-              onChange={(event) => setProductSearch(event.target.value)}
-              placeholder="Search equipment..."
-              autoComplete="off"
-              className="min-h-10 w-full rounded-xl border border-gray-300 px-3 font-normal"
-            />
-          </label>
-          <label className="block text-sm font-semibold text-gray-800">
-            <select
-              name="assetId"
-              value={selectedId}
-              onChange={(event) => setSelectedId(event.target.value)}
-              required
-              className="mt-1 min-h-11 w-full rounded-xl border border-gray-300 px-3 font-normal"
-            >
-              <option value="" disabled>
-                {matchingProducts.length
-                  ? "Select equipment"
-                  : "No matching equipment"}
-              </option>
-              {matchingProducts.map((product) => (
-                <option key={product.id} value={product.id}>
-                  {product.isKit ? "Kit · " : "Equipment · "}
-                  {product.title} ({product.availableQuantity} available)
-                </option>
-              ))}
-            </select>
-            <input
-              type="hidden"
-              name="candidateAssetIds"
-              value={selected?.candidateAssetIds.join(",") ?? ""}
-            />
-          </label>
-          {products.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3 text-sm text-gray-600">
-              No equipment is available to reserve yet. Add inventory first,
-              then return here to plan a lab reservation.
-            </p>
-          ) : matchingProducts.length === 0 ? (
-            <p className="text-sm text-gray-600">
-              No equipment matches this search. Try another name or category.
-            </p>
-          ) : null}
-        </div>
-        <div className="max-w-xs">
-          <label
-            htmlFor="reservation-quantity"
-            className="block text-sm font-semibold text-gray-800"
-          >
-            Quantity
-          </label>
-          <ReservationQuantityControl
-            value={quantityInput}
-            onChange={setQuantityInput}
-            max={quantityMax}
-          />
-          <p className="mt-1 text-xs font-normal text-gray-600">
-            Available for these dates:{" "}
-            {liveAvailability?.available ?? selected?.availableQuantity ?? 0}
-          </p>
-        </div>
+            <div className="max-w-xs">
+              <label
+                htmlFor="reservation-quantity"
+                className="block text-sm font-semibold text-gray-800"
+              >
+                Quantity
+              </label>
+              <ReservationQuantityControl
+                value={quantityInput}
+                onChange={setQuantityInput}
+                max={quantityMax}
+              />
+              <p className="mt-1 text-xs font-normal text-gray-600">
+                Available for these dates:{" "}
+                {liveAvailability?.available ??
+                  selected?.availableQuantity ??
+                  0}
+              </p>
+            </div>
+          </>
+        ) : null}
         <IoioDateRangePicker
           startDate={startDate}
           returnDate={returnDate}
@@ -904,112 +884,86 @@ export default function NewIoioReservation() {
             if (returnDate < value) setReturnDate(value);
           }}
           onReturnDateChange={setReturnDate}
-          helperText="Availability is checked again before the reservation is saved."
+          helperText={
+            isEdit
+              ? "Changing dates keeps the equipment attached to this reservation."
+              : "Availability is checked again before the reservation is saved."
+          }
         />
-        <div
-          aria-live="polite"
-          className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-700"
-        >
-          <p className="font-semibold text-gray-900">
-            Reservation availability
-          </p>
-          {availabilityFetcher.state !== "idle" && !liveAvailability ? (
-            <p className="mt-1">Checking the selected dates...</p>
-          ) : liveAvailability ? (
-            <p className="mt-1 flex flex-wrap items-center gap-x-2">
-              <span>
-                {liveAvailability.available} available of{" "}
-                {liveAvailability.total}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>Requested {liveAvailability.requested}</span>
-              {liveAvailability.loanConflictQuantity > 0 ? (
-                <>
-                  <span aria-hidden="true">·</span>
+        {!isEdit ? (
+          <>
+            <div
+              aria-live="polite"
+              className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-700"
+            >
+              <p className="font-semibold text-gray-900">
+                Reservation availability
+              </p>
+              {availabilityFetcher.state !== "idle" && !liveAvailability ? (
+                <p className="mt-1">Checking the selected dates...</p>
+              ) : liveAvailability ? (
+                <p className="mt-1 flex flex-wrap items-center gap-x-2">
                   <span>
-                    {liveAvailability.loanConflictQuantity} loan conflict
-                    {liveAvailability.loanConflictQuantity === 1 ? "" : "s"}
+                    {liveAvailability.available} available of{" "}
+                    {liveAvailability.total}
                   </span>
-                </>
-              ) : null}
-              {liveAvailability.shortfall > 0 ? (
-                <>
                   <span aria-hidden="true">·</span>
-                  <span className="font-semibold text-red-800">
-                    Short by {liveAvailability.shortfall}
-                  </span>
-                </>
-              ) : null}
-            </p>
-          ) : (
-            <p className="mt-2">
-              Choose equipment and dates to check availability.
-            </p>
-          )}
-        </div>
-        {liveAvailability && liveAvailability.conflicts.length > 0 ? (
-          <details className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-            <summary className="cursor-pointer font-semibold">
-              Conflicting current loans ({liveAvailability.conflicts.length})
-            </summary>
-            <div className="mt-3 space-y-3">
-              {liveAvailability.conflicts.map((conflict) => (
-                <div
-                  key={conflict.bookingAssetId}
-                  className="rounded-lg border border-amber-200 bg-white p-3"
-                >
-                  <p className="font-semibold">{conflict.itemName}</p>
-                  <p>Borrower: {conflict.borrowerName}</p>
-                  <p>
-                    Current return date:{" "}
-                    {formatConflictDate(conflict.currentReturnDate)}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => openEarlierReturn(conflict)}
-                    className="mt-2 rounded-lg border border-red-300 px-3 py-2 text-xs font-semibold text-red-800 hover:bg-red-50"
-                  >
-                    Request earlier return
-                  </button>
+                  <span>Requested {liveAvailability.requested}</span>
+                  {liveAvailability.loanConflictQuantity > 0 ? (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        {liveAvailability.loanConflictQuantity} loan conflict
+                        {liveAvailability.loanConflictQuantity === 1 ? "" : "s"}
+                      </span>
+                    </>
+                  ) : null}
+                  {liveAvailability.shortfall > 0 ? (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-semibold text-red-800">
+                        Short by {liveAvailability.shortfall}
+                      </span>
+                    </>
+                  ) : null}
+                </p>
+              ) : (
+                <p className="mt-2">
+                  Choose equipment and dates to check availability.
+                </p>
+              )}
+            </div>
+            {liveAvailability && liveAvailability.conflicts.length > 0 ? (
+              <details className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+                <summary className="cursor-pointer font-semibold">
+                  Conflicting current loans ({liveAvailability.conflicts.length}
+                  )
+                </summary>
+                <div className="mt-3 space-y-3">
+                  {liveAvailability.conflicts.map((conflict) => (
+                    <div
+                      key={conflict.bookingAssetId}
+                      className="rounded-lg border border-amber-200 bg-white p-3"
+                    >
+                      <p className="font-semibold">{conflict.itemName}</p>
+                      <p>Borrower: {conflict.borrowerName}</p>
+                      <p>
+                        Current return date:{" "}
+                        {formatConflictDate(conflict.currentReturnDate)}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => openEarlierReturn(conflict)}
+                        className="mt-2 rounded-lg border border-red-300 px-3 py-2 text-xs font-semibold text-red-800 hover:bg-red-50"
+                      >
+                        Request earlier return
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </details>
-        ) : null}
-        {createConflictAvailability ? (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-            <p className="font-semibold">
-              This reservation has a planning shortfall.
-            </p>
-            <p className="mt-1">
-              You can reduce the quantity or create the reservation with the
-              current shortfall.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  setQuantityInput(String(createConflictAvailability.available))
-                }
-                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-800"
-              >
-                Adjust quantity
-              </button>
-              <button
-                type="submit"
-                name="createAnyway"
-                value="true"
-                disabled={
-                  !quantityWithinAvailability ||
-                  !selectedId ||
-                  !availabilityReady
-                }
-                className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
-              >
-                Create reservation anyway
-              </button>
-            </div>
-          </div>
+              </details>
+            ) : null}
+          </>
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-3 border-t border-gray-100 pt-4">
           <Link
@@ -1021,7 +975,8 @@ export default function NewIoioReservation() {
           <button
             type="submit"
             disabled={
-              !quantityWithinAvailability || !selectedId || !availabilityReady
+              !isEdit &&
+              (!quantityWithinAvailability || !selectedId || !availabilityReady)
             }
             className="inline-flex min-h-11 items-center justify-center rounded-xl bg-red-700 px-5 text-sm font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
           >

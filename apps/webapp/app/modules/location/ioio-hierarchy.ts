@@ -71,7 +71,8 @@ export function inferIoioLocationKind(
   return "Shelves";
 }
 
-function isOperationalRoot(location: IoioLocationNode | undefined) {
+/** Operational zones are top-level locations, but are not student-facing rooms. */
+export function isIoioOperationalRoot(location: IoioLocationNode | undefined) {
   return !!location && /\b(broken|pick[\s-]?up|return)\b/iu.test(location.name);
 }
 
@@ -192,7 +193,7 @@ export function summarizeIoioLocationInventory({
         sectionSummaries.get(section.id)?.assets.add(assignment.assetId);
     } else if (
       (kind === "Rooms" || kind === "Sections" || kind === "Shelves") &&
-      !isOperationalRoot(room)
+      !isIoioOperationalRoot(room)
     ) {
       incompleteAssetIds.add(assignment.assetId);
     }

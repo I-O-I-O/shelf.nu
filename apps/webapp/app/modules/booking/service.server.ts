@@ -77,6 +77,7 @@ import {
   isQuantityTracked,
 } from "~/modules/asset/utils";
 import { stripMarkdocDelimiters } from "~/modules/audit/note-content.server";
+import { summarizeBookingAssetsForCalendar } from "~/modules/booking/calendar-asset-summary";
 import {
   formatReturnPhotoNote,
   prepareBookingReturnPhoto,
@@ -13681,12 +13682,15 @@ export async function getBookingsForCalendar(params: {
           },
           select: {
             bookingId: true,
+            quantity: true,
             asset: {
               select: {
+                id: true,
                 title: true,
-                assetModel: { select: { name: true } },
+                assetModel: { select: { id: true, name: true } },
                 assetKits: {
                   select: {
+                    id: true,
                     kit: { select: { name: true } },
                   },
                 },
@@ -13695,16 +13699,15 @@ export async function getBookingsForCalendar(params: {
           },
         })
       : [];
-    const calendarAssetNamesByBookingId = new Map<string, string[]>();
-    for (const row of calendarAssetRows) {
-      const kitName = row.asset.assetKits[0]?.kit.name;
-      const name = kitName ?? row.asset.assetModel?.name ?? row.asset.title;
-      const names = calendarAssetNamesByBookingId.get(row.bookingId) ?? [];
-      if (!names.includes(name)) names.push(name);
-      calendarAssetNamesByBookingId.set(row.bookingId, names);
-    }
+    const calendarAssetNamesByBookingId =
+      summarizeBookingAssetsForCalendar(calendarAssetRows);
 
-    const events = bookings
+    // Booking is the event identity. Its BookingAsset memberships only inform
+    // the compact equipment/quantity summary above; they never create events.
+    const uniqueBookings = [
+      ...new Map(bookings.map((booking) => [booking.id, booking])).values(),
+    ];
+    const events = uniqueBookings
       .filter((booking) => booking.from && booking.to)
       .map((booking) => {
         const custodianName = booking?.custodianUser
@@ -13716,6 +13719,7 @@ export async function getBookingsForCalendar(params: {
           title += ` | ${custodianName}`;
         }
         return {
+          id: booking.id,
           title,
           start: (booking.from as Date).toISOString(),
           end: (booking.to as Date).toISOString(),

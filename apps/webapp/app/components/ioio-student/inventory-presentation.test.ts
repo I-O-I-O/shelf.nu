@@ -89,29 +89,6 @@ describe("student inventory presentation", () => {
     expect(getStudentLocationPath("missing", locations)).toBeNull();
   });
 
-  it("filters availability using both quantity and IOIO borrowability", () => {
-    const items = groupStudentAssets([
-      asset({ id: "ready", title: "Ready" }),
-      asset({
-        id: "out-of-service",
-        title: "Out of service",
-        availableToBook: false,
-      }),
-      asset({ id: "none-left", title: "None left", availableQuantity: 0 }),
-    ]);
-
-    expect(
-      filterStudentInventory(items, { availability: "available" }).map(
-        ({ id }) => id
-      )
-    ).toEqual(["ready"]);
-    expect(
-      filterStudentInventory(items, { availability: "unavailable" }).map(
-        ({ id }) => id
-      )
-    ).toEqual(["out-of-service", "none-left"]);
-  });
-
   it("does not count out-of-service units as borrowable in a grouped product", () => {
     const grouped = groupStudentAssets([
       asset({
@@ -630,17 +607,6 @@ describe("student inventory presentation", () => {
     ]);
   });
 
-  it("filters a grouped presentation item by availability", () => {
-    const grouped = groupStudentAssets([
-      asset({ id: "available", availableQuantity: 1 }),
-      asset({ id: "unavailable", availableQuantity: 0 }),
-    ]);
-
-    expect(
-      filterStudentInventory(grouped, { availability: "available" })
-    ).toHaveLength(1);
-  });
-
   it("filters by the Shelf category id used by Categories", () => {
     const grouped = groupStudentAssets([
       asset({
@@ -658,11 +624,11 @@ describe("student inventory presentation", () => {
     ).toMatchObject([{ id: "boards" }]);
   });
 
-  it("builds Student lab-area filters from high-level locations under the Lab room", () => {
+  it("offers room roots only and omits operational zones and descendants", () => {
     const locations = getStudentLabAreaFilters([
       {
         id: "lab-room",
-        name: "IOIO Lab - B477",
+        name: "IOIO Lab",
         parentId: null,
         children: [
           {
@@ -694,51 +660,52 @@ describe("student inventory presentation", () => {
             imageUrl: null,
             thumbnailUrl: null,
           },
-          {
-            id: "section-b",
-            name: "Section B",
-            parentId: "lab-room",
-            children: [],
-            assetCount: 1,
-            imageUrl: null,
-            thumbnailUrl: null,
-          },
-          ...["Pickup Zone", "Pick-Up Zone", "Return Zone", "Broken Zone"].map(
-            (name, index) => ({
-              id: `zone-${index}`,
-              name,
-              parentId: "lab-room",
-              children: [],
-              assetCount: 0,
-              imageUrl: null,
-              thumbnailUrl: null,
-            })
-          ),
         ],
         assetCount: 0,
         imageUrl: null,
         thumbnailUrl: null,
       },
+      ...[
+        "Storage Room",
+        "Soldering Room",
+        "Pickup Zone",
+        "Return Zone",
+        "Broken Zone",
+      ].map((name, index) => ({
+        id: `root-${index}`,
+        name,
+        parentId: null,
+        children: [],
+        assetCount: 0,
+        imageUrl: null,
+        thumbnailUrl: null,
+      })),
     ]);
 
     expect(locations).toEqual([
       { key: "all", label: "All areas", code: null, locationId: null },
       {
-        key: "section-a",
-        label: "Section A",
+        key: "lab-room",
+        label: "IOIO Lab",
         code: null,
-        locationId: "section-a",
+        locationId: "lab-room",
       },
       {
-        key: "section-b",
-        label: "Section B",
+        key: "root-0",
+        label: "Storage Room",
         code: null,
-        locationId: "section-b",
+        locationId: "root-0",
+      },
+      {
+        key: "root-1",
+        label: "Soldering Room",
+        code: null,
+        locationId: "root-1",
       },
     ]);
   });
 
-  it("links exact storage paths through the deepest browseable Student area", () => {
+  it("links nested storage paths through their visible room filter", () => {
     const locations = [
       {
         id: "lab-room",
@@ -786,6 +753,6 @@ describe("student inventory presentation", () => {
         ["lab-room", "section-a", "shelf-a1", "container-a1-13"],
         locations
       )
-    ).toBe("section-a");
+    ).toBe("lab-room");
   });
 });

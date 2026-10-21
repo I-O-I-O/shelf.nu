@@ -6,7 +6,7 @@ import { ErrorContent } from "~/components/errors";
 import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import {
   filterStudentInventory,
-  getStudentLocationPath,
+  getStudentLabAreaFilters,
   groupStudentAssets,
 } from "~/components/ioio-student/inventory-presentation";
 import {
@@ -67,12 +67,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         async () => {
           const requestedCategory = params.get("category");
           const requestedItemType = params.get("itemType");
-          const requestedAvailability = params.get("availability");
-          const availability =
-            requestedAvailability === "available" ||
-            requestedAvailability === "unavailable"
-              ? requestedAvailability
-              : null;
           const itemType =
             requestedItemType === "quantity" ||
             requestedItemType === "individual"
@@ -89,7 +83,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             : null;
           const requestedLocation = params.get("location");
           const locationId = requestedLocation
-            ? getStudentLocationPath(requestedLocation, locations)
+            ? getStudentLabAreaFilters(locations).some(
+                (area) => area.locationId === requestedLocation
+              )
               ? requestedLocation
               : null
             : null;
@@ -102,7 +98,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           const assets = filterStudentInventory(groupStudentAssets(allAssets), {
             categoryId,
             itemType,
-            availability,
           });
 
           return {
@@ -112,14 +107,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             query: params.get("q") ?? "",
             categoryId,
             itemType,
-            availability,
             locationId,
             hasSearchOrFilters: Boolean(
-              params.get("q")?.trim() ||
-                categoryId ||
-                itemType ||
-                locationId ||
-                availability
+              params.get("q")?.trim() || categoryId || itemType || locationId
             ),
           };
         }
@@ -473,7 +463,6 @@ export default function IoioHome() {
     query,
     categoryId,
     itemType,
-    availability,
     locationId,
     locations,
     hasSearchOrFilters,
@@ -540,7 +529,6 @@ export default function IoioHome() {
               locationId={locationId}
               categoryId={categoryId}
               itemType={itemType}
-              availability={availability}
               scanAction={
                 <InventoryQrScanner
                   audience="student"

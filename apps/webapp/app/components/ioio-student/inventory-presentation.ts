@@ -7,6 +7,7 @@ import type {
   StudentAsset,
   StudentLocation,
 } from "~/modules/ioio-student/service.server";
+import { isIoioOperationalRoot } from "~/modules/location/ioio-hierarchy";
 
 export type StudentInventoryItem = StudentAsset & {
   sourceAssetIds: string[];
@@ -54,28 +55,22 @@ export function requestsStudentAssistantAssetCards(question: string) {
 export function getStudentLabAreaFilters(
   locations: StudentLocation[]
 ): StudentLabAreaFilter[] {
-  const labRooms = locations.filter((location) =>
-    /\blab\b/i.test(location.name)
+  // Location has no persisted type column. In Shelf's IOIO hierarchy, root
+  // records are Rooms; Sections, Shelves, and Containers are descendants.
+  // Keep service zones out of student choices using the shared hierarchy rule.
+  const rooms = locations.filter(
+    (location) =>
+      location.parentId === null &&
+      !isIoioOperationalRoot({
+        id: location.id,
+        name: location.name,
+        parentId: location.parentId,
+      })
   );
-  const roots = labRooms.length ? labRooms : locations;
-  const areas = roots.flatMap((room) => room.children);
-  const browseableAreas = areas.filter((area) => {
-    const normalizedName = area.name
-      .normalize("NFKD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase();
-    return !/(?:^|\s)(?:pick\s*-?\s*up|return|broken|problem)(?:\s|$)/u.test(
-      normalizedName
-    );
-  });
-
-  const candidates = browseableAreas.length
-    ? browseableAreas
-    : roots.filter((location) => location.children.length === 0);
 
   return [
     { key: "all", label: "All areas", code: null, locationId: null },
-    ...candidates.map((location) => ({
+    ...rooms.map((location) => ({
       key: location.id,
       label: location.name,
       code: null,
@@ -104,9 +99,8 @@ export function getStudentLocationPath(
 }
 
 /**
- * Resolve a hierarchy path to the deepest location the Student browse filters
- * accept. The browse page intentionally exposes lab-room child areas rather
- * than every storage level, and validates query IDs against that list.
+ * Resolve a hierarchy path to its room-level Student browse filter. Visible
+ * choices stay at the room level while the server query includes descendants.
  */
 export function getStudentBrowseLocationIdForPath(
   pathIds: string[],
@@ -274,21 +268,11 @@ export function filterStudentInventory(
   assets: StudentInventoryItem[],
   filters: {
     categoryId?: string | null;
-    availability?: string | null;
     itemType?: string | null;
   }
 ) {
   return assets.filter((asset) => {
     if (filters.categoryId && asset.category?.id !== filters.categoryId) {
-      return false;
-    }
-    const availableNow = Boolean(
-      asset.availableToBook && asset.availableQuantity
-    );
-    if (filters.availability === "available" && !availableNow) {
-      return false;
-    }
-    if (filters.availability === "unavailable" && availableNow) {
       return false;
     }
     if (filters.itemType === "quantity" && asset.type !== "QUANTITY_TRACKED") {

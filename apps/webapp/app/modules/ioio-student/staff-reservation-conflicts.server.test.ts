@@ -114,6 +114,7 @@ describe("getIoioStaffReservationConflictSummary", () => {
       "course-calendar-booking",
     ]);
     expect(result.softConflictBookingIds).toEqual(["course-calendar-booking"]);
+    expect(result.available).toBe(4);
     expect(result.availableAfterSoftConflicts).toBe(4);
     expect(result.availableUnitIdsAfterSoftConflicts).toEqual([
       "makey-002",
@@ -176,5 +177,94 @@ describe("getIoioStaffReservationConflictSummary", () => {
     expect(result.softConflictBookingIds).toEqual([]);
     expect(result.availableAfterSoftConflicts).toBe(0);
     expect(mocks.getIoioAvailability).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports four units when one unit is held for preparation", async () => {
+    mocks.getIoioAvailability.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 4,
+      availableUnitIds: ["makey-001", "makey-002", "makey-003", "makey-005"],
+      availableUnitIdsWithoutStaffReservations: [
+        "makey-001",
+        "makey-002",
+        "makey-003",
+        "makey-005",
+      ],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      staffReservationFrom: null,
+      staffReservationTo: null,
+      availableWithoutStaffReservations: 4,
+    });
+
+    const result = await getIoioStaffReservationConflictSummary({
+      organizationId: "ioio-dev",
+      productId: "makey-model",
+      candidateAssetIds: [
+        "makey-001",
+        "makey-002",
+        "makey-003",
+        "makey-004",
+        "makey-005",
+      ],
+      quantity: 4,
+      ...window,
+    });
+
+    expect(result).toMatchObject({
+      total: 5,
+      available: 4,
+      requested: 4,
+      shortfall: 0,
+      availableAfterSoftConflicts: 4,
+      availableUnitIdsAfterSoftConflicts: [
+        "makey-001",
+        "makey-002",
+        "makey-003",
+        "makey-005",
+      ],
+    });
+  });
+
+  it("keeps the count at three when two units have hard date conflicts", async () => {
+    mocks.getIoioAvailability.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 3,
+      availableUnitIds: ["makey-001", "makey-003", "makey-005"],
+      availableUnitIdsWithoutStaffReservations: [
+        "makey-001",
+        "makey-003",
+        "makey-005",
+      ],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      staffReservationFrom: null,
+      staffReservationTo: null,
+      availableWithoutStaffReservations: 3,
+    });
+
+    const result = await getIoioStaffReservationConflictSummary({
+      organizationId: "ioio-dev",
+      productId: "makey-model",
+      candidateAssetIds: [
+        "makey-001",
+        "makey-002",
+        "makey-003",
+        "makey-004",
+        "makey-005",
+      ],
+      quantity: 4,
+      ...window,
+    });
+
+    expect(result.available).toBe(3);
+    expect(result.shortfall).toBe(1);
+    expect(result.availableUnitIdsAfterSoftConflicts).toEqual([
+      "makey-001",
+      "makey-003",
+      "makey-005",
+    ]);
   });
 });

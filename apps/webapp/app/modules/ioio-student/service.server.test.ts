@@ -5,6 +5,7 @@ import { getAssetAvailabilityBatch } from "~/modules/asset/availability.server";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
+import { getLocationDescendantIds } from "~/modules/location/descendants.server";
 import { getIoioAvailability } from "./availability.server";
 import {
   getMyStudentLoans,
@@ -24,6 +25,9 @@ vi.mock("~/database/db.server", () => ({
 }));
 vi.mock("~/modules/asset/availability.server", () => ({
   getAssetAvailabilityBatch: vi.fn(),
+}));
+vi.mock("~/modules/location/descendants.server", () => ({
+  getLocationDescendantIds: vi.fn(),
 }));
 vi.mock("./availability.server", () => ({
   getIoioAvailability: vi.fn(() =>
@@ -45,6 +49,7 @@ vi.mock("~/modules/kit/service.server", () => ({
 describe("student catalog source selectors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getLocationDescendantIds).mockReset();
     vi.mocked(getIoioArchivedItemIds).mockImplementation(({ itemType }) =>
       Promise.resolve(
         itemType === "ASSET" ? ["archived-asset"] : ["archived-kit"]
@@ -137,6 +142,60 @@ describe("student catalog source selectors", () => {
     });
     expect(assets[0]).not.toHaveProperty("organizationId");
     expect(assets[0].category).not.toHaveProperty("organizationId");
+  });
+
+  it.each([
+    ["ioio-room", ["ioio-room", "section-a", "shelf-a1", "container-a1-1"]],
+    ["storage-room", ["storage-room", "storage-section", "storage-shelf"]],
+    [
+      "soldering-room",
+      ["soldering-room", "soldering-section", "soldering-cabinet"],
+    ],
+  ])(
+    "filters %s through its canonical Shelf descendant tree",
+    async (roomId, descendantIds) => {
+      vi.mocked(getLocationDescendantIds).mockResolvedValue(descendantIds);
+      vi.mocked(db.asset.findMany).mockResolvedValue([] as never);
+      vi.mocked(getAssetAvailabilityBatch).mockResolvedValue(new Map());
+
+      await getStudentAssets({
+        organizationId: "org-1",
+        categoryId: "category-tools",
+        locationId: roomId,
+      });
+
+      expect(getLocationDescendantIds).toHaveBeenCalledWith({
+        organizationId: "org-1",
+        locationId: roomId,
+      });
+      expect(db.asset.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            organizationId: "org-1",
+            categoryId: "category-tools",
+            assetLocations: {
+              some: { locationId: { in: descendantIds } },
+            },
+          }),
+        })
+      );
+    }
+  );
+
+  it("does not restrict location when All areas is selected", async () => {
+    vi.mocked(db.asset.findMany).mockResolvedValue([] as never);
+    vi.mocked(getAssetAvailabilityBatch).mockResolvedValue(new Map());
+
+    await getStudentAssets({ organizationId: "org-1" });
+
+    expect(getLocationDescendantIds).not.toHaveBeenCalled();
+    expect(db.asset.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({
+          assetLocations: expect.anything(),
+        }),
+      })
+    );
   });
 
   it("keeps the AssetModel grouping key without leaking a foreign model's display fields", async () => {

@@ -1,10 +1,23 @@
-import { type ReactNode, useEffect, useState } from "react";
-import { Form, Link, useNavigation, useRouteLoaderData } from "react-router";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import {
+  Form,
+  Link,
+  useNavigate,
+  useNavigation,
+  useRouteLoaderData,
+} from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
 import {
   ASSET_IMAGE_FRAME_CLASSES,
   type AssetImageFrameVariant,
 } from "~/components/assets/asset-image/sizing";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+  SheetTrigger,
+} from "~/components/shared/sheet";
 import type {
   StudentAsset,
   StudentCategory,
@@ -152,7 +165,6 @@ export function InventoryFilterControls({
   locationId,
   categoryId,
   itemType,
-  availability,
   scanAction,
 }: {
   basePath: string;
@@ -162,18 +174,43 @@ export function InventoryFilterControls({
   locationId: string | null;
   categoryId: string | null;
   itemType: string | null;
-  availability: string | null;
   scanAction?: ReactNode;
 }) {
+  const navigate = useNavigate();
   const navigation = useNavigation();
   const searching = navigation.state !== "idle";
   const areaFilters = getStudentLabAreaFilters(locations);
-  const activeFilterCount = [
-    categoryId,
-    itemType,
-    locationId,
-    availability,
-  ].filter(Boolean).length;
+  const appliedFilters = {
+    categoryId: categoryId ?? "",
+    itemType: itemType ?? "",
+    locationId: locationId ?? "",
+  };
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [draftFilters, setDraftFilters] = useState(appliedFilters);
+  const handleFilterPanelOpenChange = (open: boolean) => {
+    // Every non-Apply close path discards draft edits. Opening always starts
+    // from the URL-backed filters currently applied to the inventory.
+    setDraftFilters(appliedFilters);
+    setFilterPanelOpen(open);
+  };
+  const handleApplyFilters = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFilterPanelOpen(false);
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (draftFilters.categoryId) {
+      params.set("category", draftFilters.categoryId);
+    }
+    if (draftFilters.itemType) params.set("itemType", draftFilters.itemType);
+    if (draftFilters.locationId) {
+      params.set("location", draftFilters.locationId);
+    }
+    const search = params.toString();
+    void navigate(search ? `${basePath}?${search}` : basePath);
+  };
+  const activeFilterCount = [categoryId, itemType, locationId].filter(
+    Boolean
+  ).length;
   const activeFilters = [
     query.trim() ? { key: "q", label: `Search: ${query.trim()}` } : null,
     categoryId
@@ -204,15 +241,6 @@ export function InventoryFilterControls({
           }`,
         }
       : null,
-    availability
-      ? {
-          key: "availability",
-          label:
-            availability === "available"
-              ? "Availability: Ready to borrow"
-              : "Availability: Not ready to borrow",
-        }
-      : null,
   ].filter(
     (filter): filter is { key: string; label: string } => filter !== null
   );
@@ -223,7 +251,6 @@ export function InventoryFilterControls({
       { key: "category", value: categoryId ?? "" },
       { key: "itemType", value: itemType ?? "" },
       { key: "location", value: locationId ?? "" },
-      { key: "availability", value: availability ?? "" },
     ];
     for (const { key, value } of values) {
       if (key !== removedKey && value) params.set(key, value);
@@ -238,7 +265,6 @@ export function InventoryFilterControls({
     { name: "location", value: locationId ?? "" },
     { name: "category", value: categoryId ?? "" },
     { name: "itemType", value: itemType ?? "" },
-    { name: "availability", value: availability ?? "" },
   ];
 
   return (
@@ -282,149 +308,157 @@ export function InventoryFilterControls({
 
         {scanAction}
 
-        <details className="relative shrink-0">
-          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-gray-300 bg-white px-3 text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-red-600">
-            Filters
-            {activeFilterCount ? (
-              <span className="rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] text-white">
-                {activeFilterCount}
-              </span>
-            ) : null}
-          </summary>
-          <Form
-            key={`${categoryId ?? ""}-${itemType ?? ""}-${locationId ?? ""}-${
-              availability ?? ""
-            }`}
-            method="get"
-            action={basePath}
-            className="absolute right-0 z-10 mt-2 grid w-[min(22rem,calc(100vw-2rem))] gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-xl sm:right-0"
+        <Sheet
+          open={filterPanelOpen}
+          onOpenChange={handleFilterPanelOpenChange}
+        >
+          <SheetTrigger asChild>
+            <button
+              type="button"
+              aria-label={
+                activeFilterCount
+                  ? `Filters, ${activeFilterCount} applied`
+                  : "Filters"
+              }
+              className="flex min-h-11 shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-xl border border-gray-300 bg-white px-3 text-sm font-bold text-gray-800 hover:border-red-200 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-600"
+            >
+              Filters
+              {activeFilterCount ? (
+                <span className="rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] text-white">
+                  {activeFilterCount}
+                </span>
+              ) : null}
+            </button>
+          </SheetTrigger>
+          <SheetContent
+            side="right"
+            className="flex w-[min(24rem,calc(100vw-1rem))] flex-col gap-4 overflow-y-auto border-l bg-white p-5 sm:w-96"
           >
-            <input type="hidden" name="q" value={query} />
-            <label className="text-sm font-semibold text-gray-800">
-              Category
-              <select
-                name="category"
-                defaultValue={categoryId ?? ""}
-                className="mt-1 min-h-10 w-full rounded-lg border border-gray-300 bg-white px-2 text-sm"
-              >
-                <option value="">All categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <fieldset className="min-w-0">
-              <legend className="text-sm font-semibold text-gray-800">
-                Availability
-              </legend>
-              <div className="mt-1 flex flex-wrap gap-2">
-                {[
-                  { value: "", label: "Any availability" },
-                  { value: "available", label: "Ready to borrow" },
-                  { value: "unavailable", label: "Not ready to borrow" },
-                ].map((option, index) => {
-                  const id = `${basePath.replaceAll(
-                    "/",
-                    "-"
-                  )}-availability-${index}`;
-                  return (
-                    <label key={option.value || "any"}>
-                      <input
-                        id={id}
-                        className="peer sr-only"
-                        type="radio"
-                        name="availability"
-                        value={option.value}
-                        defaultChecked={(availability ?? "") === option.value}
-                      />
-                      <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
-                        {option.label}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </fieldset>
-            <fieldset className="min-w-0">
-              <legend className="text-sm font-semibold text-gray-800">
-                Item type
-              </legend>
-              <div className="mt-1 flex flex-wrap gap-2">
-                {[
-                  { value: "", label: "All items" },
-                  { value: "quantity", label: "Normal items" },
-                  { value: "individual", label: "Kits" },
-                ].map((option, index) => {
-                  const id = `${basePath.replaceAll(
-                    "/",
-                    "-"
-                  )}-item-type-${index}`;
-                  return (
-                    <label key={option.value || "all"}>
-                      <input
-                        id={id}
-                        className="peer sr-only"
-                        type="radio"
-                        name="itemType"
-                        value={option.value}
-                        defaultChecked={(itemType ?? "") === option.value}
-                      />
-                      <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
-                        {option.label}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </fieldset>
-            <fieldset className="min-w-0">
-              <legend className="text-sm font-semibold text-gray-800">
-                Lab area
-              </legend>
-              <div className="mt-1 flex flex-wrap gap-2">
-                {areaFilters.map((area, index) => {
-                  const id = `${basePath.replaceAll(
-                    "/",
-                    "-"
-                  )}-lab-area-${index}`;
-                  return (
-                    <label key={area.key}>
-                      <input
-                        id={id}
-                        className="peer sr-only"
-                        type="radio"
-                        name="location"
-                        value={area.locationId ?? ""}
-                        defaultChecked={
-                          (area.locationId ?? null) === locationId
-                        }
-                      />
-                      <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
-                        {formatStudentLabel(area.label)}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            </fieldset>
-            <div className="flex gap-2">
-              <button
-                type="submit"
-                className="min-h-10 flex-1 rounded-lg bg-red-700 px-3 text-sm font-bold text-white hover:bg-red-800"
-              >
-                Apply filters
-              </button>
-              <Link
-                to={basePath}
-                className="flex min-h-10 items-center rounded-lg border border-gray-300 px-3 text-sm font-bold text-gray-700 hover:border-red-200 hover:text-red-800"
-              >
-                Clear
-              </Link>
+            <div className="space-y-1 pr-8">
+              <SheetTitle className="text-left text-xl font-black text-gray-950">
+                Filters
+              </SheetTitle>
+              <SheetDescription className="text-left text-sm text-gray-600">
+                Choose how to narrow the inventory, then apply your changes.
+              </SheetDescription>
             </div>
-          </Form>
-        </details>
+            <form onSubmit={handleApplyFilters} className="grid gap-5">
+              <label className="text-sm font-semibold text-gray-800">
+                Category
+                <select
+                  value={draftFilters.categoryId}
+                  onChange={(event) =>
+                    setDraftFilters((current) => ({
+                      ...current,
+                      categoryId: event.target.value,
+                    }))
+                  }
+                  className="mt-1 min-h-10 w-full rounded-lg border border-gray-300 bg-white px-2 text-sm"
+                >
+                  <option value="">All categories</option>
+                  {categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <fieldset className="min-w-0">
+                <legend className="text-sm font-semibold text-gray-800">
+                  Item type
+                </legend>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {[
+                    { value: "", label: "All items" },
+                    { value: "quantity", label: "Normal items" },
+                    { value: "individual", label: "Kits" },
+                  ].map((option, index) => {
+                    const id = `${basePath.replaceAll(
+                      "/",
+                      "-"
+                    )}-item-type-${index}`;
+                    return (
+                      <label key={option.value || "all"}>
+                        <input
+                          id={id}
+                          className="peer sr-only"
+                          type="radio"
+                          value={option.value}
+                          checked={draftFilters.itemType === option.value}
+                          onChange={() =>
+                            setDraftFilters((current) => ({
+                              ...current,
+                              itemType: option.value,
+                            }))
+                          }
+                        />
+                        <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
+                          {option.label}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <fieldset className="min-w-0">
+                <legend className="text-sm font-semibold text-gray-800">
+                  Lab area
+                </legend>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {areaFilters.map((area, index) => {
+                    const id = `${basePath.replaceAll(
+                      "/",
+                      "-"
+                    )}-lab-area-${index}`;
+                    return (
+                      <label key={area.key}>
+                        <input
+                          id={id}
+                          className="peer sr-only"
+                          type="radio"
+                          value={area.locationId ?? ""}
+                          checked={
+                            (area.locationId ?? "") === draftFilters.locationId
+                          }
+                          onChange={() =>
+                            setDraftFilters((current) => ({
+                              ...current,
+                              locationId: area.locationId ?? "",
+                            }))
+                          }
+                        />
+                        <span className="inline-flex min-h-9 cursor-pointer items-center rounded-full border border-gray-200 bg-white px-3 text-xs font-bold text-gray-700 transition peer-checked:border-red-700 peer-checked:bg-red-700 peer-checked:text-white peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-red-700 peer-focus-visible:ring-offset-2 hover:border-red-200 hover:text-red-800">
+                          {formatStudentLabel(area.label)}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <div className="flex flex-wrap gap-2 border-t border-gray-200 pt-4">
+                <button
+                  type="submit"
+                  className="min-h-10 flex-1 rounded-lg bg-red-700 px-3 text-sm font-bold text-white hover:bg-red-800"
+                >
+                  Apply filters
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDraftFilters({
+                      categoryId: "",
+                      itemType: "",
+                      locationId: "",
+                    })
+                  }
+                  className="min-h-10 rounded-lg border border-gray-300 px-3 text-sm font-bold text-gray-700 hover:border-red-200 hover:text-red-800"
+                >
+                  Clear
+                </button>
+              </div>
+            </form>
+          </SheetContent>
+        </Sheet>
       </div>
 
       {activeFilters.length ? (
