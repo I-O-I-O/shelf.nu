@@ -241,6 +241,8 @@ interface BookingAssetsSidebarProps {
     status: BookingStatus;
     /** Concrete `BookingAsset` rows, from the list loader's `_count`. */
     _count: { bookingAssets: number };
+    /** Optional unit total for compact loan rows; a quantity pool may use one row for several items. */
+    displayQuantity?: number;
     /**
      * Outstanding model-level reservations. Optional so a caller that does
      * not select them can still render the drawer — the "Unassigned model
@@ -720,7 +722,11 @@ export function BookingAssetsSidebar({
    * every navigation, while a previously fetched payload can be stale from an
    * earlier open, and before the first open there is no payload at all.
    */
-  const assetCount = booking._count.bookingAssets;
+  const assetCount = booking.displayQuantity ?? booking._count.bookingAssets;
+  const assetCountLabel =
+    booking.displayQuantity === undefined
+      ? `${assetCount} assets`
+      : `${assetCount} ${assetCount === 1 ? "item" : "items"}`;
   const hasItems = assetCount > 0 || outstandingModelRequestCount > 0;
 
   /**
@@ -741,7 +747,7 @@ export function BookingAssetsSidebar({
       onClick={hasItems ? () => handleOpenChange(true) : undefined}
       className={!hasItems ? "hover:text-gray cursor-default no-underline" : ""}
     >
-      {assetCount} assets
+      {assetCountLabel}
     </Button>
   );
 

@@ -185,6 +185,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           status: {
             in: [
               "PENDING_PREPARATION",
+              "ASSIGNING",
               "READY_FOR_PICKUP",
               "CANCELLED",
               "CANCELLED_PICKUP",
@@ -192,7 +193,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             ],
           },
           OR: [
-            { status: { in: ["PENDING_PREPARATION", "READY_FOR_PICKUP"] } },
+            {
+              status: {
+                in: ["PENDING_PREPARATION", "ASSIGNING", "READY_FOR_PICKUP"],
+              },
+            },
             { reviewComment: { startsWith: "Cancelled by Student." } },
             {
               reviewComment: { startsWith: PREPARATION_PICKUP_EXPIRED_COMMENT },
@@ -524,7 +529,18 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         .map((operation) => operation.bookingAssetId)
         .filter((id): id is string => Boolean(id))
     );
+    const pendingPreparationBookingIds = new Set(
+      preparationOperations
+        .filter(
+          (operation) =>
+            operation.source === "IOIO_PREPARATION_REQUEST" &&
+            ["PENDING_PREPARATION", "ASSIGNING"].includes(operation.status) &&
+            operation.bookingId
+        )
+        .map((operation) => operation.bookingId as string)
+    );
     const studentVisibleLoans = loans
+      .filter((loan) => !pendingPreparationBookingIds.has(loan.id))
       .map((loan) => ({
         ...loan,
         bookingAssets: loan.bookingAssets.filter(
@@ -1584,7 +1600,7 @@ export default function IoioLoans() {
                   Preparation requested
                 </h2>
                 <p className="mt-1 text-sm text-gray-600">
-                  A TA will choose and check the exact equipment for you.
+                  Your requested units are reserved while a TA prepares them.
                 </p>
               </div>
               {preparationRequests.map((request) => (

@@ -40,6 +40,15 @@ function getLabIssueReadKey(issue: LabIssue) {
   return (hash >>> 0).toString(36);
 }
 
+function countActionableItems(issues: LabIssue[], preparationTasks: number) {
+  return (
+    issues.length +
+    (issues.some((issue) => issue.kind === "preparation")
+      ? Math.max(0, preparationTasks - 1)
+      : 0)
+  );
+}
+
 function IssueSummary({ status }: { status: LabStatus }) {
   const summaries = [
     {
@@ -108,6 +117,10 @@ function IssueSummary({ status }: { status: LabStatus }) {
 
 export function LabStatusCard({ status }: { status: LabStatus }) {
   const visibleIssues = status.issues.slice(0, 3);
+  const actionableItemCount = countActionableItems(
+    status.issues,
+    status.preparationTasks
+  );
   return (
     <section
       aria-labelledby="lab-status-heading"
@@ -131,7 +144,7 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
             View all
           </Link>
           <Activity
-            aria-label={`${status.totalIssues} current issues`}
+            aria-label={`${actionableItemCount} current issues`}
             className="size-6 shrink-0 text-gray-500"
           />
         </div>
@@ -146,8 +159,8 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
             Needs attention
           </h3>
           <p className="mt-1 text-sm font-semibold text-gray-800">
-            {status.totalIssues} item{status.totalIssues === 1 ? "" : "s"} need
-            action.
+            {actionableItemCount} item
+            {actionableItemCount === 1 ? " needs" : "s need"} action.
           </p>
           <ul className="mt-4 space-y-2" aria-label="Current lab issues">
             {visibleIssues.map((issue) => (
@@ -262,13 +275,19 @@ export function StaffLabStatusBell({
     };
   }, [isOpen]);
 
-  const currentIssueCount = status?.totalIssues ?? 0;
+  const currentIssueCount = status
+    ? countActionableItems(status.issues, status.preparationTasks)
+    : 0;
   const seenIssueKeys =
     seenState.key === readStateKey ? new Set(seenState.issueKeys) : new Set();
-  const newIssueCount =
+  const newIssues =
     status?.issues.filter(
       (issue) => !seenIssueKeys.has(getLabIssueReadKey(issue))
-    ).length ?? 0;
+    ) ?? [];
+  const newIssueCount = countActionableItems(
+    newIssues,
+    status?.preparationTasks ?? 0
+  );
 
   function toggleOpen() {
     const nextOpen = !isOpen;
@@ -349,7 +368,7 @@ export function StaffLabStatusBell({
               ))}
             </ul>
           ) : null}
-          {currentIssueCount > 5 ? (
+          {status && status.issues.length > 5 ? (
             <p className="mt-3 text-xs text-gray-500">
               Showing 5 of {currentIssueCount} current actionable items.
             </p>

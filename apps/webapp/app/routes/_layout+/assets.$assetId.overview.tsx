@@ -71,7 +71,10 @@ import { usePosition } from "~/hooks/use-position";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import { getAssetAvailability } from "~/modules/asset/availability.server";
 import { getAssetOverviewFields } from "~/modules/asset/fields";
-import { getIndividualUnitAvailability } from "~/modules/asset/individual-product-quantity.server";
+import {
+  getIndividualUnitAvailability,
+  getIndividualUnitPreparationStates,
+} from "~/modules/asset/individual-product-quantity.server";
 import {
   MOVE_UNITS_INTENT_FIELD,
   type MoveAxis,
@@ -114,6 +117,7 @@ import {
 } from "~/modules/ioio-staff/archive.server";
 import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
+import { getImmediateBorrowingWindow } from "~/modules/ioio-student/date-range";
 import { isIoioPhysicalUnitBlockingReport } from "~/modules/ioio-student/report-problem.shared";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { moveAssetKitUnits } from "~/modules/kit/service.server";
@@ -220,6 +224,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       request,
       include: getAssetOverviewFields(canUseBarcodes),
     });
+    const immediateBorrowingWindow = getImmediateBorrowingWindow(
+      asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45
+    );
     const primaryAssetLocation = getPrimaryLocation(asset);
     const assetLocationPath =
       (asset.type === AssetType.INDIVIDUAL || isQuantityTracked(asset)) &&
@@ -302,12 +309,16 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         )[0]
       : null;
     const individualUnitIds = individualProductUnits.map((unit) => unit.id);
-    const [individualAvailability, physicalUnitOperations] = await Promise.all([
+    const [
+      individualAvailability,
+      physicalUnitOperations,
+      preparationStatesByUnitId,
+    ] = await Promise.all([
       individualUnitIds.length
         ? getIndividualUnitAvailability({
             organizationId,
             assetIds: individualUnitIds,
-            window: null,
+            window: immediateBorrowingWindow,
           })
         : Promise.resolve({ total: 0, available: 0, availableUnitIds: [] }),
       individualUnitIds.length
@@ -315,22 +326,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             where: {
               organizationId,
               assetId: { in: individualUnitIds },
-              OR: [
-                {
-                  operationType: "REPORT_PROBLEM",
-                  status: { in: ["SUCCEEDED", "PROCESSING"] },
-                },
-                {
-                  operationType: "IOIO_PREPARATION",
-                  status: {
-                    in: [
-                      "PENDING_PREPARATION",
-                      "READY_FOR_PICKUP",
-                      "CANCELLED_PICKUP",
-                    ],
-                  },
-                },
-              ],
+              operationType: "REPORT_PROBLEM",
+              status: { in: ["SUCCEEDED", "PROCESSING"] },
             },
             select: {
               assetId: true,
@@ -340,6 +337,10 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             },
           })
         : Promise.resolve([]),
+      getIndividualUnitPreparationStates({
+        organizationId,
+        assetIds: individualUnitIds,
+      }),
     ]);
     const availablePhysicalUnitIds = new Set(
       individualAvailability.availableUnitIds
@@ -362,9 +363,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       const issueReportTypes = operations
         .filter((operation) => operation.operationType === "REPORT_PROBLEM")
         .map((operation) => operation.reportType);
-      const preparationStates = operations
-        .filter((operation) => operation.operationType === "IOIO_PREPARATION")
-        .map((operation) => operation.status);
+      const preparationStates = preparationStatesByUnitId.get(unit.id) ?? [];
       const hasIssueReport = issueReportTypes.some(
         isIoioPhysicalUnitBlockingReport
       );
@@ -471,15 +470,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       organizationId,
     });
     /**
-     * Compute quantity availability for QUANTITY_TRACKED assets via the
-     * shared `getAssetAvailability` primitive, called with NO `window` —
-     * "current state" mode. This is the #2724 fix: the headline `available`
-     * below is `physicalAvailable` (total − inCustody − inKits −
-     * checkedOut), which can never be dragged negative by far-future
-     * reservations the way the old inline formula could (it summed EVERY
-     * active reservation, all-time, and subtracted the lot). Reservations
-     * still surface on their own "Reserved (bookings)" row
-     * (`reservedTotal`), just no longer baked into the headline.
+     * Compute quantity availability through Shelf's shared primitive for
+     * this asset's immediate borrowing window. Active holds reduce the free
+     * count, while non-overlapping future reservations remain informational.
      */
     let quantityData: QuantityData | null = null;
 
@@ -509,6 +502,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       const availability = await getAssetAvailability({
         assetId: asset.id,
         organizationId,
+        window: immediateBorrowingWindow,
       });
 
       quantityData = buildQuantityData({

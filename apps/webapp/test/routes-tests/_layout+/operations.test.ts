@@ -326,6 +326,11 @@ describe("Operations loader", () => {
       status: "PENDING_PREPARATION",
       reviewComment: null,
     };
+    const secondRequest = {
+      ...request,
+      id: "preparation-request-2",
+      selectedAssetIds: ["unit-2"],
+    };
     const product = {
       id: "product-1",
       title: "Makey Kit #005",
@@ -353,7 +358,9 @@ describe("Operations loader", () => {
           id?: { in?: string[] };
         };
       }) => {
-        if (args.where?.operationType === "IOIO_PREPARATION") return [request];
+        if (args.where?.operationType === "IOIO_PREPARATION") {
+          return [request, secondRequest];
+        }
         if (args.where?.userOrganizations) {
           return [
             {
@@ -402,7 +409,7 @@ describe("Operations loader", () => {
     const task = result.data.tasks.find(
       (entry) => entry.operationId === request.id
     );
-    expect(result.data.summary["to-prepare"]).toBe(1);
+    expect(result.data.summary["to-prepare"]).toBe(2);
     expect(task).toMatchObject({
       id: request.id,
       kind: "to-prepare",
@@ -417,6 +424,14 @@ describe("Operations loader", () => {
       physicalUnitAssignment: "No unit assigned yet",
       requestedPeriod: "Oct 12 – Oct 16, 2026",
     });
+    expect(
+      result.data.tasks.filter((entry) => entry.kind === "to-prepare")
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ operationId: request.id }),
+        expect.objectContaining({ operationId: secondRequest.id }),
+      ])
+    );
     expect(mocks.methods.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({

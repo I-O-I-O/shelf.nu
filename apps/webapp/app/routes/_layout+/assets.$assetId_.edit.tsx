@@ -1,10 +1,5 @@
 import { useMemo } from "react";
-import {
-  AssetStatus,
-  AssetType,
-  BookingStatus,
-  TagUseFor,
-} from "@prisma/client";
+import { AssetType, TagUseFor } from "@prisma/client";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -14,7 +9,6 @@ import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import { NewAssetFormSchema } from "~/components/assets/form";
 import { IoioAssetCreateForm } from "~/components/assets/ioio-asset-create-form";
-import { IoioPhysicalUnitEditForm } from "~/components/assets/ioio-physical-unit-edit-form";
 
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -31,7 +25,6 @@ import {
   convertIndividualProductToQuantityTracked,
   convertQuantityTrackedAssetBulk,
   ensureIndividualAssetModel,
-  setIndividualAssetAvailability,
   updateAsset,
   updateAssetMainImage,
 } from "~/modules/asset/service.server";
@@ -78,80 +71,6 @@ import { slugify } from "~/utils/slugify";
 import { removeStorageImageObject } from "~/utils/storage.server";
 
 export type AssetEditLoaderData = typeof loader;
-
-async function getPhysicalUnitAvailabilityBlock({
-  id,
-  organizationId,
-  status,
-}: {
-  id: string;
-  organizationId: string;
-  status: AssetStatus;
-}): Promise<string | null> {
-  if (status === AssetStatus.CHECKED_OUT) {
-    return "This unit is checked out and cannot be marked available until it is returned.";
-  }
-  if (status === AssetStatus.IN_CUSTODY) {
-    return "This unit is assigned to someone and must be released from custody first.";
-  }
-
-  const [custody, activeBooking, preparationHold, unresolvedIssue] =
-    await Promise.all([
-      db.custody.findFirst({ where: { assetId: id }, select: { id: true } }),
-      db.bookingAsset.findFirst({
-        where: {
-          assetId: id,
-          checkedInAt: null,
-          booking: {
-            organizationId,
-            status: {
-              in: [
-                BookingStatus.RESERVED,
-                BookingStatus.ONGOING,
-                BookingStatus.OVERDUE,
-              ],
-            },
-          },
-        },
-        select: { id: true },
-      }),
-      db.ioioWriteOperation.findFirst({
-        where: {
-          organizationId,
-          assetId: id,
-          operationType: "IOIO_PREPARATION",
-          status: { in: ["READY_FOR_PICKUP", "CANCELLED_PICKUP"] },
-        },
-        select: { status: true },
-      }),
-      db.ioioWriteOperation.findFirst({
-        where: {
-          organizationId,
-          assetId: id,
-          operationType: "REPORT_PROBLEM",
-          status: "SUCCEEDED",
-        },
-        select: { id: true },
-      }),
-    ]);
-
-  if (custody) {
-    return "This unit is assigned to someone and must be released from custody first.";
-  }
-  if (activeBooking) {
-    return "This unit is part of an active loan or reservation.";
-  }
-  if (preparationHold?.status === "CANCELLED_PICKUP") {
-    return "This unit is waiting to be put back after a cancelled pickup.";
-  }
-  if (preparationHold) {
-    return "This unit is staged for pickup and must be checked back in first.";
-  }
-  if (unresolvedIssue) {
-    return "Resolve the existing issue report before changing availability.";
-  }
-  return null;
-}
 
 export async function loader({ context, request, params }: LoaderFunctionArgs) {
   const authSession = context.getSession();
@@ -215,9 +134,13 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
 
     const isPhysicalUnit =
       asset.type === AssetType.INDIVIDUAL && Boolean(asset.assetModelId);
-    const availabilityBlock = isPhysicalUnit
-      ? await getPhysicalUnitAvailabilityBlock({ id, organizationId, asset })
-      : null;
+
+    // Physical-unit availability and label actions live on the inventory
+    // detail page. The Edit route should open the existing product-level
+    // Shelf editor for model-linked units.
+    if (isPhysicalUnit && !productGroupMode) {
+      return redirect(`/assets/${encodeURIComponent(id)}/edit?productGroup=1`);
+    }
 
     if (
       productGroupMode &&
@@ -344,7 +267,6 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       assetModels,
       totalAssetModels,
       physicalUnits,
-      availabilityBlock,
       currency: currentOrganization?.currency,
       customFields,
       // Inventory edits should always have a useful way back, including when
@@ -384,37 +306,6 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const clonedRequest = request.clone();
     const formData = await clonedRequest.formData();
-
-    if (formData.get("intent") === "physical-unit-availability") {
-      const { availabilityAction } = parseData(
-        formData,
-        z.object({
-          availabilityAction: z.enum(["available", "unavailable"]),
-        })
-      );
-      try {
-        const result = await setIndividualAssetAvailability({
-          id,
-          detailAssetId: id,
-          organizationId,
-          userId,
-          action: availabilityAction,
-        });
-        return payload({
-          success: true,
-          intent: "physical-unit-availability",
-          availableToBook: result.availableToBook,
-        });
-      } catch (cause) {
-        if (cause instanceof ShelfError && cause.status === 409) {
-          return data(
-            { success: false, error: { message: cause.message } },
-            { status: 409 }
-          );
-        }
-        throw cause;
-      }
-    }
 
     if (formData.get("intent") === "ensure-individual-model") {
       const assetModelId = await ensureIndividualAssetModel({
@@ -983,7 +874,6 @@ export default function AssetEditPage() {
   const {
     asset,
     physicalUnits,
-    availabilityBlock,
     productGroup,
     productLocationId,
     productLocationIsMixed,
@@ -994,76 +884,58 @@ export default function AssetEditPage() {
     [asset.tags]
   );
 
-  const isPhysicalUnit =
-    !productGroup &&
-    asset.type === AssetType.INDIVIDUAL &&
-    Boolean(asset.assetModelId);
   const generalTitle = productGroup?.name ?? asset.title;
 
   return (
     <div className="relative">
-      <Header
-        title={isPhysicalUnit ? "Edit physical unit" : "Edit general item"}
-        hideQuickFind
+      <Header title="Edit general item" hideQuickFind />
+      <IoioAssetCreateForm
+        id={asset.id}
+        sequentialId={asset.sequentialId}
+        mainImage={productGroup?.image ?? asset.mainImage}
+        thumbnailImage={productGroup?.thumbnailImage ?? asset.thumbnailImage}
+        mainImageExpiration={
+          !productGroup && asset.mainImageExpiration
+            ? new Date(asset.mainImageExpiration)
+            : null
+        }
+        title={generalTitle}
+        categoryId={asset.categoryId}
+        assetModelId={asset.assetModelId}
+        locationId={
+          productGroup
+            ? productLocationId
+            : getPrimaryLocation(asset)?.id ?? null
+        }
+        description={productGroup?.description ?? asset.description}
+        valuation={asset.valuation}
+        type={asset.type}
+        quantity={asset.quantity}
+        minQuantity={asset.minQuantity}
+        consumptionType={asset.consumptionType}
+        unitOfMeasure={asset.unitOfMeasure}
+        requiresBorrowApproval={asset.requiresBorrowApproval}
+        requiresStaffPreparation={asset.requiresStaffPreparation}
+        requiresReturnPhoto={asset.requiresReturnPhoto}
+        maxBorrowDays={asset.maxBorrowDays}
+        extensionBorrowDays={asset.extensionBorrowDays}
+        returnHandling={asset.returnHandling}
+        tags={tags}
+        barcodes={asset.barcodes}
+        preferredBarcodeId={asset.preferredBarcodeId}
+        showAssetModel={false}
+        physicalUnits={physicalUnits}
+        productGroup={
+          productGroup
+            ? {
+                name: productGroup.name,
+                locationIsMixed: productLocationIsMixed,
+                hasImage: Boolean(productGroup.image),
+              }
+            : undefined
+        }
+        referer={referer}
       />
-      {isPhysicalUnit ? (
-        <IoioPhysicalUnitEditForm
-          id={asset.id}
-          title={asset.title}
-          status={asset.status}
-          availableToBook={asset.availableToBook}
-          availabilityBlock={availabilityBlock}
-          qrId={asset.qrCodes[0]?.id}
-        />
-      ) : (
-        <IoioAssetCreateForm
-          id={asset.id}
-          sequentialId={asset.sequentialId}
-          mainImage={productGroup?.image ?? asset.mainImage}
-          thumbnailImage={productGroup?.thumbnailImage ?? asset.thumbnailImage}
-          mainImageExpiration={
-            !productGroup && asset.mainImageExpiration
-              ? new Date(asset.mainImageExpiration)
-              : null
-          }
-          title={generalTitle}
-          categoryId={asset.categoryId}
-          assetModelId={asset.assetModelId}
-          locationId={
-            productGroup
-              ? productLocationId
-              : getPrimaryLocation(asset)?.id ?? null
-          }
-          description={productGroup?.description ?? asset.description}
-          valuation={asset.valuation}
-          type={asset.type}
-          quantity={asset.quantity}
-          minQuantity={asset.minQuantity}
-          consumptionType={asset.consumptionType}
-          unitOfMeasure={asset.unitOfMeasure}
-          requiresBorrowApproval={asset.requiresBorrowApproval}
-          requiresStaffPreparation={asset.requiresStaffPreparation}
-          requiresReturnPhoto={asset.requiresReturnPhoto}
-          maxBorrowDays={asset.maxBorrowDays}
-          extensionBorrowDays={asset.extensionBorrowDays}
-          returnHandling={asset.returnHandling}
-          tags={tags}
-          barcodes={asset.barcodes}
-          preferredBarcodeId={asset.preferredBarcodeId}
-          showAssetModel={false}
-          physicalUnits={physicalUnits}
-          productGroup={
-            productGroup
-              ? {
-                  name: productGroup.name,
-                  locationIsMixed: productLocationIsMixed,
-                  hasImage: Boolean(productGroup.image),
-                }
-              : undefined
-          }
-          referer={referer}
-        />
-      )}
     </div>
   );
 }

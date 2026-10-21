@@ -11,6 +11,8 @@ const dbMock = vi.hoisted(() => ({
     update: vi.fn(),
     updateMany: vi.fn(),
   },
+  // why: the preparation service writes inside Prisma's transaction callback;
+  // the mock must execute that callback for the test to observe the write.
   $transaction: vi.fn(),
 }));
 const requireStudentReadMock = vi.hoisted(() => vi.fn());
@@ -45,6 +47,12 @@ const authA = {
 describe("Milestone 12 durable report safeguards", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    dbMock.$transaction.mockImplementation((callback) => {
+      if (typeof callback !== "function") {
+        throw new Error("Expected a transaction callback in this test.");
+      }
+      return callback(dbMock);
+    });
     requireStudentReadMock.mockResolvedValue(authA);
     dbMock.asset.findFirst.mockResolvedValue(null);
     dbMock.kit.findFirst.mockResolvedValue(null);

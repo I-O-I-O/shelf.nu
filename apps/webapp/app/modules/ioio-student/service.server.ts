@@ -14,6 +14,7 @@ import {
   getIoioArchivedItemIds,
   IOIO_ARCHIVE_ITEM_TYPE,
 } from "~/modules/ioio-staff/archive.server";
+import { getImmediateBorrowingWindow } from "~/modules/ioio-student/date-range";
 import { isKitAvailableToBook } from "~/modules/kit/availability";
 import { getIoioKitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
@@ -195,25 +196,45 @@ async function shapeAssets(
     );
   }
 
-  const availability = await getAssetAvailabilityBatch(
-    currentRows.map((asset) => asset.id),
-    { organizationId, window: null }
+  const now = new Date();
+  const quantityAssets = currentRows.filter(
+    (asset) => asset.type === AssetType.QUANTITY_TRACKED
+  );
+  const assetsByBorrowWindow = new Map<number, string[]>();
+  for (const asset of quantityAssets) {
+    const maxBorrowDays =
+      asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45;
+    const assetIds = assetsByBorrowWindow.get(maxBorrowDays) ?? [];
+    assetIds.push(asset.id);
+    assetsByBorrowWindow.set(maxBorrowDays, assetIds);
+  }
+  const availabilityByWindow = await Promise.all(
+    [...assetsByBorrowWindow].map(async ([maxBorrowDays, assetIds]) =>
+      getAssetAvailabilityBatch(assetIds, {
+        organizationId,
+        window: getImmediateBorrowingWindow(maxBorrowDays, now),
+      })
+    )
+  );
+  const availability = new Map(
+    availabilityByWindow.flatMap((result) => [...result.entries()])
   );
   const individualAvailability = new Map(
     await Promise.all(
       currentRows
         .filter((asset) => asset.type === AssetType.INDIVIDUAL)
-        .map(
-          async (asset) =>
-            [
-              asset.id,
-              await getIndividualUnitAvailability({
-                organizationId,
-                assetIds: [asset.id],
-                window: null,
-              }),
-            ] as const
-        )
+        .map(async (asset) => {
+          const maxBorrowDays =
+            asset.assetKits[0]?.kit.maxBorrowDays ?? asset.maxBorrowDays ?? 45;
+          return [
+            asset.id,
+            await getIndividualUnitAvailability({
+              organizationId,
+              assetIds: [asset.id],
+              window: getImmediateBorrowingWindow(maxBorrowDays, now),
+            }),
+          ] as const;
+        })
     )
   );
 
@@ -254,7 +275,13 @@ async function shapeAssets(
         asset.type === AssetType.QUANTITY_TRACKED
           ? Math.max(
               0,
-              currentAvailability?.physicalAvailable ?? asset.quantity ?? 0
+              Math.min(
+                currentAvailability?.bookable ??
+                  currentAvailability?.physicalAvailable ??
+                  asset.quantity ??
+                  0,
+                currentAvailability?.physicalAvailable ?? asset.quantity ?? 0
+              )
             )
           : individualAvailability.get(asset.id)?.available ?? 0,
       availableToBook: asset.availableToBook,

@@ -6,6 +6,7 @@ import { resolveAssetImagesForPresentation } from "~/modules/asset/service.serve
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
 import {
+  getMyStudentLoans,
   getStudentAssets,
   getStudentKits,
   getStudentLocations,
@@ -14,8 +15,10 @@ import {
 vi.mock("~/database/db.server", () => ({
   db: {
     asset: { findMany: vi.fn() },
+    booking: { findMany: vi.fn() },
     kit: { findMany: vi.fn() },
     location: { findMany: vi.fn() },
+    teamMember: { findMany: vi.fn() },
   },
 }));
 vi.mock("~/modules/asset/availability.server", () => ({
@@ -85,7 +88,7 @@ describe("student catalog source selectors", () => {
       },
     ] as never);
     vi.mocked(getAssetAvailabilityBatch).mockResolvedValue(
-      new Map([["asset-1", { physicalAvailable: 5 } as never]])
+      new Map([["asset-1", { physicalAvailable: 5, bookable: 3 } as never]])
     );
 
     const assets = await getStudentAssets({ organizationId: "org-1" });
@@ -112,7 +115,10 @@ describe("student catalog source selectors", () => {
     );
     expect(getAssetAvailabilityBatch).toHaveBeenCalledWith(["asset-1"], {
       organizationId: "org-1",
-      window: null,
+      window: expect.objectContaining({
+        from: expect.any(Date),
+        to: expect.any(Date),
+      }),
     });
     expect(resolveAssetImagesForPresentation).toHaveBeenCalledTimes(1);
     expect(assets[0]).toMatchObject({
@@ -120,7 +126,7 @@ describe("student catalog source selectors", () => {
       title: "Arduino Nano",
       mainImage: "https://images.example/nano.jpg",
       quantity: 8,
-      availableQuantity: 5,
+      availableQuantity: 3,
       category: { id: "category-1", name: "Boards & Embedded Systems" },
       locations: [{ id: "shelf-1", name: "Shelf A1", quantity: 8 }],
       qrIds: ["qr-1"],
@@ -400,5 +406,141 @@ describe("student catalog source selectors", () => {
     });
     expect(kits[0]).not.toHaveProperty("organizationId");
     expect(kits[0].assetKits[0]?.asset).not.toHaveProperty("organizationId");
+  });
+});
+
+describe("student Loans quantity representation", () => {
+  it("keeps repeated same-item preparation reservations as separate loan requests", async () => {
+    const from = new Date("2026-10-20T09:00:00.000Z");
+    const to = new Date("2026-11-20T17:00:00.000Z");
+    const unit = (id: string) => ({
+      id,
+      title: "Makey Kit",
+      type: "INDIVIDUAL",
+      sequentialId: id,
+      maxBorrowDays: 45,
+      extensionBorrowDays: null,
+      returnHandling: "RETURN_TO_SHELF",
+      mainImage: null,
+      thumbnailImage: null,
+      mainImageStoragePath: null,
+      thumbnailImageStoragePath: null,
+      assetModel: null,
+      assetLocations: [],
+    });
+    const requestBooking = (id: string, unitId: string) => ({
+      id,
+      name: "IOIO borrow — Makey Kit",
+      status: "RESERVED",
+      from,
+      to,
+      bookingAssets: [
+        {
+          id: `${id}-asset`,
+          quantity: 1,
+          checkedOutAt: null,
+          checkedInAt: null,
+          sourceKitId: null,
+          asset: unit(unitId),
+        },
+      ],
+      consumptionLogs: [],
+    });
+    vi.mocked(db.teamMember.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.kit.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.booking.findMany).mockResolvedValue([
+      requestBooking("request-booking-1", "makey-unit-001"),
+      requestBooking("request-booking-2", "makey-unit-002"),
+    ] as never);
+
+    const loans = await getMyStudentLoans({
+      organizationId: "org-1",
+      userId: "student-1",
+    });
+
+    expect(loans.map(({ id }) => id)).toEqual([
+      "request-booking-1",
+      "request-booking-2",
+    ]);
+    expect(
+      loans.reduce(
+        (total, loan) =>
+          total +
+          loan.bookingAssets.reduce((sum, item) => sum + item.quantity, 0),
+        0
+      )
+    ).toBe(2);
+  });
+
+  it("keeps quantity-pool units and mixed assets independent in one loan", async () => {
+    const borrowedAt = new Date("2026-10-20T09:00:00.000Z");
+    const dueAt = new Date("2026-11-20T17:00:00.000Z");
+    const makeQuantityAsset = (id: string, title: string) => ({
+      id,
+      title,
+      type: "QUANTITY_TRACKED",
+      sequentialId: null,
+      maxBorrowDays: 45,
+      extensionBorrowDays: null,
+      returnHandling: "RETURN_TO_SHELF",
+      mainImage: null,
+      thumbnailImage: null,
+      mainImageStoragePath: null,
+      thumbnailImageStoragePath: null,
+      assetModel: null,
+      assetLocations: [],
+    });
+    vi.mocked(db.teamMember.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.kit.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.booking.findMany).mockResolvedValue([
+      {
+        id: "mixed-loan",
+        name: "IOIO borrow — Makey Kit",
+        status: "ONGOING",
+        from: borrowedAt,
+        to: dueAt,
+        bookingAssets: [
+          {
+            id: "makey-booking-asset",
+            quantity: 2,
+            checkedOutAt: borrowedAt,
+            checkedInAt: null,
+            sourceKitId: null,
+            asset: makeQuantityAsset("makey-kit", "Makey Kit"),
+          },
+          {
+            id: "motor-booking-asset",
+            quantity: 1,
+            checkedOutAt: borrowedAt,
+            checkedInAt: null,
+            sourceKitId: null,
+            asset: makeQuantityAsset("motor", "Motor"),
+          },
+        ],
+        consumptionLogs: [],
+      },
+    ] as never);
+
+    const loans = await getMyStudentLoans({
+      organizationId: "org-1",
+      userId: "student-1",
+    });
+
+    expect(loans[0]?.bookingAssets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          asset: expect.objectContaining({ id: "makey-kit" }),
+          quantity: 2,
+          borrowedQuantity: 2,
+          outstandingQuantity: 2,
+        }),
+        expect.objectContaining({
+          asset: expect.objectContaining({ id: "motor" }),
+          quantity: 1,
+          borrowedQuantity: 1,
+          outstandingQuantity: 1,
+        }),
+      ])
+    );
   });
 });

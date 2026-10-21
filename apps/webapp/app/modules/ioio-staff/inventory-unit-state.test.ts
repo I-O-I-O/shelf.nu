@@ -51,6 +51,27 @@ describe("IOIO physical inventory state", () => {
     );
   });
 
+  it("shows two reserved preparation bookings as two preparing units and three available", () => {
+    const states = ["001", "002", "003", "004", "005"].map((id) =>
+      getIoioPhysicalUnitState({
+        ...available,
+        bookingStates: ["004", "005"].includes(id)
+          ? [{ status: "RESERVED", isSoftStaffReservation: false }]
+          : [],
+        preparationStates: ["004", "005"].includes(id)
+          ? ["PENDING_PREPARATION"]
+          : [],
+        availableAccordingToIoioInventory: !["004", "005"].includes(id),
+      })
+    );
+
+    expect(states.filter((state) => state === "Available")).toHaveLength(3);
+    expect(states.filter((state) => state === "In preparation")).toHaveLength(
+      2
+    );
+    expect(states).not.toContain("Reserved");
+  });
+
   it("returns a fully released pickup unit to Available", () => {
     const releasedUnit = getIoioPhysicalUnitState({
       ...available,

@@ -77,13 +77,13 @@ describe("getLabStatus", () => {
   });
 
   it("counts the preparation queue organization on Staff Dashboard", async () => {
-    database.ioioWriteOperation.count.mockImplementation(({ where }) =>
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
       Promise.resolve(
         where.organizationId === "team-1" &&
           where.operationType === "IOIO_PREPARATION" &&
           where.status === "PENDING_PREPARATION"
-          ? 1
-          : 0
+          ? [{ quantity: 2 }]
+          : []
       )
     );
 
@@ -92,8 +92,11 @@ describe("getLabStatus", () => {
       preparationOrganizationId: "team-1",
     });
 
-    expect(result.preparationTasks).toBe(1);
-    expect(database.ioioWriteOperation.count).toHaveBeenCalledWith(
+    expect(result.preparationTasks).toBe(2);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ title: "2 items to prepare" })
+    );
+    expect(database.ioioWriteOperation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           organizationId: "team-1",
@@ -102,6 +105,22 @@ describe("getLabStatus", () => {
           source: { in: ["IOIO_PREPARATION_REQUEST", "IOIO_ASSISTANT"] },
         }),
       })
+    );
+  });
+
+  it("uses singular grammar for one preparation unit", async () => {
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "IOIO_PREPARATION" &&
+          where.status === "PENDING_PREPARATION"
+          ? [{ quantity: 1 }]
+          : []
+      )
+    );
+
+    const result = await getLabStatus({ organizationId: "org-1" });
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ title: "1 item to prepare" })
     );
   });
 
@@ -413,6 +432,7 @@ describe("getLabStatus", () => {
 
   it("surfaces cancelled prepared pickups in Staff status notifications", async () => {
     database.ioioWriteOperation.findMany
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])

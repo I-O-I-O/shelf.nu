@@ -189,6 +189,7 @@ export const getAssetOverviewFields = (canUseBarcodes: boolean = false) => {
             name: true,
             status: true,
             image: true,
+            maxBorrowDays: true,
           },
         },
       },

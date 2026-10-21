@@ -116,9 +116,15 @@ import { userHasPermission } from "~/utils/permissions/permission.validator.clie
 import { tw } from "~/utils/tw";
 
 type StaffInventorySourceItem = AssetsFromViewItem & {
+  ioioAvailable?: number;
   physicalAvailable?: number;
   preparedPickupHeld?: boolean;
   blockingIssueReported?: boolean;
+  ioioPreparationStates?: string[];
+  ioioBookingStates?: Array<{
+    status: string;
+    isSoftStaffReservation: boolean;
+  }>;
 };
 type StaffInventoryItem = StaffInventoryDisplayRow<StaffInventorySourceItem>;
 type ExpandedUnitAction =
@@ -680,7 +686,8 @@ function getStaffInventoryQuantities(
   if (isQuantityTracked(item)) {
     const availableQuantity = Math.max(
       0,
-      item.physicalAvailable ??
+      item.ioioAvailable ??
+        item.physicalAvailable ??
         quantityData?.available ??
         (item.availableToBook && item.status !== "CHECKED_OUT"
           ? totalQuantity
@@ -710,17 +717,23 @@ function getStaffInventoryUnitState(item: StaffInventorySourceItem) {
   return getIoioPhysicalUnitState({
     assetStatus: item.custody.length > 0 ? "IN_CUSTODY" : item.status,
     availableToBook: item.availableToBook,
-    bookingStates: item.bookingAssets.map(({ booking }) => ({
-      status: booking.status,
-      isSoftStaffReservation: false,
-    })),
-    preparationStates: item.preparedPickupHeld ? ["READY_FOR_PICKUP"] : [],
+    bookingStates:
+      item.ioioBookingStates ??
+      item.bookingAssets.map(({ booking }) => ({
+        status: booking.status,
+        isSoftStaffReservation: false,
+      })),
+    preparationStates:
+      item.ioioPreparationStates ??
+      (item.preparedPickupHeld ? ["READY_FOR_PICKUP"] : []),
     issueReportTypes: item.blockingIssueReported ? ["ITEM_DAMAGED"] : [],
     availableAccordingToIoioInventory:
-      item.status === AssetStatus.AVAILABLE &&
-      item.availableToBook &&
-      !item.preparedPickupHeld &&
-      item.custody.length === 0,
+      item.ioioAvailable !== undefined
+        ? item.ioioAvailable > 0
+        : item.status === AssetStatus.AVAILABLE &&
+          item.availableToBook &&
+          !item.preparedPickupHeld &&
+          item.custody.length === 0,
   });
 }
 

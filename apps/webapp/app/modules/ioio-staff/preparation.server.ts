@@ -53,9 +53,9 @@ function getStoredAssetIds(value: unknown): string[] {
 }
 
 /**
- * Staff assigns available units to a logical preparation request. This is the
- * point where a native Shelf booking is created and reserved; the student's
- * earlier request itself does not reserve an arbitrary physical unit.
+ * Staff assigns a logical preparation request to its already-reserved Shelf
+ * booking. The student request holds its requested quantity from submission;
+ * for individually tracked assets, that booking already identifies the units.
  */
 export async function assignPreparationRequest({
   organizationId,

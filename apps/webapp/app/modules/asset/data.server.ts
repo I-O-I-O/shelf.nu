@@ -35,7 +35,11 @@ import { canImportAssets } from "~/utils/subscription.server";
 import type { UserNameFields } from "~/utils/user";
 import { resolveUserDisplayName } from "~/utils/user";
 import { getAssetAvailabilityBatch } from "./availability.server";
-import { getPreparedPickupHeldUnitIds } from "./individual-product-quantity.server";
+import {
+  getIndividualUnitAvailability,
+  getIndividualUnitPreparationStates,
+  getPreparedPickupHeldUnitIds,
+} from "./individual-product-quantity.server";
 import { parseFiltersWithHierarchy } from "./query.server";
 import {
   getAdvancedPaginatedAndFilterableAssets,
@@ -57,6 +61,8 @@ import {
   getAssetModelRollup,
 } from "../asset-model/rollup.server";
 import { getActiveCustomFields } from "../custom-field/service.server";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "../ioio-student/availability.server";
+import { getImmediateBorrowingWindow } from "../ioio-student/date-range";
 import { IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES } from "../ioio-student/report-problem.shared";
 import type { OrganizationFromUser } from "../organization/service.server";
 import { TAG_WITH_COLOR_SELECT } from "../tag/constants";
@@ -352,18 +358,101 @@ export async function simpleModeLoader({
   // it into the `custody.custodian` structure the UI expects.
   assets = updateAssetsWithBookingCustodians(assets);
 
-  // The IOIO Inventory list needs the same physical-now availability and
-  // prepared-pickup state as the student catalog. Keep the generic Shelf
+  // The IOIO Inventory list needs the same immediate borrowable availability
+  // and prepared-pickup state as the student catalog. Keep the generic Shelf
   // payload unchanged unless this caller opts into the archive-aware view.
-  let physicalAvailabilityByAssetId: Awaited<
+  let ioioAvailabilityByAssetId: Awaited<
     ReturnType<typeof getAssetAvailabilityBatch>
   > | null = null;
   let preparedPickupHeldUnitIds = new Set<string>();
+  let individualAvailableUnitIds = new Set<string>();
+  let individualPreparationStates = new Map<string, string[]>();
+  let individualBookingStates = new Map<
+    string,
+    { status: string; isSoftStaffReservation: boolean }[]
+  >();
   let blockingReportAssetIds = new Set<string>();
   if (excludeAssetIds !== undefined) {
     const individualAssetIds = assets
       .filter((asset) => asset.type === AssetType.INDIVIDUAL)
       .map((asset) => asset.id);
+    const assetIds = assets.map((asset) => asset.id);
+    // The inventory payload preserves AssetKit pivots but not their nested Kit
+    // policy in its declared type. Read the canonical borrow window directly,
+    // scoped to this organization and ordered for a stable first membership.
+    const kitBorrowPolicies = assetIds.length
+      ? await db.assetKit.findMany({
+          where: { organizationId, assetId: { in: assetIds } },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: {
+            assetId: true,
+            kit: { select: { maxBorrowDays: true } },
+          },
+        })
+      : [];
+    const kitBorrowDaysByAssetId = new Map<string, number>();
+    for (const { assetId, kit } of kitBorrowPolicies) {
+      if (!kitBorrowDaysByAssetId.has(assetId)) {
+        kitBorrowDaysByAssetId.set(assetId, kit.maxBorrowDays);
+      }
+    }
+    const now = new Date();
+    const individualByBorrowWindow = new Map<number, string[]>();
+    for (const asset of assets) {
+      if (asset.type !== AssetType.INDIVIDUAL) continue;
+      const maxBorrowDays =
+        kitBorrowDaysByAssetId.get(asset.id) ?? asset.maxBorrowDays ?? 45;
+      individualByBorrowWindow.set(maxBorrowDays, [
+        ...(individualByBorrowWindow.get(maxBorrowDays) ?? []),
+        asset.id,
+      ]);
+    }
+    const [individualAvailability, preparationStates, bookingStates] =
+      await Promise.all([
+        Promise.all(
+          [...individualByBorrowWindow].map(([days, assetIds]) =>
+            getIndividualUnitAvailability({
+              organizationId,
+              assetIds,
+              window: getImmediateBorrowingWindow(days, now),
+            })
+          )
+        ),
+        getIndividualUnitPreparationStates({
+          organizationId,
+          assetIds: individualAssetIds,
+        }),
+        individualAssetIds.length
+          ? db.bookingAsset.findMany({
+              where: {
+                assetId: { in: individualAssetIds },
+                checkedInAt: null,
+                booking: {
+                  organizationId,
+                  status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
+                },
+              },
+              select: {
+                assetId: true,
+                booking: { select: { status: true, description: true } },
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+    individualAvailableUnitIds = new Set(
+      individualAvailability.flatMap((result) => result.availableUnitIds)
+    );
+    individualPreparationStates = preparationStates;
+    for (const row of bookingStates) {
+      individualBookingStates.set(row.assetId, [
+        ...(individualBookingStates.get(row.assetId) ?? []),
+        {
+          status: row.booking.status,
+          isSoftStaffReservation:
+            row.booking.description === IOIO_STAFF_RESERVATION_DESCRIPTION,
+        },
+      ]);
+    }
     const [heldPickupUnitIds, blockingReports] = await Promise.all([
       getPreparedPickupHeldUnitIds({
         organizationId,
@@ -387,9 +476,26 @@ export async function simpleModeLoader({
         .filter((assetId): assetId is string => Boolean(assetId))
     );
     try {
-      physicalAvailabilityByAssetId = await getAssetAvailabilityBatch(
-        assets.map((asset) => asset.id),
-        { organizationId, window: null }
+      const now = new Date();
+      const assetsByBorrowWindow = new Map<number, string[]>();
+      for (const asset of assets) {
+        if (asset.type !== AssetType.QUANTITY_TRACKED) continue;
+        const maxBorrowDays =
+          kitBorrowDaysByAssetId.get(asset.id) ?? asset.maxBorrowDays ?? 45;
+        const assetIds = assetsByBorrowWindow.get(maxBorrowDays) ?? [];
+        assetIds.push(asset.id);
+        assetsByBorrowWindow.set(maxBorrowDays, assetIds);
+      }
+      const availabilityByWindow = await Promise.all(
+        [...assetsByBorrowWindow].map(([maxBorrowDays, assetIds]) =>
+          getAssetAvailabilityBatch(assetIds, {
+            organizationId,
+            window: getImmediateBorrowingWindow(maxBorrowDays, now),
+          })
+        )
+      );
+      ioioAvailabilityByAssetId = new Map(
+        availabilityByWindow.flatMap((result) => [...result.entries()])
       );
     } catch (cause) {
       Logger.error(
@@ -490,11 +596,24 @@ export async function simpleModeLoader({
       items: redactCustodianForViewer(
         assets.map((asset) => ({
           ...asset,
-          ...(physicalAvailabilityByAssetId
+          ...(ioioAvailabilityByAssetId
             ? {
-                physicalAvailable:
-                  physicalAvailabilityByAssetId.get(asset.id)
-                    ?.physicalAvailable ?? 0,
+                ioioAvailable: Math.max(
+                  0,
+                  Math.min(
+                    ioioAvailabilityByAssetId.get(asset.id)?.bookable ?? 0,
+                    ioioAvailabilityByAssetId.get(asset.id)
+                      ?.physicalAvailable ?? 0
+                  )
+                ),
+              }
+            : {}),
+          ...(asset.type === AssetType.INDIVIDUAL
+            ? {
+                ioioAvailable: individualAvailableUnitIds.has(asset.id) ? 1 : 0,
+                ioioPreparationStates:
+                  individualPreparationStates.get(asset.id) ?? [],
+                ioioBookingStates: individualBookingStates.get(asset.id) ?? [],
               }
             : {}),
           ...(preparedPickupHeldUnitIds.has(asset.id)

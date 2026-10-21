@@ -37,7 +37,7 @@ import {
   resolvePhysicalUnitNumber,
   type PreparedBorrowProposal,
 } from "~/modules/ioio-student/borrow-item.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
+import { requireIoioBorrowerAccess } from "~/modules/ioio-student/route.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { normalizeQrScanValue } from "~/modules/qr/normalize-scan-value";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
@@ -61,12 +61,6 @@ const checkoutActionSchema = z.discriminatedUnion("intent", [
     qrId: z.string().min(1),
   }),
   z.object({
-    intent: z.literal("resolve-unit"),
-    assetId: z.string().min(1),
-    candidateAssetIds: z.string().optional(),
-    unitNumber: z.string().min(1),
-  }),
-  z.object({
     intent: z.literal("prepare"),
     assetId: z.string().min(1),
     candidateAssetIds: z.string().optional(),
@@ -82,12 +76,14 @@ const checkoutActionSchema = z.discriminatedUnion("intent", [
     assetId: z.string().min(1),
     candidateAssetIds: z.string().optional(),
     quantity: z.coerce.number().int().min(1),
+    submissionToken: z.string().uuid().optional(),
   }),
   z.object({
     intent: z.literal("acknowledge-preparation-reservation"),
     assetId: z.string().min(1),
     candidateAssetIds: z.string().optional(),
     quantity: z.coerce.number().int().min(1),
+    submissionToken: z.string().uuid().optional(),
   }),
   z.object({
     intent: z.literal("confirm"),
@@ -129,6 +125,7 @@ const confirmAllProposalSchema = z
         assetId: z.string().min(1),
         candidateAssetIds: z.array(z.string().min(1)).optional(),
         quantity: z.number().int().min(1),
+        submissionToken: z.string().uuid(),
       }),
     ])
   )
@@ -147,14 +144,14 @@ const confirmAllProposalSchema = z
   });
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
-  const { userId } = await requireStudentRead({ context, request });
+  const { userId } = await requireIoioBorrowerAccess({ context, request });
   return data(payload({ userId }));
 }
 
 export async function action({ context, request }: ActionFunctionArgs) {
   const { userId } = context.getSession();
   try {
-    const auth = await requireStudentRead({ context, request });
+    const auth = await requireIoioBorrowerAccess({ context, request });
     const parsed = checkoutActionSchema.parse(
       Object.fromEntries(await request.formData())
     );
@@ -298,28 +295,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
         qrId,
       });
     }
-    if (parsed.intent === "resolve-unit") {
-      const unit = await resolvePhysicalUnitNumber(
-        {
-          assetId: parsed.assetId,
-          candidateAssetIds: parsed.candidateAssetIds
-            ? parsed.candidateAssetIds.split(",").filter(Boolean)
-            : undefined,
-          unitNumber: parsed.unitNumber,
-        },
-        { context, request }
-      );
-      return data({
-        ok: true as const,
-        intent: "unit-resolved" as const,
-        unit: {
-          id: unit.physicalAssetId,
-          title: unit.title,
-          unitNumber: unit.displayUnitNumber,
-        },
-        qrId: unit.qrId,
-      });
-    }
     if (parsed.intent === "prepare") {
       const parseIdList = (value: string | undefined) =>
         value
@@ -351,6 +326,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
             ? parsed.candidateAssetIds.split(",").filter(Boolean)
             : undefined,
           quantity: parsed.quantity,
+          submissionToken: parsed.submissionToken,
         },
         { context, request }
       );
@@ -369,6 +345,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
             : undefined,
           quantity: parsed.quantity,
           acknowledgeStaffReservationOverlap: true,
+          submissionToken: parsed.submissionToken,
         },
         { context, request }
       );
@@ -421,17 +398,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
             requiresStaffPreparation: boolean;
             dueDate?: string;
           }
-        | { itemId: string; kind: "preparation"; ok: true; quantity: number }
+        | {
+            itemId: string;
+            kind: "preparation";
+            ok: true;
+            quantity: number;
+            requestId: string;
+          }
         | { itemId: string; ok: false; error: string }
       > = [];
       for (const proposal of proposals) {
         try {
           if (proposal.kind === "preparation") {
-            await requestPreparationForItem(
+            const result = await requestPreparationForItem(
               {
                 assetId: proposal.assetId,
                 candidateAssetIds: proposal.candidateAssetIds,
                 quantity: proposal.quantity,
+                submissionToken: proposal.submissionToken,
               },
               { context, request }
             );
@@ -440,6 +424,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
               kind: "preparation",
               ok: true,
               quantity: proposal.quantity,
+              requestId: result.requestId,
             });
           } else {
             const result = await borrowItem(
@@ -505,12 +490,6 @@ type CheckoutActionData =
     }
   | {
       ok: true;
-      intent: "unit-resolved";
-      unit: { id: string; title: string; unitNumber: string };
-      qrId: string;
-    }
-  | {
-      ok: true;
       intent: "availability";
       availableQuantity: number;
       totalQuantity: number;
@@ -544,7 +523,13 @@ type CheckoutActionData =
             dueDate?: string;
             requiresStaffPreparation?: boolean;
           }
-        | { itemId: string; kind: "preparation"; ok: true; quantity: number }
+        | {
+            itemId: string;
+            kind: "preparation";
+            ok: true;
+            quantity: number;
+            requestId: string;
+          }
         | { itemId: string; ok: false; error: string }
       >;
     }
@@ -593,6 +578,7 @@ type ResolvedPhysicalUnit = {
 
 type PreparationBasketConfiguration = {
   assetId: string;
+  submissionToken: string;
   candidateAssetIds: string[];
   quantity: number;
   requiresStaffReservationAcknowledgement: boolean;
@@ -626,7 +612,6 @@ function CheckoutLine({
   const fetcher = useFetcher<CheckoutActionData>();
   const availabilityFetcher = useFetcher<CheckoutActionData>();
   const qrFetcher = useFetcher<CheckoutActionData>();
-  const unitFetcher = useFetcher<CheckoutActionData>();
   const { setBorrowQuantity } = useStudentCheckout();
   const quantity = item.borrowQuantity;
   const maxBorrowDays = item.maxBorrowDays ?? 45;
@@ -648,14 +633,10 @@ function CheckoutLine({
     []
   );
   const [reservationAcknowledged, setReservationAcknowledged] = useState(false);
-  const [unitNumberInput, setUnitNumberInput] = useState("");
   const [resolutionError, setResolutionError] = useState<string | null>(null);
   const lastAvailabilityRequestRef = useRef<string | null>(null);
   const lastPrepareRequestRef = useRef<string | null>(null);
   const handledQrResponseRef = useRef<CheckoutActionData | undefined>(
-    undefined
-  );
-  const handledUnitResponseRef = useRef<CheckoutActionData | undefined>(
     undefined
   );
   const handledPrepareResponseRef = useRef<CheckoutActionData | undefined>(
@@ -686,7 +667,6 @@ function CheckoutLine({
         { ...unit, unitNumber, qrId },
       ]);
       setResolutionError(null);
-      setUnitNumberInput("");
       setScanOpen(false);
       setScanPaused(true);
       setProposal(null);
@@ -703,7 +683,6 @@ function CheckoutLine({
       );
       setProposal(null);
       setReservationAcknowledged(false);
-      setUnitNumberInput("");
       setResolutionError(null);
       setScanOpen(false);
       setScanPaused(false);
@@ -761,18 +740,6 @@ function CheckoutLine({
       setScanPaused(false);
     }
   }, [addSelectedUnit, qrFetcher.data]);
-
-  useEffect(() => {
-    const response = unitFetcher.data;
-    if (!response || handledUnitResponseRef.current === response) return;
-    handledUnitResponseRef.current = response;
-    if (response.intent === "unit-resolved") {
-      addSelectedUnit(response.unit, response.qrId);
-    }
-    if (!response.ok && response.intent === "error") {
-      setResolutionError(response.error);
-    }
-  }, [addSelectedUnit, unitFetcher.data]);
 
   useEffect(() => {
     const requestKey = `${item.id}:${item.candidateAssetIds.join(",")}`;
@@ -834,6 +801,7 @@ function CheckoutLine({
       requestPreparation && canRequestPreparation && !accessApprovalRequired
         ? {
             assetId: item.id,
+            submissionToken: item.preparationSubmissionToken,
             candidateAssetIds: item.candidateAssetIds,
             quantity,
             requiresStaffReservationAcknowledgement:
@@ -846,6 +814,7 @@ function CheckoutLine({
     canRequestPreparation,
     item.candidateAssetIds,
     item.id,
+    item.preparationSubmissionToken,
     onPreparationConfigured,
     availabilityData?.staffReservedCount,
     quantity,
@@ -931,27 +900,6 @@ function CheckoutLine({
     );
   }
 
-  function resolveUnitNumber(value: string) {
-    const normalized = value.trim();
-    if (
-      !normalized ||
-      selectedUnits.length >= quantity ||
-      unitFetcher.state !== "idle"
-    ) {
-      return;
-    }
-    setResolutionError(null);
-    void unitFetcher.submit(
-      {
-        intent: "resolve-unit",
-        assetId: item.id,
-        candidateAssetIds: item.candidateAssetIds.join(","),
-        unitNumber: normalized,
-      },
-      { method: "post" }
-    );
-  }
-
   useEffect(() => {
     if (dateAvailability > 0 && quantity > dateMaxQuantity) {
       setBorrowQuantity(item.id, dateMaxQuantity);
@@ -965,8 +913,6 @@ function CheckoutLine({
     lastPrepareRequestRef.current = null;
   }, [quantity]);
 
-  const resolutionBusy =
-    qrFetcher.state !== "idle" || unitFetcher.state !== "idle";
   const allUnitsSelected = needExactUnits && selectedUnits.length >= quantity;
 
   return (
@@ -1113,9 +1059,6 @@ function CheckoutLine({
             }
             disabled={availabilityFetcher.state !== "idle"}
           />
-          <span className="text-xs font-normal text-gray-600">
-            Available: {dateAvailability}
-          </span>
         </div>
       ) : null}
 
@@ -1284,36 +1227,6 @@ function CheckoutLine({
                       />
                     </div>
                   ) : null}
-                  <form
-                    className="mt-3"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      resolveUnitNumber(unitNumberInput);
-                    }}
-                  >
-                    <label className="block text-xs font-semibold text-blue-950">
-                      Unit number
-                      <input
-                        type="text"
-                        value={unitNumberInput}
-                        onChange={(event) =>
-                          setUnitNumberInput(event.target.value)
-                        }
-                        className="ioio-identifier mt-1 min-h-10 w-full rounded-lg border border-blue-200 px-2 text-sm"
-                        placeholder="Example: #001"
-                        autoComplete="off"
-                      />
-                    </label>
-                    <button
-                      type="submit"
-                      disabled={!unitNumberInput.trim() || resolutionBusy}
-                      className="mt-2 rounded-lg border border-blue-300 px-3 py-2 text-xs font-bold text-blue-900 disabled:opacity-50"
-                    >
-                      {unitFetcher.state !== "idle"
-                        ? "Confirming..."
-                        : "Confirm"}
-                    </button>
-                  </form>
                 </>
               ) : null}
               {resolutionError ? (
@@ -1378,6 +1291,7 @@ function CheckoutLine({
                         assetId: item.id,
                         candidateAssetIds: item.candidateAssetIds.join(","),
                         quantity: String(quantity),
+                        submissionToken: item.preparationSubmissionToken,
                       },
                       { method: "post" }
                     );
@@ -1542,6 +1456,7 @@ export default function IoioCheckout() {
         const previous = current[itemId];
         if (
           previous?.assetId === configuration.assetId &&
+          previous.submissionToken === configuration.submissionToken &&
           previous.quantity === configuration.quantity &&
           previous.requiresStaffReservationAcknowledgement ===
             configuration.requiresStaffReservationAcknowledgement &&
@@ -1559,6 +1474,12 @@ export default function IoioCheckout() {
   const handlePreparationSubmitted = useCallback(
     (itemId: string, title: string) => {
       setPreparationRequestTitles((current) => [...current, title]);
+      setPreparationConfigurations((current) => {
+        if (!current[itemId]) return current;
+        const next = { ...current };
+        delete next[itemId];
+        return next;
+      });
       removeItem(itemId);
     },
     [removeItem]
@@ -1615,6 +1536,11 @@ export default function IoioCheckout() {
         return title ? [title] : [];
       });
       setPreparationRequestTitles((current) => [...current, ...titles]);
+      setPreparationConfigurations((current) => {
+        const next = { ...current };
+        preparationRequests.forEach(({ itemId }) => delete next[itemId]);
+        return next;
+      });
       preparationRequests.forEach(({ itemId }) => removeItem(itemId));
     }
     if (
@@ -1659,6 +1585,7 @@ export default function IoioCheckout() {
         kind: "preparation",
         itemId: item.id,
         assetId: preparation.assetId,
+        submissionToken: preparation.submissionToken,
         candidateAssetIds: preparation.candidateAssetIds,
         quantity: preparation.quantity,
       });

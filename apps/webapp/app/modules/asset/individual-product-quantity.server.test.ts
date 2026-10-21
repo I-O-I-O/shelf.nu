@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMock = vi.hoisted(() => ({
   asset: { findMany: vi.fn() },
+  booking: { findMany: vi.fn() },
   bookingAsset: { findMany: vi.fn() },
   custody: { findMany: vi.fn() },
   ioioWriteOperation: { findMany: vi.fn() },
@@ -18,6 +19,7 @@ vi.mock("~/modules/ioio-staff/archive.server", () => ({
 import {
   calculateIndividualUnitAvailability,
   getIndividualUnitAvailability,
+  getIndividualUnitPreparationStates,
 } from "./individual-product-quantity.server";
 
 describe("individual product availability", () => {
@@ -32,8 +34,140 @@ describe("individual product availability", () => {
       }))
     );
     dbMock.bookingAsset.findMany.mockResolvedValue([]);
+    dbMock.booking.findMany.mockResolvedValue([]);
     dbMock.custody.findMany.mockResolvedValue([]);
     dbMock.ioioWriteOperation.findMany.mockResolvedValue([]);
+  });
+
+  it("labels exactly the booked units for a quantity-two preparation request", async () => {
+    const booked = ["004", "005"].map((assetId) => ({
+      id: `slice-${assetId}`,
+      assetId,
+      bookingId: "reservation-1",
+    }));
+    dbMock.bookingAsset.findMany.mockResolvedValue(booked);
+    dbMock.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.status === "CANCELLED_PICKUP"
+          ? []
+          : [
+              {
+                source: "IOIO_PREPARATION_REQUEST",
+                status: "PENDING_PREPARATION",
+                bookingId: "reservation-1",
+                bookingAssetId: null,
+              },
+            ]
+      )
+    );
+
+    const states = await getIndividualUnitPreparationStates({
+      organizationId: "org-1",
+      assetIds: ["001", "002", "003", "004", "005"],
+    });
+
+    expect([...states]).toEqual([
+      ["004", ["PENDING_PREPARATION"]],
+      ["005", ["PENDING_PREPARATION"]],
+    ]);
+    expect(states.has("002")).toBe(false);
+    expect(
+      calculateIndividualUnitAvailability(
+        ["001", "002", "003", "004", "005"].map((id) => ({
+          id,
+          status: AssetStatus.AVAILABLE,
+          availableToBook: true,
+        })),
+        booked.map(({ assetId }) => assetId)
+      ).available
+    ).toBe(3);
+  });
+
+  it("releases cancelled reservations and ignores stale request anchors", async () => {
+    dbMock.bookingAsset.findMany.mockResolvedValue([]);
+    dbMock.ioioWriteOperation.findMany.mockResolvedValue([]);
+
+    await expect(
+      getIndividualUnitPreparationStates({
+        organizationId: "org-1",
+        assetIds: ["001", "002", "003", "004", "005"],
+      })
+    ).resolves.toEqual(new Map());
+    expect(
+      calculateIndividualUnitAvailability(
+        ["001", "002", "003", "004", "005"].map((id) => ({
+          id,
+          status: AssetStatus.AVAILABLE,
+          availableToBook: true,
+        })),
+        []
+      ).available
+    ).toBe(5);
+  });
+
+  it("releases only the cancelled request's physical unit", async () => {
+    const activeBookings = [
+      { id: "slice-004", assetId: "004", bookingId: "request-a" },
+      { id: "slice-005", assetId: "005", bookingId: "request-b" },
+    ];
+    dbMock.bookingAsset.findMany.mockImplementation(() =>
+      Promise.resolve(activeBookings)
+    );
+    dbMock.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.status === "CANCELLED_PICKUP"
+          ? []
+          : activeBookings.map((row) => ({
+              source: "IOIO_PREPARATION_REQUEST",
+              status: "PENDING_PREPARATION",
+              bookingId: row.bookingId,
+              bookingAssetId: null,
+            }))
+      )
+    );
+    const readStates = () =>
+      getIndividualUnitPreparationStates({
+        organizationId: "org-1",
+        assetIds: ["001", "002", "003", "004", "005"],
+      });
+
+    expect((await readStates()).size).toBe(2);
+    activeBookings.pop();
+    expect([...(await readStates())].map(([id]) => id)).toEqual(["004"]);
+    activeBookings.pop();
+    expect((await readStates()).size).toBe(0);
+  });
+
+  it("keeps a prepared booked unit staged without making another hold", async () => {
+    dbMock.bookingAsset.findMany.mockResolvedValue([
+      { id: "slice-004", assetId: "004", bookingId: "reservation-1" },
+    ]);
+    dbMock.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.status === "CANCELLED_PICKUP"
+          ? []
+          : [
+              {
+                source: "IOIO_PREPARATION_REQUEST",
+                status: "ASSIGNED",
+                bookingId: "reservation-1",
+                bookingAssetId: null,
+              },
+              {
+                source: "IOIO_ASSISTANT",
+                status: "READY_FOR_PICKUP",
+                bookingId: "reservation-1",
+                bookingAssetId: "slice-004",
+              },
+            ]
+      )
+    );
+    const states = await getIndividualUnitPreparationStates({
+      organizationId: "org-1",
+      assetIds: ["004"],
+    });
+    expect(states.get("004")).toContain("READY_FOR_PICKUP");
+    expect(states.size).toBe(1);
   });
 
   it("counts active physical units and removes units reserved for the selected dates", () => {
@@ -132,9 +266,10 @@ describe("individual product availability", () => {
 
   it("keeps ready and cancelled prepared pickups unavailable until Staff puts them back", async () => {
     dbMock.ioioWriteOperation.findMany.mockResolvedValue([
-      { assetId: "002" },
-      { assetId: "004" },
+      { assetId: "002", status: "READY_FOR_PICKUP", bookingId: "booking-2" },
+      { assetId: "004", status: "CANCELLED_PICKUP", bookingId: "booking-4" },
     ]);
+    dbMock.booking.findMany.mockResolvedValue([{ id: "booking-2" }]);
 
     const heldResult = await getIndividualUnitAvailability({
       organizationId: "org-1",
@@ -167,5 +302,30 @@ describe("individual product availability", () => {
         window: null,
       })
     ).resolves.toMatchObject({ total: 5, available: 5 });
+  });
+
+  it("releases a stale ready-for-pickup state after its booking finishes", async () => {
+    dbMock.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "IOIO_PREPARATION"
+          ? [
+              {
+                assetId: "002",
+                status: "READY_FOR_PICKUP",
+                bookingId: "finished-booking",
+              },
+            ]
+          : []
+      )
+    );
+    dbMock.booking.findMany.mockResolvedValue([]);
+
+    const availability = await getIndividualUnitAvailability({
+      organizationId: "org-1",
+      assetIds: ["001", "002", "003", "004", "005"],
+      window: null,
+    });
+
+    expect(availability.available).toBe(5);
   });
 });

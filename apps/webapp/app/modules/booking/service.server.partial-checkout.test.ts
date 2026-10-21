@@ -97,6 +97,9 @@ vitest.mock("~/database/db.server", () => {
         findUnique: vitest
           .fn()
           .mockResolvedValue({ status: BookingStatus.RESERVED }),
+        // why: checkout side effects re-read description when a fixture does
+        // not include it, so reminder scheduling can complete without a DB.
+        findFirst: vitest.fn().mockResolvedValue({ description: null }),
         update: vitest.fn().mockResolvedValue({}),
       },
       asset: {

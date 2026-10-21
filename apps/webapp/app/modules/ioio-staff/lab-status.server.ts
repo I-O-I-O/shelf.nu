@@ -617,7 +617,7 @@ export async function getLabStatus({
     pendingReservationRequestCount,
     submittedReturnOperations,
     archivedMarkers,
-    preparationTaskCount,
+    preparationTaskRows,
     cancelledPickupOperations,
     readyForPickupCount,
     annualAccessApprovalCount,
@@ -701,13 +701,14 @@ export async function getLabStatus({
       },
       select: { itemType: true, itemId: true },
     }),
-    db.ioioWriteOperation.count({
+    db.ioioWriteOperation.findMany({
       where: {
         organizationId: preparationOrganizationId,
         operationType: "IOIO_PREPARATION",
         status: "PENDING_PREPARATION",
         source: { in: ["IOIO_PREPARATION_REQUEST", "IOIO_ASSISTANT"] },
       },
+      select: { quantity: true },
     }),
     db.ioioWriteOperation.findMany({
       where: {
@@ -976,6 +977,10 @@ export async function getLabStatus({
         },
       ]
     : [];
+  const preparationTaskCount = preparationTaskRows.reduce(
+    (total, row) => total + Math.max(1, row.quantity ?? 1),
+    0
+  );
   const preparationIssues: LabIssue[] = preparationTaskCount
     ? [
         {

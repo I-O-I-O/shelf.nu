@@ -41,7 +41,11 @@ vi.mock("../assets/asset-image", () => ({
 }));
 // why: the drawer has its own data-fetching UI; the row only needs to show its trigger.
 vi.mock("./booking-assets-sidebar", () => ({
-  BookingAssetsSidebar: () => <span>1 item</span>,
+  BookingAssetsSidebar: ({
+    booking,
+  }: {
+    booking: { displayQuantity?: number };
+  }) => <span>{booking.displayQuantity ?? 1} items</span>,
 }));
 // why: team member display formatting depends on current organization context.
 vi.mock("../user/team-member-badge", () => ({
@@ -121,6 +125,46 @@ function buildLoan(overrides: Partial<LoanItem> = {}): LoanItem {
 }
 
 describe("IOIO staff loan row", () => {
+  it("shows a quantity-pool loan as one canonical item with the booked quantity", () => {
+    render(
+      <table>
+        <tbody>
+          <tr>
+            <IoioStaffLoanContent
+              item={buildLoan({
+                _count: { bookingAssets: 1 },
+                bookingAssets: [
+                  {
+                    id: "makey-booking-asset",
+                    checkedOutAt: new Date("2026-10-20T09:00:00Z"),
+                    checkedInAt: null,
+                    checkedOutQuantity: 2,
+                    quantity: 2,
+                    asset: {
+                      id: "makey-kit",
+                      title: "Makey Kit",
+                      type: "QUANTITY_TRACKED",
+                      mainImage: null,
+                      thumbnailImage: null,
+                      assetModel: null,
+                    },
+                  },
+                ] as never,
+              })}
+              ioioStaff
+              compactStaffLoans
+            />
+          </tr>
+        </tbody>
+      </table>
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Makey Kit × 2" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 items")).toBeInTheDocument();
+  });
+
   it("shows an IOIO item name, friendly overdue status, borrower, and loan workflow link", () => {
     render(
       <table>

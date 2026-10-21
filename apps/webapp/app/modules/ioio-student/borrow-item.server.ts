@@ -9,8 +9,10 @@ import {
   normalizePhysicalUnitNumber,
 } from "~/modules/asset/physical-unit";
 import {
+  cancelBooking,
   checkoutBooking,
   createBooking,
+  deleteBooking,
   reserveBooking,
   updateBookingAssets,
 } from "~/modules/booking/service.server";
@@ -18,7 +20,6 @@ import {
   createPreparationTask,
   IOIO_PREPARATION_OPERATION,
   PREPARATION_PENDING,
-  PREPARATION_READY,
 } from "~/modules/ioio-staff/preparation.server";
 import { getClientHint } from "~/utils/client-hints";
 import { ShelfError, isLikeShelfError } from "~/utils/error";
@@ -266,7 +267,10 @@ export async function resolvePhysicalUnitNumber(
   }
   const normalizedUnitNumber = normalizePhysicalUnitNumber(unitNumber);
   if (!normalizedUnitNumber) {
-    throw borrowError("Enter a physical unit number such as 001.", 400);
+    throw borrowError(
+      "The scanned QR does not identify a numbered physical unit.",
+      400
+    );
   }
 
   const candidates = await loadBorrowPhysicalUnitCandidates({
@@ -721,7 +725,22 @@ export async function prepareBorrowItem(
     } else {
       if (!parsed.scanned_asset_id || !parsed.scanned_qr_id) {
         throw borrowError(
-          "Scan or enter the physical unit QR before confirming this borrowing.",
+          "Scan the physical unit QR before confirming this borrowing.",
+          409
+        );
+      }
+      const candidates = await loadBorrowPhysicalUnitCandidates({
+        requestedAsset,
+        candidateAssetIds: parsed.candidate_asset_ids,
+        organizationId: auth.organizationId,
+      });
+      if (
+        !candidates.some(
+          (candidate) => candidate.id === parsed.scanned_asset_id
+        )
+      ) {
+        throw borrowError(
+          `This QR does not belong to ${requestedAsset.title}. Scan a matching physical unit.`,
           409
         );
       }
@@ -759,17 +778,7 @@ export async function prepareBorrowItem(
           },
         },
       });
-      const belongsToProduct = Boolean(
-        scannedAsset &&
-          ((requestedAsset.assetModelId &&
-            scannedAsset.assetModelId === requestedAsset.assetModelId) ||
-            scannedAsset.assetKits.some((candidate) =>
-              requestedAsset.assetKits.some(
-                (kit) => kit.kitId === candidate.kitId
-              )
-            ))
-      );
-      if (!scannedQr || !scannedAsset || !belongsToProduct) {
+      if (!scannedQr || !scannedAsset) {
         throw borrowError(
           `This QR does not belong to ${requestedAsset.title}. Scan a matching physical unit.`,
           409
@@ -1006,11 +1015,13 @@ export async function requestPreparationForItem(
     assetId,
     candidateAssetIds,
     quantity,
+    submissionToken,
     acknowledgeStaffReservationOverlap = false,
   }: {
     assetId: string;
     candidateAssetIds?: string[];
     quantity: number;
+    submissionToken?: string;
     acknowledgeStaffReservationOverlap?: boolean;
   },
   { context, request }: Context
@@ -1040,9 +1051,91 @@ export async function requestPreparationForItem(
   );
   assertInitialBorrowingPeriod(from, to, getEffectiveMaxBorrowDays(asset));
 
-  let logicalCandidateIds: string[];
+  let logicalCandidateIds =
+    asset.type === AssetType.INDIVIDUAL
+      ? [...new Set(candidateAssetIds ?? [])]
+      : [asset.id];
+  const effectiveSubmissionToken = submissionToken ?? randomUUID();
+  const idempotencyKey = `IOIO_PREPARATION_REQUEST:${auth.organizationId}:${auth.userId}:${effectiveSubmissionToken}`;
+  const existingSubmission = await db.ioioWriteOperation.findFirst({
+    where: {
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      operationType: IOIO_PREPARATION_OPERATION,
+      source: "IOIO_PREPARATION_REQUEST",
+      idempotencyKey,
+    },
+    select: {
+      id: true,
+      assetId: true,
+      bookingId: true,
+      status: true,
+      quantity: true,
+      selectedAssetIds: true,
+    },
+  });
+  if (existingSubmission) {
+    const existingUnitIds = Array.isArray(existingSubmission.selectedAssetIds)
+      ? existingSubmission.selectedAssetIds.filter(
+          (id): id is string => typeof id === "string"
+        )
+      : [];
+    const sameUnits =
+      [...existingUnitIds].sort().join(",") ===
+      [...logicalCandidateIds].sort().join(",");
+    if (
+      existingSubmission.assetId !== asset.id ||
+      existingSubmission.quantity !== quantity ||
+      !sameUnits
+    ) {
+      throw borrowError(
+        "This submission token is already associated with a different preparation request. Refresh your borrowing list before trying again.",
+        409
+      );
+    }
+    if (
+      !["ASSIGNING", PREPARATION_PENDING, "ASSIGNED"].includes(
+        existingSubmission.status
+      )
+    ) {
+      throw borrowError(
+        "This preparation request has already been processed. Refresh your borrowing list before submitting again.",
+        409
+      );
+    }
+    if (
+      existingSubmission.status === "ASSIGNING" ||
+      existingSubmission.status === PREPARATION_PENDING
+    ) {
+      const existingHold = existingSubmission.bookingId
+        ? await db.booking.findFirst({
+            where: {
+              id: existingSubmission.bookingId,
+              organizationId: auth.organizationId,
+              status: BookingStatus.RESERVED,
+            },
+            select: { id: true },
+          })
+        : null;
+      if (!existingHold) {
+        throw borrowError(
+          existingSubmission.status === "ASSIGNING"
+            ? "This preparation request is still being reserved. Try again shortly."
+            : "This preparation request no longer has an active Shelf reservation. Refresh your borrowing list before trying again.",
+          409
+        );
+      }
+    }
+    return {
+      ok: true as const,
+      status: "requested" as const,
+      requestId: existingSubmission.id,
+      duplicate: true as const,
+    };
+  }
+
   if (asset.type === AssetType.INDIVIDUAL) {
-    const candidateIds = [...new Set(candidateAssetIds ?? [])];
+    const candidateIds = logicalCandidateIds;
     const candidates = await loadBorrowPhysicalUnitCandidates({
       requestedAsset: asset,
       candidateAssetIds: candidateIds,
@@ -1058,137 +1151,6 @@ export async function requestPreparationForItem(
     );
   } else {
     logicalCandidateIds = [asset.id];
-  }
-
-  const pendingRequest = await db.ioioWriteOperation.findFirst({
-    where: {
-      organizationId: auth.organizationId,
-      userId: auth.userId,
-      assetId: asset.id,
-      operationType: IOIO_PREPARATION_OPERATION,
-      source: "IOIO_PREPARATION_REQUEST",
-      status: { in: [PREPARATION_PENDING, "ASSIGNING"] },
-    },
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      quantity: true,
-      selectedAssetIds: true,
-      description: true,
-    },
-  });
-  const assignedRequests = pendingRequest
-    ? []
-    : await db.ioioWriteOperation.findMany({
-        where: {
-          organizationId: auth.organizationId,
-          userId: auth.userId,
-          assetId: asset.id,
-          operationType: IOIO_PREPARATION_OPERATION,
-          source: "IOIO_PREPARATION_REQUEST",
-          status: "ASSIGNED",
-        },
-        orderBy: { createdAt: "desc" },
-        select: {
-          id: true,
-          bookingId: true,
-          quantity: true,
-          selectedAssetIds: true,
-        },
-      });
-  let activeRequest = pendingRequest;
-  for (const assigned of assignedRequests) {
-    if (!assigned.bookingId) continue;
-    const [booking, activeTask] = await Promise.all([
-      db.booking.findFirst({
-        where: {
-          id: assigned.bookingId,
-          organizationId: auth.organizationId,
-          status: BookingStatus.RESERVED,
-        },
-        select: { id: true },
-      }),
-      db.ioioWriteOperation.findFirst({
-        where: {
-          organizationId: auth.organizationId,
-          userId: auth.userId,
-          bookingId: assigned.bookingId,
-          operationType: IOIO_PREPARATION_OPERATION,
-          source: { not: "IOIO_PREPARATION_REQUEST" },
-          status: { in: [PREPARATION_PENDING, PREPARATION_READY] },
-        },
-        select: { id: true },
-      }),
-    ]);
-    if (booking && activeTask) {
-      activeRequest = assigned;
-      break;
-    }
-  }
-  if (activeRequest) {
-    const existingUnitIds = Array.isArray(activeRequest.selectedAssetIds)
-      ? activeRequest.selectedAssetIds.filter(
-          (id): id is string => typeof id === "string"
-        )
-      : [];
-    const sameUnits =
-      [...existingUnitIds].sort().join(",") ===
-      [...logicalCandidateIds].sort().join(",");
-    if (activeRequest.quantity !== quantity || !sameUnits) {
-      throw borrowError(
-        "You already have a preparation request for this item. Staff will update it in My Loans.",
-        409
-      );
-    }
-    if (
-      acknowledgeStaffReservationOverlap &&
-      activeRequest.id === pendingRequest?.id &&
-      !hasAcknowledgedStaffReservation(pendingRequest.description)
-    ) {
-      const activeAvailability = await getIoioAvailability({
-        organizationId: auth.organizationId,
-        productId: asset.id,
-        candidateAssetIds:
-          asset.type === AssetType.INDIVIDUAL ? logicalCandidateIds : undefined,
-        from,
-        to,
-      });
-      if (
-        !activeAvailability.staffReservationBookingIds.length ||
-        quantity > activeAvailability.availableWithoutStaffReservations
-      ) {
-        throw borrowError(
-          "The request can only continue when the course reservation is the only conflict.",
-          409
-        );
-      }
-      const update = await db.ioioWriteOperation.updateMany({
-        where: {
-          id: activeRequest.id,
-          userId: auth.userId,
-          organizationId: auth.organizationId,
-          status: PREPARATION_PENDING,
-        },
-        data: {
-          description: `${
-            pendingRequest.description ??
-            "Student requested equipment preparation."
-          } ${IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT}`,
-        },
-      });
-      if (update.count !== 1) {
-        throw borrowError(
-          "This preparation request changed before your permission was saved. Review it again.",
-          409
-        );
-      }
-    }
-    return {
-      ok: true as const,
-      status: "requested" as const,
-      requestId: activeRequest.id,
-      duplicate: true as const,
-    };
   }
 
   const availability = await getIoioAvailability({
@@ -1239,18 +1201,35 @@ export async function requestPreparationForItem(
     userId: auth.userId,
     organizationId: auth.organizationId,
   });
-  await resolveBorrowerTeamMember({
+  const teamMemberId = await resolveBorrowerTeamMember({
     userId: auth.userId,
     organizationId: auth.organizationId,
     role: auth.role,
   });
 
+  const selectedPhysicalAssetIds =
+    asset.type === AssetType.INDIVIDUAL
+      ? (acknowledgeStaffReservationOverlap
+          ? availability.availableUnitIdsWithoutStaffReservations
+          : availability.availableUnitIds
+        ).slice(0, quantity)
+      : [];
+  if (
+    asset.type === AssetType.INDIVIDUAL &&
+    selectedPhysicalAssetIds.length !== quantity
+  ) {
+    throw borrowError(
+      "The requested Kit units are no longer available for preparation.",
+      409
+    );
+  }
+
   const operation = await db.ioioWriteOperation.create({
     data: {
       operationType: IOIO_PREPARATION_OPERATION,
       source: "IOIO_PREPARATION_REQUEST",
-      status: PREPARATION_PENDING,
-      idempotencyKey: `IOIO_PREPARATION_REQUEST:${randomUUID()}`,
+      status: "ASSIGNING",
+      idempotencyKey,
       userId: auth.userId,
       organizationId: auth.organizationId,
       reportType: IOIO_PREPARATION_OPERATION,
@@ -1265,19 +1244,174 @@ export async function requestPreparationForItem(
     },
   });
 
-  const visibleRequest = await db.ioioWriteOperation.findFirst({
-    where: {
-      id: operation.id,
+  const marker = `IOIO_PREPARATION_REQUEST:${operation.id}`;
+  let bookingId: string | null = null;
+  try {
+    const booking = await createBooking({
+      booking: {
+        name: `IOIO borrow — ${asset.title}`,
+        description: marker,
+        creatorId: auth.userId,
+        custodianUserId: auth.userId,
+        custodianTeamMemberId: teamMemberId,
+        organizationId: auth.organizationId,
+        from,
+        to,
+        tags: [],
+      },
+      assetIds:
+        asset.type === AssetType.INDIVIDUAL
+          ? selectedPhysicalAssetIds
+          : [asset.id],
+      hints: getClientHint(request),
+    });
+    bookingId = booking.id;
+
+    const linkedRequest = await db.ioioWriteOperation.updateMany({
+      where: {
+        id: operation.id,
+        userId: auth.userId,
+        organizationId: auth.organizationId,
+        operationType: IOIO_PREPARATION_OPERATION,
+        source: "IOIO_PREPARATION_REQUEST",
+        status: "ASSIGNING",
+      },
+      data: { bookingId },
+    });
+    if (linkedRequest.count !== 1) {
+      throw borrowError(
+        "This preparation request changed before its inventory could be reserved.",
+        409
+      );
+    }
+
+    if (asset.type === AssetType.QUANTITY_TRACKED) {
+      await updateBookingAssets({
+        id: booking.id,
+        organizationId: auth.organizationId,
+        assetIds: [asset.id],
+        quantities: { [asset.id]: quantity },
+        userId: auth.userId,
+      });
+    }
+
+    await reserveBooking({
+      id: booking.id,
       organizationId: auth.organizationId,
+      name: `IOIO borrow — ${asset.title}`,
+      description: marker,
+      custodianUserId: auth.userId,
+      custodianTeamMemberId: teamMemberId,
+      from,
+      to,
+      hints: getClientHint(request),
+      isSelfServiceOrBase: auth.role === "SELF_SERVICE",
+      tags: [],
       userId: auth.userId,
-      operationType: IOIO_PREPARATION_OPERATION,
-      source: "IOIO_PREPARATION_REQUEST",
-      status: PREPARATION_PENDING,
-    },
-    select: { id: true },
-  });
-  if (!visibleRequest) {
-    throw new Error("The preparation request could not be verified.");
+      ignoreBookingIds: acknowledgeStaffReservationOverlap
+        ? availability.staffReservationBookingIds
+        : [],
+      allowImmediateStart: true,
+    });
+
+    const reservedBooking = await db.booking.findFirst({
+      where: {
+        id: booking.id,
+        organizationId: auth.organizationId,
+        status: BookingStatus.RESERVED,
+      },
+      select: { id: true },
+    });
+    if (!reservedBooking) {
+      throw new Error(
+        "The Shelf preparation reservation could not be verified."
+      );
+    }
+
+    const requestReady = await db.ioioWriteOperation.updateMany({
+      where: {
+        id: operation.id,
+        userId: auth.userId,
+        organizationId: auth.organizationId,
+        operationType: IOIO_PREPARATION_OPERATION,
+        source: "IOIO_PREPARATION_REQUEST",
+        status: "ASSIGNING",
+        bookingId,
+      },
+      data: { status: PREPARATION_PENDING },
+    });
+    if (requestReady.count !== 1) {
+      throw borrowError(
+        "This preparation request changed before its inventory could be reserved.",
+        409
+      );
+    }
+
+    const visibleRequest = await db.ioioWriteOperation.findFirst({
+      where: {
+        id: operation.id,
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        operationType: IOIO_PREPARATION_OPERATION,
+        source: "IOIO_PREPARATION_REQUEST",
+        status: { in: ["ASSIGNING", PREPARATION_PENDING] },
+        bookingId,
+      },
+      select: { id: true },
+    });
+    if (!visibleRequest) {
+      throw new Error("The preparation request could not be verified.");
+    }
+  } catch (cause) {
+    if (bookingId) {
+      try {
+        const existingBooking = await db.booking.findFirst({
+          where: { id: bookingId, organizationId: auth.organizationId },
+          select: { id: true, status: true },
+        });
+        if (existingBooking?.status === BookingStatus.DRAFT) {
+          await deleteBooking(
+            { id: bookingId, organizationId: auth.organizationId },
+            getClientHint(request),
+            auth.userId
+          );
+        } else if (existingBooking?.status === BookingStatus.RESERVED) {
+          await cancelBooking({
+            id: bookingId,
+            organizationId: auth.organizationId,
+            userId: auth.userId,
+            hints: getClientHint(request),
+            expectedStatus: BookingStatus.RESERVED,
+            cancellationReason:
+              "Preparation reservation setup did not complete.",
+          });
+        }
+      } catch (cleanupCause) {
+        Logger.error({
+          event: "ioio_preparation_reservation_cleanup_failed",
+          operationId: operation.id,
+          bookingId,
+          organizationId: auth.organizationId,
+          error: cleanupCause,
+        });
+      }
+    }
+    await db.ioioWriteOperation.updateMany({
+      where: {
+        id: operation.id,
+        userId: auth.userId,
+        organizationId: auth.organizationId,
+        operationType: IOIO_PREPARATION_OPERATION,
+        source: "IOIO_PREPARATION_REQUEST",
+        status: { in: ["ASSIGNING", PREPARATION_PENDING] },
+      },
+      data: {
+        status: "FAILED",
+        completedAt: new Date(),
+        failureCode: "PREPARATION_RESERVATION_FAILED",
+      },
+    });
+    throw cause;
   }
 
   return {
@@ -1360,6 +1494,124 @@ export async function cancelBorrowItem(
     data: { status: "CANCELLED", completedAt: new Date() },
   });
   return { ok: true as const, status: "cancelled" as const };
+}
+
+async function refreshExpiredBorrowProposal(
+  confirmationToken: string,
+  operation: {
+    id: string;
+    userId: string;
+    organizationId: string;
+    source: string;
+    description: string | null;
+    assetId: string | null;
+    kitId: string | null;
+    quantity: number | null;
+    selectedAssetIds: Prisma.JsonValue | null;
+  },
+  { context, request }: Context
+) {
+  if (!operation.assetId || operation.kitId || !operation.quantity) {
+    throw borrowError(
+      "This borrow proposal has expired. Review the item and try again.",
+      409
+    );
+  }
+
+  const draft: BorrowProposalDraft = {
+    asset_id: operation.assetId,
+    kit_id: null,
+    quantity: operation.quantity,
+    borrow_mode:
+      operation.source === "IOIO_HAVE_ITEM" ? "I_HAVE_ITEM" : "STANDARD",
+  };
+  const selectedPhysicalUnitIds = getStoredSelectedAssetIds(
+    operation.selectedAssetIds
+  );
+  const requestedAsset = await loadBorrowAsset(
+    operation.assetId,
+    operation.organizationId
+  );
+  if (!requestedAsset) {
+    throw borrowError("The selected Shelf asset is no longer available.", 404);
+  }
+
+  if (requestedAsset.type === AssetType.INDIVIDUAL) {
+    if (selectedPhysicalUnitIds.length !== operation.quantity) {
+      throw borrowError(
+        "The selected physical units no longer match the reviewed borrow proposal.",
+        409
+      );
+    }
+    const candidates = await loadBorrowPhysicalUnitCandidates({
+      requestedAsset,
+      candidateAssetIds: selectedPhysicalUnitIds,
+      organizationId: operation.organizationId,
+    });
+    const candidatesById = new Map(
+      candidates.map((candidate) => [candidate.id, candidate])
+    );
+    const scannedQrIds = selectedPhysicalUnitIds.map(
+      (unitId) => candidatesById.get(unitId)?.qrCodes[0]?.id
+    );
+    if (
+      candidates.length !== selectedPhysicalUnitIds.length ||
+      scannedQrIds.some((qrId) => !qrId)
+    ) {
+      throw borrowError(
+        "The selected Kit units could not be verified. Scan each unit again.",
+        409
+      );
+    }
+    draft.candidate_asset_ids = selectedPhysicalUnitIds;
+    draft.scanned_asset_ids = selectedPhysicalUnitIds;
+    draft.scanned_qr_ids = scannedQrIds as string[];
+  }
+
+  const replacement = await prepareBorrowItem(draft, { context, request });
+  if (
+    replacement.staffReservationWarning &&
+    hasAcknowledgedStaffReservation(operation.description)
+  ) {
+    await db.ioioWriteOperation.updateMany({
+      where: {
+        id: replacement.operationId,
+        organizationId: operation.organizationId,
+        status: "PREPARED",
+      },
+      data: {
+        description: `Borrow proposal for Shelf asset ${operation.assetId} ${IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT}`,
+      },
+    });
+  }
+
+  const cancelled = await db.ioioWriteOperation.updateMany({
+    where: {
+      id: operation.id,
+      idempotencyKey: confirmationToken,
+      userId: operation.userId,
+      organizationId: operation.organizationId,
+      operationType: IOIO_BORROW_OPERATION,
+      status: "PREPARED",
+      createdAt: { lt: new Date(Date.now() - BORROW_PROPOSAL_TTL_MS) },
+    },
+    data: { status: "CANCELLED", completedAt: new Date() },
+  });
+  if (cancelled.count !== 1) {
+    await db.ioioWriteOperation.updateMany({
+      where: {
+        id: replacement.operationId,
+        organizationId: operation.organizationId,
+        status: "PREPARED",
+      },
+      data: { status: "CANCELLED", completedAt: new Date() },
+    });
+    throw borrowError(
+      "This borrow proposal changed before it could be refreshed. Review it and confirm again.",
+      409
+    );
+  }
+  return replacement;
 }
 
 export async function borrowItem(
@@ -1470,13 +1722,19 @@ export async function borrowItem(
     operation.status === "PREPARED" &&
     operationExpired(operation.createdAt)
   ) {
-    await db.ioioWriteOperation.updateMany({
-      where: { idempotencyKey: confirmationToken, status: "PREPARED" },
-      data: { status: "CANCELLED", completedAt: new Date() },
-    });
-    throw borrowError(
-      "This borrow proposal has expired or was cancelled.",
-      404
+    const replacement = await refreshExpiredBorrowProposal(
+      confirmationToken,
+      operation,
+      { context, request }
+    );
+    return borrowItem(
+      {
+        confirmationToken: replacement.confirmationToken,
+        quantity,
+        selectedPhysicalUnitIds,
+        allowStaffReservationOverlap,
+      },
+      { context, request }
     );
   }
   if (operation.status === "CANCELLED" || operation.status === "FAILED") {

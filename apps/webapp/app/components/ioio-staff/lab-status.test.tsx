@@ -5,7 +5,7 @@ import type {
   LabIssue,
   LabStatus,
 } from "~/modules/ioio-staff/lab-status.server";
-import { StaffLabStatusBell } from "./lab-status";
+import { LabStatusCard, StaffLabStatusBell } from "./lab-status";
 
 function createStatus(count: number): LabStatus {
   const issues: LabIssue[] = Array.from({ length: count }, (_, index) => ({
@@ -46,9 +46,68 @@ function renderBell(status: LabStatus | null) {
   );
 }
 
+describe("LabStatusCard", () => {
+  afterEach(() => cleanup());
+
+  it("counts preparation units in Needs attention with correct grammar", () => {
+    const status = createStatus(0);
+    status.totalIssues = 1;
+    status.preparationTasks = 2;
+    status.issues = [
+      {
+        id: "preparation:pending",
+        kind: "preparation",
+        severity: "attention",
+        title: "2 items to prepare",
+        detail: "Prepare equipment.",
+        href: "/operations?view=to-prepare",
+      },
+    ];
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <LabStatusCard status={status} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("2 items need action.")).toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <LabStatusCard status={{ ...status, preparationTasks: 1 }} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("1 item needs action.")).toBeInTheDocument();
+  });
+});
+
 describe("StaffLabStatusBell", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(() => cleanup());
+
+  it("counts newly actionable preparation units in the notification badge", () => {
+    const status = createStatus(0);
+    status.totalIssues = 1;
+    status.preparationTasks = 2;
+    status.issues = [
+      {
+        id: "preparation:pending",
+        kind: "preparation",
+        severity: "attention",
+        title: "2 items to prepare",
+        detail: "Prepare equipment.",
+        href: "/operations?view=to-prepare",
+      },
+    ];
+
+    renderBell(status);
+    expect(screen.getByText("2")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open lab status notifications" })
+    );
+    expect(
+      screen.getByText("2 current actionable items; all have been seen.")
+    ).toBeInTheDocument();
+  });
 
   it("shows the current Lab status total and updates when loader data changes", () => {
     const { rerender } = renderBell(createStatus(3));

@@ -155,7 +155,10 @@ function getCanonicalLoanName(item: ListBookingsContentProps["item"]) {
     new Set(getCanonicalLoanAssets(item).map(getLoanAssetDisplayName))
   );
 
-  if (names.length === 1) return names[0];
+  if (names.length === 1) {
+    const quantity = getLoanQuantity(item);
+    return quantity > 1 ? `${names[0]} × ${quantity}` : names[0];
+  }
   if (names.length > 1) return `${names[0]} + ${names.length - 1} more`;
   return getLoanDisplayName(item.name);
 }

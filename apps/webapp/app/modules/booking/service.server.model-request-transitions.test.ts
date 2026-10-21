@@ -58,6 +58,9 @@ vitest.mock("~/database/db.server", () => ({
     $queryRaw: vitest.fn().mockResolvedValue([{ status: "DRAFT" }]),
     booking: {
       findUniqueOrThrow: vitest.fn(),
+      // why: checkout side effects re-read the booking description when the
+      // transition fixture does not provide one, before scheduling reminders.
+      findFirst: vitest.fn().mockResolvedValue({ description: null }),
       update: vitest.fn(),
     },
     bookingAsset: {

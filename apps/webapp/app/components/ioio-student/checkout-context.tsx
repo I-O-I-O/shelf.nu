@@ -1,10 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { StudentAsset } from "~/modules/ioio-student/service.server";
+import { generateClientId } from "~/utils/id/client-id";
 import type { StudentInventoryItem } from "./inventory-presentation";
 
 export type StudentCheckoutItem = {
   id: string;
+  preparationSubmissionToken: string;
   title: string;
   type: StudentAsset["type"];
   isKit: boolean;
@@ -52,6 +54,19 @@ function isAssetType(value: unknown): value is StudentAsset["type"] {
   return value === "INDIVIDUAL" || value === "QUANTITY_TRACKED";
 }
 
+function createPreparationSubmissionToken() {
+  return generateClientId();
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value
+    )
+  );
+}
+
 function normalizeAssetModel(value: unknown): StudentAsset["assetModel"] {
   if (typeof value !== "object" || value === null) return null;
   const model = value as Record<string, unknown>;
@@ -86,6 +101,9 @@ function normalizeSavedItem(value: unknown): StudentCheckoutItem | null {
 
   return {
     id: item.id,
+    preparationSubmissionToken: isUuid(item.preparationSubmissionToken)
+      ? item.preparationSubmissionToken
+      : createPreparationSubmissionToken(),
     title: item.title,
     type: isAssetType(item.type) ? item.type : "QUANTITY_TRACKED",
     isKit: item.isKit === true,
@@ -119,6 +137,7 @@ function checkoutItemFromAsset(
 ): StudentCheckoutItem {
   return {
     id: asset.id,
+    preparationSubmissionToken: createPreparationSubmissionToken(),
     title: asset.title,
     type: asset.type,
     isKit: asset.kits.length > 0,
@@ -187,7 +206,14 @@ export function StudentCheckoutProvider({ children }: { children: ReactNode }) {
       recentlyAdded,
       addItem: (asset) => {
         const item =
-          "candidateAssetIds" in asset ? asset : checkoutItemFromAsset(asset);
+          "preparationSubmissionToken" in asset
+            ? asset
+            : "candidateAssetIds" in asset
+            ? {
+                ...asset,
+                preparationSubmissionToken: createPreparationSubmissionToken(),
+              }
+            : checkoutItemFromAsset(asset);
         if (items.some((existing) => existing.id === item.id)) return;
         setItems((current) =>
           current.some((existing) => existing.id === item.id)

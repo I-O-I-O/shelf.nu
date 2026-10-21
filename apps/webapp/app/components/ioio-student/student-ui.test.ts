@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -165,11 +165,43 @@ describe("student checkout action", () => {
       screen.getByRole("button", { name: "Add to borrow list" })
     );
     expect(screen.getByRole("button", { name: "In borrow list" })).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(
+        window.sessionStorage.getItem("ioio-student-checkout") ?? "[]"
+      ) as Array<{ preparationSubmissionToken: string }>;
+      expect(saved[0]?.preparationSubmissionToken).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+      );
+    });
+    const firstSubmissionToken = (
+      JSON.parse(
+        window.sessionStorage.getItem("ioio-student-checkout") ?? "[]"
+      ) as Array<{ preparationSubmissionToken: string }>
+    )[0]?.preparationSubmissionToken;
 
     await user.click(screen.getByRole("button", { name: "In borrow list" }));
     expect(
       screen.getByRole("button", { name: "Add to borrow list" })
     ).toBeTruthy();
+    await waitFor(() => {
+      expect(
+        JSON.parse(
+          window.sessionStorage.getItem("ioio-student-checkout") ?? "[]"
+        )
+      ).toHaveLength(0);
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Add to borrow list" })
+    );
+    await waitFor(() => {
+      const saved = JSON.parse(
+        window.sessionStorage.getItem("ioio-student-checkout") ?? "[]"
+      ) as Array<{ preparationSubmissionToken: string }>;
+      expect(saved[0]?.preparationSubmissionToken).not.toBe(
+        firstSubmissionToken
+      );
+    });
+    window.sessionStorage.clear();
   });
 
   it("uses the requested Borrow label for an available Staff item", () => {

@@ -86,7 +86,7 @@ vi.mock("~/utils/user", () => ({
   ),
 }));
 vi.mock("~/utils/logger", () => ({
-  Logger: { info: vi.fn(), warn: vi.fn() },
+  Logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 import {
@@ -238,7 +238,235 @@ describe("IOIO borrow_item", () => {
     expect(checkoutBookingMock).toHaveBeenCalled();
   });
 
-  it("stores a preparation request against the logical product without assigning a physical unit", async () => {
+  it("refreshes only an expired Motor proposal before borrowing", async () => {
+    const expiredOperation = {
+      id: "op-expired-motor",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      source: "IOIO_ASSISTANT",
+      assetId: asset.id,
+      kitId: null,
+      quantity: 1,
+      selectedAssetIds: null,
+      from: new Date(from),
+      to: new Date(to),
+      bookingId: null,
+      createdAt: new Date(Date.now() - 11 * 60 * 1000),
+      failureCode: null,
+      description: `Borrow proposal for Shelf asset ${asset.id}`,
+    };
+    let replacementOperation: typeof expiredOperation | null = null;
+    dbMock.ioioWriteOperation.findUnique.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.idempotencyKey === "expired-motor-token"
+          ? expiredOperation
+          : replacementOperation
+      )
+    );
+    dbMock.ioioWriteOperation.create.mockImplementation(({ data }) => {
+      replacementOperation = {
+        ...expiredOperation,
+        id: "op-refreshed-motor",
+        status: "PREPARED",
+        source: data.source,
+        assetId: data.assetId,
+        quantity: data.quantity,
+        selectedAssetIds: null,
+        from: data.from,
+        to: data.to,
+        createdAt: new Date(),
+        description: data.description,
+      };
+      return Promise.resolve({ id: "op-refreshed-motor" });
+    });
+    dbMock.booking.findFirst.mockResolvedValueOnce(null).mockResolvedValue({
+      id: "booking-refreshed-motor",
+      status: "DRAFT",
+      bookingAssets: [
+        {
+          id: "booking-asset-refreshed-motor",
+          assetId: asset.id,
+          quantity: 1,
+        },
+      ],
+    });
+    createBookingMock.mockResolvedValue({ id: "booking-refreshed-motor" });
+    updateBookingAssetsMock.mockResolvedValue(undefined);
+    checkoutBookingMock.mockResolvedValue(undefined);
+
+    await expect(
+      borrowItem(
+        {
+          confirmationToken: "expired-motor-token",
+          quantity: 1,
+          selectedPhysicalUnitIds: [],
+        },
+        { context, request }
+      )
+    ).resolves.toMatchObject({
+      status: "submitted",
+      bookingId: "booking-refreshed-motor",
+    });
+
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          operationType: "BORROW_ITEM",
+          status: "PREPARED",
+          assetId: asset.id,
+          quantity: 1,
+          idempotencyKey: expect.not.stringMatching("expired-motor-token"),
+        }),
+      })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "op-expired-motor",
+          idempotencyKey: "expired-motor-token",
+          status: "PREPARED",
+        }),
+        data: expect.objectContaining({ status: "CANCELLED" }),
+      })
+    );
+    expect(checkoutBookingMock).toHaveBeenCalled();
+  });
+
+  it("refreshes an expired scanned Kit proposal from its saved physical units", async () => {
+    const kit = {
+      ...asset,
+      id: "makey-kit",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "makey-model",
+      requiresBorrowApproval: false,
+      requiresStaffPreparation: false,
+    };
+    const unit = {
+      id: "makey-unit-003",
+      title: "Makey Kit #003",
+      status: "AVAILABLE" as const,
+      availableToBook: true,
+      assetModelId: "makey-model",
+      assetKits: [],
+      qrCodes: [{ id: "makey-qr-003" }],
+    };
+    const expiredOperation = {
+      id: "op-expired-makey",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      source: "IOIO_HAVE_ITEM",
+      assetId: kit.id,
+      kitId: null,
+      quantity: 1,
+      selectedAssetIds: [unit.id],
+      from: new Date(from),
+      to: new Date(to),
+      bookingId: null,
+      createdAt: new Date(Date.now() - 11 * 60 * 1000),
+      failureCode: null,
+      description: `Borrow proposal for Shelf asset ${kit.id}`,
+    };
+    let replacementOperation: typeof expiredOperation | null = null;
+    dbMock.ioioWriteOperation.findUnique.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.idempotencyKey === "expired-makey-token"
+          ? expiredOperation
+          : replacementOperation
+      )
+    );
+    dbMock.ioioWriteOperation.create.mockImplementation(({ data }) => {
+      replacementOperation = {
+        ...expiredOperation,
+        id: "op-refreshed-makey",
+        status: "PREPARED",
+        source: data.source,
+        assetId: data.assetId,
+        quantity: data.quantity,
+        selectedAssetIds: data.selectedAssetIds,
+        from: data.from,
+        to: data.to,
+        createdAt: new Date(),
+        description: data.description,
+      };
+      return Promise.resolve({ id: "op-refreshed-makey" });
+    });
+    dbMock.asset.findFirst
+      .mockResolvedValueOnce(kit)
+      .mockResolvedValueOnce(kit)
+      .mockResolvedValueOnce({
+        ...unit,
+        assetLocations: [{ location: { name: "Container A1-1" } }],
+      })
+      .mockResolvedValue(kit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
+    dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 1,
+      availableCount: 1,
+      availableUnitIds: [unit.id],
+      availableUnitIdsWithoutStaffReservations: [unit.id],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      availableWithoutStaffReservations: 1,
+    });
+    dbMock.booking.findFirst.mockResolvedValueOnce(null).mockResolvedValue({
+      id: "booking-refreshed-makey",
+      status: "DRAFT",
+      bookingAssets: [
+        {
+          id: "booking-asset-refreshed-makey",
+          assetId: unit.id,
+          quantity: 1,
+        },
+      ],
+    });
+    createBookingMock.mockResolvedValue({ id: "booking-refreshed-makey" });
+    checkoutBookingMock.mockResolvedValue(undefined);
+
+    await expect(
+      borrowItem(
+        {
+          confirmationToken: "expired-makey-token",
+          quantity: 1,
+          selectedPhysicalUnitIds: [unit.id],
+        },
+        { context, request }
+      )
+    ).resolves.toMatchObject({
+      status: "submitted",
+      bookingId: "booking-refreshed-makey",
+    });
+
+    expect(dbMock.qr.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "makey-qr-003",
+        organizationId: auth.organizationId,
+        assetId: unit.id,
+      },
+      select: { assetId: true },
+    });
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          source: "IOIO_HAVE_ITEM",
+          assetId: kit.id,
+          selectedAssetIds: [unit.id],
+        }),
+      })
+    );
+    expect(createBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ assetIds: [unit.id] })
+    );
+  });
+
+  it("reserves a quantity-pool preparation request in Shelf with its requested quantity", async () => {
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
       requiresStaffPreparation: true,
@@ -247,9 +475,15 @@ describe("IOIO borrow_item", () => {
     dbMock.ioioWriteOperation.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: "op-a" });
+    createBookingMock.mockResolvedValue({ id: "booking-preparation" });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "booking-preparation",
+      status: "RESERVED",
+    });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
 
     await requestPreparationForItem(
-      { assetId: asset.id, quantity: 1 },
+      { assetId: asset.id, quantity: 2 },
       { context, request }
     );
 
@@ -258,14 +492,127 @@ describe("IOIO borrow_item", () => {
         data: expect.objectContaining({
           organizationId: auth.organizationId,
           source: "IOIO_PREPARATION_REQUEST",
-          status: "PENDING_PREPARATION",
+          status: "ASSIGNING",
           assetId: asset.id,
           selectedAssetIds: [asset.id],
-          quantity: 1,
+          quantity: 2,
         }),
       })
     );
-    expect(createBookingMock).not.toHaveBeenCalled();
+    expect(createBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        booking: expect.objectContaining({
+          description: "IOIO_PREPARATION_REQUEST:op-a",
+          custodianUserId: auth.userId,
+          custodianTeamMemberId: "team-a",
+        }),
+        assetIds: [asset.id],
+      })
+    );
+    expect(updateBookingAssetsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "booking-preparation",
+        assetIds: [asset.id],
+        quantities: { [asset.id]: 2 },
+      })
+    );
+    expect(reserveBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "booking-preparation",
+        description: "IOIO_PREPARATION_REQUEST:op-a",
+        allowImmediateStart: true,
+      })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "op-a" }),
+        data: { bookingId: "booking-preparation" },
+      })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "op-a",
+          status: "ASSIGNING",
+          bookingId: "booking-preparation",
+        }),
+        data: { status: "PENDING_PREPARATION" },
+      })
+    );
+  });
+
+  it("reserves the selected physical kit units when preparation is requested", async () => {
+    const product = {
+      ...asset,
+      id: "makey-product",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "makey-model",
+      requiresStaffPreparation: true,
+    };
+    dbMock.asset.findFirst.mockResolvedValue(product);
+    dbMock.asset.findMany.mockResolvedValue([
+      {
+        id: "unit-001",
+        title: "Makey Kit #001",
+        status: "AVAILABLE",
+        availableToBook: true,
+        assetModelId: "makey-model",
+        assetKits: [],
+        qrCodes: [],
+      },
+      {
+        id: "unit-002",
+        title: "Makey Kit #002",
+        status: "AVAILABLE",
+        availableToBook: true,
+        assetModelId: "makey-model",
+        assetKits: [],
+        qrCodes: [],
+      },
+    ]);
+    dbMock.ioioWriteOperation.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "op-makey" });
+    dbMock.ioioWriteOperation.create.mockResolvedValue({ id: "op-makey" });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+    createBookingMock.mockResolvedValue({ id: "booking-makey" });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "booking-makey",
+      status: "RESERVED",
+    });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 2,
+      availableUnitIds: ["unit-001", "unit-002"],
+      availableUnitIdsWithoutStaffReservations: ["unit-001", "unit-002"],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      availableWithoutStaffReservations: 2,
+    });
+
+    await requestPreparationForItem(
+      {
+        assetId: product.id,
+        candidateAssetIds: ["unit-001", "unit-002"],
+        quantity: 2,
+      },
+      { context, request }
+    );
+
+    expect(createBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetIds: ["unit-001", "unit-002"],
+      })
+    );
+    expect(updateBookingAssetsMock).not.toHaveBeenCalled();
+    expect(reserveBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "booking-makey" })
+    );
   });
 
   it("requires a Student acknowledgement before creating a request across a course reservation", async () => {
@@ -305,6 +652,12 @@ describe("IOIO borrow_item", () => {
     dbMock.ioioWriteOperation.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: "op-a" });
+    createBookingMock.mockResolvedValue({ id: "booking-preparation" });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "booking-preparation",
+      status: "RESERVED",
+    });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
     getIoioAvailabilityMock.mockResolvedValue({
       totalActive: 8,
       availableCount: 0,
@@ -505,67 +858,176 @@ describe("IOIO borrow_item", () => {
     expect(dbMock.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
   });
 
-  it("does not reuse an assigned request after its pickup task is finished", async () => {
+  it("does not accept a preparation quantity above the remaining pool stock", async () => {
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
       requiresStaffPreparation: true,
       maxBorrowDays: 45,
     });
-    dbMock.ioioWriteOperation.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "op-a" });
-    dbMock.ioioWriteOperation.findMany.mockResolvedValue([
-      {
-        id: "old-assigned-request",
-        bookingId: "old-booking",
-        quantity: 1,
-        selectedAssetIds: [asset.id],
-      },
-    ]);
-    dbMock.booking.findFirst.mockResolvedValue(null);
-
-    const result = await requestPreparationForItem(
-      { assetId: asset.id, quantity: 1 },
-      { context, request }
-    );
-
-    expect(result).toMatchObject({ requestId: "op-a", status: "requested" });
-    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledOnce();
-  });
-
-  it("reuses an assigned request while its reserved pickup task is active", async () => {
-    dbMock.asset.findFirst.mockResolvedValue({
-      ...asset,
-      requiresStaffPreparation: true,
-      maxBorrowDays: 45,
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 3,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      availableWithoutStaffReservations: 3,
     });
-    dbMock.ioioWriteOperation.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "active-preparation-task" });
-    dbMock.ioioWriteOperation.findMany.mockResolvedValue([
-      {
-        id: "assigned-request",
-        bookingId: "reserved-booking",
-        quantity: 1,
-        selectedAssetIds: [asset.id],
-      },
-    ]);
-    dbMock.booking.findFirst.mockResolvedValue({ id: "reserved-booking" });
 
-    const result = await requestPreparationForItem(
-      { assetId: asset.id, quantity: 1 },
-      { context, request }
-    );
+    await expect(
+      requestPreparationForItem(
+        { assetId: asset.id, quantity: 4 },
+        { context, request }
+      )
+    ).rejects.toThrow("Only 3 units are available for preparation.");
 
-    expect(result).toMatchObject({
-      requestId: "assigned-request",
-      duplicate: true,
-    });
     expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
   });
 
-  it("reuses an equivalent active preparation request instead of creating a duplicate", async () => {
+  it("creates a separate preparation obligation for each new same-kit submission", async () => {
+    const product = {
+      ...asset,
+      id: "makey-product",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "makey-model",
+      requiresStaffPreparation: true,
+      maxBorrowDays: 45,
+    };
+    const unitIds = [
+      "unit-001",
+      "unit-002",
+      "unit-003",
+      "unit-004",
+      "unit-005",
+    ];
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...product,
+    });
+    dbMock.asset.findMany.mockResolvedValue(
+      unitIds.map((id) => ({
+        id,
+        title: `Makey Kit #${id.slice(-3)}`,
+        status: "AVAILABLE",
+        availableToBook: true,
+        assetModelId: "makey-model",
+        assetKits: [],
+        qrCodes: [],
+      }))
+    );
+    dbMock.ioioWriteOperation.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "request-one" })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "request-two" });
+    dbMock.ioioWriteOperation.create
+      .mockResolvedValueOnce({ id: "request-one" })
+      .mockResolvedValueOnce({ id: "request-two" });
+    createBookingMock
+      .mockResolvedValueOnce({ id: "booking-one" })
+      .mockResolvedValueOnce({ id: "booking-two" });
+    dbMock.booking.findFirst
+      .mockResolvedValueOnce({ id: "booking-one", status: "RESERVED" })
+      .mockResolvedValueOnce({ id: "booking-two", status: "RESERVED" });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+    getIoioAvailabilityMock
+      .mockResolvedValueOnce({
+        totalActive: 5,
+        availableCount: 5,
+        availableUnitIds: unitIds,
+        availableUnitIdsWithoutStaffReservations: unitIds,
+        conflicts: [],
+        staffReservedCount: 0,
+        staffReservationBookingIds: [],
+        availableWithoutStaffReservations: 5,
+      })
+      .mockResolvedValueOnce({
+        totalActive: 5,
+        availableCount: 4,
+        availableUnitIds: unitIds.slice(1),
+        availableUnitIdsWithoutStaffReservations: unitIds.slice(1),
+        conflicts: [],
+        staffReservedCount: 0,
+        staffReservationBookingIds: [],
+        availableWithoutStaffReservations: 4,
+      });
+
+    const first = await requestPreparationForItem(
+      {
+        assetId: product.id,
+        candidateAssetIds: unitIds,
+        quantity: 1,
+        submissionToken: "11111111-1111-4111-8111-111111111111",
+      },
+      { context, request }
+    );
+    const second = await requestPreparationForItem(
+      {
+        assetId: product.id,
+        candidateAssetIds: unitIds,
+        quantity: 1,
+        submissionToken: "22222222-2222-4222-8222-222222222222",
+      },
+      { context, request }
+    );
+
+    expect(first).toMatchObject({
+      requestId: "request-one",
+      status: "requested",
+    });
+    expect(second).toMatchObject({
+      requestId: "request-two",
+      status: "requested",
+    });
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledTimes(2);
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          assetId: product.id,
+          quantity: 1,
+          idempotencyKey:
+            "IOIO_PREPARATION_REQUEST:org-a:user-a:11111111-1111-4111-8111-111111111111",
+        }),
+      })
+    );
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          assetId: product.id,
+          quantity: 1,
+          idempotencyKey:
+            "IOIO_PREPARATION_REQUEST:org-a:user-a:22222222-2222-4222-8222-222222222222",
+        }),
+      })
+    );
+    expect(createBookingMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ assetIds: ["unit-001"] })
+    );
+    expect(createBookingMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ assetIds: ["unit-002"] })
+    );
+    expect(reserveBookingMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ id: "booking-one" })
+    );
+    expect(reserveBookingMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ id: "booking-two" })
+    );
+    expect(getIoioAvailabilityMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ productId: product.id })
+    );
+  });
+
+  it("returns the same canonical request when the same submission token is retried", async () => {
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
       requiresStaffPreparation: true,
@@ -573,12 +1035,23 @@ describe("IOIO borrow_item", () => {
     });
     dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
       id: "existing-preparation-request",
+      assetId: asset.id,
+      bookingId: "existing-booking",
+      status: "PENDING_PREPARATION",
       quantity: 1,
       selectedAssetIds: [asset.id],
     });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "existing-booking",
+      status: "RESERVED",
+    });
 
     const result = await requestPreparationForItem(
-      { assetId: asset.id, quantity: 1 },
+      {
+        assetId: asset.id,
+        quantity: 1,
+        submissionToken: "33333333-3333-4333-8333-333333333333",
+      },
       { context, request }
     );
 
@@ -588,6 +1061,69 @@ describe("IOIO borrow_item", () => {
       duplicate: true,
     });
     expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps submission idempotency independent between students", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      requiresStaffPreparation: true,
+      maxBorrowDays: 45,
+    });
+    requireIoioBorrowerAccessMock
+      .mockResolvedValueOnce({ ...auth, userId: "student-a" })
+      .mockResolvedValueOnce({ ...auth, userId: "student-b" });
+    dbMock.ioioWriteOperation.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "request-a" })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "request-b" });
+    dbMock.ioioWriteOperation.create
+      .mockResolvedValueOnce({ id: "request-a" })
+      .mockResolvedValueOnce({ id: "request-b" });
+    createBookingMock
+      .mockResolvedValueOnce({ id: "booking-a" })
+      .mockResolvedValueOnce({ id: "booking-b" });
+    dbMock.booking.findFirst
+      .mockResolvedValueOnce({ id: "booking-a", status: "RESERVED" })
+      .mockResolvedValueOnce({ id: "booking-b", status: "RESERVED" });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await requestPreparationForItem(
+      {
+        assetId: asset.id,
+        quantity: 1,
+        submissionToken: "44444444-4444-4444-8444-444444444444",
+      },
+      { context, request }
+    );
+    await requestPreparationForItem(
+      {
+        assetId: asset.id,
+        quantity: 1,
+        submissionToken: "44444444-4444-4444-8444-444444444444",
+      },
+      { context, request }
+    );
+
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          idempotencyKey:
+            "IOIO_PREPARATION_REQUEST:org-a:student-a:44444444-4444-4444-8444-444444444444",
+        }),
+      })
+    );
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          idempotencyKey:
+            "IOIO_PREPARATION_REQUEST:org-a:student-b:44444444-4444-4444-8444-444444444444",
+        }),
+      })
+    );
   });
 
   it("treats blank physical-unit fields as absent for pooled assets", async () => {
@@ -1076,6 +1612,172 @@ describe("IOIO borrow_item", () => {
     ).resolves.toMatchObject({ asset: { id: unit.id, title: unit.title } });
   });
 
+  it("rejects a selected physical unit when its submitted QR belongs elsewhere", async () => {
+    const product = {
+      ...asset,
+      id: "product-a",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "model-a",
+    };
+    const unit = {
+      ...product,
+      id: "unit-1",
+      title: "Makey Kit #001",
+      assetModelId: "model-a",
+    };
+    dbMock.asset.findFirst
+      .mockResolvedValueOnce(product)
+      .mockResolvedValueOnce(unit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
+    dbMock.qr.findFirst.mockResolvedValue(null);
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: product.id,
+          candidate_asset_ids: [unit.id],
+          scanned_asset_id: unit.id,
+          scanned_qr_id: "qr-from-another-unit",
+          borrow_mode: "I_HAVE_ITEM",
+          kit_id: null,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).rejects.toMatchObject({ status: 409 });
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+  });
+
+  it("does not let a scan from another checkout item select this unit", async () => {
+    const product = {
+      ...asset,
+      id: "product-a",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: "model-a",
+    };
+    const expectedUnit = {
+      ...product,
+      id: "unit-1",
+      title: "Makey Kit #001",
+      assetModelId: "model-a",
+    };
+    dbMock.asset.findFirst.mockResolvedValueOnce(product);
+    dbMock.asset.findMany.mockResolvedValue([expectedUnit]);
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: product.id,
+          candidate_asset_ids: [expectedUnit.id],
+          scanned_asset_id: "unit-from-another-item",
+          scanned_qr_id: "another-item-qr",
+          borrow_mode: "I_HAVE_ITEM",
+          kit_id: null,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).rejects.toMatchObject({ status: 409 });
+    expect(dbMock.qr.findFirst).not.toHaveBeenCalled();
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+  });
+
+  it("confirms possession only for a scanned unit in the expected kit", async () => {
+    const product = {
+      ...asset,
+      id: "product-a",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: null,
+      assetKits: [{ kitId: "makey-kit", kit: { maxBorrowDays: 45 } }],
+    };
+    const unit = {
+      ...product,
+      id: "unit-1",
+      title: "Makey Kit #001",
+      assetKits: [{ kitId: "makey-kit" }],
+    };
+    dbMock.asset.findFirst
+      .mockResolvedValueOnce(product)
+      .mockResolvedValueOnce(unit);
+    dbMock.asset.findMany.mockResolvedValue([unit]);
+    dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 1,
+      availableCount: 1,
+      availableUnitIds: [unit.id],
+      availableUnitIdsWithoutStaffReservations: [unit.id],
+      conflicts: [],
+      staffReservedCount: 0,
+      staffReservationBookingIds: [],
+      staffReservationFrom: null,
+      staffReservationTo: null,
+      availableWithoutStaffReservations: 1,
+    });
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: product.id,
+          candidate_asset_ids: [unit.id],
+          scanned_asset_id: unit.id,
+          scanned_qr_id: "makey-unit-qr",
+          borrow_mode: "I_HAVE_ITEM",
+          kit_id: null,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).resolves.toMatchObject({
+      selectedPhysicalUnitIds: [unit.id],
+      asset: { id: unit.id, title: unit.title },
+      requiresStaffPreparation: false,
+    });
+  });
+
+  it("rejects a scanned unit that belongs to a different kit", async () => {
+    const product = {
+      ...asset,
+      id: "product-a",
+      title: "Makey Kit",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      assetModelId: null,
+      assetKits: [{ kitId: "makey-kit", kit: { maxBorrowDays: 45 } }],
+    };
+    const unit = {
+      ...product,
+      id: "unit-1",
+      title: "Arduino Kit #001",
+      assetKits: [{ kitId: "arduino-kit" }],
+    };
+    // The candidate query rejects this mismatched kit before loading the
+    // scanned asset itself, so only the requested product is read here.
+    dbMock.asset.findFirst.mockResolvedValueOnce(product);
+    dbMock.qr.findFirst.mockResolvedValue({ assetId: unit.id });
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: product.id,
+          candidate_asset_ids: [unit.id],
+          scanned_asset_id: unit.id,
+          scanned_qr_id: "arduino-unit-qr",
+          borrow_mode: "I_HAVE_ITEM",
+          kit_id: null,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).rejects.toMatchObject({ status: 409 });
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+  });
+
   it("rejects an individually tracked unit when Staff marked it unavailable", async () => {
     const product = {
       ...asset,
@@ -1228,7 +1930,7 @@ describe("IOIO borrow_item", () => {
   });
 
   it.each(["001", "#001"])(
-    "resolves a physical unit number entered as %s against the selected product",
+    "resolves a scanned physical unit label in the %s format",
     async (unitNumber) => {
       const product = {
         ...asset,
@@ -1293,6 +1995,7 @@ describe("IOIO borrow_item", () => {
         {
           asset_id: asset.id,
           candidate_asset_ids: ["unit-1"],
+          borrow_mode: "I_HAVE_ITEM",
           kit_id: null,
           quantity: 1,
           from,
@@ -1300,7 +2003,10 @@ describe("IOIO borrow_item", () => {
         },
         { context, request }
       )
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Scan the physical unit QR before confirming this borrowing.",
+    });
     expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
   });
 

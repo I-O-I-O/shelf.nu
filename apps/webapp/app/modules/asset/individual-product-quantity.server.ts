@@ -29,6 +29,94 @@ export type IndividualUnitAvailabilityCandidate = {
   availableToBook: boolean;
 };
 
+/** Resolve preparation state from the physical units held by Shelf bookings.
+ * Request.assetId is a logical product anchor and must never label that unit.
+ */
+export async function getIndividualUnitPreparationStates({
+  organizationId,
+  assetIds,
+}: {
+  organizationId: string;
+  assetIds: string[];
+}) {
+  const states = new Map<string, string[]>();
+  if (!assetIds.length) return states;
+
+  const bookingAssets = await db.bookingAsset.findMany({
+    where: {
+      assetId: { in: [...new Set(assetIds)] },
+      booking: { organizationId, status: BookingStatus.RESERVED },
+    },
+    select: { id: true, assetId: true, bookingId: true },
+  });
+  const bookingIds = [...new Set(bookingAssets.map((row) => row.bookingId))];
+  const operations = bookingIds.length
+    ? await db.ioioWriteOperation.findMany({
+        where: {
+          organizationId,
+          operationType: "IOIO_PREPARATION",
+          bookingId: { in: bookingIds },
+          OR: [
+            {
+              source: "IOIO_PREPARATION_REQUEST",
+              status: { in: ["ASSIGNING", "PENDING_PREPARATION", "ASSIGNED"] },
+            },
+            {
+              source: "IOIO_ASSISTANT",
+              status: { in: ["PENDING_PREPARATION", "READY_FOR_PICKUP"] },
+            },
+          ],
+        },
+        select: {
+          source: true,
+          status: true,
+          bookingId: true,
+          bookingAssetId: true,
+        },
+      })
+    : [];
+  for (const row of bookingAssets) {
+    const matching = operations.filter(
+      (operation) =>
+        operation.bookingId === row.bookingId &&
+        (operation.source === "IOIO_PREPARATION_REQUEST" ||
+          operation.bookingAssetId === row.id)
+    );
+    if (matching.length) {
+      states.set(
+        row.assetId,
+        matching.map((operation) =>
+          operation.status === "READY_FOR_PICKUP"
+            ? "READY_FOR_PICKUP"
+            : "PENDING_PREPARATION"
+        )
+      );
+    }
+  }
+
+  // A cancelled pickup remains staged until Staff explicitly puts it back.
+  const cancelledPickup = await db.ioioWriteOperation.findMany({
+    where: {
+      organizationId,
+      operationType: "IOIO_PREPARATION",
+      source: "IOIO_ASSISTANT",
+      status: "CANCELLED_PICKUP",
+      bookingAssetId: { not: null },
+      assetId: { in: [...new Set(assetIds)] },
+    },
+    select: { assetId: true },
+  });
+  for (const operation of cancelledPickup) {
+    if (operation.assetId) {
+      states.set(operation.assetId, [
+        ...(states.get(operation.assetId) ?? []),
+        "CANCELLED_PICKUP",
+      ]);
+    }
+  }
+  return states;
+}
+
 /**
  * Physical units staged for pickup stay unavailable after a Student cancels
  * or their pickup window expires. The operation state is the lifecycle source
@@ -52,11 +140,41 @@ export async function getPreparedPickupHeldUnitIds({
       assetId: { in: uniqueAssetIds },
       bookingAssetId: { not: null },
     },
-    select: { assetId: true },
+    select: { assetId: true, bookingId: true, status: true },
   });
+
+  const readyBookingIds = [
+    ...new Set(
+      operations
+        .filter((operation) => operation.status === "READY_FOR_PICKUP")
+        .flatMap((operation) => operation.bookingId ?? [])
+    ),
+  ];
+  const activeReadyBookings = readyBookingIds.length
+    ? await db.booking.findMany({
+        where: {
+          id: { in: readyBookingIds },
+          organizationId,
+          status: BookingStatus.RESERVED,
+        },
+        select: { id: true },
+      })
+    : [];
+  const activeReadyBookingIds = new Set(
+    activeReadyBookings.map((booking) => booking.id)
+  );
 
   return new Set(
     operations
+      .filter(
+        (operation) =>
+          operation.status === "CANCELLED_PICKUP" ||
+          (operation.status === "READY_FOR_PICKUP" &&
+            Boolean(
+              operation.bookingId &&
+                activeReadyBookingIds.has(operation.bookingId)
+            ))
+      )
       .map((operation) => operation.assetId)
       .filter((assetId): assetId is string => Boolean(assetId))
   );

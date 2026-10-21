@@ -308,6 +308,20 @@ describe("logical preparation physical-unit assignment", () => {
         data: expect.objectContaining({ status: "READY_FOR_PICKUP" }),
       })
     );
+    expect(dbMock.ioioWriteOperation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "request-1",
+          source: "IOIO_PREPARATION_REQUEST",
+        }),
+      })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "request-1" }),
+        data: expect.objectContaining({ status: "ASSIGNED" }),
+      })
+    );
   });
 
   it("skips two conflicted units and assigns the next reservable unit", async () => {
@@ -421,6 +435,71 @@ describe("logical preparation physical-unit assignment", () => {
 
     expect(updateBookingAssets).toHaveBeenCalledWith(
       expect.objectContaining({ assetIds: ["unit-002", "unit-003"] })
+    );
+  });
+
+  it("keeps an already-reserved quantity-pool preparation booking at its quantity", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "request-quantity-pool",
+      userId: "student-1",
+      assetId: "pool-kit",
+      selectedAssetIds: ["pool-kit"],
+      quantity: 2,
+      from: new Date("2026-10-11T00:00:00.000Z"),
+      to: new Date("2026-11-22T23:59:59.999Z"),
+      bookingId: "reserved-booking",
+      description: "Student requested equipment preparation.",
+    });
+    dbMock.asset.findFirst.mockResolvedValue({
+      id: "pool-kit",
+      title: "Makey Kit",
+      type: "QUANTITY_TRACKED",
+      quantity: 5,
+      maxBorrowDays: 45,
+      assetModel: null,
+      assetLocations: [],
+      assetKits: [],
+    });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "reserved-booking",
+      status: "RESERVED",
+      bookingAssets: [
+        { id: "reserved-kit-row", assetId: "pool-kit", quantity: 2 },
+      ],
+    });
+    dbMock.teamMember.findFirst.mockResolvedValue({ id: "student-member-1" });
+    dbMock.bookingAsset.findMany.mockResolvedValue([
+      {
+        id: "reserved-kit-row",
+        assetId: "pool-kit",
+        quantity: 2,
+        asset: { assetLocations: [] },
+      },
+    ] as never);
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+    dbMock.ioioWriteOperation.upsert.mockResolvedValue({
+      id: "preparation-task-1",
+      status: "PENDING_PREPARATION",
+    } as never);
+
+    await assignPreparationRequest({
+      organizationId: "ioio-lab",
+      operationId: "request-quantity-pool",
+      staffUserId: "staff-1",
+      assignedAssetIds: [],
+      hints: {} as never,
+    });
+
+    expect(updateBookingAssets).not.toHaveBeenCalled();
+    expect(reserveBooking).not.toHaveBeenCalled();
+    expect(dbMock.ioioWriteOperation.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          bookingId: "reserved-booking",
+          bookingAssetId: "reserved-kit-row",
+          quantity: 2,
+        }),
+      })
     );
   });
 
@@ -619,6 +698,76 @@ describe("markPreparationReady", () => {
           status: "DECLINED",
           reviewComment: "The kit is unavailable that week.",
           reviewedByUserId: "staff-1",
+        }),
+      })
+    );
+  });
+
+  it("releases the Shelf reservation when Staff declines a preparation request", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "logical-request-1",
+      bookingId: "reserved-booking",
+      source: "IOIO_PREPARATION_REQUEST",
+    });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "reserved-booking",
+      status: "RESERVED",
+    });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await declinePreparation({
+      organizationId: "ioio-lab",
+      operationId: "logical-request-1",
+      staffUserId: "staff-1",
+      hints: {} as never,
+      staffComment: "The kit is unavailable that week.",
+    });
+
+    expect(cancelBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "reserved-booking",
+        expectedStatus: "RESERVED",
+      })
+    );
+  });
+
+  it("declines only the selected repeated request and releases its own booking", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "preparation-request-2",
+      bookingId: "reserved-booking-2",
+      source: "IOIO_PREPARATION_REQUEST",
+    });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "reserved-booking-2",
+      status: "RESERVED",
+    });
+    dbMock.ioioWriteOperation.updateMany.mockResolvedValue({ count: 1 });
+
+    await declinePreparation({
+      organizationId: "ioio-lab",
+      operationId: "preparation-request-2",
+      staffUserId: "staff-1",
+      hints: {} as never,
+    });
+
+    expect(dbMock.ioioWriteOperation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "preparation-request-2" }),
+      })
+    );
+    expect(cancelBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "reserved-booking-2",
+        expectedStatus: "RESERVED",
+      })
+    );
+    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            expect.objectContaining({ id: "preparation-request-2" }),
+            expect.objectContaining({ bookingId: "reserved-booking-2" }),
+          ],
         }),
       })
     );
@@ -1159,6 +1308,33 @@ describe("cancelStudentPreparationRequest", () => {
       })
     );
     expect(cancelBooking).not.toHaveBeenCalled();
+  });
+
+  it("releases the Shelf reservation when the Student cancels before preparation", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "request-1",
+      source: "IOIO_PREPARATION_REQUEST",
+      status: "PENDING_PREPARATION",
+      bookingId: "booking-1",
+    });
+    dbMock.booking.findFirst.mockResolvedValue({
+      id: "booking-1",
+      status: "RESERVED",
+    });
+
+    await cancelStudentPreparationRequest({
+      organizationId: "ioio-lab",
+      operationId: "request-1",
+      borrowerUserId: "student-1",
+      hints: {} as never,
+    });
+
+    expect(cancelBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "booking-1",
+        expectedStatus: "RESERVED",
+      })
+    );
   });
 
   it("keeps a prepared unit reserved and creates a Staff put-back task", async () => {
