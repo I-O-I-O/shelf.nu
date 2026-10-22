@@ -186,6 +186,9 @@ function InlineLocationForm({
   const [selectedColor, setSelectedColor] = useState<string>();
   const busy = fetcher.state !== "idle";
   const label = `${locationType[0]?.toUpperCase()}${locationType.slice(1)}`;
+  const parentName = parentId
+    ? locations.find((location) => location.id === parentId)?.name
+    : null;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => inputRef.current?.focus(), 50);
@@ -201,6 +204,13 @@ function InlineLocationForm({
       <input type="hidden" name="intent" value="inline-create" />
       <input type="hidden" name="locationType" value={locationType} />
       <input type="hidden" name="parentId" value={parentId ?? ""} />
+      {locationType === "container" ? (
+        <p className="basis-full text-xs text-gray-600" aria-live="polite">
+          {parentName
+            ? `Adding container under ${parentName}`
+            : "Select a shelf before adding a container."}
+        </p>
+      ) : null}
       <label
         className="sr-only"
         htmlFor={`inline-${locationType}-${parentId ?? "root"}`}
@@ -235,7 +245,11 @@ function InlineLocationForm({
           />
         </div>
       ) : null}
-      <Button type="submit" size="sm" disabled={busy}>
+      <Button
+        type="submit"
+        size="sm"
+        disabled={busy || (locationType === "container" && !parentId)}
+      >
         {busy ? "Adding…" : "Add"}
       </Button>
       <Button
@@ -396,6 +410,10 @@ export function IoioLocationHierarchy({
         location.parentId === selectedSection?.id &&
         inferIoioLocationKind(location, locationsById) === "Shelves"
     ) ?? null;
+  const containerParentId =
+    selectedId && !selectedLocation
+      ? null
+      : selectedShelf?.id ?? (shelves.length === 1 ? shelves[0]!.id : null);
   const containersByShelf = shelves.map((shelf) => ({
     shelf,
     containers: (childrenByParentId.get(shelf.id) ?? []).filter(
@@ -497,9 +515,11 @@ export function IoioLocationHierarchy({
     if (
       !creating ||
       creating.locationType !== locationType ||
-      creating.parentId !== parentId
+      (locationType !== "container" && creating.parentId !== parentId)
     )
       return null;
+    const formParentId =
+      locationType === "container" ? parentId : creating.parentId;
     return (
       <div className="my-2 rounded-md bg-gray-50 px-3 py-2">
         <InlineLocationForm
@@ -507,7 +527,7 @@ export function IoioLocationHierarchy({
             creating.parentId ?? "root"
           }-${lastCreatedLocationId}`}
           locationType={creating.locationType}
-          parentId={creating.parentId}
+          parentId={formParentId}
           locations={locations}
           fetcher={fetcher}
           onCancel={() => setCreating(null)}
@@ -600,9 +620,7 @@ export function IoioLocationHierarchy({
     {
       id: "containers",
       type: "container",
-      parentId:
-        selectedShelf?.id ??
-        (shelves.length === 1 ? shelves[0]?.id ?? null : null),
+      parentId: containerParentId,
       disabled: !selectedSection || shelves.length === 0,
       prompt: !selectedRoom
         ? "Select a room first."
@@ -716,13 +734,7 @@ export function IoioLocationHierarchy({
                 />
                 {expanded ? (
                   <div className="py-1">
-                    {renderInlineForm(
-                      group.type,
-                      group.id === "containers" &&
-                        creating?.locationType === "container"
-                        ? creating.parentId
-                        : group.parentId
-                    )}
+                    {renderInlineForm(group.type, group.parentId)}
                     {group.prompt ? (
                       <p className="px-3 py-2 text-sm text-gray-500">
                         {group.prompt}
