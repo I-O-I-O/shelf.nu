@@ -187,6 +187,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
   const sourceAssets = await getStudentAssets({
     organizationId: auth.organizationId,
+    includeHidden: true,
   });
   const sourceAssetsById = new Map(
     sourceAssets.map((asset) => [asset.id, asset])

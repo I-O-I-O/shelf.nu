@@ -6,8 +6,10 @@ import {
   getIoioArchivedItemIds,
   IOIO_ARCHIVE_ITEM_TYPE,
 } from "~/modules/ioio-staff/archive.server";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "./reservation-constants";
 
-export const IOIO_STAFF_RESERVATION_DESCRIPTION = "IOIO staff reservation";
+export { IOIO_STAFF_RESERVATION_DESCRIPTION } from "./reservation-constants";
+
 export const IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT =
   "Student acknowledged IOIO staff reservation overlap.";
 

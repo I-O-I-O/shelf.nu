@@ -274,6 +274,7 @@ export const assetIndexFields = ({
     assetModel: {
       select: {
         id: true,
+        ioioHidden: true,
         ...ASSET_MODEL_IMAGE_SELECT.assetModel.select,
       },
     },

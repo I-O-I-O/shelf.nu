@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
   getAssetIndexSettings: vi.fn(),
   trashIoioItems: vi.fn(),
   archiveIoioItems: vi.fn(),
+  setIoioAssetHidden: vi.fn(),
   sendNotification: vi.fn(),
+  assetFindFirst: vi.fn(),
+  assetModelFindFirst: vi.fn(),
 }));
 
 // why: permission lookup is the authorization boundary; a fixed Staff result
@@ -31,6 +34,9 @@ vi.mock("~/modules/ioio-staff/archive.server", () => ({
   getIoioArchivedItemIds: vi.fn().mockResolvedValue([]),
   trashIoioItems: mocks.trashIoioItems,
 }));
+vi.mock("~/modules/ioio-staff/visibility.server", () => ({
+  setIoioAssetHidden: mocks.setIoioAssetHidden,
+}));
 vi.mock("~/modules/asset/service.server", () => ({
   addIndividualUnitsToAssetModel: vi.fn(),
   bulkDeleteAssets: vi.fn(),
@@ -41,10 +47,14 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
   sendNotification: mocks.sendNotification,
 }));
 
-// why: the action does not access the database directly; stubbing prevents
-// db.server's development connection from opening during route import.
+// why: route action tests need controlled product ownership and no database
+// connection; visibility authorization resolves the canonical AssetModel.
 vi.mock("~/database/db.server", () => ({
-  db: { user: { findUniqueOrThrow: vi.fn() } },
+  db: {
+    user: { findUniqueOrThrow: vi.fn() },
+    asset: { findFirst: mocks.assetFindFirst },
+    assetModel: { findFirst: mocks.assetModelFindFirst },
+  },
 }));
 
 import { action } from "~/routes/_layout+/assets._index";
@@ -76,6 +86,8 @@ describe("active Staff Inventory Trash action", () => {
       role: "ADMIN",
     });
     mocks.getAssetIndexSettings.mockResolvedValue({});
+    mocks.assetFindFirst.mockResolvedValue({ assetModelId: null });
+    mocks.assetModelFindFirst.mockResolvedValue(null);
     mocks.trashIoioItems.mockResolvedValue([
       { itemType: "ASSET", itemId: "asset-1" },
     ]);
@@ -125,5 +137,81 @@ describe("active Staff Inventory Trash action", () => {
 
     expect(result.init?.status).toBe(409);
     expect(result.data?.error?.message).toContain("checked out or in custody");
+  });
+
+  it("uses the update permission and visibility service for Hide asset", async () => {
+    const result = (await action(
+      createActionArgs({
+        context,
+        request: new Request("http://localhost/assets", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "hide-asset",
+            assetId: "makey-unit-001",
+          }),
+        }),
+      })
+    )) as unknown as { success: boolean; hidden: boolean };
+
+    expect(mocks.requirePermission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity: "asset",
+        action: "update",
+      })
+    );
+    expect(mocks.setIoioAssetHidden).toHaveBeenCalledWith({
+      assetId: "makey-unit-001",
+      organizationId: "org-1",
+      hidden: true,
+    });
+    expect(result).toMatchObject({ success: true, hidden: true });
+  });
+
+  it("uses AssetModel update permission for a linked product", async () => {
+    mocks.assetFindFirst.mockResolvedValue({ assetModelId: "makey-model" });
+    mocks.assetModelFindFirst.mockResolvedValue({ id: "makey-model" });
+
+    const result = await action(
+      createActionArgs({
+        context,
+        request: new Request("http://localhost/assets", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "hide-asset",
+            assetId: "makey-unit-001",
+          }),
+        }),
+      })
+    );
+
+    expect(mocks.requirePermission).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity: "assetModel",
+        action: "update",
+      })
+    );
+    expect(result).toMatchObject({ success: true, hidden: true });
+  });
+
+  it("uses the same visibility service for Unhide asset", async () => {
+    const result = (await action(
+      createActionArgs({
+        context,
+        request: new Request("http://localhost/assets", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "unhide-asset",
+            assetId: "makey-unit-001",
+          }),
+        }),
+      })
+    )) as unknown as { success: boolean; hidden: boolean };
+
+    expect(mocks.setIoioAssetHidden).toHaveBeenCalledWith({
+      assetId: "makey-unit-001",
+      organizationId: "org-1",
+      hidden: false,
+    });
+    expect(result).toMatchObject({ success: true, hidden: false });
   });
 });

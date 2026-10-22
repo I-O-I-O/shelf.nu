@@ -29,6 +29,7 @@ import {
   getStudentReturnIssueComment,
 } from "./return-item.shared";
 import { requireStudentRead, type IoioAuthSnapshot } from "./route.server";
+import { isIoioAssetHidden } from "./visibility.shared";
 
 type Context = Pick<LoaderFunctionArgs, "context" | "request"> & {
   /** Snapshot the authenticated actor for the whole return request. */
@@ -157,6 +158,11 @@ type ReturnTarget = {
       title: string;
       type: AssetType;
       returnHandling: AssetReturnHandling;
+      ioioHidden: boolean;
+      assetModel: {
+        organizationId: string;
+        ioioHidden: boolean;
+      } | null;
       assetLocations: Array<{ location: { id: string; name: string } }>;
     };
   };
@@ -250,6 +256,10 @@ async function loadReturnTarget({
               title: true,
               type: true,
               returnHandling: true,
+              ioioHidden: true,
+              assetModel: {
+                select: { organizationId: true, ioioHidden: true },
+              },
               assetLocations: {
                 select: { location: { select: { id: true, name: true } } },
                 take: 1,
@@ -424,6 +434,10 @@ export async function completeSubmittedReturn(
   if (operation.quantity > target.heldQuantity) {
     throw returnError("The requested return quantity is no longer held.", 409);
   }
+  const remainsHidden = isIoioAssetHidden(
+    target.bookingAsset.asset,
+    auth.organizationId
+  );
 
   const result = await partialCheckinBooking({
     id: target.booking.id,
@@ -477,6 +491,7 @@ export async function completeSubmittedReturn(
     status: "checked" as const,
     bookingId: result.booking.id,
     assetTitle: target.bookingAsset.asset.title,
+    remainsHidden,
   };
 }
 

@@ -267,6 +267,8 @@ model Asset {
   status                    AssetStatus         @default(AVAILABLE)
   valuation                 Float?              @map("value") // Field to store the monetary value of an asset
   availableToBook           Boolean             @default(true)
+  /// IOIO student-catalog visibility. Does not affect physical availability.
+  ioioHidden                Boolean             @default(false)
   requiresBorrowApproval    Boolean             @default(false)
   requiresStaffPreparation  Boolean             @default(false)
   requiresReturnPhoto       Boolean             @default(false)
@@ -538,6 +540,8 @@ model AssetModel {
   id          String  @id @default(cuid())
   name        String
   description String?
+  /// Hides the logical product and all linked units from IOIO student discovery.
+  ioioHidden  Boolean @default(false)
 
   /// Public URL (bucket `files`) of the model's cover image. Rendered by any
   /// asset of this model that has no image of its own. Public — and therefore

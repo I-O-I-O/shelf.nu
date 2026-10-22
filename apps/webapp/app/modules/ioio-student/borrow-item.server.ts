@@ -43,6 +43,7 @@ import {
   IOIO_BORROW_OPERATION,
 } from "./rate-limit.server";
 import { requireIoioBorrowerAccess } from "./route.server";
+import { isIoioAssetHidden } from "./visibility.shared";
 
 type Context = Pick<LoaderFunctionArgs, "context" | "request">;
 type BorrowOperationStatus =
@@ -113,6 +114,14 @@ function assertBorrowRole(role: string) {
       "Your Shelf role is not allowed to borrow IOIO items.",
       403
     );
+  }
+}
+
+function assertStudentBorrowVisible(
+  asset: NonNullable<Awaited<ReturnType<typeof loadBorrowAsset>>>
+) {
+  if (isIoioAssetHidden(asset, asset.organizationId)) {
+    throw borrowError("This item is hidden from student borrowing.", 409);
   }
 }
 
@@ -267,6 +276,7 @@ export async function resolvePhysicalUnitNumber(
       403
     );
   }
+  assertStudentBorrowVisible(requestedAsset);
   const normalizedUnitNumber = normalizePhysicalUnitNumber(unitNumber);
   if (!normalizedUnitNumber) {
     throw borrowError(
@@ -347,12 +357,17 @@ async function loadBorrowAsset(assetId: string, organizationId: string) {
     where: { id: assetId, organizationId },
     select: {
       id: true,
+      organizationId: true,
       title: true,
       type: true,
       quantity: true,
       assetModelId: true,
       status: true,
       availableToBook: true,
+      ioioHidden: true,
+      assetModel: {
+        select: { organizationId: true, ioioHidden: true },
+      },
       requiresBorrowApproval: true,
       requiresStaffPreparation: true,
       maxBorrowDays: true,
@@ -441,6 +456,7 @@ export async function getBorrowItemAvailability(
       403
     );
   }
+  assertStudentBorrowVisible(asset);
   const window =
     parsedFrom && parsedTo
       ? { from: parsedFrom, to: parsedTo }
@@ -629,6 +645,7 @@ export async function prepareBorrowItem(
       403
     );
   }
+  assertStudentBorrowVisible(requestedAsset);
   const requiresPhysicalUnit = requestedAsset.type === AssetType.INDIVIDUAL;
   const { from, to } = getImmediateBorrowingWindow(
     getEffectiveMaxBorrowDays(requestedAsset)
@@ -699,12 +716,17 @@ export async function prepareBorrowItem(
         },
         select: {
           id: true,
+          organizationId: true,
           title: true,
           type: true,
           quantity: true,
           assetModelId: true,
           status: true,
           availableToBook: true,
+          ioioHidden: true,
+          assetModel: {
+            select: { organizationId: true, ioioHidden: true },
+          },
           requiresBorrowApproval: true,
           requiresStaffPreparation: true,
           maxBorrowDays: true,
@@ -762,12 +784,17 @@ export async function prepareBorrowItem(
         },
         select: {
           id: true,
+          organizationId: true,
           title: true,
           type: true,
           quantity: true,
           assetModelId: true,
           status: true,
           availableToBook: true,
+          ioioHidden: true,
+          assetModel: {
+            select: { organizationId: true, ioioHidden: true },
+          },
           requiresBorrowApproval: true,
           requiresStaffPreparation: true,
           maxBorrowDays: true,
@@ -1026,6 +1053,7 @@ export async function acknowledgePreparationStaffReservation(
   ) {
     throw borrowError("Choose a valid preparation item and quantity.", 409);
   }
+  assertStudentBorrowVisible(asset);
   const candidateIds =
     asset.type === AssetType.INDIVIDUAL
       ? [...new Set(candidateAssetIds ?? [])].sort()
@@ -1120,6 +1148,7 @@ export async function requestPreparationForItem(
   if (!asset) {
     throw borrowError("The selected Shelf item is not in this workspace.", 403);
   }
+  assertStudentBorrowVisible(asset);
   if (!asset.requiresStaffPreparation) {
     throw borrowError(
       "This item can be borrowed directly without preparation.",
@@ -1876,6 +1905,17 @@ export async function borrowItem(
     );
   }
 
+  if (operation.status === "PREPARED") {
+    const proposedAsset = await loadBorrowAsset(
+      operation.assetId,
+      auth.organizationId
+    );
+    if (!proposedAsset) {
+      throw borrowError("The referenced Shelf asset no longer exists.", 404);
+    }
+    assertStudentBorrowVisible(proposedAsset);
+  }
+
   const existingMarkedBooking = await findMarkedBooking({
     organizationId: auth.organizationId,
     operationId: operation.id,
@@ -1942,6 +1982,7 @@ export async function borrowItem(
     const asset = await loadBorrowAsset(operation.assetId, auth.organizationId);
     if (!asset)
       throw borrowError("The referenced Shelf asset no longer exists.", 404);
+    if (!canResumeProcessing) assertStudentBorrowVisible(asset);
     const selectedPhysicalAssetIds =
       asset.type === AssetType.INDIVIDUAL
         ? getStoredSelectedAssetIds(operation.selectedAssetIds).length

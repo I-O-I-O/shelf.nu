@@ -4,8 +4,10 @@ const database = vi.hoisted(() => ({
   $transaction: vi.fn(),
   asset: { findMany: vi.fn(), findFirst: vi.fn(), delete: vi.fn() },
   custody: { findMany: vi.fn() },
-  bookingAsset: { findMany: vi.fn() },
+  bookingAsset: { findMany: vi.fn(), deleteMany: vi.fn() },
   bookingModelRequest: { findMany: vi.fn() },
+  booking: { findMany: vi.fn() },
+  ioioWriteOperation: { findMany: vi.fn() },
   kit: { findMany: vi.fn() },
   ioioArchivedItem: {
     findMany: vi.fn(),
@@ -21,6 +23,8 @@ const database = vi.hoisted(() => ({
 // requiring a running local database or changing inventory data.
 vi.mock("~/database/db.server", () => ({ db: database }));
 
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/reservation-constants";
+
 import {
   getIoioAssetLifecycleRedirectTarget,
   getIoioArchivedItemIds,
@@ -29,41 +33,73 @@ import {
   trashIoioItems,
 } from "./archive.server";
 
+const availableAsset = (id: string, title = id) => ({
+  id,
+  title,
+  status: "AVAILABLE",
+  assetModelId: null,
+  categoryId: null,
+  category: null,
+  assetLocations: [],
+});
+
+function setAssets(ids: string[], titles: string[] = ids) {
+  database.asset.findMany.mockImplementation(({ select }) =>
+    select?.type
+      ? ids.map((id) => ({
+          id,
+          title: titles[ids.indexOf(id)],
+          type: "INDIVIDUAL",
+        }))
+      : ids.map((id) => availableAsset(id, titles[ids.indexOf(id)]))
+  );
+}
+
+function setSuccessfulMarkers(ids: string[]) {
+  database.ioioArchivedItem.findMany.mockReset();
+  database.ioioArchivedItem.findMany
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce(
+      ids.map((itemId, index) => ({
+        id: `marker-${index + 1}`,
+        itemType: "ASSET",
+        itemId,
+      }))
+    );
+  database.ioioArchivedItem.createMany.mockResolvedValue({ count: ids.length });
+}
+
+function trashAssets(ids: string[]) {
+  return trashIoioItems({
+    organizationId: "org-1",
+    items: ids.map((itemId) => ({ itemType: "ASSET" as const, itemId })),
+    trashedById: "staff-1",
+  });
+}
+
 describe("IOIO asset archive lifecycle", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     const tx = {
       asset: database.asset,
       custody: database.custody,
       bookingAsset: database.bookingAsset,
       bookingModelRequest: database.bookingModelRequest,
+      booking: database.booking,
+      ioioWriteOperation: database.ioioWriteOperation,
       kit: database.kit,
       ioioArchivedItem: database.ioioArchivedItem,
     };
     database.$transaction.mockImplementation((callback) => callback(tx));
-    database.asset.findMany.mockImplementation(({ select }) =>
-      select?.type
-        ? [{ id: "asset-1", title: "IOIO image upload", type: "INDIVIDUAL" }]
-        : [
-            {
-              id: "asset-1",
-              status: "AVAILABLE",
-              assetModelId: null,
-              categoryId: null,
-              category: null,
-              assetLocations: [],
-            },
-          ]
-    );
+    setAssets(["asset-1"], ["IOIO image upload"]);
     database.kit.findMany.mockResolvedValue([]);
     database.custody.findMany.mockResolvedValue([]);
     database.bookingAsset.findMany.mockResolvedValue([]);
+    database.bookingAsset.deleteMany.mockResolvedValue({ count: 0 });
     database.bookingModelRequest.findMany.mockResolvedValue([]);
-    database.ioioArchivedItem.findMany
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        { id: "marker-1", itemType: "ASSET", itemId: "asset-1" },
-      ]);
+    database.booking.findMany.mockResolvedValue([]);
+    database.ioioWriteOperation.findMany.mockResolvedValue([]);
+    setSuccessfulMarkers(["asset-1"]);
     database.ioioArchivedItem.createMany.mockResolvedValue({ count: 1 });
   });
 
@@ -100,28 +136,8 @@ describe("IOIO asset archive lifecycle", () => {
 
   it("moves multiple normal Asset records to Trash by their Asset IDs", async () => {
     const ids = ["asset-1", "asset-2"];
-    database.asset.findMany.mockImplementation(({ select }) =>
-      select?.type
-        ? ids.map((id) => ({ id, title: id, type: "INDIVIDUAL" }))
-        : ids.map((id) => ({
-            id,
-            status: "AVAILABLE",
-            assetModelId: null,
-            categoryId: null,
-            category: null,
-            assetLocations: [],
-          }))
-    );
-    database.ioioArchivedItem.findMany
-      .mockReset()
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(
-        ids.map((itemId, index) => ({
-          id: `marker-${index + 1}`,
-          itemType: "ASSET",
-          itemId,
-        }))
-      );
+    setAssets(ids);
+    setSuccessfulMarkers(ids);
 
     await expect(
       trashIoioItems({
@@ -253,7 +269,15 @@ describe("IOIO asset archive lifecycle", () => {
 
   it("rejects Trash for an asset with an active booking without creating a marker", async () => {
     database.bookingAsset.findMany.mockResolvedValue([
-      { assetId: "asset-1", bookingId: "booking-1" },
+      {
+        assetId: "asset-1",
+        bookingId: "booking-1",
+        booking: {
+          status: "ONGOING",
+          description: "Student loan",
+          to: new Date("2026-10-25T00:00:00.000Z"),
+        },
+      },
     ]);
 
     await expect(
@@ -268,5 +292,226 @@ describe("IOIO asset archive lifecycle", () => {
     });
 
     expect(database.ioioArchivedItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["completed", "COMPLETE", new Date("2026-10-21T00:00:00.000Z")],
+    ["cancelled", "CANCELLED", new Date("2026-10-25T00:00:00.000Z")],
+    ["expired", "RESERVED", new Date("2026-10-01T00:00:00.000Z")],
+  ])(
+    "allows Trash when the only membership is a %s booking",
+    async (_label, status, to) => {
+      database.bookingAsset.findMany.mockResolvedValue([
+        {
+          assetId: "asset-1",
+          bookingId: "booking-history",
+          booking: { status, description: "Student booking", to },
+        },
+      ]);
+
+      await expect(trashAssets(["asset-1"])).resolves.toHaveLength(1);
+
+      expect(database.ioioArchivedItem.createMany).toHaveBeenCalled();
+    }
+  );
+
+  it("allows Trash for an available unit with only a soft IOIO calendar reservation", async () => {
+    database.bookingAsset.findMany.mockResolvedValue([
+      {
+        assetId: "asset-1",
+        bookingId: "course-reservation-1",
+        booking: {
+          status: "RESERVED",
+          description: IOIO_STAFF_RESERVATION_DESCRIPTION,
+          to: new Date("2027-01-30T23:59:59.999Z"),
+        },
+      },
+    ]);
+
+    await expect(trashAssets(["asset-1"])).resolves.toHaveLength(1);
+
+    expect(database.ioioArchivedItem.createMany).toHaveBeenCalled();
+    // The reversible Trash marker leaves the still-valid soft booking row intact.
+    expect(database.bookingAsset.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("allows all five available physical units to move to Trash despite soft reservations", async () => {
+    const ids = ["asset-1", "asset-2", "asset-3", "asset-4", "asset-5"];
+    setAssets(
+      ids,
+      ids.map((_, index) => `Makey Kit #00${index + 1}`)
+    );
+    setSuccessfulMarkers(ids);
+    database.bookingAsset.findMany.mockResolvedValue(
+      ids.map((assetId, index) => ({
+        assetId,
+        bookingId: `course-reservation-${index + 1}`,
+        booking: {
+          status: "RESERVED",
+          description: IOIO_STAFF_RESERVATION_DESCRIPTION,
+          to: new Date("2027-01-30T23:59:59.999Z"),
+        },
+      }))
+    );
+
+    await expect(trashAssets(ids)).resolves.toHaveLength(5);
+
+    expect(database.ioioArchivedItem.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining(
+        ids.map((itemId) => expect.objectContaining({ itemId }))
+      ),
+    });
+  });
+
+  it("reports only the genuinely blocked unit in a mixed bulk selection", async () => {
+    const ids = ["asset-1", "asset-2", "asset-3", "asset-4", "asset-5"];
+    setAssets(
+      ids,
+      ids.map((_, index) => `Makey Kit #00${index + 1}`)
+    );
+    database.bookingAsset.findMany.mockResolvedValue(
+      ids.map((assetId, index) => ({
+        assetId,
+        bookingId:
+          index === 2 ? "live-booking-3" : `course-reservation-${index + 1}`,
+        booking: {
+          status: "RESERVED",
+          description:
+            index === 2
+              ? "Student booking"
+              : IOIO_STAFF_RESERVATION_DESCRIPTION,
+          to: new Date("2027-01-30T23:59:59.999Z"),
+        },
+      }))
+    );
+
+    const rejection = trashAssets(ids);
+    const failure = await rejection.catch((error: unknown) => error);
+    expect(failure).toMatchObject({ status: 409 });
+    expect((failure as Error).message).toContain("Makey Kit #003 (asset-3)");
+    expect((failure as Error).message).not.toContain("Makey Kit #001");
+    expect(database.ioioArchivedItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps checked-out units blocked and identifies the unit", async () => {
+    database.asset.findMany.mockImplementation(({ select }) =>
+      select?.type
+        ? [{ id: "asset-1", title: "Makey Kit #001", type: "INDIVIDUAL" }]
+        : [
+            {
+              ...availableAsset("asset-1", "Makey Kit #001"),
+              status: "CHECKED_OUT",
+            },
+          ]
+    );
+
+    await expect(trashAssets(["asset-1"])).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("Makey Kit #001 (asset-1)"),
+    });
+
+    expect(database.ioioArchivedItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps a staged cancelled pickup blocked after its booking is cancelled", async () => {
+    database.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        assetId: "asset-1",
+        bookingId: "cancelled-booking-1",
+        status: "CANCELLED_PICKUP",
+      },
+    ]);
+
+    await expect(trashAssets(["asset-1"])).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("IOIO image upload (asset-1)"),
+    });
+
+    expect(database.booking.findMany).not.toHaveBeenCalled();
+    expect(database.ioioArchivedItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps a ready pickup blocked only while its Shelf booking is reserved", async () => {
+    database.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        assetId: "asset-1",
+        bookingId: "ready-booking-1",
+        status: "READY_FOR_PICKUP",
+      },
+    ]);
+    database.booking.findMany.mockResolvedValue([{ id: "ready-booking-1" }]);
+
+    await expect(trashAssets(["asset-1"])).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("active preparation or pickup"),
+    });
+
+    expect(database.booking.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["ready-booking-1"] },
+        organizationId: "org-1",
+        status: "RESERVED",
+      },
+      select: { id: true },
+    });
+  });
+
+  it("keeps a unit with an active preparation commitment blocked", async () => {
+    database.bookingAsset.findMany.mockResolvedValue([
+      {
+        assetId: "asset-1",
+        bookingId: "preparation-booking-1",
+        booking: {
+          status: "RESERVED",
+          description: IOIO_STAFF_RESERVATION_DESCRIPTION,
+          to: new Date("2027-01-30T23:59:59.999Z"),
+        },
+      },
+    ]);
+    database.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        assetId: "asset-1",
+        bookingAssetId: "booking-asset-1",
+        bookingId: "preparation-booking-1",
+        status: "PENDING_PREPARATION",
+      },
+    ]);
+    database.booking.findMany.mockResolvedValue([
+      { id: "preparation-booking-1" },
+    ]);
+
+    await expect(trashAssets(["asset-1"])).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("IOIO image upload (asset-1)"),
+    });
+
+    expect(database.ioioArchivedItem.createMany).not.toHaveBeenCalled();
+  });
+
+  it("ignores a soft model-level calendar request when validating physical units", async () => {
+    setAssets(["asset-1"], ["Makey Kit #001"]);
+    database.asset.findMany.mockImplementation(({ select }) =>
+      select?.type
+        ? [{ id: "asset-1", title: "Makey Kit #001", type: "INDIVIDUAL" }]
+        : [
+            {
+              ...availableAsset("asset-1", "Makey Kit #001"),
+              assetModelId: "model-1",
+            },
+          ]
+    );
+    database.bookingModelRequest.findMany.mockResolvedValue([
+      {
+        assetModelId: "model-1",
+        bookingId: "course-reservation-1",
+        booking: {
+          status: "RESERVED",
+          description: IOIO_STAFF_RESERVATION_DESCRIPTION,
+          to: new Date("2027-01-30T23:59:59.999Z"),
+        },
+      },
+    ]);
+
+    await expect(trashAssets(["asset-1"])).resolves.toHaveLength(1);
   });
 });

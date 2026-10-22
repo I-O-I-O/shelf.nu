@@ -148,6 +148,10 @@ function uniqueAssetIds(assetIds: string[]) {
   return [...new Set(assetIds)];
 }
 
+function isStaffInventoryItemHidden(item: StaffInventoryItem) {
+  return Boolean(item.ioioHidden || item.assetModel?.ioioHidden);
+}
+
 type StaffInventoryListProps = {
   headerActions?: ReactNode;
   customEmptyStateContent?: {
@@ -764,6 +768,7 @@ function StaffInventoryRow({
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
   const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
+  const isHidden = isStaffInventoryItemHidden(item);
   const [expanded, setExpanded] = useState(false);
   const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
     string[]
@@ -816,6 +821,11 @@ function StaffInventoryRow({
                 >
                   {item.logicalTitle}
                 </Button>
+                {isHidden ? (
+                  <Badge color="#E5E7EB" textColor="#374151" withDot={false}>
+                    Hidden
+                  </Badge>
+                ) : null}
                 {item.isExpandable ? (
                   <button
                     type="button"
@@ -1524,6 +1534,7 @@ function StaffInventoryMobileRow({
   const { availableQuantity, totalQuantity } =
     getStaffInventoryQuantities(item);
   const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
+  const isHidden = isStaffInventoryItemHidden(item);
   const [expanded, setExpanded] = useState(false);
   const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
     string[]
@@ -1571,6 +1582,11 @@ function StaffInventoryMobileRow({
         >
           {item.logicalTitle}
         </Button>
+        {isHidden ? (
+          <Badge color="#E5E7EB" textColor="#374151" withDot={false}>
+            Hidden
+          </Badge>
+        ) : null}
         {item.isExpandable ? (
           <button
             type="button"
@@ -1738,6 +1754,7 @@ function StaffInventoryActions({
   const setSelectedItems = useSetAtom(selectedBulkItemsAtom);
   const openBulkDialog = useSetAtom(openBulkDialogAtom);
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
+  const visibilityFetcher = useFetcher();
   const isRowSelected = selectedItems.some(
     (selectedItem) => bulkSelectionKey(selectedItem) === bulkSelectionKey(item)
   );
@@ -1745,6 +1762,17 @@ function StaffInventoryActions({
     item.isExpandable && physicalUnitIds.length > 0 && onPhysicalUnitAction;
   const assetModelId = item.assetModelId ?? item.assetModel?.id;
   const canEditGeneralItem = assetModelId ? canUpdateAssetModel : canUpdate;
+  const isHidden = isStaffInventoryItemHidden(item);
+
+  const toggleStudentVisibility = () => {
+    void visibilityFetcher.submit(
+      {
+        intent: isHidden ? "unhide-asset" : "hide-asset",
+        assetId: item.id,
+      },
+      { method: "post" }
+    );
+  };
 
   const selectActionTargets = () => {
     if (!isRowSelected) {
@@ -1846,6 +1874,18 @@ function StaffInventoryActions({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-52 max-w-60">
+              {canEditGeneralItem ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  disabled={visibilityFetcher.state !== "idle"}
+                  onSelect={toggleStudentVisibility}
+                >
+                  <span>{isHidden ? "Unhide asset" : "Hide asset"}</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canUpdate && (canReadQr || canDelete) ? (
+                <DropdownMenuSeparator />
+              ) : null}
               {canUpdate ? (
                 <DropdownMenuItem
                   className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"

@@ -26,6 +26,7 @@ import {
   IOIO_STAFF_RESERVATION_DESCRIPTION,
 } from "./availability.server";
 import { resolveFuzzyInventoryCandidates } from "./inventory-search.shared";
+import { isIoioAssetHidden } from "./visibility.shared";
 
 const ASSET_SELECT = {
   id: true,
@@ -39,11 +40,13 @@ const ASSET_SELECT = {
   thumbnailImageStoragePath: true,
   updatedAt: true,
   assetModelId: true,
+  ioioHidden: true,
   assetModel: {
     select: {
       id: true,
       name: true,
       organizationId: true,
+      ioioHidden: true,
       image: true,
       thumbnailImage: true,
       imageStoragePath: true,
@@ -360,11 +363,14 @@ export async function getStudentAssets({
   query,
   categoryId,
   locationId,
+  includeHidden = false,
 }: {
   organizationId: Organization["id"];
   query?: string | null;
   categoryId?: string | null;
   locationId?: string | null;
+  /** Staff calendar tooling can retain access to hidden products. */
+  includeHidden?: boolean;
 }) {
   const normalizedQuery = normalizeInventoryDiscoveryQuery(query);
   const [archivedAssetIds, archivedKitIds] = await Promise.all([
@@ -429,7 +435,10 @@ export async function getStudentAssets({
     orderBy: [{ title: "asc" }, { id: "asc" }],
   });
 
-  return shapeAssets(rows, organizationId, archivedKitIds);
+  const visibleRows = includeHidden
+    ? rows
+    : rows.filter((row) => !isIoioAssetHidden(row, organizationId));
+  return shapeAssets(visibleRows, organizationId, archivedKitIds);
 }
 
 /** Normalize only the discovery query; Shelf records are never changed. */
@@ -497,6 +506,8 @@ export async function findStudentAssetFuzzyMatches({
       AND c."organizationId" = a."organizationId"
     WHERE a."organizationId" = ${organizationId}
       ${archiveFilter}
+      AND a."ioioHidden" = false
+      AND (am."id" IS NULL OR am."ioioHidden" = false)
       AND (
         a."title" % ${normalizedQuery}
         OR word_similarity(${normalizedQuery}, a."title") >= 0.35
@@ -522,9 +533,11 @@ export async function findStudentAssetFuzzyMatches({
 export async function getStudentAsset({
   organizationId,
   assetId,
+  includeHidden = false,
 }: {
   organizationId: Organization["id"];
   assetId: string;
+  includeHidden?: boolean;
 }) {
   const [archivedAssetIds, archivedKitIds] = await Promise.all([
     getIoioArchivedItemIds({
@@ -544,7 +557,9 @@ export async function getStudentAsset({
     },
     select: ASSET_SELECT,
   });
-  if (!asset) return null;
+  if (!asset || (!includeHidden && isIoioAssetHidden(asset, organizationId))) {
+    return null;
+  }
   const [shaped] = await shapeAssets([asset], organizationId, archivedKitIds);
   return shaped ?? null;
 }
@@ -586,10 +601,17 @@ export async function getStudentLocations({
       organizationId,
       ...(archivedAssetIds.length ? { id: { notIn: archivedAssetIds } } : {}),
     },
-    select: { assetLocations: { select: { locationId: true } } },
+    select: {
+      ioioHidden: true,
+      assetModel: {
+        select: { organizationId: true, ioioHidden: true },
+      },
+      assetLocations: { select: { locationId: true } },
+    },
   });
   const assetCounts = new Map<string, number>();
   for (const asset of activeAssetPlacements) {
+    if (isIoioAssetHidden(asset, organizationId)) continue;
     for (const placement of asset.assetLocations) {
       assetCounts.set(
         placement.locationId,
@@ -681,6 +703,11 @@ export async function getStudentKits({
               type: true,
               quantity: true,
               availableToBook: true,
+              ioioHidden: true,
+              assetModelId: true,
+              assetModel: {
+                select: { organizationId: true, ioioHidden: true },
+              },
             },
           },
         },
@@ -694,7 +721,8 @@ export async function getStudentKits({
     const assetKits = kit.assetKits.filter(
       ({ asset }) =>
         asset.organizationId === organizationId &&
-        !archivedAssetIds.includes(asset.id)
+        !archivedAssetIds.includes(asset.id) &&
+        !isIoioAssetHidden(asset, organizationId)
     );
     const safeAssetKits = assetKits.map(({ quantity, asset }) => ({
       quantity,

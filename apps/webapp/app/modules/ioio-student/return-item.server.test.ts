@@ -174,6 +174,37 @@ describe("IOIO return_item", () => {
     );
   });
 
+  it("allows the borrower to prepare a return for an item hidden after checkout", async () => {
+    dbMock.booking.findFirst.mockResolvedValue({
+      ...booking,
+      bookingAssets: [
+        {
+          ...bookingAsset,
+          asset: {
+            ...bookingAsset.asset,
+            ioioHidden: true,
+            assetModel: null,
+          },
+        },
+      ],
+    });
+
+    await expect(
+      prepareReturnItem(
+        {
+          booking_id: booking.id,
+          booking_asset_id: bookingAsset.id,
+          asset_id: bookingAsset.assetId,
+          quantity: 1,
+        },
+        { context, request }
+      )
+    ).resolves.toMatchObject({
+      operationId: "operation-a",
+      asset: { id: bookingAsset.assetId },
+    });
+  });
+
   it("routes configured Return section items to Returns Area instead of normal storage", async () => {
     dbMock.booking.findFirst.mockResolvedValue({
       ...booking,
@@ -417,6 +448,48 @@ describe("IOIO return_item", () => {
         }),
         data: expect.objectContaining({ status: "SUCCEEDED" }),
       })
+    );
+  });
+
+  it("checks in a hidden item normally and reports that it remains hidden", async () => {
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue(
+      operation({ status: "SUBMITTED", reportType: "RETURN_ITEM" })
+    );
+    dbMock.booking.findFirst.mockResolvedValue({
+      ...booking,
+      bookingAssets: [
+        {
+          ...bookingAsset,
+          asset: {
+            ...bookingAsset.asset,
+            ioioHidden: true,
+            assetModel: null,
+          },
+        },
+      ],
+    });
+
+    await expect(
+      completeSubmittedReturn(
+        { operationId: "operation-a" },
+        {
+          context,
+          request,
+          auth: {
+            userId: "staff-a",
+            organizationId: auth.organizationId,
+            role: "OWNER",
+          },
+        }
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      status: "checked",
+      remainsHidden: true,
+    });
+
+    expect(checkinMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: booking.id })
     );
   });
 

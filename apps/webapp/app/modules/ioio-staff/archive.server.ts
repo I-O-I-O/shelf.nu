@@ -1,6 +1,7 @@
 import { db } from "~/database/db.server";
 import type { ExtendedPrismaClient } from "~/database/db.server";
 import { normalizeInventoryTitle } from "~/modules/asset/staff-inventory-view";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/reservation-constants";
 import { ShelfError } from "~/utils/error";
 
 export const IOIO_ARCHIVE_ITEM_TYPE = {
@@ -23,6 +24,25 @@ export const IOIO_ITEM_DISPOSITION = {
 } as const;
 
 const ACTIVE_BOOKING_STATUSES = ["RESERVED", "ONGOING", "OVERDUE"] as const;
+
+function isBlockingAssetBooking(
+  booking:
+    | { status: string; description: string | null; to: Date }
+    | null
+    | undefined,
+  checkedAt: Date
+) {
+  if (!booking) return false;
+  if (booking.status === "ONGOING" || booking.status === "OVERDUE") {
+    // These statuses represent a live loan, regardless of the planned end date.
+    return true;
+  }
+  return (
+    booking.status === "RESERVED" &&
+    booking.to > checkedAt &&
+    booking.description !== IOIO_STAFF_RESERVATION_DESCRIPTION
+  );
+}
 
 export type IoioItemDisposition =
   (typeof IOIO_ITEM_DISPOSITION)[keyof typeof IOIO_ITEM_DISPOSITION];
@@ -496,6 +516,7 @@ async function moveIoioItemsToDisposition({
               where: { organizationId, id: { in: expandedAssetIds } },
               select: {
                 id: true,
+                title: true,
                 status: true,
                 assetModelId: true,
                 categoryId: true,
@@ -539,57 +560,197 @@ async function moveIoioItemsToDisposition({
       }
 
       if (assets.length > 0) {
+        const checkedAt = new Date();
         const assetModelIds = assets.flatMap((asset) =>
           asset.assetModelId ? [asset.assetModelId] : []
         );
-        const [custodyRows, activeBookings, modelBookingRequests] =
-          await Promise.all([
-            tx.custody.findMany({
-              where: { assetId: { in: expandedAssetIds } },
-              select: { assetId: true },
-            }),
-            tx.bookingAsset.findMany({
-              where: {
-                assetId: { in: expandedAssetIds },
-                booking: { status: { in: [...ACTIVE_BOOKING_STATUSES] } },
+        const [
+          custodyRows,
+          bookingRows,
+          modelBookingRequests,
+          preparationOperations,
+        ] = await Promise.all([
+          tx.custody.findMany({
+            where: { assetId: { in: expandedAssetIds } },
+            select: { assetId: true },
+          }),
+          tx.bookingAsset.findMany({
+            where: {
+              assetId: { in: expandedAssetIds },
+              booking: {
+                organizationId,
+                status: { in: [...ACTIVE_BOOKING_STATUSES] },
               },
-              select: { assetId: true, bookingId: true },
-            }),
-            assetModelIds.length > 0
-              ? tx.bookingModelRequest.findMany({
-                  where: {
-                    assetModelId: { in: assetModelIds },
-                    fulfilledAt: null,
-                    booking: {
-                      status: { in: [...ACTIVE_BOOKING_STATUSES] },
+            },
+            select: {
+              assetId: true,
+              bookingId: true,
+              booking: {
+                select: {
+                  status: true,
+                  description: true,
+                  to: true,
+                },
+              },
+            },
+          }),
+          assetModelIds.length > 0
+            ? tx.bookingModelRequest.findMany({
+                where: {
+                  assetModelId: { in: assetModelIds },
+                  fulfilledAt: null,
+                  booking: {
+                    OR: [
+                      { status: { in: ["ONGOING", "OVERDUE"] } },
+                      {
+                        status: "RESERVED",
+                        to: { gt: checkedAt },
+                        OR: [
+                          {
+                            description: {
+                              not: IOIO_STAFF_RESERVATION_DESCRIPTION,
+                            },
+                          },
+                          { description: null },
+                        ],
+                      },
+                    ],
+                  },
+                },
+                select: {
+                  assetModelId: true,
+                  bookingId: true,
+                  booking: {
+                    select: {
+                      status: true,
+                      description: true,
+                      to: true,
                     },
                   },
-                  select: { assetModelId: true, bookingId: true },
-                })
-              : Promise.resolve([]),
-          ]);
+                },
+              })
+            : Promise.resolve([]),
+          tx.ioioWriteOperation.findMany({
+            where: {
+              organizationId,
+              operationType: "IOIO_PREPARATION",
+              status: {
+                in: [
+                  "PENDING_PREPARATION",
+                  "READY_FOR_PICKUP",
+                  "CANCELLED_PICKUP",
+                ],
+              },
+              assetId: { in: expandedAssetIds },
+              bookingAssetId: { not: null },
+            },
+            select: { assetId: true, bookingId: true, status: true },
+          }),
+        ]);
 
-        if (
-          assets.some((asset) => asset.status !== "AVAILABLE") ||
-          custodyRows.length > 0
-        ) {
+        const activeBookingRows = bookingRows.filter((row) =>
+          isBlockingAssetBooking(row.booking, checkedAt)
+        );
+        const activeModelBookingRequests = modelBookingRequests.filter((row) =>
+          isBlockingAssetBooking(row.booking, checkedAt)
+        );
+        const preparationBookingIds = [
+          ...new Set(
+            preparationOperations
+              .filter((operation) => operation.status !== "CANCELLED_PICKUP")
+              .flatMap((operation) => operation.bookingId ?? [])
+          ),
+        ];
+        const activePreparationBookings = preparationBookingIds.length
+          ? await tx.booking.findMany({
+              where: {
+                id: { in: preparationBookingIds },
+                organizationId,
+                status: "RESERVED",
+              },
+              select: { id: true },
+            })
+          : [];
+        const activePreparationBookingIds = new Set(
+          activePreparationBookings.map((booking) => booking.id)
+        );
+        const heldPreparationAssetIds = new Set(
+          preparationOperations
+            .filter(
+              (operation) =>
+                operation.status === "CANCELLED_PICKUP" ||
+                (["PENDING_PREPARATION", "READY_FOR_PICKUP"].includes(
+                  operation.status
+                ) &&
+                  Boolean(
+                    operation.bookingId &&
+                      activePreparationBookingIds.has(operation.bookingId)
+                  ))
+            )
+            .flatMap((operation) => operation.assetId ?? [])
+        );
+
+        const custodyAssetIds = new Set(custodyRows.map((row) => row.assetId));
+        const blockingAssetIds = new Set([
+          ...assets
+            .filter(
+              (asset) =>
+                asset.status !== "AVAILABLE" || custodyAssetIds.has(asset.id)
+            )
+            .map((asset) => asset.id),
+          ...activeBookingRows.map((row) => row.assetId),
+          ...heldPreparationAssetIds,
+        ]);
+        if (blockingAssetIds.size > 0) {
+          const blockingDetails = assets
+            .filter((asset) => blockingAssetIds.has(asset.id))
+            .map((asset) => {
+              const reasons: string[] = [];
+              if (
+                asset.status !== "AVAILABLE" ||
+                custodyAssetIds.has(asset.id)
+              ) {
+                reasons.push("checked out or in custody");
+              }
+              const bookingIds = [
+                ...new Set(
+                  activeBookingRows
+                    .filter((row) => row.assetId === asset.id)
+                    .map((row) => row.bookingId)
+                ),
+              ];
+              if (bookingIds.length) {
+                reasons.push(`active booking ${bookingIds.join(", ")}`);
+              }
+              if (heldPreparationAssetIds.has(asset.id)) {
+                reasons.push("active preparation or pickup");
+              }
+              return `${asset.title} (${asset.id}): ${reasons.join("; ")}`;
+            });
           throw new ShelfError({
             cause: null,
-            title: "Asset is currently in use",
-            message:
-              "One or more selected assets are checked out or in custody. Check them in before archiving or moving them to Trash.",
+            title: "Selected assets are currently in use",
+            message: `These selected units cannot be archived or moved to Trash: ${blockingDetails.join(
+              ", "
+            )}. Resolve the listed checkout, booking, or pickup first.`,
             label: "Assets",
             status: 409,
             shouldBeCaptured: false,
           });
         }
 
-        if (activeBookings.length > 0 || modelBookingRequests.length > 0) {
+        if (activeModelBookingRequests.length > 0) {
+          const bookingIds = [
+            ...new Set(activeModelBookingRequests.map((row) => row.bookingId)),
+          ];
           throw new ShelfError({
             cause: null,
-            title: "Asset has an active booking",
-            message:
-              "One or more selected assets have an active booking. Remove them from the booking before archiving or moving them to Trash.",
+            title: "Active booking request needs this product pool",
+            message: `The selected product pool is still needed by active booking request${
+              bookingIds.length === 1 ? "" : "s"
+            } ${bookingIds.join(
+              ", "
+            )}. Resolve those requests before archiving or moving these units to Trash.`,
             label: "Assets",
             status: 409,
             shouldBeCaptured: false,

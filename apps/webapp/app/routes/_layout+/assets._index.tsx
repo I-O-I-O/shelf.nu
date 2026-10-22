@@ -45,6 +45,7 @@ import {
   trashIoioItems,
 } from "~/modules/ioio-staff/archive.server";
 import { returnResolvedAssetToService } from "~/modules/ioio-staff/lab-status.server";
+import { setIoioAssetHidden } from "~/modules/ioio-staff/visibility.server";
 import assetCss from "~/styles/assets.css?url";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -183,6 +184,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       ASSET_LIFECYCLE_INTENT.ARCHIVE,
       ASSET_LIFECYCLE_INTENT.TRASH,
       "return-unit-to-service",
+      "hide-asset",
+      "unhide-asset",
       "add-individual-units",
       "create-preset",
       "rename-preset",
@@ -204,6 +207,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       [ASSET_LIFECYCLE_INTENT.ARCHIVE]: PermissionAction.delete,
       [ASSET_LIFECYCLE_INTENT.TRASH]: PermissionAction.delete,
       "return-unit-to-service": PermissionAction.update,
+      "hide-asset": PermissionAction.update,
+      "unhide-asset": PermissionAction.update,
       "add-individual-units": PermissionAction.update,
       "create-preset": PermissionAction.read,
       "rename-preset": PermissionAction.read,
@@ -211,10 +216,43 @@ export async function action({ context, request }: ActionFunctionArgs) {
       "toggle-star-preset": PermissionAction.read,
     };
 
+    let permissionEntity = PermissionEntity.asset;
+    if (intent === "hide-asset" || intent === "unhide-asset") {
+      const { assetId } = parseData(
+        formData,
+        z.object({ assetId: z.string().min(1) })
+      );
+      const { organizationId: readOrganizationId } = await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.asset,
+        action: PermissionAction.read,
+      });
+      const asset = await db.asset.findFirst({
+        where: { id: assetId, organizationId: readOrganizationId },
+        select: { assetModelId: true },
+      });
+      if (!asset) {
+        throw new Response("The selected inventory item could not be found.", {
+          status: 404,
+        });
+      }
+      if (asset.assetModelId) {
+        const model = await db.assetModel.findFirst({
+          where: {
+            id: asset.assetModelId,
+            organizationId: readOrganizationId,
+          },
+          select: { id: true },
+        });
+        if (model) permissionEntity = PermissionEntity.assetModel;
+      }
+    }
+
     const { organizationId, canUseBarcodes, role } = await requirePermission({
       userId,
       request,
-      entity: PermissionEntity.asset,
+      entity: permissionEntity,
       action: intent2ActionMap[intent],
     });
 
@@ -227,6 +265,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
     });
 
     switch (intent) {
+      case "hide-asset":
+      case "unhide-asset": {
+        const { assetId } = parseData(
+          formData,
+          z.object({ assetId: z.string().min(1) })
+        );
+        const hidden = intent === "hide-asset";
+        await setIoioAssetHidden({ assetId, organizationId, hidden });
+        sendNotification({
+          title: hidden ? "Asset hidden" : "Asset visible to students",
+          message: hidden
+            ? "Students can no longer discover or borrow this item. Existing loans are unchanged."
+            : "Students can discover and borrow this item again.",
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+        return payload({ success: true, assetId, hidden });
+      }
       case "return-unit-to-service": {
         if (role !== "ADMIN" && role !== "OWNER") {
           throw new Response("Staff access required", { status: 403 });

@@ -9,6 +9,7 @@ import { getLocationDescendantIds } from "~/modules/location/descendants.server"
 import { getIoioAvailability } from "./availability.server";
 import {
   getMyStudentLoans,
+  getStudentAsset,
   getStudentAssets,
   getStudentKits,
   getStudentLocations,
@@ -16,7 +17,7 @@ import {
 
 vi.mock("~/database/db.server", () => ({
   db: {
-    asset: { findMany: vi.fn() },
+    asset: { findFirst: vi.fn(), findMany: vi.fn() },
     booking: { findMany: vi.fn() },
     kit: { findMany: vi.fn() },
     location: { findMany: vi.fn() },
@@ -55,6 +56,98 @@ describe("student catalog source selectors", () => {
         itemType === "ASSET" ? ["archived-asset"] : ["archived-kit"]
       )
     );
+  });
+
+  it("hides standalone and model-linked products from student discovery only", async () => {
+    const makeAsset = (
+      id: string,
+      options: {
+        ioioHidden?: boolean;
+        modelHidden?: boolean;
+        assetModelId?: string | null;
+      } = {}
+    ) => ({
+      id,
+      organizationId: "org-1",
+      title: id,
+      description: null,
+      mainImage: null,
+      mainImageExpiration: null,
+      thumbnailImage: null,
+      updatedAt: new Date("2026-10-01T00:00:00.000Z"),
+      assetModelId: options.assetModelId ?? null,
+      ioioHidden: options.ioioHidden ?? false,
+      assetModel: options.assetModelId
+        ? {
+            id: options.assetModelId,
+            name: "Grouped product",
+            organizationId: "org-1",
+            ioioHidden: options.modelHidden ?? false,
+            image: null,
+            thumbnailImage: null,
+          }
+        : null,
+      status: "AVAILABLE",
+      type: "QUANTITY_TRACKED",
+      quantity: 5,
+      availableToBook: true,
+      maxBorrowDays: 45,
+      extensionBorrowDays: null,
+      requiresBorrowApproval: false,
+      requiresStaffPreparation: false,
+      sequentialId: null,
+      category: null,
+      assetLocations: [],
+      assetKits: [],
+      qrCodes: [],
+    });
+    vi.mocked(db.asset.findMany).mockResolvedValue([
+      makeAsset("visible"),
+      makeAsset("hidden-asset", { ioioHidden: true }),
+      makeAsset("hidden-model-unit", {
+        assetModelId: "hidden-model",
+        modelHidden: true,
+      }),
+    ] as never);
+    vi.mocked(getAssetAvailabilityBatch).mockResolvedValue(
+      new Map([
+        ["visible", { physicalAvailable: 5, bookable: 5 } as never],
+        ["hidden-asset", { physicalAvailable: 5, bookable: 5 } as never],
+        ["hidden-model-unit", { physicalAvailable: 5, bookable: 5 } as never],
+      ])
+    );
+
+    const studentAssets = await getStudentAssets({ organizationId: "org-1" });
+    const staffAssets = await getStudentAssets({
+      organizationId: "org-1",
+      includeHidden: true,
+    });
+
+    expect(studentAssets.map(({ id }) => id)).toEqual(["visible"]);
+    expect(staffAssets.map(({ id }) => id)).toEqual([
+      "visible",
+      "hidden-asset",
+      "hidden-model-unit",
+    ]);
+    expect(
+      staffAssets.slice(1).map(({ availableQuantity }) => availableQuantity)
+    ).toEqual([5, 5]);
+  });
+
+  it("does not resolve a hidden asset through direct student detail access", async () => {
+    vi.mocked(db.asset.findFirst).mockResolvedValue({
+      id: "hidden-asset",
+      organizationId: "org-1",
+      ioioHidden: true,
+      assetModel: null,
+    } as never);
+
+    const asset = await getStudentAsset({
+      organizationId: "org-1",
+      assetId: "hidden-asset",
+    });
+
+    expect(asset).toBeNull();
   });
 
   it("uses the same org-scoped Shelf asset records and physical availability as Staff", async () => {
@@ -446,7 +539,13 @@ describe("student catalog source selectors", () => {
 
     expect(db.asset.findMany).toHaveBeenCalledWith({
       where: { organizationId: "org-1", id: { notIn: ["archived-asset"] } },
-      select: { assetLocations: { select: { locationId: true } } },
+      select: {
+        ioioHidden: true,
+        assetModel: {
+          select: { organizationId: true, ioioHidden: true },
+        },
+        assetLocations: { select: { locationId: true } },
+      },
     });
     expect(locations).toMatchObject([
       {
@@ -500,6 +599,20 @@ describe("student catalog source selectors", () => {
           {
             quantity: 1,
             asset: {
+              id: "hidden-asset",
+              organizationId: "org-1",
+              title: "Hidden board",
+              type: "INDIVIDUAL",
+              quantity: null,
+              availableToBook: true,
+              ioioHidden: true,
+              assetModelId: null,
+              assetModel: null,
+            },
+          },
+          {
+            quantity: 1,
+            asset: {
               id: "foreign-asset",
               organizationId: "org-2",
               title: "Foreign asset",
@@ -536,6 +649,9 @@ describe("student catalog source selectors", () => {
     });
     expect(kits[0]).not.toHaveProperty("organizationId");
     expect(kits[0].assetKits[0]?.asset).not.toHaveProperty("organizationId");
+    expect(kits[0].assetKits.map(({ asset }) => asset.id)).toEqual([
+      "member-1",
+    ]);
   });
 });
 
@@ -560,6 +676,54 @@ describe("student Loans quantity representation", () => {
         }),
       })
     );
+  });
+
+  it("keeps an existing loan visible when its product is hidden", async () => {
+    const hiddenLoan = {
+      id: "hidden-product-loan",
+      name: "IOIO borrow — Makey Kit",
+      status: "ONGOING",
+      from: new Date("2026-10-20T09:00:00.000Z"),
+      to: new Date("2026-11-20T17:00:00.000Z"),
+      bookingAssets: [
+        {
+          id: "hidden-product-booking-asset",
+          quantity: 1,
+          checkedOutAt: new Date("2026-10-20T09:00:00.000Z"),
+          checkedInAt: null,
+          sourceKitId: null,
+          asset: {
+            id: "hidden-product",
+            title: "Makey Kit",
+            type: "QUANTITY_TRACKED",
+            sequentialId: null,
+            maxBorrowDays: 45,
+            extensionBorrowDays: null,
+            returnHandling: "RETURN_TO_SHELF",
+            mainImage: null,
+            thumbnailImage: null,
+            mainImageStoragePath: null,
+            thumbnailImageStoragePath: null,
+            assetModel: null,
+            assetLocations: [],
+          },
+        },
+      ],
+      consumptionLogs: [],
+    };
+    vi.mocked(db.teamMember.findMany).mockResolvedValue([] as never);
+    vi.mocked(db.booking.findMany).mockResolvedValue([hiddenLoan] as never);
+
+    const loans = await getMyStudentLoans({
+      organizationId: "org-1",
+      userId: "student-1",
+    });
+
+    expect(loans).toHaveLength(1);
+    expect(loans[0]).toMatchObject({
+      id: "hidden-product-loan",
+      bookingAssets: [{ asset: { id: "hidden-product", title: "Makey Kit" } }],
+    });
   });
 
   it("keeps repeated same-item preparation reservations as separate loan requests", async () => {

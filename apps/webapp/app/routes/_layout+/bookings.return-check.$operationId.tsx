@@ -37,6 +37,7 @@ import { getSafeReturnTo } from "~/modules/booking/return-review-navigation";
 import { disableReturnedAssetFromUse } from "~/modules/ioio-staff/return-inspection.server";
 import { completeSubmittedReturn } from "~/modules/ioio-student/return-item.server";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
+import { isIoioAssetHidden } from "~/modules/ioio-student/visibility.shared";
 import {
   getIoioKitDisplayName,
   getIoioPhysicalUnitDisplayName,
@@ -164,6 +165,10 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
                   title: true,
                   type: true,
                   returnHandling: true,
+                  ioioHidden: true,
+                  assetModel: {
+                    select: { organizationId: true, ioioHidden: true },
+                  },
                   mainImage: true,
                   thumbnailImage: true,
                 },
@@ -261,6 +266,7 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
           },
           isKit,
           isProblem,
+          isHidden: isIoioAssetHidden(bookingAsset.asset, auth.organizationId),
           quantity: operation.quantity,
           returnedBy: memberName || "Shelf user",
           returnedAt: operation.createdAt,
@@ -388,6 +394,15 @@ export default function ReturnCheckPage() {
           </Link>
         </h1>
       </header>
+      {task.isHidden ? (
+        <p
+          role="status"
+          className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-semibold text-gray-800"
+        >
+          Hidden from students. Checking this return will not make the product
+          visible again.
+        </p>
+      ) : null}
       <section className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
         <div className="flex flex-wrap gap-4">
           <Link

@@ -107,12 +107,15 @@ const auth = {
 };
 const asset = {
   id: "asset-a",
+  organizationId: "org-a",
   title: "Arduino Nano",
   type: "QUANTITY_TRACKED" as const,
   assetModelId: null,
   quantity: 8,
   status: "AVAILABLE" as const,
   availableToBook: true,
+  ioioHidden: false,
+  assetModel: null,
   assetLocations: [{ location: { name: "B477 / Shelf A1" } }],
   assetKits: [],
 };
@@ -181,6 +184,82 @@ describe("IOIO borrow_item", () => {
       })
     );
     expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks new borrow proposals for a hidden product without changing availability", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      ioioHidden: false,
+      assetModel: { organizationId: "org-a", ioioHidden: true },
+    });
+
+    await expect(
+      prepareBorrowItem(
+        {
+          asset_id: asset.id,
+          kit_id: null,
+          quantity: 1,
+          from,
+          to,
+        },
+        { context, request }
+      )
+    ).rejects.toThrow("hidden from student borrowing");
+
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks QR unit resolution when the product is hidden", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      ioioHidden: true,
+    });
+
+    await expect(
+      resolvePhysicalUnitNumber(
+        { assetId: asset.id, unitNumber: "001" },
+        { context, request }
+      )
+    ).rejects.toThrow("hidden from student borrowing");
+
+    expect(dbMock.asset.findMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a prepared proposal after Hide before claiming its token", async () => {
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      id: "op-a",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      operationType: "BORROW_ITEM",
+      status: "PREPARED",
+      assetId: asset.id,
+      kitId: null,
+      quantity: 1,
+      selectedAssetIds: null,
+      from: new Date(from),
+      to: new Date(to),
+      source: "IOIO_STUDENT_BASKET",
+      bookingId: null,
+      createdAt: new Date(),
+      failureCode: null,
+      description: null,
+    });
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      ioioHidden: true,
+    });
+
+    await expect(
+      borrowItem(
+        { confirmationToken: "token-a", quantity: 1 },
+        { context, request }
+      )
+    ).rejects.toThrow("hidden from student borrowing");
+
+    expect(dbMock.ioioWriteOperation.updateMany).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
+    expect(checkoutBookingMock).not.toHaveBeenCalled();
   });
 
   it("borrows an immediately available quantity-tracked asset through Shelf without preparation", async () => {
