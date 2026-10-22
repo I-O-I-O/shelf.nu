@@ -264,4 +264,34 @@ describe("getIoioAvailability", () => {
       })
     );
   });
+
+  it("reports five physical units when a course reservation books all five", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      id: "motor",
+      type: AssetType.QUANTITY_TRACKED,
+      quantity: 5,
+      availableToBook: true,
+    });
+    dbMock.bookingAsset.findMany.mockResolvedValue([
+      {
+        assetId: "motor",
+        bookingId: "course-reservation",
+        quantity: 5,
+        booking: { from, to },
+      },
+    ]);
+    getAssetAvailabilityMock
+      .mockResolvedValueOnce({ bookable: 0, physicalAvailable: 5 })
+      .mockResolvedValueOnce({ bookable: 5, physicalAvailable: 5 });
+
+    const result = await getIoioAvailability({
+      organizationId: "org-a",
+      productId: "motor",
+      from,
+      to,
+    });
+    expect(result.availableCount).toBe(0);
+    expect(result.availableWithoutStaffReservations).toBe(5);
+    expect(result.staffReservedCount).toBe(5);
+  });
 });

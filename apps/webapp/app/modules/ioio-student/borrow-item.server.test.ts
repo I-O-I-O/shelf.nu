@@ -92,6 +92,7 @@ vi.mock("~/utils/logger", () => ({
 import {
   borrowItem,
   acknowledgeBorrowItemStaffReservation,
+  acknowledgePreparationStaffReservation,
   prepareBorrowItem,
   requestPreparationForItem,
   resolvePhysicalUnitNumber,
@@ -121,6 +122,8 @@ const to = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 describe("IOIO borrow_item", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    dbMock.ioioWriteOperation.findFirst.mockReset();
+    dbMock.ioioWriteOperation.findUnique.mockReset();
     requireIoioBorrowerAccessMock.mockResolvedValue(auth);
     dbMock.$transaction.mockImplementation((callback) => callback(dbMock));
     dbMock.$queryRaw.mockResolvedValue([
@@ -487,6 +490,9 @@ describe("IOIO borrow_item", () => {
       { context, request }
     );
 
+    expect(createBookingMock).toHaveBeenCalledTimes(1);
+    expect(reserveBookingMock).toHaveBeenCalledTimes(1);
+
     expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -643,7 +649,7 @@ describe("IOIO borrow_item", () => {
     expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
   });
 
-  it("persists an acknowledged course overlap on the preparation request", async () => {
+  it("acknowledges only the selected preparation conflict without submitting, then submits on final confirmation", async () => {
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
       requiresStaffPreparation: true,
@@ -671,14 +677,48 @@ describe("IOIO borrow_item", () => {
       availableWithoutStaffReservations: 8,
     });
 
+    const acknowledgement = await acknowledgePreparationStaffReservation(
+      { assetId: asset.id, quantity: 1 },
+      { context, request }
+    );
+    expect(acknowledgement.confirmationToken).toBeTruthy();
+    expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          source: "IOIO_PREPARATION_RESERVATION_ACKNOWLEDGEMENT",
+          status: "PREPARED",
+          assetId: asset.id,
+          quantity: 1,
+        }),
+      })
+    );
+    expect(createBookingMock).not.toHaveBeenCalled();
+    expect(reserveBookingMock).not.toHaveBeenCalled();
+    expect(checkoutBookingMock).not.toHaveBeenCalled();
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      operationType: "IOIO_PREPARATION",
+      source: "IOIO_PREPARATION_RESERVATION_ACKNOWLEDGEMENT",
+      status: "PREPARED",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      assetId: asset.id,
+      quantity: 1,
+      selectedAssetIds: [asset.id],
+      reviewComment: JSON.stringify(["course-booking"]),
+      createdAt: new Date(),
+    });
+
     await requestPreparationForItem(
       {
         assetId: asset.id,
         quantity: 1,
-        acknowledgeStaffReservationOverlap: true,
+        reservationAcknowledgementToken: acknowledgement.confirmationToken,
       },
       { context, request }
     );
+
+    expect(createBookingMock).toHaveBeenCalledTimes(1);
+    expect(reserveBookingMock).toHaveBeenCalledTimes(1);
 
     expect(dbMock.ioioWriteOperation.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -689,6 +729,48 @@ describe("IOIO borrow_item", () => {
         }),
       })
     );
+  });
+
+  it("rejects a preparation acknowledgement issued for another item", async () => {
+    dbMock.asset.findFirst.mockResolvedValue({
+      ...asset,
+      requiresStaffPreparation: true,
+    });
+    dbMock.ioioWriteOperation.findFirst.mockResolvedValue(null);
+    getIoioAvailabilityMock.mockResolvedValue({
+      totalActive: 5,
+      availableCount: 0,
+      availableUnitIds: [],
+      availableUnitIdsWithoutStaffReservations: [],
+      staffReservedCount: 5,
+      staffReservationBookingIds: ["course-booking"],
+      availableWithoutStaffReservations: 5,
+    });
+    dbMock.ioioWriteOperation.findUnique.mockResolvedValue({
+      operationType: "IOIO_PREPARATION",
+      source: "IOIO_PREPARATION_RESERVATION_ACKNOWLEDGEMENT",
+      status: "PREPARED",
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      assetId: "different-item",
+      quantity: 1,
+      selectedAssetIds: ["different-item"],
+      reviewComment: JSON.stringify(["course-booking"]),
+      createdAt: new Date(),
+    });
+
+    await expect(
+      requestPreparationForItem(
+        {
+          assetId: asset.id,
+          quantity: 1,
+          reservationAcknowledgementToken:
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+        { context, request }
+      )
+    ).rejects.toThrow("Confirm that you have permission");
+    expect(createBookingMock).not.toHaveBeenCalled();
   });
 
   it("rejects a forged final override without the stored acknowledgement", async () => {

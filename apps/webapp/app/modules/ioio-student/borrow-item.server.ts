@@ -54,6 +54,8 @@ type BorrowOperationStatus =
   | "PENDING_APPROVAL";
 
 const BORROW_PROPOSAL_TTL_MS = 10 * 60 * 1000;
+const PREPARATION_ACKNOWLEDGEMENT_SOURCE =
+  "IOIO_PREPARATION_RESERVATION_ACKNOWLEDGEMENT";
 function hasStaffReservationAcknowledgement(
   description: string | null | undefined
 ) {
@@ -1005,6 +1007,87 @@ export async function acknowledgeBorrowItemStaffReservation(
   return { ok: true as const, acknowledged: true as const };
 }
 
+/** Record permission for one preparation item without reserving or checking out stock. */
+export async function acknowledgePreparationStaffReservation(
+  {
+    assetId,
+    candidateAssetIds,
+    quantity,
+  }: { assetId: string; candidateAssetIds?: string[]; quantity: number },
+  { context, request }: Context
+) {
+  const auth = await requireIoioBorrowerAccess({ context, request });
+  assertBorrowRole(auth.role);
+  const asset = await loadBorrowAsset(assetId, auth.organizationId);
+  if (
+    !asset?.requiresStaffPreparation ||
+    !Number.isInteger(quantity) ||
+    quantity < 1
+  ) {
+    throw borrowError("Choose a valid preparation item and quantity.", 409);
+  }
+  const candidateIds =
+    asset.type === AssetType.INDIVIDUAL
+      ? [...new Set(candidateAssetIds ?? [])].sort()
+      : [asset.id];
+  if (asset.type === AssetType.INDIVIDUAL) {
+    const candidates = await loadBorrowPhysicalUnitCandidates({
+      requestedAsset: asset,
+      candidateAssetIds: candidateIds,
+      organizationId: auth.organizationId,
+    });
+    if (!candidateIds.length || candidates.length !== candidateIds.length) {
+      throw borrowError("The requested Kit units could not be verified.", 409);
+    }
+    await assertPhysicalUnitsNotArchived(candidateIds, auth.organizationId);
+  }
+  const { from, to } = getImmediateBorrowingWindow(
+    getEffectiveMaxBorrowDays(asset)
+  );
+  const availability = await getIoioAvailability({
+    organizationId: auth.organizationId,
+    productId: asset.id,
+    candidateAssetIds:
+      asset.type === AssetType.INDIVIDUAL ? candidateIds : undefined,
+    from,
+    to,
+  });
+  if (!availability.staffReservationBookingIds.length) {
+    throw borrowError(
+      "There is no overlapping course reservation to confirm.",
+      409
+    );
+  }
+  if (quantity > availability.availableWithoutStaffReservations) {
+    throw borrowError(
+      "The requested quantity is not physically available.",
+      409
+    );
+  }
+  const confirmationToken = randomUUID();
+  await db.ioioWriteOperation.create({
+    data: {
+      operationType: IOIO_PREPARATION_OPERATION,
+      source: PREPARATION_ACKNOWLEDGEMENT_SOURCE,
+      status: "PREPARED",
+      idempotencyKey: confirmationToken,
+      userId: auth.userId,
+      organizationId: auth.organizationId,
+      reportType: IOIO_PREPARATION_OPERATION,
+      description: IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT,
+      assetId: asset.id,
+      selectedAssetIds: candidateIds,
+      quantity,
+      from,
+      to,
+      reviewComment: JSON.stringify(
+        availability.staffReservationBookingIds.sort()
+      ),
+    },
+  });
+  return { confirmationToken };
+}
+
 /**
  * Persist a logical preparation request without assigning a physical unit or
  * creating a native booking. Staff assigns and checks the actual unit later;
@@ -1016,13 +1099,13 @@ export async function requestPreparationForItem(
     candidateAssetIds,
     quantity,
     submissionToken,
-    acknowledgeStaffReservationOverlap = false,
+    reservationAcknowledgementToken,
   }: {
     assetId: string;
     candidateAssetIds?: string[];
     quantity: number;
     submissionToken?: string;
-    acknowledgeStaffReservationOverlap?: boolean;
+    reservationAcknowledgementToken?: string;
   },
   { context, request }: Context
 ) {
@@ -1163,31 +1246,59 @@ export async function requestPreparationForItem(
   });
   const hasSoftReservationOverlap =
     availability.staffReservationBookingIds.length > 0;
-  if (acknowledgeStaffReservationOverlap && !hasSoftReservationOverlap) {
-    throw borrowError(
-      "There is no overlapping course reservation to confirm.",
-      409
-    );
-  }
-  if (hasSoftReservationOverlap && !acknowledgeStaffReservationOverlap) {
-    throw borrowError(
-      "A course reservation overlaps these dates. Confirm that you have permission before continuing.",
-      409
-    );
+  if (hasSoftReservationOverlap) {
+    const acknowledgement = reservationAcknowledgementToken
+      ? await db.ioioWriteOperation.findUnique({
+          where: { idempotencyKey: reservationAcknowledgementToken },
+          select: {
+            operationType: true,
+            source: true,
+            status: true,
+            userId: true,
+            organizationId: true,
+            assetId: true,
+            quantity: true,
+            selectedAssetIds: true,
+            reviewComment: true,
+          },
+        })
+      : null;
+    const acknowledgedIds = Array.isArray(acknowledgement?.selectedAssetIds)
+      ? acknowledgement.selectedAssetIds
+          .filter((id): id is string => typeof id === "string")
+          .sort()
+      : [];
+    if (
+      acknowledgement?.operationType !== IOIO_PREPARATION_OPERATION ||
+      acknowledgement.source !== PREPARATION_ACKNOWLEDGEMENT_SOURCE ||
+      acknowledgement.status !== "PREPARED" ||
+      acknowledgement.userId !== auth.userId ||
+      acknowledgement.organizationId !== auth.organizationId ||
+      acknowledgement.assetId !== asset.id ||
+      acknowledgement.quantity !== quantity ||
+      acknowledgedIds.join(",") !== [...logicalCandidateIds].sort().join(",") ||
+      acknowledgement.reviewComment !==
+        JSON.stringify([...availability.staffReservationBookingIds].sort())
+    ) {
+      throw borrowError(
+        "Confirm that you have permission for this course reservation before continuing.",
+        409
+      );
+    }
   }
   if (
     quantity >
-    (acknowledgeStaffReservationOverlap
+    (hasSoftReservationOverlap
       ? availability.availableWithoutStaffReservations
       : availability.availableCount)
   ) {
     throw borrowError(
       `Only ${
-        acknowledgeStaffReservationOverlap
+        hasSoftReservationOverlap
           ? availability.availableWithoutStaffReservations
           : availability.availableCount
       } unit${
-        (acknowledgeStaffReservationOverlap
+        (hasSoftReservationOverlap
           ? availability.availableWithoutStaffReservations
           : availability.availableCount) === 1
           ? ""
@@ -1209,7 +1320,7 @@ export async function requestPreparationForItem(
 
   const selectedPhysicalAssetIds =
     asset.type === AssetType.INDIVIDUAL
-      ? (acknowledgeStaffReservationOverlap
+      ? (hasSoftReservationOverlap
           ? availability.availableUnitIdsWithoutStaffReservations
           : availability.availableUnitIds
         ).slice(0, quantity)
@@ -1233,7 +1344,7 @@ export async function requestPreparationForItem(
       userId: auth.userId,
       organizationId: auth.organizationId,
       reportType: IOIO_PREPARATION_OPERATION,
-      description: acknowledgeStaffReservationOverlap
+      description: hasSoftReservationOverlap
         ? `Student requested equipment preparation. ${IOIO_STAFF_RESERVATION_ACKNOWLEDGEMENT}`
         : "Student requested equipment preparation.",
       assetId: asset.id,
@@ -1308,7 +1419,7 @@ export async function requestPreparationForItem(
       isSelfServiceOrBase: auth.role === "SELF_SERVICE",
       tags: [],
       userId: auth.userId,
-      ignoreBookingIds: acknowledgeStaffReservationOverlap
+      ignoreBookingIds: hasSoftReservationOverlap
         ? availability.staffReservationBookingIds
         : [],
       allowImmediateStart: true,

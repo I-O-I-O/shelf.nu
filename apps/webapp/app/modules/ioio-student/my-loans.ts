@@ -4,8 +4,17 @@ export type PendingStudentReturnReference = {
 };
 
 export function splitStudentLoanSections<
-  TLoan extends { id: string; status?: string; bookingAssets: TAsset[] },
-  TAsset extends { id: string },
+  TLoan extends {
+    id: string;
+    status?: string;
+    from?: Date | string;
+    bookingAssets: TAsset[];
+  },
+  TAsset extends {
+    id: string;
+    returnedAt?: Date | string | null;
+    checkedOutAt?: Date | string | null;
+  },
 >(loans: TLoan[], pendingReturns: PendingStudentReturnReference[]) {
   const pendingKeys = new Set(
     pendingReturns
@@ -22,7 +31,28 @@ export function splitStudentLoanSections<
   const isPending = (bookingId: string, bookingAssetId: string) =>
     pendingKeys.has(`${bookingId}:${bookingAssetId}`);
 
-  const pastLoans = loans.filter((loan) => loan.status === "COMPLETE");
+  const timestamp = (value: Date | string | null | undefined) =>
+    value ? new Date(value).getTime() || 0 : 0;
+  const pastLoans = loans
+    .filter((loan) => loan.status === "COMPLETE")
+    .sort((left, right) => {
+      const returned = (loan: TLoan) =>
+        Math.max(
+          0,
+          ...loan.bookingAssets.map((asset) => timestamp(asset.returnedAt))
+        );
+      const checkedOut = (loan: TLoan) =>
+        Math.max(
+          0,
+          ...loan.bookingAssets.map((asset) => timestamp(asset.checkedOutAt))
+        );
+      return (
+        returned(right) - returned(left) ||
+        checkedOut(right) - checkedOut(left) ||
+        timestamp(right.from) - timestamp(left.from) ||
+        right.id.localeCompare(left.id)
+      );
+    });
   const currentLoans = loans.filter((loan) => loan.status !== "COMPLETE");
   const activeLoans = currentLoans
     .map((loan) => ({

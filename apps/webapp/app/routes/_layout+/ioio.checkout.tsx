@@ -30,6 +30,7 @@ import { resolveAssetImagesForPresentation } from "~/modules/asset/service.serve
 import {
   borrowItem,
   acknowledgeBorrowItemStaffReservation,
+  acknowledgePreparationStaffReservation,
   cancelBorrowItem,
   getBorrowItemAvailability,
   prepareBorrowItem,
@@ -77,13 +78,13 @@ const checkoutActionSchema = z.discriminatedUnion("intent", [
     candidateAssetIds: z.string().optional(),
     quantity: z.coerce.number().int().min(1),
     submissionToken: z.string().uuid().optional(),
+    reservationAcknowledgementToken: z.string().uuid().optional(),
   }),
   z.object({
     intent: z.literal("acknowledge-preparation-reservation"),
     assetId: z.string().min(1),
     candidateAssetIds: z.string().optional(),
     quantity: z.coerce.number().int().min(1),
-    submissionToken: z.string().uuid().optional(),
   }),
   z.object({
     intent: z.literal("confirm"),
@@ -126,6 +127,7 @@ const confirmAllProposalSchema = z
         candidateAssetIds: z.array(z.string().min(1)).optional(),
         quantity: z.number().int().min(1),
         submissionToken: z.string().uuid(),
+        reservationAcknowledgementToken: z.string().uuid().optional(),
       }),
     ])
   )
@@ -168,7 +170,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       return data({
         ok: true as const,
         intent: "availability" as const,
-        availableQuantity: availability.available,
+        availableQuantity: availability.availableWithoutStaffReservations,
         totalQuantity: availability.total,
         staffReservedCount: availability.staffReservedCount,
         availableWithoutStaffReservations:
@@ -327,6 +329,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
             : undefined,
           quantity: parsed.quantity,
           submissionToken: parsed.submissionToken,
+          reservationAcknowledgementToken:
+            parsed.reservationAcknowledgementToken,
         },
         { context, request }
       );
@@ -337,21 +341,19 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
     if (parsed.intent === "acknowledge-preparation-reservation") {
-      const result = await requestPreparationForItem(
+      const result = await acknowledgePreparationStaffReservation(
         {
           assetId: parsed.assetId,
           candidateAssetIds: parsed.candidateAssetIds
             ? parsed.candidateAssetIds.split(",").filter(Boolean)
             : undefined,
           quantity: parsed.quantity,
-          acknowledgeStaffReservationOverlap: true,
-          submissionToken: parsed.submissionToken,
         },
         { context, request }
       );
       return data({
         ok: true as const,
-        intent: "preparation-requested" as const,
+        intent: "preparation-reservation-acknowledged" as const,
         result,
       });
     }
@@ -416,6 +418,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
                 candidateAssetIds: proposal.candidateAssetIds,
                 quantity: proposal.quantity,
                 submissionToken: proposal.submissionToken,
+                reservationAcknowledgementToken:
+                  proposal.reservationAcknowledgementToken,
               },
               { context, request }
             );
@@ -508,6 +512,11 @@ type CheckoutActionData =
       intent: "preparation-requested";
       result: { ok: true; status: "requested"; requestId: string };
     }
+  | {
+      ok: true;
+      intent: "preparation-reservation-acknowledged";
+      result: { confirmationToken: string };
+    }
   | { ok: true; intent: "confirmed" | "cancelled"; result?: unknown }
   | { ok: true; intent: "reservation-acknowledged" }
   | {
@@ -582,6 +591,7 @@ type PreparationBasketConfiguration = {
   candidateAssetIds: string[];
   quantity: number;
   requiresStaffReservationAcknowledgement: boolean;
+  reservationAcknowledgementToken?: string;
 };
 
 function CheckoutLine({
@@ -633,6 +643,11 @@ function CheckoutLine({
     []
   );
   const [reservationAcknowledged, setReservationAcknowledged] = useState(false);
+  const [preparationAcknowledgement, setPreparationAcknowledgement] = useState<{
+    key: string;
+    token: string;
+  } | null>(null);
+  const acknowledgementRequestKeyRef = useRef<string | null>(null);
   const [resolutionError, setResolutionError] = useState<string | null>(null);
   const lastAvailabilityRequestRef = useRef<string | null>(null);
   const lastPrepareRequestRef = useRef<string | null>(null);
@@ -710,6 +725,12 @@ function CheckoutLine({
       setReservationAcknowledged(true);
       onPrepared(item.id, proposal, item.title, true);
     }
+    if (response.intent === "preparation-reservation-acknowledged") {
+      setPreparationAcknowledgement({
+        key: acknowledgementRequestKeyRef.current ?? "",
+        token: response.result.confirmationToken,
+      });
+    }
     if (response.intent === "preparation-requested") {
       onPreparationSubmitted(item.id, item.title);
     }
@@ -759,13 +780,20 @@ function CheckoutLine({
     fetcher.data?.intent === "error" ? fetcher.data.error : null;
   const dateAvailability =
     availabilityFetcher.data?.intent === "availability"
-      ? availabilityFetcher.data.availableQuantity
+      ? availabilityFetcher.data.availableWithoutStaffReservations
       : item.availableQuantity;
   const dateMaxQuantity = Math.max(1, dateAvailability);
   const availabilityData =
     availabilityFetcher.data?.intent === "availability"
       ? availabilityFetcher.data
       : null;
+  const preparationAcknowledgementKey = `${
+    item.id
+  }:${quantity}:${item.candidateAssetIds.join(",")}`;
+  const preparationAcknowledgementToken =
+    preparationAcknowledgement?.key === preparationAcknowledgementKey
+      ? preparationAcknowledgement.token
+      : undefined;
   const canUseStaffReservationOverlap = Boolean(
     availabilityData &&
       availabilityData.staffReservedCount > 0 &&
@@ -806,6 +834,7 @@ function CheckoutLine({
             quantity,
             requiresStaffReservationAcknowledgement:
               (availabilityData?.staffReservedCount ?? 0) > 0,
+            reservationAcknowledgementToken: preparationAcknowledgementToken,
           }
         : null
     );
@@ -817,6 +846,7 @@ function CheckoutLine({
     item.preparationSubmissionToken,
     onPreparationConfigured,
     availabilityData?.staffReservedCount,
+    preparationAcknowledgementToken,
     quantity,
     requestPreparation,
   ]);
@@ -954,8 +984,10 @@ function CheckoutLine({
                       : "text-green-800"
                   }`}
                 >
-                  {dateAvailability <= 0
-                    ? "Unavailable for selected dates"
+                  {availabilityData && availabilityData.staffReservedCount > 0
+                    ? "Overlaps with selected dates"
+                    : dateAvailability <= 0
+                    ? "No physical units available"
                     : requiresStaffPreparation
                     ? "Preparation required"
                     : accessApprovalRequired
@@ -1125,7 +1157,7 @@ function CheckoutLine({
                 </p>
                 {reservationAcknowledged ? (
                   <p className="mt-2 font-semibold">
-                    Continue anyway is selected.
+                    ✓ Course reservation acknowledged
                   </p>
                 ) : (
                   <button
@@ -1144,7 +1176,7 @@ function CheckoutLine({
                   >
                     {fetcher.state !== "idle"
                       ? "Saving permission…"
-                      : "Continue anyway"}
+                      : "I have permission — continue"}
                   </button>
                 )}
               </div>
@@ -1237,12 +1269,6 @@ function CheckoutLine({
             </div>
           ) : null}
           <div className="mt-3">
-            {canUseStaffReservationOverlap && availabilityData ? (
-              <p className="text-xs font-semibold text-amber-900">
-                A course reservation overlaps; details appear before
-                confirmation.
-              </p>
-            ) : null}
             {!requestPreparation ? (
               <p className="mt-2 text-xs font-semibold text-gray-600">
                 {availabilityFetcher.state !== "idle"
@@ -1281,27 +1307,34 @@ function CheckoutLine({
                     : ""}
                   . Only continue if you have permission to borrow them.
                 </p>
-                <button
-                  type="button"
-                  className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
-                  onClick={() => {
-                    void fetcher.submit(
-                      {
-                        intent: "acknowledge-preparation-reservation",
-                        assetId: item.id,
-                        candidateAssetIds: item.candidateAssetIds.join(","),
-                        quantity: String(quantity),
-                        submissionToken: item.preparationSubmissionToken,
-                      },
-                      { method: "post" }
-                    );
-                  }}
-                  disabled={fetcher.state !== "idle"}
-                >
-                  {fetcher.state !== "idle"
-                    ? "Submitting request…"
-                    : "I have permission — continue"}
-                </button>
+                {preparationAcknowledgementToken ? (
+                  <p className="mt-2 font-semibold">
+                    ✓ Course reservation acknowledged
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    className="mt-2 rounded-lg border border-amber-800 px-3 py-2 text-xs font-bold text-amber-950 hover:bg-amber-100"
+                    onClick={() => {
+                      acknowledgementRequestKeyRef.current =
+                        preparationAcknowledgementKey;
+                      void fetcher.submit(
+                        {
+                          intent: "acknowledge-preparation-reservation",
+                          assetId: item.id,
+                          candidateAssetIds: item.candidateAssetIds.join(","),
+                          quantity: String(quantity),
+                        },
+                        { method: "post" }
+                      );
+                    }}
+                    disabled={fetcher.state !== "idle"}
+                  >
+                    {fetcher.state !== "idle"
+                      ? "Saving permission…"
+                      : "I have permission — continue"}
+                  </button>
+                )}
               </div>
             ) : null}
             {requestPreparation &&
@@ -1458,6 +1491,8 @@ export default function IoioCheckout() {
           previous?.assetId === configuration.assetId &&
           previous.submissionToken === configuration.submissionToken &&
           previous.quantity === configuration.quantity &&
+          previous.reservationAcknowledgementToken ===
+            configuration.reservationAcknowledgementToken &&
           previous.requiresStaffReservationAcknowledgement ===
             configuration.requiresStaffReservationAcknowledgement &&
           previous.candidateAssetIds.join(",") ===
@@ -1559,7 +1594,9 @@ export default function IoioCheckout() {
       const line = preparedLines[item.id];
       const preparation = preparationConfigurations[item.id];
       return Boolean(
-        (preparation && !preparation.requiresStaffReservationAcknowledgement) ||
+        (preparation &&
+          (!preparation.requiresStaffReservationAcknowledgement ||
+            Boolean(preparation.reservationAcknowledgementToken))) ||
           (line &&
             !pendingApprovalIds.has(item.id) &&
             (line.proposal.staffReservationWarning === null ||
@@ -1588,6 +1625,8 @@ export default function IoioCheckout() {
         submissionToken: preparation.submissionToken,
         candidateAssetIds: preparation.candidateAssetIds,
         quantity: preparation.quantity,
+        reservationAcknowledgementToken:
+          preparation.reservationAcknowledgementToken,
       });
     }
   });

@@ -88,6 +88,8 @@ function renderBorrowingList(
     itemType?: StudentCheckoutItem["type"];
     loadProposal?: boolean;
     reservationWarning?: boolean;
+    physicalAvailable?: number;
+    onAction?: (intent: string) => void;
   } = {}
 ) {
   const itemType = options.itemType ?? "INDIVIDUAL";
@@ -121,16 +123,41 @@ function renderBorrowingList(
     if (!options.loadProposal) return null;
     const formData = await request.formData();
     const intent = formData.get("intent");
+    options.onAction?.(String(intent));
     if (intent === "availability") {
       return {
         ok: true,
         intent: "availability",
-        availableQuantity: 5,
+        availableQuantity: options.reservationWarning
+          ? 0
+          : options.physicalAvailable ?? 5,
         totalQuantity: 5,
-        staffReservedCount: options.reservationWarning ? 1 : 0,
-        availableWithoutStaffReservations: 5,
+        staffReservedCount: options.reservationWarning ? 5 : 0,
+        availableWithoutStaffReservations: options.physicalAvailable ?? 5,
         staffReservationFrom: null,
         staffReservationTo: null,
+      };
+    }
+    if (intent === "acknowledge-preparation-reservation") {
+      return {
+        ok: true,
+        intent: "preparation-reservation-acknowledged",
+        result: { confirmationToken: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+      };
+    }
+    if (intent === "confirm-all") {
+      return {
+        ok: true,
+        intent: "confirmed-all",
+        results: [
+          {
+            itemId,
+            kind: "preparation",
+            ok: true,
+            quantity: 1,
+            requestId: "request-1",
+          },
+        ],
       };
     }
     if (intent === "prepare") {
@@ -186,7 +213,12 @@ function renderBorrowingList(
   return render(createElement(Stub, { initialEntries: ["/ioio/checkout"] }));
 }
 
-function renderMixedBorrowingList() {
+function renderMixedBorrowingList(
+  options: {
+    reservationWarning?: boolean;
+    onAction?: (intent: string) => void;
+  } = {}
+) {
   const items: StudentCheckoutItem[] = [
     {
       id: "makey-kit",
@@ -236,16 +268,29 @@ function renderMixedBorrowingList() {
       action: async ({ request }) => {
         const formData = await request.formData();
         const intent = formData.get("intent");
+        options.onAction?.(String(intent));
         if (intent === "availability") {
+          const hasOverlap =
+            options.reservationWarning &&
+            formData.get("assetId") === "makey-kit";
           return {
             ok: true,
             intent: "availability",
-            availableQuantity: 5,
+            availableQuantity: hasOverlap ? 0 : 5,
             totalQuantity: 5,
-            staffReservedCount: 0,
+            staffReservedCount: hasOverlap ? 5 : 0,
             availableWithoutStaffReservations: 5,
             staffReservationFrom: null,
             staffReservationTo: null,
+          };
+        }
+        if (intent === "acknowledge-preparation-reservation") {
+          return {
+            ok: true,
+            intent: "preparation-reservation-acknowledged",
+            result: {
+              confirmationToken: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            },
           };
         }
         if (intent === "prepare") {
@@ -347,6 +392,86 @@ it("supports quantity changes and removal through the shared borrower checkout",
   await waitFor(() => {
     expect(screen.queryByRole("heading", { name: "Motor" })).toBeNull();
   });
+});
+
+it("keeps physical availability and quantity controls after acknowledging a course overlap", async () => {
+  const actions: string[] = [];
+  renderBorrowingList(true, {
+    loadProposal: true,
+    reservationWarning: true,
+    onAction: (intent) => actions.push(intent),
+  });
+
+  expect(await screen.findByText("5 available · Container A1-1")).toBeTruthy();
+  expect(screen.queryByText("0 available · Container A1-1")).toBeNull();
+  expect(await screen.findByText("Course reservation overlaps")).toBeTruthy();
+  const increase = screen.getByRole("button", {
+    name: "Increase quantity for makey kit",
+  });
+  fireEvent.click(increase);
+  expect(screen.getByLabelText("quantity for Makey Kit 2")).toBeTruthy();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Decrease quantity for makey kit" })
+  );
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "I have permission — continue" })
+  );
+  expect(
+    await screen.findByText("✓ Course reservation acknowledged")
+  ).toBeTruthy();
+  expect(actions).toContain("acknowledge-preparation-reservation");
+  expect(actions).not.toContain("confirm-all");
+  expect(
+    screen.getByRole("button", { name: "Confirm borrowing" })
+  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Makey Kit" })).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "Increase quantity for makey kit" })
+  ).toBeTruthy();
+  expect(
+    screen.queryByText(
+      "A course reservation overlaps; details appear before confirmation."
+    )
+  ).toBeNull();
+  expect(screen.queryByText("Unavailable for selected dates")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm borrowing" }));
+  await waitFor(() => expect(actions).toContain("confirm-all"));
+});
+
+it("limits overlap quantities by hard available stock", async () => {
+  renderBorrowingList(true, {
+    loadProposal: true,
+    reservationWarning: true,
+    physicalAvailable: 3,
+  });
+  expect(await screen.findByText("3 available · Container A1-1")).toBeTruthy();
+  await screen.findByText("Course reservation overlaps");
+  const increase = screen.getByRole("button", {
+    name: "Increase quantity for makey kit",
+  });
+  fireEvent.click(increase);
+  fireEvent.click(increase);
+  expect(screen.getByLabelText("quantity for Makey Kit 3")).toBeTruthy();
+  expect(increase).toBeDisabled();
+});
+
+it("acknowledges one basket item without submitting another item", async () => {
+  const actions: string[] = [];
+  renderMixedBorrowingList({
+    reservationWarning: true,
+    onAction: (intent) => actions.push(intent),
+  });
+  await screen.findByText("Course reservation overlaps");
+  fireEvent.click(
+    screen.getByRole("button", { name: "I have permission — continue" })
+  );
+  expect(
+    await screen.findByText("✓ Course reservation acknowledged")
+  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Makey Kit" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Motor" })).toBeTruthy();
+  expect(actions).not.toContain("confirm-all");
 });
 
 it("omits the empty proposal container for a normal asset", async () => {
