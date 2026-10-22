@@ -942,6 +942,9 @@ describe("updateAssetModelImage", () => {
 
     expect(result).toBeNull();
     expect(db.assetModel.update).not.toHaveBeenCalled();
+    expect(parseFileFormData).toHaveBeenCalledWith(
+      expect.objectContaining({ allowEmptyFile: true })
+    );
   });
 
   it("stores a null thumbnail when the parser returned a bare path", async () => {

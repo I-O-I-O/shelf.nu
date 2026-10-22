@@ -92,6 +92,8 @@ interface Props {
   canSeeAllCustody: boolean;
   /** Optional IOIO Inventory lifecycle filter and availability projection. */
   excludeAssetIds?: string[];
+  /** Staff Inventory only: limit the list to assets/products hidden from students. */
+  ioioHiddenOnly?: boolean;
 }
 
 const searchFieldTooltipText = `
@@ -179,6 +181,7 @@ export async function simpleModeLoader({
   settings,
   canSeeAllCustody,
   excludeAssetIds,
+  ioioHiddenOnly,
 }: Props) {
   // Threaded into the asset query so the custodian FILTER seed is scoped —
   // it used a role-only check that let BASE through unscoped. See
@@ -318,6 +321,7 @@ export async function simpleModeLoader({
       isSelfService,
       userId,
       excludeAssetIds,
+      ioioHiddenOnly,
     }),
     getTagsForBookingTagsFilter({
       organizationId,

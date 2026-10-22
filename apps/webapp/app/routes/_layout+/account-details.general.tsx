@@ -21,7 +21,7 @@ import {
   LanguageRegionForm,
   FormatPrefsFormSchema,
 } from "~/components/user/language-region/language-region-form";
-import PasswordResetForm from "~/components/user/password-reset-form";
+import PasswordChangeForm from "~/components/user/password-change-form";
 import { RequestDeleteUser } from "~/components/user/request-delete-user";
 import {
   UserContactDetailsForm,
@@ -34,7 +34,12 @@ import {
 
 import { sendEmail } from "~/emails/mail.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
-import { refreshAccessToken } from "~/modules/auth/service.server";
+import { createPasswordChangeSchema } from "~/modules/auth/password-change-schema";
+import {
+  changeAccountPassword,
+  refreshAccessToken,
+  sendResetPasswordLink,
+} from "~/modules/auth/service.server";
 import { assertEmailChangeAllowed } from "~/modules/auth/sso-enforcement.server";
 import {
   getUserByID,
@@ -48,7 +53,6 @@ import type { UpdateUserContactPayload } from "~/modules/user-contact/service.se
 import { updateUserContact } from "~/modules/user-contact/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { checkExhaustiveSwitch } from "~/utils/check-exhaustive-switch";
-import { delay } from "~/utils/delay";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { ADMIN_EMAIL, SERVER_URL } from "~/utils/env";
 import { makeShelfError, ShelfError } from "~/utils/error";
@@ -63,7 +67,8 @@ import { getConfiguredSSODomains } from "~/utils/sso.server";
 // First we define our intent schema
 const IntentSchema = z.object({
   intent: z.enum([
-    "resetPassword",
+    "changePassword",
+    "requestPasswordReset",
     "updateUser",
     "updateDisplayName",
     "deleteUser",
@@ -76,8 +81,13 @@ const IntentSchema = z.object({
 
 // Then we define schemas for each intent type
 const ActionSchemas = {
-  resetPassword: z.object({
-    type: z.literal("resetPassword"),
+  changePassword: createPasswordChangeSchema({
+    type: z.literal("changePassword"),
+    intent: z.literal("changePassword"),
+  }),
+
+  requestPasswordReset: z.object({
+    type: z.literal("requestPasswordReset"),
   }),
 
   updateUser: UserDetailsFormSchema.extend({
@@ -116,6 +126,7 @@ const ActionSchemas = {
 
 // Helper function to get schema
 function getActionSchema(intent: z.infer<typeof IntentSchema>["intent"]) {
+  if (intent === "changePassword") return ActionSchemas.changePassword;
   return ActionSchemas[intent].extend({ intent: z.literal(intent) });
 }
 
@@ -149,16 +160,29 @@ export async function action({ context, request }: ActionFunctionArgs) {
     );
 
     switch (intent) {
-      case "resetPassword": {
-        if (parsedData.type !== "resetPassword")
+      case "changePassword": {
+        if (parsedData.type !== "changePassword")
           throw new Error("Invalid payload type");
 
-        /** Logout user after 3 seconds */
-        await delay(2000);
-
+        await changeAccountPassword({
+          id: userId,
+          accessToken: authSession.accessToken,
+          refreshToken: authSession.refreshToken,
+          currentPassword: parsedData.currentPassword,
+          newPassword: parsedData.newPassword,
+        });
         context.destroySession();
+        return redirect("/login?password_changed=true");
+      }
+      case "requestPasswordReset": {
+        if (parsedData.type !== "requestPasswordReset")
+          throw new Error("Invalid payload type");
 
-        return redirect("/forgot-password");
+        // Always use the signed-in account email. A forged form email cannot
+        // redirect password recovery to another user's address.
+        await sendResetPasswordLink(email);
+
+        return payload({ resetEmailRequested: true });
       }
       case "updateUser": {
         if (parsedData.type !== "updateUser")
@@ -520,14 +544,7 @@ export default function UserPage() {
                 Update your password here.
               </p>
             </div>
-            <div>
-              <p>Need to reset your password?</p>
-              <p>
-                Click below to start the reset process. You'll be logged out and
-                redirected to our password reset page.
-              </p>
-            </div>
-            <PasswordResetForm />
+            <PasswordChangeForm />
           </Card>
           <Card className="my-0">
             <h3 className="text-text-lg font-semibold">Delete account</h3>

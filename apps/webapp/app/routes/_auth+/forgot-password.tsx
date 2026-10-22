@@ -47,41 +47,55 @@ const ForgotPasswordSchema = z.object({
     })),
 });
 
-const OtpSchema = z
+const RecoverySchema = z
   .object({
-    otp: z.string().min(6, "OTP is required."),
-    email: z.string().transform((email) => email.toLowerCase()),
+    otp: z.string().optional(),
+    token_hash: z.string().min(1).optional(),
+    email: z
+      .string()
+      .optional()
+      .transform((email) => email?.toLowerCase()),
     password: passwordSchema("Password is too short. Minimum 8 characters."),
     confirmPassword: passwordSchema(
       "Password is too short. Minimum 8 characters."
     ),
   })
-  .superRefine(({ password, confirmPassword, otp, email }, ctx) => {
+  .superRefine(({ password, confirmPassword, otp, email, token_hash }, ctx) => {
+    if (token_hash ? otp || email : !otp || !email) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Use the recovery link or enter the code from your email.",
+        path: [token_hash ? "token_hash" : "otp"],
+      });
+    }
+
     if (password !== confirmPassword) {
-      return ctx.addIssue({
+      ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Password and confirm password must match",
         path: ["confirmPassword"],
       });
     }
-
-    return { password, confirmPassword, otp, email };
   });
 
 export function loader({ context, request }: LoaderFunctionArgs) {
   const searchParams = getCurrentSearchParams(request);
+  const hasRecoveryLink =
+    Boolean(searchParams.get("token_hash")) &&
+    searchParams.get("type") === "recovery";
 
   const title = "Forgot password?";
-  const subHeading =
-    searchParams.has("email") && searchParams.get("email") !== ""
-      ? "Step 2 of 2: Enter OTP and your new password"
-      : "Step 1 of 2: Enter your email";
+  const subHeading = hasRecoveryLink
+    ? "Choose a new password"
+    : searchParams.has("email") && searchParams.get("email") !== ""
+    ? "Step 2 of 2: Enter the code and choose a new password"
+    : "Step 1 of 2: Enter your email";
 
-  if (context.isAuthenticated) {
+  if (context.isAuthenticated && !hasRecoveryLink) {
     return redirect("/assets");
   }
 
-  return data(payload({ title, subHeading }));
+  return data(payload({ title, subHeading, hasRecoveryLink }));
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -169,19 +183,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
         return redirect("/forgot-password?email=" + encodeURIComponent(email));
       }
       case "confirm-otp": {
-        const { email, otp, password } = parseData(
+        const { email, otp, token_hash, password } = parseData(
           await readFormData(request.clone()),
-          OtpSchema,
+          RecoverySchema,
           { shouldBeCaptured: false }
         );
 
-        // Attempt to verify the OTP
-        const { data: otpData, error: verifyError } =
-          await getSupabaseAdmin().auth.verifyOtp({
-            email,
-            token: otp,
-            type: "recovery",
-          });
+        // Verify either the Supabase-generated recovery link or the existing
+        // email code. Both produce the same canonical recovery session before
+        // any password update is allowed.
+        const verification = token_hash
+          ? await getSupabaseAdmin().auth.verifyOtp({
+              token_hash,
+              type: "recovery",
+            })
+          : await getSupabaseAdmin().auth.verifyOtp({
+              email: email!,
+              token: otp!,
+              type: "recovery",
+            });
+        const { data: otpData, error: verifyError } = verification;
 
         if (verifyError || !otpData.user || !otpData.session) {
           throw new ShelfError({
@@ -190,7 +211,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
             // The OTP is deliberately NOT included. It is a live
             // account-takeover credential until it expires, and additionalData
             // is written straight to the log line.
-            additionalData: { email },
+            additionalData: email ? { email } : undefined,
             label: "Auth",
             shouldBeCaptured: false,
           });
@@ -201,6 +222,16 @@ export async function action({ request, context }: ActionFunctionArgs) {
          * failure from here on revokes it, so it never outlives the request.
          */
         const recoveryAccessToken = otpData.session.access_token;
+        const verifiedEmail = otpData.user.email ?? email;
+        if (!verifiedEmail) {
+          await revokeSession(recoveryAccessToken);
+          throw new ShelfError({
+            cause: null,
+            message: "Invalid or expired verification code",
+            label: "Auth",
+            shouldBeCaptured: false,
+          });
+        }
 
         /**
          * A code sent before the address was refused (a deploy, a domain newly
@@ -213,7 +244,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
           // The account and address the code verified, which are the
           // session's own.
           userId: otpData.user.id,
-          email: otpData.user.email ?? email,
+          email: verifiedEmail,
           accessToken: recoveryAccessToken,
         });
         if (refusal) {
@@ -256,6 +287,10 @@ export default function ForgotPassword() {
   const actionData = useActionData<typeof action>();
   const [searchParams] = useSearchParams();
   const email = searchParams.get("email") || "";
+  const tokenHash =
+    searchParams.get("type") === "recovery"
+      ? searchParams.get("token_hash") || ""
+      : "";
   const emailError =
     zo.errors.email()?.message || actionData?.error?.message || "";
   const disabled = useDisabled();
@@ -266,7 +301,7 @@ export default function ForgotPassword() {
    * their fields — instead of bouncing back to the email step with a generic
    * message. Hard errors (e.g. an invalid OTP) still fall back to the email step.
    */
-  const otpValidationErrors = getValidationErrors<typeof OtpSchema>(
+  const otpValidationErrors = getValidationErrors<typeof RecoverySchema>(
     actionData?.error
   );
 
@@ -274,12 +309,11 @@ export default function ForgotPassword() {
     <div className="flex min-h-full flex-col justify-center">
       <div className="mx-auto w-full">
         {(actionData?.error && !otpValidationErrors) ||
-        !email ||
-        email === "" ? (
+        (!tokenHash && (!email || email === "")) ? (
           <div>
             <p className="mb-4 text-center">
-              Enter your email address and we'll send you a one-time code to
-              reset your password.
+              Enter your email address and we’ll send a secure password reset
+              link.
             </p>
             <Form ref={zo.ref} method="post" className="space-y-2" replace>
               <input type="hidden" name="intent" value="request-otp" />
@@ -302,7 +336,7 @@ export default function ForgotPassword() {
                 type="submit"
                 disabled={disabled}
               >
-                {!disabled ? "Reset password" : "Sending code..."}
+                {!disabled ? "Reset password" : "Sending email..."}
               </IoioAuthPrimaryButton>
             </Form>
             <p className="mt-2 text-center text-gray-500">
@@ -310,14 +344,16 @@ export default function ForgotPassword() {
               few minutes.
             </p>
           </div>
+        ) : tokenHash ? (
+          <PasswordResetForm email="" tokenHash={tokenHash} />
         ) : (
           <>
             <p className="mb-2">
-              We've sent a 6-digit code to{" "}
+              We’ve sent password reset instructions to{" "}
               <span className="font-semibold">{email}</span>.
             </p>
             <ol className="mb-4 list-inside list-decimal">
-              <li>Enter the code from your email</li>
+              <li>Open the secure link, or enter the 6-digit code below</li>
               <li>Enter your new password</li>
               <li>Confirm your new password</li>
             </ol>
@@ -340,8 +376,14 @@ export default function ForgotPassword() {
   );
 }
 
-function PasswordResetForm({ email }: { email: string }) {
-  const zoReset = useZorm("ResetPasswordForm", OtpSchema);
+function PasswordResetForm({
+  email,
+  tokenHash,
+}: {
+  email: string;
+  tokenHash?: string;
+}) {
+  const zoReset = useZorm("ResetPasswordForm", RecoverySchema);
   const disabled = useDisabled();
   const actionData = useActionData<typeof action>();
 
@@ -350,17 +392,23 @@ function PasswordResetForm({ email }: { email: string }) {
    * when client-side zorm validation is bypassed (disabled JS, modified
    * request, or client/server rule divergence). See CLAUDE.md form pattern.
    */
-  const validationErrors = getValidationErrors<typeof OtpSchema>(
+  const validationErrors = getValidationErrors<typeof RecoverySchema>(
     actionData?.error
   );
 
   // Keep the form mounted for validation errors so field-level messages render;
   // only a hard error (e.g. invalid OTP) falls back to the generic message.
-  return !email || email === "" || (actionData?.error && !validationErrors) ? (
+  return (!email && !tokenHash) || (actionData?.error && !validationErrors) ? (
     <div>Something went wrong. Please refresh the page and try again.</div>
   ) : (
     <Form method="post" ref={zoReset.ref} className="space-y-2">
-      <ShelfOTP error={zoReset.errors.otp()?.message} />
+      {tokenHash ? null : (
+        <ShelfOTP
+          error={
+            validationErrors?.otp?.message || zoReset.errors.otp()?.message
+          }
+        />
+      )}
 
       <PasswordInput
         label="New password"
@@ -391,7 +439,10 @@ function PasswordResetForm({ email }: { email: string }) {
         required
       />
 
-      <input type="hidden" name="email" value={email} />
+      {email ? <input type="hidden" name="email" value={email} /> : null}
+      {tokenHash ? (
+        <input type="hidden" name="token_hash" value={tokenHash} />
+      ) : null}
       <input type="hidden" name="intent" value="confirm-otp" />
 
       <IoioAuthPrimaryButton

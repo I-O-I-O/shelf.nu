@@ -5838,6 +5838,16 @@ describe("getAssets search via UNION", () => {
     expect(findManyMock.mock.calls[0][0]!.where!.OR).toBeUndefined();
   });
 
+  it("limits the staff Hidden view to hidden assets or hidden AssetModels", async () => {
+    await getAssets({ ...base, search: null, ioioHiddenOnly: true });
+
+    const where = findManyMock.mock.calls[0][0]!.where!;
+    expect(where.AND).toContainEqual({
+      OR: [{ ioioHidden: true }, { assetModel: { is: { ioioHidden: true } } }],
+    });
+    expect(where.availableToBook).toBeUndefined();
+  });
+
   it("fail-closed: whitespace-only search matches nothing, no UNION", async () => {
     await getAssets({ ...base, search: "   " });
     expect(queryRawMock).not.toHaveBeenCalled();

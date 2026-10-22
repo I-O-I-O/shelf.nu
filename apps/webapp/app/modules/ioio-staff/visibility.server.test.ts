@@ -16,7 +16,7 @@ vi.mock("~/database/db.server", () => ({
   db: { $transaction: mocks.transaction },
 }));
 
-import { setIoioAssetHidden } from "./visibility.server";
+import { setIoioAssetHidden, setIoioAssetsHidden } from "./visibility.server";
 
 describe("setIoioAssetHidden", () => {
   beforeEach(() => {
@@ -37,6 +37,7 @@ describe("setIoioAssetHidden", () => {
     mocks.assetFindFirst.mockResolvedValue({
       id: "asset-1",
       assetModelId: null,
+      ioioHidden: false,
     });
     mocks.assetModelFindFirst.mockResolvedValue(null);
   });
@@ -45,8 +46,12 @@ describe("setIoioAssetHidden", () => {
     mocks.assetFindFirst.mockResolvedValue({
       id: "unit-001",
       assetModelId: "makey-model",
+      ioioHidden: false,
     });
-    mocks.assetModelFindFirst.mockResolvedValue({ id: "makey-model" });
+    mocks.assetModelFindFirst.mockResolvedValue({
+      id: "makey-model",
+      ioioHidden: false,
+    });
 
     await expect(
       setIoioAssetHidden({
@@ -62,7 +67,7 @@ describe("setIoioAssetHidden", () => {
 
     expect(mocks.assetModelFindFirst).toHaveBeenCalledWith({
       where: { id: "makey-model", organizationId: "org-1" },
-      select: { id: true },
+      select: { id: true, ioioHidden: true },
     });
     expect(mocks.assetModelUpdate).toHaveBeenCalledWith({
       where: { id: "makey-model", organizationId: "org-1" },
@@ -90,8 +95,12 @@ describe("setIoioAssetHidden", () => {
     mocks.assetFindFirst.mockResolvedValue({
       id: "unit-001",
       assetModelId: "makey-model",
+      ioioHidden: false,
     });
-    mocks.assetModelFindFirst.mockResolvedValue({ id: "makey-model" });
+    mocks.assetModelFindFirst.mockResolvedValue({
+      id: "makey-model",
+      ioioHidden: true,
+    });
 
     await setIoioAssetHidden({
       assetId: "unit-001",
@@ -109,6 +118,7 @@ describe("setIoioAssetHidden", () => {
     mocks.assetFindFirst.mockResolvedValue({
       id: "unit-001",
       assetModelId: "legacy-model",
+      ioioHidden: false,
     });
 
     await setIoioAssetHidden({
@@ -118,9 +128,56 @@ describe("setIoioAssetHidden", () => {
     });
 
     expect(mocks.assetUpdateMany).toHaveBeenCalledWith({
-      where: { organizationId: "org-1", assetModelId: "legacy-model" },
+      where: {
+        organizationId: "org-1",
+        assetModelId: "legacy-model",
+        ioioHidden: { not: true },
+      },
       data: { ioioHidden: true },
     });
     expect(mocks.assetModelUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not rewrite an item that already has the requested visibility", async () => {
+    mocks.assetFindFirst.mockResolvedValue({
+      id: "asset-1",
+      assetModelId: null,
+      ioioHidden: true,
+    });
+
+    await setIoioAssetHidden({
+      assetId: "asset-1",
+      organizationId: "org-1",
+      hidden: true,
+    });
+
+    expect(mocks.assetUpdate).not.toHaveBeenCalled();
+  });
+
+  it("updates a shared model once for multiple selected physical units", async () => {
+    let modelHidden = false;
+    mocks.assetFindFirst.mockImplementation(({ where }) =>
+      Promise.resolve({
+        id: where.id,
+        assetModelId: "makey-model",
+        ioioHidden: false,
+      })
+    );
+    mocks.assetModelFindFirst.mockImplementation(() =>
+      Promise.resolve({ id: "makey-model", ioioHidden: modelHidden })
+    );
+    mocks.assetModelUpdate.mockImplementation(({ data }) => {
+      modelHidden = data.ioioHidden;
+      return Promise.resolve({ id: "makey-model", ioioHidden: modelHidden });
+    });
+
+    await setIoioAssetsHidden({
+      assetIds: ["unit-001", "unit-002", "unit-001"],
+      organizationId: "org-1",
+      hidden: true,
+    });
+
+    expect(mocks.assetFindFirst).toHaveBeenCalledTimes(2);
+    expect(mocks.assetModelUpdate).toHaveBeenCalledTimes(1);
   });
 });

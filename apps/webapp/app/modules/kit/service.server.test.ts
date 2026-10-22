@@ -16,6 +16,7 @@ import { Logger } from "~/utils/logger";
 import {
   createKit,
   updateKit,
+  updateKitImage,
   getKit,
   deleteKit,
   bulkDeleteKits,
@@ -39,6 +40,68 @@ import { getQr } from "../qr/service.server";
 
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
+
+describe("updateKitImage with an optional image", () => {
+  beforeEach(() => {
+    vitest.clearAllMocks();
+  });
+
+  it("keeps an existing image when the browser posts an empty file input", async () => {
+    const form = new FormData();
+    form.set("image", new File([], "", { type: "application/octet-stream" }));
+
+    await updateKitImage({
+      request: new Request("http://localhost/kits/kit-1/edit", {
+        method: "POST",
+        body: form,
+      }),
+      kitId: "kit-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    });
+
+    expect(db.kit.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps an image-free kit image-free on an ordinary edit", async () => {
+    await updateKitImage({
+      request: new Request("http://localhost/kits/kit-1/edit", {
+        method: "POST",
+        body: new FormData(),
+      }),
+      kitId: "kit-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    });
+
+    expect(db.kit.update).not.toHaveBeenCalled();
+  });
+
+  it("still rejects a real unsupported image upload", async () => {
+    const form = new FormData();
+    form.set(
+      "image",
+      new File(["text"], "not-an-image.txt", { type: "text/plain" })
+    );
+
+    await expect(
+      updateKitImage({
+        request: new Request("http://localhost/kits/kit-1/edit", {
+          method: "POST",
+          body: form,
+        }),
+        kitId: "kit-1",
+        userId: "user-1",
+        organizationId: "org-1",
+      })
+    ).rejects.toMatchObject({
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+
+    expect(db.kit.update).not.toHaveBeenCalled();
+  });
+});
 
 // Mock dependencies
 // why: testing kit service logic without executing actual database operations

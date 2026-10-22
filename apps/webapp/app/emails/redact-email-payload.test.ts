@@ -24,6 +24,16 @@ describe("redactEmailTokens", () => {
     );
   });
 
+  it("strips Supabase recovery token hashes from reset links", () => {
+    expect(
+      redactEmailTokens(
+        "https://app.shelf.nu/forgot-password?type=recovery&token_hash=single-use-secret"
+      )
+    ).toBe(
+      "https://app.shelf.nu/forgot-password?type=recovery&token_hash=REDACTED"
+    );
+  });
+
   it("strips a bare JWT outside any link", () => {
     expect(redactEmailTokens(`Your token is ${JWT}.`)).toBe(
       "Your token is REDACTED."

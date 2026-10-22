@@ -441,25 +441,28 @@ describe("unreadable image upload", () => {
     });
   });
 
-  it("omits an empty no-selection file part when optional uploads allow it", async () => {
-    const form = new FormData();
-    form.append(
-      "mainImage",
-      new File([], "", { type: "application/octet-stream" })
-    );
+  it.each(["mainImage", "image"])(
+    "omits an empty %s file input when optional uploads allow it",
+    async (fieldName) => {
+      const form = new FormData();
+      form.append(
+        fieldName,
+        new File([], "", { type: "application/octet-stream" })
+      );
 
-    const parsed = await parseFileFormData({
-      request: new Request("http://localhost/assets/new", {
-        method: "POST",
-        body: form,
-      }),
-      newFileName: "asset-1/main",
-      bucketName: "assets",
-      allowEmptyFile: true,
-    });
+      const parsed = await parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+        allowEmptyFile: true,
+      });
 
-    expect(parsed.has("mainImage")).toBe(false);
-  });
+      expect(parsed.has(fieldName)).toBe(false);
+    }
+  );
 
   it("still rejects a named unsupported file when optional uploads allow no selection", async () => {
     const form = new FormData();

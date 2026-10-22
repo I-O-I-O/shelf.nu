@@ -1,6 +1,11 @@
 import { AssetStatus } from "@prisma/client";
 
-export type InventoryQuickFilter = "all" | "available" | "checked-out" | "kits";
+export type InventoryQuickFilter =
+  | "all"
+  | "available"
+  | "checked-out"
+  | "kits"
+  | "hidden";
 
 export const INVENTORY_QUICK_FILTERS: Array<{
   key: InventoryQuickFilter;
@@ -10,6 +15,7 @@ export const INVENTORY_QUICK_FILTERS: Array<{
   { key: "available", label: "Available" },
   { key: "checked-out", label: "Checked out" },
   { key: "kits", label: "Kits" },
+  { key: "hidden", label: "Hidden" },
 ];
 
 export function applyInventoryQuickFilter(
@@ -17,6 +23,7 @@ export function applyInventoryQuickFilter(
   filter: InventoryQuickFilter
 ): URLSearchParams {
   const next = new URLSearchParams(current);
+  next.delete("ioioVisibility");
   if (filter === "all") {
     next.delete("status");
     next.delete("assetKitFilter");
@@ -25,6 +32,11 @@ export function applyInventoryQuickFilter(
     next.delete("status");
     next.delete("category", "__ioio-kit__");
     next.set("assetKitFilter", "IN_OTHER_KITS");
+  } else if (filter === "hidden") {
+    next.delete("status");
+    next.delete("assetKitFilter");
+    next.delete("category", "__ioio-kit__");
+    next.set("ioioVisibility", "hidden");
   } else {
     next.set(
       "status",

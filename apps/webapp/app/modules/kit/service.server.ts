@@ -1589,6 +1589,7 @@ export async function updateKitImage({
         withoutEnlargement: true,
       },
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
+      allowEmptyFile: true,
     });
 
     const image = fileData.get("image") as string;

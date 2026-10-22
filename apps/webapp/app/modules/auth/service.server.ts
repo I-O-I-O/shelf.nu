@@ -6,7 +6,15 @@ import {
 import type { AuthSession } from "@server/session";
 import { config } from "~/config/shelf.config";
 import { db } from "~/database/db.server";
-import { getSupabaseAdmin } from "~/integrations/supabase/client";
+import { sendEmail } from "~/emails/mail.server";
+import {
+  passwordResetHtmlEmail,
+  passwordResetTextEmail,
+} from "~/emails/password-reset";
+import {
+  getSupabaseAdmin,
+  getSupabaseAuthClient,
+} from "~/integrations/supabase/client";
 import { SERVER_URL } from "~/utils/env";
 
 import type { ErrorLabel } from "~/utils/error";
@@ -519,13 +527,13 @@ export async function sendOTP(email: string) {
 }
 
 /**
- * Sends a password reset code by email.
+ * Sends a Supabase-generated password recovery link and one-time code.
  *
  * An address that must use SSO is sent nothing, and the function returns
  * exactly as a successful send does, so every caller answers the same way for
  * every address.
  *
- * @param email - the address to send the reset code to
+ * @param email - the address to send the recovery email to
  * @throws {ShelfError} a wrapped Supabase failure
  */
 export async function sendResetPasswordLink(email: string) {
@@ -533,7 +541,31 @@ export async function sendResetPasswordLink(email: string) {
     const decision = await getLegacyLoginDecision(email);
     if (!decision.allowed) return;
 
-    await getSupabaseAdmin().auth.resetPasswordForEmail(email);
+    const { data, error } = await getSupabaseAdmin().auth.admin.generateLink({
+      type: "recovery",
+      email,
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    const resetUrl = new URL("/forgot-password", SERVER_URL);
+    resetUrl.searchParams.set("token_hash", data.properties.hashed_token);
+    resetUrl.searchParams.set("type", "recovery");
+
+    sendEmail({
+      to: email,
+      subject: "🔐 Reset your Shelf password",
+      text: passwordResetTextEmail({
+        resetUrl: resetUrl.toString(),
+        otp: data.properties.email_otp,
+      }),
+      html: await passwordResetHtmlEmail({
+        resetUrl: resetUrl.toString(),
+        otp: data.properties.email_otp,
+      }),
+    });
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -541,6 +573,138 @@ export async function sendResetPasswordLink(email: string) {
         "Something went wrong while sending the reset password link. Please try again later or contact support.",
       additionalData: { email },
       label,
+    });
+  }
+}
+
+/**
+ * Changes the password for the authenticated account after Supabase Auth
+ * verifies the current password in the same update operation.
+ *
+ * The user-scoped client is per call and non-persistent: its temporary session
+ * is seeded only from the current Shelf session, and the verified Auth user id
+ * must match that session before any password update is attempted.
+ */
+export async function changeAccountPassword({
+  id,
+  accessToken,
+  refreshToken,
+  currentPassword,
+  newPassword,
+}: {
+  id: string;
+  accessToken: string;
+  refreshToken: string;
+  currentPassword: string;
+  newPassword: string;
+}) {
+  const user = await db.user.findFirst({
+    where: { id },
+    select: { sso: true },
+  });
+
+  if (user?.sso) {
+    throw new ShelfError({
+      cause: null,
+      message: "You cannot update the password of an SSO user.",
+      label,
+      shouldBeCaptured: false,
+      status: 403,
+    });
+  }
+
+  const auth = getSupabaseAuthClient().auth;
+
+  try {
+    const { data: userData, error: userError } =
+      await auth.getUser(accessToken);
+    if (userError || !userData.user || userData.user.id !== id) {
+      throw new ShelfError({
+        cause: userError,
+        message: "Your session could not be verified. Please sign in again.",
+        additionalData: { id },
+        label,
+        shouldBeCaptured: false,
+        status: 401,
+      });
+    }
+
+    const { data: sessionData, error: sessionError } = await auth.setSession({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    });
+    if (sessionError || sessionData.user?.id !== id) {
+      throw new ShelfError({
+        cause: sessionError,
+        message: "Your session could not be verified. Please sign in again.",
+        additionalData: { id },
+        label,
+        shouldBeCaptured: false,
+        status: 401,
+      });
+    }
+
+    const { error: updateError } = await auth.updateUser({
+      password: newPassword,
+      current_password: currentPassword,
+    });
+
+    if (updateError) {
+      const isWrongCurrentPassword =
+        (isAuthApiError(updateError) &&
+          updateError.code === "invalid_credentials") ||
+        /current password/i.test(updateError.message);
+
+      throw new ShelfError({
+        cause: updateError,
+        message: isWrongCurrentPassword
+          ? "Current password is incorrect."
+          : isAuthApiError(updateError) && updateError.code === "weak_password"
+          ? "New password does not meet the password requirements."
+          : "Something went wrong while updating the password. Please try again later or contact support.",
+        additionalData: { id },
+        label,
+        shouldBeCaptured: !isWrongCurrentPassword,
+        status: isWrongCurrentPassword ? 400 : 500,
+      });
+    }
+
+    // Shelf's existing password reset flow ends all sessions after a password
+    // update. Preserve that policy for a signed-in change as well.
+    const { data: activeSession } = await auth.getSession();
+    if (activeSession.session?.access_token) {
+      try {
+        const { error: signOutError } =
+          await getSupabaseAdmin().auth.admin.signOut(
+            activeSession.session.access_token,
+            "global"
+          );
+        if (signOutError) throw signOutError;
+      } catch (cause) {
+        Logger.error(
+          new ShelfError({
+            cause,
+            message: "Failed to revoke all sessions after a password change.",
+            additionalData: { id },
+            label,
+          })
+        );
+      }
+    }
+  } catch (cause) {
+    if (isLikeShelfError(cause)) throw cause;
+
+    const wrongCurrentPassword =
+      isAuthApiError(cause) && cause.code === "invalid_credentials";
+    throw new ShelfError({
+      cause,
+      message: wrongCurrentPassword
+        ? "Current password is incorrect."
+        : "Something went wrong while updating the password. Please try again later or contact support.",
+      additionalData: { id },
+      label,
+      shouldBeCaptured: !wrongCurrentPassword,
+      status: wrongCurrentPassword ? 400 : 500,
     });
   }
 }

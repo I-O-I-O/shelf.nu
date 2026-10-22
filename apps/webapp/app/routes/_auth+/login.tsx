@@ -279,6 +279,7 @@ export default function IndexLoginForm() {
   const redirectTo = searchParams.get("redirectTo") ?? undefined;
   const acceptedInvite = searchParams.get("acceptedInvite");
   const passwordReset = searchParams.get("password_reset");
+  const passwordChanged = searchParams.get("password_changed");
   const data = useActionData<typeof action>();
 
   const navigation = useNavigation();
@@ -299,6 +300,11 @@ export default function IndexLoginForm() {
         <div className="mb-8 text-center text-success-600">
           You have successfully reset your password. You can now use your new
           password to login.
+        </div>
+      ) : null}
+      {passwordChanged ? (
+        <div className="mb-8 text-center text-success-600" role="status">
+          Password changed successfully. Please sign in again.
         </div>
       ) : null}
       <Form ref={zo.ref} method="post" replace className="flex flex-col gap-5">

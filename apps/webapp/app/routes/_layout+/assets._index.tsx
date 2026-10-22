@@ -45,7 +45,10 @@ import {
   trashIoioItems,
 } from "~/modules/ioio-staff/archive.server";
 import { returnResolvedAssetToService } from "~/modules/ioio-staff/lab-status.server";
-import { setIoioAssetHidden } from "~/modules/ioio-staff/visibility.server";
+import {
+  setIoioAssetHidden,
+  setIoioAssetsHidden,
+} from "~/modules/ioio-staff/visibility.server";
 import assetCss from "~/styles/assets.css?url";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -165,6 +168,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       settings,
       canSeeAllCustody,
       excludeAssetIds: archivedAssetIds,
+      ioioHiddenOnly:
+        inventoryUrl.searchParams.get("ioioVisibility") === "hidden",
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -217,10 +222,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
     };
 
     let permissionEntity = PermissionEntity.asset;
+    let visibilityAssetIds: string[] | undefined;
+    let visibilityPermissionEntities: PermissionEntity[] = [];
     if (intent === "hide-asset" || intent === "unhide-asset") {
-      const { assetId } = parseData(
+      const { assetId, assetIds } = parseData(
         formData,
-        z.object({ assetId: z.string().min(1) })
+        z
+          .object({
+            assetId: z.string().min(1).optional(),
+            assetIds: z.array(z.string().min(1)).optional(),
+          })
+          .refine(
+            ({ assetId: singleAssetId, assetIds: multipleAssetIds }) =>
+              Boolean(singleAssetId || multipleAssetIds?.length),
+            { message: "Select at least one inventory item." }
+          )
+      );
+      visibilityAssetIds = Array.from(
+        new Set([...(assetIds ?? []), ...(assetId ? [assetId] : [])])
       );
       const { organizationId: readOrganizationId } = await requirePermission({
         userId,
@@ -228,24 +247,71 @@ export async function action({ context, request }: ActionFunctionArgs) {
         entity: PermissionEntity.asset,
         action: PermissionAction.read,
       });
-      const asset = await db.asset.findFirst({
-        where: { id: assetId, organizationId: readOrganizationId },
-        select: { assetModelId: true },
-      });
-      if (!asset) {
-        throw new Response("The selected inventory item could not be found.", {
-          status: 404,
-        });
-      }
-      if (asset.assetModelId) {
-        const model = await db.assetModel.findFirst({
+      if (assetIds?.length) {
+        const assets = await db.asset.findMany({
           where: {
-            id: asset.assetModelId,
+            id: { in: visibilityAssetIds },
             organizationId: readOrganizationId,
           },
-          select: { id: true },
+          select: { id: true, assetModelId: true },
         });
-        if (model) permissionEntity = PermissionEntity.assetModel;
+        if (assets.length !== visibilityAssetIds.length) {
+          throw new Response(
+            "The selected inventory item could not be found.",
+            { status: 404 }
+          );
+        }
+        const assetModelIds = Array.from(
+          new Set(
+            assets
+              .map(({ assetModelId }) => assetModelId)
+              .filter((id): id is string => Boolean(id))
+          )
+        );
+        const assetModels = assetModelIds.length
+          ? await db.assetModel.findMany({
+              where: {
+                id: { in: assetModelIds },
+                organizationId: readOrganizationId,
+              },
+              select: { id: true },
+            })
+          : [];
+        const validModelIds = new Set(assetModels.map(({ id }) => id));
+        visibilityPermissionEntities = Array.from(
+          new Set(
+            assets.map(({ assetModelId }) =>
+              assetModelId && validModelIds.has(assetModelId)
+                ? PermissionEntity.assetModel
+                : PermissionEntity.asset
+            )
+          )
+        );
+        permissionEntity =
+          visibilityPermissionEntities[0] ?? PermissionEntity.asset;
+        visibilityPermissionEntities = visibilityPermissionEntities.slice(1);
+      } else {
+        const singleAssetId = visibilityAssetIds[0];
+        const asset = await db.asset.findFirst({
+          where: { id: singleAssetId, organizationId: readOrganizationId },
+          select: { assetModelId: true },
+        });
+        if (!asset) {
+          throw new Response(
+            "The selected inventory item could not be found.",
+            { status: 404 }
+          );
+        }
+        if (asset.assetModelId) {
+          const model = await db.assetModel.findFirst({
+            where: {
+              id: asset.assetModelId,
+              organizationId: readOrganizationId,
+            },
+            select: { id: true },
+          });
+          if (model) permissionEntity = PermissionEntity.assetModel;
+        }
       }
     }
 
@@ -255,6 +321,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
       entity: permissionEntity,
       action: intent2ActionMap[intent],
     });
+    for (const entity of visibilityPermissionEntities) {
+      await requirePermission({
+        userId,
+        request,
+        entity,
+        action: PermissionAction.update,
+      });
+    }
 
     // Fetch asset index settings to determine mode
     const settings = await getAssetIndexSettings({
@@ -267,21 +341,42 @@ export async function action({ context, request }: ActionFunctionArgs) {
     switch (intent) {
       case "hide-asset":
       case "unhide-asset": {
-        const { assetId } = parseData(
-          formData,
-          z.object({ assetId: z.string().min(1) })
-        );
         const hidden = intent === "hide-asset";
-        await setIoioAssetHidden({ assetId, organizationId, hidden });
+        const assetIds = visibilityAssetIds ?? [];
+        if (assetIds.length === 1) {
+          await setIoioAssetHidden({
+            assetId: assetIds[0],
+            organizationId,
+            hidden,
+          });
+        } else {
+          await setIoioAssetsHidden({
+            assetIds,
+            organizationId,
+            hidden,
+          });
+        }
+        const subject = assetIds.length === 1 ? "Asset" : "Assets";
         sendNotification({
-          title: hidden ? "Asset hidden" : "Asset visible to students",
+          title: hidden
+            ? `${subject} hidden`
+            : `${subject} visible to students`,
           message: hidden
-            ? "Students can no longer discover or borrow this item. Existing loans are unchanged."
-            : "Students can discover and borrow this item again.",
+            ? `Students can no longer discover or borrow ${
+                assetIds.length === 1 ? "this item" : "these items"
+              }. Existing loans are unchanged.`
+            : `Students can discover and borrow ${
+                assetIds.length === 1 ? "this item" : "these items"
+              } again.`,
           icon: { name: "success", variant: "success" },
           senderId: authSession.userId,
         });
-        return payload({ success: true, assetId, hidden });
+        return payload({
+          success: true,
+          assetIds,
+          ...(assetIds.length === 1 ? { assetId: assetIds[0] } : {}),
+          hidden,
+        });
       }
       case "return-unit-to-service": {
         if (role !== "ADMIN" && role !== "OWNER") {

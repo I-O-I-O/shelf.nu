@@ -762,6 +762,8 @@ export async function getAssets(params: {
   availableToBookOnly?: boolean;
   /** IOIO staff-only presentation filter for reversible archive markers. */
   excludeAssetIds?: string[];
+  /** IOIO staff Inventory view showing hidden assets and products only. */
+  ioioHiddenOnly?: boolean;
 }) {
   let {
     organizationId,
@@ -783,6 +785,7 @@ export async function getAssets(params: {
     assetKitFilter,
     availableToBookOnly,
     excludeAssetIds,
+    ioioHiddenOnly,
   } = params;
 
   try {
@@ -793,6 +796,22 @@ export async function getAssets(params: {
 
     if (excludeAssetIds?.length) {
       where.id = { notIn: excludeAssetIds };
+    }
+
+    if (ioioHiddenOnly) {
+      where.AND = [
+        ...(Array.isArray(where.AND)
+          ? where.AND
+          : where.AND
+          ? [where.AND]
+          : []),
+        {
+          OR: [
+            { ioioHidden: true },
+            { assetModel: { is: { ioioHidden: true } } },
+          ],
+        },
+      ];
     }
 
     if (availableToBookOnly) {
@@ -5967,6 +5986,7 @@ export async function getPaginatedAndFilterableAssets({
   canSeeAllCustody,
   userId,
   excludeAssetIds,
+  ioioHiddenOnly,
 }: {
   request: LoaderFunctionArgs["request"];
   organizationId: Organization["id"];
@@ -5989,6 +6009,8 @@ export async function getPaginatedAndFilterableAssets({
   userId?: string;
   /** Optional presentation-only exclusion used by the IOIO archive view. */
   excludeAssetIds?: string[];
+  /** Optional staff-only presentation filter for the canonical IOIO hidden flag. */
+  ioioHiddenOnly?: boolean;
 }) {
   const currentFilterParams = new URLSearchParams(filters || "");
   const searchParams = filters
@@ -6104,6 +6126,7 @@ export async function getPaginatedAndFilterableAssets({
         assetKitFilter,
         availableToBookOnly: isSelfService,
         excludeAssetIds,
+        ioioHiddenOnly,
       }),
     ]);
 

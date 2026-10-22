@@ -126,6 +126,15 @@ describe("AtomsResetHandler", () => {
     expect(count()).toBe(0);
   });
 
+  it("clears the selection when View changes to Hidden", () => {
+    const { goTo, count } = renderAt("/assets?status=AVAILABLE");
+    expect(count()).toBe(2);
+
+    goTo("ioioVisibility=hidden");
+
+    expect(count()).toBe(0);
+  });
+
   it("keeps the selection when only the page changes", () => {
     // Selecting across pages is deliberate, so paging is not a filter change.
     const { goTo, count } = renderAt("/assets?s=amaran&page=1");

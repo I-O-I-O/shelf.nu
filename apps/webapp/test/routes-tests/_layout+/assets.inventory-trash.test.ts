@@ -9,9 +9,12 @@ const mocks = vi.hoisted(() => ({
   trashIoioItems: vi.fn(),
   archiveIoioItems: vi.fn(),
   setIoioAssetHidden: vi.fn(),
+  setIoioAssetsHidden: vi.fn(),
   sendNotification: vi.fn(),
   assetFindFirst: vi.fn(),
+  assetFindMany: vi.fn(),
   assetModelFindFirst: vi.fn(),
+  assetModelFindMany: vi.fn(),
 }));
 
 // why: permission lookup is the authorization boundary; a fixed Staff result
@@ -36,6 +39,7 @@ vi.mock("~/modules/ioio-staff/archive.server", () => ({
 }));
 vi.mock("~/modules/ioio-staff/visibility.server", () => ({
   setIoioAssetHidden: mocks.setIoioAssetHidden,
+  setIoioAssetsHidden: mocks.setIoioAssetsHidden,
 }));
 vi.mock("~/modules/asset/service.server", () => ({
   addIndividualUnitsToAssetModel: vi.fn(),
@@ -52,8 +56,14 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
 vi.mock("~/database/db.server", () => ({
   db: {
     user: { findUniqueOrThrow: vi.fn() },
-    asset: { findFirst: mocks.assetFindFirst },
-    assetModel: { findFirst: mocks.assetModelFindFirst },
+    asset: {
+      findFirst: mocks.assetFindFirst,
+      findMany: mocks.assetFindMany,
+    },
+    assetModel: {
+      findFirst: mocks.assetModelFindFirst,
+      findMany: mocks.assetModelFindMany,
+    },
   },
 }));
 
@@ -88,6 +98,8 @@ describe("active Staff Inventory Trash action", () => {
     mocks.getAssetIndexSettings.mockResolvedValue({});
     mocks.assetFindFirst.mockResolvedValue({ assetModelId: null });
     mocks.assetModelFindFirst.mockResolvedValue(null);
+    mocks.assetFindMany.mockResolvedValue([]);
+    mocks.assetModelFindMany.mockResolvedValue([]);
     mocks.trashIoioItems.mockResolvedValue([
       { itemType: "ASSET", itemId: "asset-1" },
     ]);
@@ -213,5 +225,44 @@ describe("active Staff Inventory Trash action", () => {
       hidden: false,
     });
     expect(result).toMatchObject({ success: true, hidden: false });
+  });
+
+  it("authorizes every entity scope in a mixed bulk visibility action", async () => {
+    mocks.assetFindMany.mockResolvedValue([
+      { id: "visible-unit", assetModelId: null },
+      { id: "model-unit", assetModelId: "makey-model" },
+    ]);
+    mocks.assetModelFindMany.mockResolvedValue([{ id: "makey-model" }]);
+
+    const result = await action(
+      createActionArgs({
+        context,
+        request: new Request("http://localhost/assets", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "hide-asset",
+            "assetIds[0]": "visible-unit",
+            "assetIds[1]": "model-unit",
+          }),
+        }),
+      })
+    );
+
+    expect(mocks.requirePermission).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: "asset", action: "update" })
+    );
+    expect(mocks.requirePermission).toHaveBeenCalledWith(
+      expect.objectContaining({ entity: "assetModel", action: "update" })
+    );
+    expect(mocks.setIoioAssetsHidden).toHaveBeenCalledWith({
+      assetIds: ["visible-unit", "model-unit"],
+      organizationId: "org-1",
+      hidden: true,
+    });
+    expect(result).toMatchObject({
+      success: true,
+      assetIds: ["visible-unit", "model-unit"],
+      hidden: true,
+    });
   });
 });

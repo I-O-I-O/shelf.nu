@@ -1,6 +1,6 @@
 /**
  * Tests for the SSO guard on the legacy sign-in paths in the auth service:
- * password login, sending an email OTP, sending a password reset code, and
+ * password login, sending an email OTP, sending a password recovery link, and
  * verifying an email OTP.
  *
  * The decision is per-account, so no response given before authentication may
@@ -57,12 +57,23 @@ const supabaseMocks = vi.hoisted(() => ({
   signUp: vi.fn(),
   signInWithPassword: vi.fn(),
   signInWithOtp: vi.fn(),
-  resetPasswordForEmail: vi.fn(),
   verifyOtp: vi.fn(),
-  admin: { signOut: vi.fn() },
+  admin: { signOut: vi.fn(), generateLink: vi.fn() },
 }));
 vi.mock("~/integrations/supabase/client", () => ({
   getSupabaseAdmin: vi.fn(() => ({ auth: supabaseMocks })),
+}));
+
+const { mockSendEmail } = vi.hoisted(() => ({ mockSendEmail: vi.fn() }));
+// why: the mail queue is an external side effect; the generated Supabase
+// recovery URL and code are asserted from the payload instead.
+vi.mock("~/emails/mail.server", () => ({ sendEmail: mockSendEmail }));
+
+// why: rendering an email template is unrelated to whether Supabase generated
+// and Shelf sent the recovery credentials correctly.
+vi.mock("~/emails/password-reset", () => ({
+  passwordResetTextEmail: vi.fn(({ resetUrl, otp }) => `${resetUrl} ${otp}`),
+  passwordResetHtmlEmail: vi.fn().mockResolvedValue("<html>reset</html>"),
 }));
 
 const EMAIL = "jane@acme.com";
@@ -109,7 +120,12 @@ beforeEach(() => {
     error: null,
   });
   supabaseMocks.signInWithOtp.mockResolvedValue({ error: null });
-  supabaseMocks.resetPasswordForEmail.mockResolvedValue({ error: null });
+  supabaseMocks.admin.generateLink.mockResolvedValue({
+    data: {
+      properties: { hashed_token: "hashed-token", email_otp: "123456" },
+    },
+    error: null,
+  });
   supabaseMocks.verifyOtp.mockResolvedValue({
     data: { session: SUPABASE_SESSION },
     error: null,
@@ -240,14 +256,24 @@ describe("sendResetPasswordLink", () => {
     givenRefused();
 
     await expect(sendResetPasswordLink(EMAIL)).resolves.toBeUndefined();
-    expect(supabaseMocks.resetPasswordForEmail).not.toHaveBeenCalled();
+    expect(supabaseMocks.admin.generateLink).not.toHaveBeenCalled();
   });
 
-  it("sends a reset code to an allowed address", async () => {
+  it("sends a Supabase recovery link and code to an allowed address", async () => {
     await expect(sendResetPasswordLink(EMAIL)).resolves.toBeUndefined();
 
     expect(getLegacyLoginDecision).toHaveBeenCalledWith(EMAIL);
-    expect(supabaseMocks.resetPasswordForEmail).toHaveBeenCalledWith(EMAIL);
+    expect(supabaseMocks.admin.generateLink).toHaveBeenCalledWith({
+      type: "recovery",
+      email: EMAIL,
+    });
+    expect(mockSendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: EMAIL,
+        subject: "🔐 Reset your Shelf password",
+        text: expect.stringMatching(/token_hash=hashed-token.*123456/),
+      })
+    );
   });
 });
 

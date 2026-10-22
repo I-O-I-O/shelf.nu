@@ -51,10 +51,12 @@ import {
   InventoryViewSelect,
   INVENTORY_FILTER_TRIGGER_CLASS_NAME,
 } from "~/components/assets/assets-index/inventory-view-select";
+import { partitionInventoryVisibilitySelection } from "~/components/assets/assets-index/inventory-visibility-selection";
 import {
   STAFF_INVENTORY_UPDATED_AT_HEADING,
   StaffInventoryUpdatedAt,
 } from "~/components/assets/assets-index/staff-inventory-updated-at";
+import { useClearInventorySelectionOnSuccess } from "~/components/assets/assets-index/use-clear-inventory-selection-on-success";
 import BulkArchiveDialog from "~/components/assets/bulk-archive-dialog";
 import BulkCategoryUpdateDialog from "~/components/assets/bulk-category-update-dialog";
 import BulkDownloadQrDialog from "~/components/assets/bulk-download-qr-dialog";
@@ -68,6 +70,7 @@ import { ChevronRight } from "~/components/icons/library";
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
 import { EmptyState } from "~/components/list/empty-state";
 import { SearchForm } from "~/components/list/filters/search-form";
+import type { ListItemData } from "~/components/list/list-item";
 import { Pagination } from "~/components/list/pagination";
 import { IoioLocationCascadeSelect } from "~/components/location/ioio-location-cascade-select";
 import { getEffectiveIoioLocationColor } from "~/components/location/ioio-location-colors";
@@ -148,8 +151,32 @@ function uniqueAssetIds(assetIds: string[]) {
   return [...new Set(assetIds)];
 }
 
-function isStaffInventoryItemHidden(item: StaffInventoryItem) {
+function isStaffInventoryItemHidden(item: {
+  ioioHidden?: boolean;
+  assetModelId?: string | null;
+  assetModel?: { ioioHidden?: boolean } | null;
+}) {
   return Boolean(item.ioioHidden || item.assetModel?.ioioHidden);
+}
+
+function canUpdateVisibilityForItems(
+  roles: OrganizationRoles[] | undefined,
+  items: ListItemData[]
+) {
+  return (
+    items.length > 0 &&
+    items.every((item) => {
+      const assetModelId =
+        item.assetModelId ?? (item.assetModel as { id?: string } | null)?.id;
+      return userHasPermission({
+        roles,
+        entity: assetModelId
+          ? PermissionEntity.assetModel
+          : PermissionEntity.asset,
+        action: PermissionAction.update,
+      });
+    })
+  );
 }
 
 type StaffInventoryListProps = {
@@ -220,6 +247,40 @@ export function StaffInventoryList({
   const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
   const headerCheckboxRef = useRef<HTMLInputElement>(null);
   const [undoAction, setUndoAction] = useState<BulkUndoRequest | null>(null);
+  const visibilityFetcher = useFetcher<{ success?: boolean }>();
+  const pendingVisibilitySelectionRef = useRef<ListItemData[] | null>(null);
+  const {
+    hiddenItems: selectedHiddenItems,
+    visibleItems: selectedVisibleItems,
+  } = partitionInventoryVisibilitySelection(selectedItems);
+  const canHideSelected = canUpdateVisibilityForItems(
+    roles,
+    selectedVisibleItems
+  );
+  const canUnhideSelected = canUpdateVisibilityForItems(
+    roles,
+    selectedHiddenItems
+  );
+
+  useClearInventorySelectionOnSuccess({
+    data: visibilityFetcher.data,
+    state: visibilityFetcher.state,
+    pendingSelectionRef: pendingVisibilitySelectionRef,
+  });
+
+  const submitVisibilityChange = (hidden: boolean) => {
+    const targetItems = hidden ? selectedVisibleItems : selectedHiddenItems;
+    const assetIds = uniqueAssetIds(targetItems.map((item) => item.id));
+    if (assetIds.length === 0) return;
+
+    pendingVisibilitySelectionRef.current = [...selectedItems];
+    const formData = new FormData();
+    formData.set("intent", hidden ? "hide-asset" : "unhide-asset");
+    assetIds.forEach((assetId, index) => {
+      formData.set(`assetIds[${index}]`, assetId);
+    });
+    void visibilityFetcher.submit(formData, { method: "post" });
+  };
 
   const rememberBulkAction = useCallback(
     (context: BulkUpdateSuccessContext) => {
@@ -322,10 +383,14 @@ export function StaffInventoryList({
             canUpdate={canBulkUpdate}
             canDelete={canBulkDelete}
             canPrintLabels={canPrintLabels}
+            canHide={canHideSelected}
+            canUnhide={canUnhideSelected}
             onChangeCategory={() => openBulkDialog("category")}
             onChangeLocation={() => openBulkDialog("location")}
             onArchive={() => openBulkDialog("archive")}
             onTrash={() => openBulkDialog("trash")}
+            onHide={() => submitVisibilityChange(true)}
+            onUnhide={() => submitVisibilityChange(false)}
             onPrintLabels={() => {
               const assetIds = uniqueAssetIds(
                 selectedItems.map((item) => item.id)
@@ -443,7 +508,13 @@ function InventorySummaryStat({
 
 function StaffInventoryFilters() {
   const { categories, locations } = useLoaderData<AssetIndexLoaderData>();
-  const filterParams = ["status", "category", "location", "assetKitFilter"];
+  const filterParams = [
+    "status",
+    "category",
+    "location",
+    "assetKitFilter",
+    "ioioVisibility",
+  ];
   const hasFiltersToClear = useSearchParamHasValue(...filterParams);
   const clearFilters = useClearValueFromParams(...filterParams);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -487,6 +558,8 @@ function StaffInventoryFilters() {
     searchParams.getAll("category").includes(IOIO_KIT_CATEGORY_FILTER);
   const viewFilter: InventoryQuickFilter = kitsSelected
     ? "kits"
+    : searchParams.get("ioioVisibility") === "hidden"
+    ? "hidden"
     : activeStatus === AssetStatus.AVAILABLE
     ? "available"
     : activeStatus === AssetStatus.CHECKED_OUT
@@ -981,6 +1054,8 @@ function StaffInventoryExpandedUnitsContent({
     [item.members]
   );
   const selectAllRef = useRef<HTMLInputElement>(null);
+  const pendingDirectLifecycleIdsRef = useRef<string[] | null>(null);
+  const lastHandledMutationResponseRef = useRef<unknown>(null);
   const canUpdate = userHasPermission({
     roles,
     entity: PermissionEntity.asset,
@@ -1021,18 +1096,37 @@ function StaffInventoryExpandedUnitsContent({
   }, [someSelected]);
 
   useEffect(() => {
-    if (!fetcher.data?.success || !actionRequest) return;
-    const completedAction = actionRequest.action;
-    onActionRequestChange(null);
-    if (completedAction === "archive" || completedAction === "trash") {
-      onSelectedUnitIdsChange(
-        selectedUnitIds.filter((id) => !actionRequest.targetIds.includes(id))
-      );
+    const response = fetcher.data;
+    if (
+      fetcher.state !== "idle" ||
+      !response?.success ||
+      response === lastHandledMutationResponseRef.current
+    ) {
+      return;
     }
+    lastHandledMutationResponseRef.current = response;
+
+    if (actionRequest) {
+      const targetIds = actionRequest.targetIds;
+      onActionRequestChange(null);
+      onSelectedUnitIdsChange(
+        selectedUnitIds.filter((id) => !targetIds.includes(id))
+      );
+      void revalidator.revalidate();
+      return;
+    }
+
+    const completedDirectIds = pendingDirectLifecycleIdsRef.current;
+    if (!completedDirectIds) return;
+    pendingDirectLifecycleIdsRef.current = null;
+    onSelectedUnitIdsChange(
+      selectedUnitIds.filter((id) => !completedDirectIds.includes(id))
+    );
     void revalidator.revalidate();
   }, [
     actionRequest,
     fetcher.data,
+    fetcher.state,
     onActionRequestChange,
     onSelectedUnitIdsChange,
     revalidator,
@@ -1045,6 +1139,7 @@ function StaffInventoryExpandedUnitsContent({
   ) => {
     const uniqueTargetIds = uniqueAssetIds(targetIds);
     if (uniqueTargetIds.length === 0) return;
+    pendingDirectLifecycleIdsRef.current = null;
     onActionRequestChange({
       action: nextAction,
       targetIds: uniqueTargetIds,
@@ -1055,6 +1150,17 @@ function StaffInventoryExpandedUnitsContent({
     uniqueAssetIds(
       selectedUnitIds.includes(unitId) ? selectedUnitIds : [unitId]
     );
+
+  const returnUnitToService = (assetId: string) => {
+    pendingDirectLifecycleIdsRef.current = [assetId];
+    void fetcher.submit(
+      {
+        intent: "return-unit-to-service",
+        assetId,
+      },
+      { method: "post" }
+    );
+  };
 
   const printSelectedLabels = useCallback(
     (targetIds = selectedUnitIds) => {
@@ -1216,15 +1322,7 @@ function StaffInventoryExpandedUnitsContent({
                       member.bookingAssets.length === 0 ? (
                         <DropdownMenuItem
                           className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-green-800"
-                          onSelect={() =>
-                            fetcher.submit(
-                              {
-                                intent: "return-unit-to-service",
-                                assetId: member.id,
-                              },
-                              { method: "post" }
-                            )
-                          }
+                          onSelect={() => returnUnitToService(member.id)}
                         >
                           <span>Return to service</span>
                         </DropdownMenuItem>
@@ -1752,9 +1850,11 @@ function StaffInventoryActions({
   const navigate = useNavigate();
   const selectedItems = useAtomValue(selectedBulkItemsAtom);
   const setSelectedItems = useSetAtom(selectedBulkItemsAtom);
+  const removeSelectedItems = useSetAtom(removeSelectedBulkItemsAtom);
   const openBulkDialog = useSetAtom(openBulkDialogAtom);
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
   const visibilityFetcher = useFetcher();
+  const lastHandledVisibilityResponseRef = useRef<unknown>(null);
   const isRowSelected = selectedItems.some(
     (selectedItem) => bulkSelectionKey(selectedItem) === bulkSelectionKey(item)
   );
@@ -1763,6 +1863,26 @@ function StaffInventoryActions({
   const assetModelId = item.assetModelId ?? item.assetModel?.id;
   const canEditGeneralItem = assetModelId ? canUpdateAssetModel : canUpdate;
   const isHidden = isStaffInventoryItemHidden(item);
+
+  useEffect(() => {
+    const response = visibilityFetcher.data as
+      | { success?: boolean }
+      | undefined;
+    if (
+      visibilityFetcher.state !== "idle" ||
+      !response?.success ||
+      response === lastHandledVisibilityResponseRef.current
+    ) {
+      return;
+    }
+    lastHandledVisibilityResponseRef.current = response;
+    removeSelectedItems(getStaffInventoryActionTargets(item));
+  }, [
+    item,
+    removeSelectedItems,
+    visibilityFetcher.data,
+    visibilityFetcher.state,
+  ]);
 
   const toggleStudentVisibility = () => {
     void visibilityFetcher.submit(

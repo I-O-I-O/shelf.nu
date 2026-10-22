@@ -13,17 +13,21 @@ describe("Inventory quick filters", () => {
       "Available",
       "Checked out",
       "Kits",
+      "Hidden",
     ]);
   });
 
-  it.each<[InventoryQuickFilter, string | null, string | null]>([
-    ["all", null, null],
-    ["available", AssetStatus.AVAILABLE, null],
-    ["checked-out", AssetStatus.CHECKED_OUT, null],
-    ["kits", null, "IN_OTHER_KITS"],
-  ])("applies the %s quick filter", (filter, status, kitFilter) => {
+  it.each<[InventoryQuickFilter, string | null, string | null, string | null]>([
+    ["all", null, null, null],
+    ["available", AssetStatus.AVAILABLE, null, null],
+    ["checked-out", AssetStatus.CHECKED_OUT, null, null],
+    ["kits", null, "IN_OTHER_KITS", null],
+    ["hidden", null, null, "hidden"],
+  ])("applies the %s quick filter", (filter, status, kitFilter, visibility) => {
     const result = applyInventoryQuickFilter(
-      new URLSearchParams("s=makey&location=loc-1&category=category-1&page=3"),
+      new URLSearchParams(
+        "s=makey&location=loc-1&category=category-1&page=3&ioioVisibility=hidden"
+      ),
       filter
     );
 
@@ -32,6 +36,7 @@ describe("Inventory quick filters", () => {
     expect(result.get("location")).toBe("loc-1");
     expect(result.has("page")).toBe(false);
     expect(result.get("assetKitFilter")).toBe(kitFilter);
+    expect(result.get("ioioVisibility")).toBe(visibility);
     expect(result.getAll("category")).toEqual(["category-1"]);
   });
 
@@ -46,5 +51,6 @@ describe("Inventory quick filters", () => {
     expect(result.get("status")).toBeNull();
     expect(result.getAll("category")).toEqual(["category-1"]);
     expect(result.has("assetKitFilter")).toBe(false);
+    expect(result.has("ioioVisibility")).toBe(false);
   });
 });

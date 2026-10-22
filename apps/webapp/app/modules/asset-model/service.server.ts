@@ -310,6 +310,7 @@ export async function updateAssetModelImage({
       generateThumbnail: true,
       thumbnailSize: 108,
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
+      allowEmptyFile: true,
     });
 
     const uploaded = fileData.get("image") as string | null;
