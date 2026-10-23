@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   IOIO_REPORT_TYPES,
+  IOIO_REPORT_SELECT_OPTIONS,
   IOIO_REPORT_ACKNOWLEDGEMENTS,
+  IOIO_REPORT_CONTEXT_RULES,
+  IOIO_REPORT_FORM_OPTIONS,
+  IOIO_REPORT_FORM_VALUES,
+  IOIO_REPORT_TYPE_BY_FORM_VALUE,
   IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES,
   isIoioPhysicalUnitBlockingReport,
+  classifyIoioReport,
   reportProposalSchema,
   sanitizeReportText,
 } from "./report-problem.shared";
@@ -40,6 +46,61 @@ describe("IOIO problem report safety", () => {
     expect(IOIO_REPORT_ACKNOWLEDGEMENTS.FOUND_SOMETHING).toBe(
       "Thanks for letting Staff know."
     );
+  });
+
+  it("provides an Ask IOIO option for every server-proposable report type", () => {
+    expect(IOIO_REPORT_SELECT_OPTIONS.map(({ value }) => value)).toEqual(
+      IOIO_REPORT_TYPES
+    );
+    expect(IOIO_REPORT_SELECT_OPTIONS).toContainEqual({
+      value: "ITEM_NOT_WORKING",
+      label: "Item not working",
+    });
+    expect(IOIO_REPORT_SELECT_OPTIONS).toContainEqual({
+      value: "PART_MISSING",
+      label: "Part missing",
+    });
+    expect(IOIO_REPORT_SELECT_OPTIONS).toContainEqual({
+      value: "FOUND_SOMETHING",
+      label: "Found something",
+    });
+  });
+
+  it("maps each generic form option to its canonical report type", () => {
+    expect(IOIO_REPORT_FORM_OPTIONS.map(({ value }) => value)).toEqual(
+      IOIO_REPORT_FORM_VALUES
+    );
+    expect(
+      IOIO_REPORT_FORM_VALUES.map((value) => [
+        value,
+        IOIO_REPORT_TYPE_BY_FORM_VALUE[value],
+      ])
+    ).toEqual([
+      ["DAMAGED", "ITEM_DAMAGED"],
+      ["MISSING", "ITEM_MISSING"],
+      ["CANT_FIND", "CANNOT_FIND"],
+      ["WRONG_LOCATION", "WRONG_LOCATION"],
+      ["LOCATION_FULL", "LOCATION_FULL"],
+      ["KIT_INCOMPLETE", "KIT_INCOMPLETE"],
+      ["FOUND_SOMETHING", "FOUND_SOMETHING"],
+      ["OTHER", "OTHER"],
+    ]);
+    expect(IOIO_REPORT_CONTEXT_RULES.FOUND_SOMETHING).toEqual({
+      asset: "optional",
+      kit: "none",
+      location: "none",
+      exactUnit: "none",
+    });
+    expect(IOIO_REPORT_CONTEXT_RULES.KIT_INCOMPLETE).toEqual({
+      asset: "none",
+      kit: "required",
+      location: "none",
+      exactUnit: "none",
+    });
+  });
+
+  it("classifies Not working as an equipment condition for Staff visibility", () => {
+    expect(classifyIoioReport("ITEM_NOT_WORKING")).toBe("equipment-condition");
   });
 
   it("redacts contact data and control characters from descriptions", () => {

@@ -48,10 +48,10 @@ const querySchema = z.object({
   assetId: z.string().min(1),
 });
 
-const reportTypes = [
+export const IOIO_RETURN_REPORT_TYPES = [
   { value: "ITEM_DAMAGED", label: "Broken or damaged" },
-  { value: "KIT_INCOMPLETE", label: "Missing parts" },
-  { value: "ITEM_MISSING", label: "Not working" },
+  { value: "PART_MISSING", label: "Missing parts" },
+  { value: "ITEM_NOT_WORKING", label: "Not working" },
   { value: "OTHER", label: "Other" },
 ] as const;
 
@@ -378,7 +378,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
       if (
         parsed.issueState === "problem" &&
         (!parsed.reportType ||
-          !reportTypes.some(({ value }) => value === parsed.reportType))
+          !IOIO_RETURN_REPORT_TYPES.some(
+            ({ value }) => value === parsed.reportType
+          ))
       ) {
         throw new Error("Choose what is wrong with the item.");
       }
@@ -606,7 +608,7 @@ export default function IoioReturn() {
                     className="mt-2 min-h-11 w-full rounded-xl border border-gray-300 bg-white px-3 font-normal"
                   >
                     <option value="">Choose an issue</option>
-                    {reportTypes.map((type) => (
+                    {IOIO_RETURN_REPORT_TYPES.map((type) => (
                       <option key={type.value} value={type.value}>
                         {type.label}
                       </option>

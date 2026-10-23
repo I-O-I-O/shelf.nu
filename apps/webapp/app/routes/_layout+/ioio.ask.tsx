@@ -55,6 +55,7 @@ import {
   reportProblem,
   type PreparedReportProposal,
 } from "~/modules/ioio-student/report-problem.server";
+import { IOIO_REPORT_SELECT_OPTIONS } from "~/modules/ioio-student/report-problem.shared";
 import {
   getAssistantActionFeedback,
   isSubmittedAssistantMessage,
@@ -546,13 +547,11 @@ function ReportCard({
           defaultValue={proposal.reportType}
           className="mt-1 block min-h-11 w-full rounded-xl border border-gray-300 bg-white px-3"
         >
-          <option value="ITEM_MISSING">Item missing</option>
-          <option value="ITEM_DAMAGED">Item damaged</option>
-          <option value="WRONG_LOCATION">Wrong location</option>
-          <option value="LOCATION_FULL">Location full</option>
-          <option value="CANNOT_FIND">Cannot find</option>
-          <option value="KIT_INCOMPLETE">Kit incomplete</option>
-          <option value="OTHER">Other</option>
+          {IOIO_REPORT_SELECT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
         </select>
       </label>
       <label className="block text-sm font-medium text-gray-800">

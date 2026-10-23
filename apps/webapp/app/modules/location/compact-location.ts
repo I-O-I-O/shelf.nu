@@ -3,7 +3,15 @@ export type CompactLocationSummary = {
   storageLabel: string | null;
 };
 
-const LOCATION_PREFIX = /^(?:room|section|shelf|container|box)\s+/iu;
+/** Format the room and actual assigned location without intermediate levels. */
+export function formatStudentAssetLocation(path: string[]) {
+  const { room, storageLabel } = getCompactLocationSummary(path, {
+    showIntermediateLocations: false,
+  });
+  return [room, storageLabel].filter(Boolean).join(" · ") || null;
+}
+
+const LOCATION_PREFIX = /^(?:room|section|shelf|container|cabinet|box)\s+/iu;
 const ROOM_CODE = /^[A-Z]{1,4}[\d-]+$/u;
 
 function splitLocationName(value: string) {

@@ -18,10 +18,14 @@ function renderDetail({
   availableQuantity = 4,
   availabilityDetail,
   imageUrl = "/makey-kit.jpg",
+  title = "Makey Kit",
+  description = "A classroom electronics kit.",
 }: {
   availableQuantity?: number;
   availabilityDetail?: string;
   imageUrl?: string | null;
+  title?: string;
+  description?: string | null;
 } = {}) {
   const router = createMemoryRouter(
     [
@@ -31,8 +35,9 @@ function renderDetail({
           <IoioAssetDetailLayout
             backTo="/ioio"
             backLabel="Back to Inventory"
-            title="Makey Kit"
-            description="A classroom electronics kit."
+            title={title}
+            description={description}
+            descriptionPlacement="below-details"
             image={
               <AssetDetailImage
                 asset={{
@@ -75,6 +80,64 @@ function renderDetail({
 
 describe("IoioAssetDetailLayout", () => {
   afterEach(() => cleanup());
+
+  it.each(["Grove Kit", "Camera"])(
+    "puts the %s image and details before its full description",
+    (title) => {
+      const description =
+        "This kit includes an Arduino Nano 33 BLE Rev2.\n\nThe kit consists of the following components:\n1x Arduino Nano 33 BLE Sense Rev2\n1x USB-A to Micro-USB cable";
+      renderDetail({ title, description });
+
+      const titleHeading = screen.getByRole("heading", { name: title });
+      const action = screen.getByRole("button", {
+        name: "Add to borrow list",
+      });
+      const image = screen.getByRole("region", { name: `${title} image` });
+      const details = screen.getByRole("heading", { name: "Details" });
+      const descriptionHeading = screen.getByRole("heading", {
+        name: "Description",
+      });
+      const descriptionText = screen.getByText(
+        (_, element) =>
+          element?.tagName === "P" && element.textContent === description
+      );
+
+      expect(
+        titleHeading.compareDocumentPosition(action) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        action.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        image.compareDocumentPosition(details) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        details.compareDocumentPosition(descriptionHeading) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        descriptionHeading.compareDocumentPosition(descriptionText) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(descriptionText.textContent).toBe(description);
+      expect(descriptionText.className).toContain("whitespace-pre-wrap");
+      expect(descriptionText.className).toContain("break-words");
+      expect(descriptionHeading.closest("section")?.className).toContain(
+        "w-full"
+      );
+      expect(action).toBeTruthy();
+      expect(screen.getByText("4 / 5 kits available")).toBeTruthy();
+      expect(screen.getByText("Inventory")).toBeTruthy();
+    }
+  );
+
+  it("does not render a description section for an empty description", () => {
+    renderDetail({ description: " \n " });
+
+    expect(screen.queryByRole("heading", { name: "Description" })).toBeNull();
+  });
 
   it("shows concise student availability and the requested details grid", () => {
     const { container } = renderDetail();

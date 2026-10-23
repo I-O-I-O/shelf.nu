@@ -1,3 +1,4 @@
+import { CheckCircle2 } from "lucide-react";
 import { useLoaderData } from "react-router";
 import {
   data,
@@ -7,10 +8,7 @@ import {
 } from "react-router";
 import { AssetDetailImage } from "~/components/assets/asset-image";
 import { groupStudentAssets } from "~/components/ioio-student/inventory-presentation";
-import {
-  formatStudentLabel,
-  SectionHeading,
-} from "~/components/ioio-student/student-ui";
+import { formatStudentLabel } from "~/components/ioio-student/student-ui";
 import { Button } from "~/components/shared/button";
 import { db } from "~/database/db.server";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
@@ -144,8 +142,26 @@ export default function IoioReportComplete() {
 
   return (
     <div className="mx-auto max-w-2xl">
-      <SectionHeading title="Report sent" />
       <section className="space-y-5 rounded-3xl border border-gray-200 bg-white p-5 shadow-sm sm:p-7">
+        <div
+          role="status"
+          className="rounded-2xl border border-green-200 bg-green-50 p-5 shadow-sm sm:p-6"
+        >
+          <div className="flex items-start gap-3">
+            <CheckCircle2
+              aria-hidden="true"
+              className="mt-0.5 size-6 shrink-0 text-green-700"
+            />
+            <div className="min-w-0">
+              <h1 className="text-2xl font-black tracking-tight text-green-950">
+                Report sent
+              </h1>
+              <p className="mt-1 text-sm font-semibold text-green-900">
+                {acknowledgement}
+              </p>
+            </div>
+          </div>
+        </div>
         {item ? (
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 sm:p-5">
             <div
@@ -190,12 +206,6 @@ export default function IoioReportComplete() {
             </p>
           </div>
         ) : null}
-        <p
-          role="status"
-          className="rounded-xl bg-red-50 px-4 py-3 font-semibold text-red-900"
-        >
-          {acknowledgement}
-        </p>
         <Button
           to="/ioio"
           variant="primary"

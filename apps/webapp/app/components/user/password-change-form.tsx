@@ -6,7 +6,6 @@ import type { UserPageActionData } from "~/routes/_layout+/account-details.gener
 import { getValidationErrors } from "~/utils/http";
 import { Form } from "../custom-form";
 import PasswordInput from "../forms/password-input";
-import { Button } from "../shared/button";
 
 export default function PasswordChangeForm() {
   const zo = useZorm("ChangePasswordForm", PasswordChangeSchema);
@@ -70,13 +69,14 @@ export default function PasswordChangeForm() {
           </p>
         ) : null}
 
-        <Button
+        <button
           data-test-id="change-password"
           type="submit"
           disabled={disabled}
+          className="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-wait disabled:bg-gray-300"
         >
           {disabled ? "Changing password…" : "Change password"}
-        </Button>
+        </button>
       </Form>
 
       <div className="border-t border-gray-200 pt-3">
@@ -84,14 +84,14 @@ export default function PasswordChangeForm() {
         <Form method="post" className="mt-1">
           <input type="hidden" name="intent" value="requestPasswordReset" />
           <input type="hidden" name="type" value="requestPasswordReset" />
-          <Button
+          <button
             data-test-id="reset-password-by-email"
             type="submit"
-            variant="link"
             disabled={disabled}
+            className="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-wait disabled:bg-gray-300"
           >
             Reset password by email
-          </Button>
+          </button>
         </Form>
         {resetRequested ? (
           <p role="status" className="text-sm text-green-700">

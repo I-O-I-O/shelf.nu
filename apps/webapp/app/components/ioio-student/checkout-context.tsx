@@ -153,7 +153,8 @@ function checkoutItemFromAsset(
       "requiresBorrowApproval" in asset &&
       asset.requiresBorrowApproval === true,
     requiresStaffPreparation: asset.requiresStaffPreparation,
-    location: asset.locations[0]?.name ?? null,
+    location:
+      asset.locations[0]?.displayPath ?? asset.locations[0]?.name ?? null,
     candidateAssetIds:
       "sourceAssetIds" in asset && Array.isArray(asset.sourceAssetIds)
         ? asset.sourceAssetIds

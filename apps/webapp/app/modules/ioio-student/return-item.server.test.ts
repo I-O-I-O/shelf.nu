@@ -380,41 +380,52 @@ describe("IOIO return_item", () => {
     );
   });
 
-  it("keeps a problem return pending Staff inspection", async () => {
-    dbMock.ioioWriteOperation.findUnique.mockResolvedValue(
-      operation({
-        reportType: "ITEM_DAMAGED",
-        description: "Issue reported: ITEM_DAMAGED. m",
-      })
-    );
+  it.each([
+    "ITEM_DAMAGED",
+    "PART_MISSING",
+    "ITEM_NOT_WORKING",
+    "OTHER",
+  ] as const)(
+    "keeps a %s problem return pending Staff inspection",
+    async (reportType) => {
+      dbMock.ioioWriteOperation.findUnique.mockResolvedValue(
+        operation({
+          reportType,
+          description: `Issue reported: ${reportType}. m`,
+        })
+      );
 
-    const result = await submitReturnItem(
-      { confirmationToken: "token-a", quantity: 2 },
-      { context, request }
-    );
+      const result = await submitReturnItem(
+        { confirmationToken: "token-a", quantity: 2 },
+        { context, request }
+      );
 
-    expect(result).toMatchObject({
-      status: "submitted",
-      bookingId: booking.id,
-    });
-    expect(checkinMock).not.toHaveBeenCalled();
-    expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "SUBMITTED",
-          description: "Return submitted. Issue reported: ITEM_DAMAGED. m",
+      expect(result).toMatchObject({
+        status: "submitted",
+        bookingId: booking.id,
+      });
+      expect(checkinMock).not.toHaveBeenCalled();
+      expect(dbMock.ioioWriteOperation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "SUBMITTED",
+            description: `Return submitted. Issue reported: ${reportType}. m`,
+          }),
+        })
+      );
+      expect(createBorrowedItemProblemReportMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportType,
+          description: "m",
+          bookingId: booking.id,
+          bookingAssetId: bookingAsset.id,
+          assetId: bookingAsset.assetId,
         }),
-      })
-    );
-    expect(createBorrowedItemProblemReportMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reportType: "ITEM_DAMAGED",
-        description: "m",
-      }),
-      expect.anything(),
-      expect.objectContaining({ source: "IOIO_STUDENT_RETURN" })
-    );
-  });
+        expect.anything(),
+        expect.objectContaining({ source: "IOIO_STUDENT_RETURN" })
+      );
+    }
+  );
 
   it("keeps the problem report open when Staff completes a return for service review", async () => {
     dbMock.ioioWriteOperation.findFirst.mockResolvedValue(

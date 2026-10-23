@@ -92,6 +92,159 @@ describe("IOIO asset creation form", () => {
     navigate.mockClear();
   });
 
+  it("starts new assets with the existing quantity and preparation defaults", () => {
+    render(<IoioAssetCreateForm showAssetModel={false} />);
+
+    expect(
+      screen.getByRole("button", { name: /^Quantity Identical units/ })
+    ).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByText("Advanced options"));
+    expect(screen.getByLabelText("Requires preparation")).not.toBeChecked();
+    expect(screen.getByLabelText("Assigned storage location")).toBeChecked();
+  });
+
+  it("presets preparation and return handling only when tracking changes to individual", () => {
+    render(<IoioAssetCreateForm showAssetModel={false} />);
+    const individualTracking = screen.getByRole("button", {
+      name: /^Individual QR tracking/,
+    });
+    fireEvent.click(individualTracking);
+    fireEvent.click(screen.getByText("Advanced options"));
+
+    const preparation = screen.getByLabelText("Requires preparation");
+    const staffReturn = screen.getByLabelText("Return section for staff check");
+    const storageReturn = screen.getByLabelText("Assigned storage location");
+    expect(preparation).toBeChecked();
+    expect(staffReturn).toBeChecked();
+    expect(storageReturn).not.toBeChecked();
+
+    fireEvent.click(preparation);
+    expect(preparation).not.toBeChecked();
+    fireEvent.click(storageReturn);
+    expect(staffReturn).not.toBeChecked();
+    expect(storageReturn).toBeChecked();
+
+    // Re-selecting an already active value and other form changes preserve overrides.
+    fireEvent.click(individualTracking);
+    expect(preparation).not.toBeChecked();
+    expect(storageReturn).toBeChecked();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Edited item title" },
+    });
+    expect(preparation).not.toBeChecked();
+    expect(storageReturn).toBeChecked();
+  });
+
+  it("keeps preparation and return handling when individual tracking is turned off", () => {
+    render(
+      <IoioAssetCreateForm
+        showAssetModel={false}
+        type="INDIVIDUAL"
+        requiresStaffPreparation
+        returnHandling="RETURN_TO_RETURN_ZONE"
+      />
+    );
+    fireEvent.click(screen.getByText("Advanced options"));
+
+    const preparation = screen.getByLabelText("Requires preparation");
+    const staffReturn = screen.getByLabelText("Return section for staff check");
+    expect(preparation).toBeChecked();
+    expect(staffReturn).toBeChecked();
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Quantity Identical units/ })
+    );
+    expect(preparation).toBeChecked();
+    expect(staffReturn).toBeChecked();
+  });
+
+  it.each([
+    ["INDIVIDUAL", false, "RETURN_TO_STORAGE"],
+    ["INDIVIDUAL", true, "RETURN_TO_RETURN_ZONE"],
+    ["QUANTITY_TRACKED", true, "RETURN_TO_STORAGE"],
+  ] as const)(
+    "preserves saved edit defaults for tracking %s, preparation %s, and destination %s",
+    (type, requiresStaffPreparation, returnHandling) => {
+      render(
+        <IoioAssetCreateForm
+          id="asset-1"
+          showAssetModel={false}
+          type={type}
+          requiresStaffPreparation={requiresStaffPreparation}
+          returnHandling={returnHandling}
+        />
+      );
+      fireEvent.click(screen.getByText("Advanced options"));
+
+      expect(screen.getByLabelText("Requires preparation")).toHaveProperty(
+        "checked",
+        requiresStaffPreparation
+      );
+      expect(
+        screen.getByLabelText("Return section for staff check")
+      ).toHaveProperty("checked", returnHandling === "RETURN_TO_RETURN_ZONE");
+      expect(screen.getByLabelText("Assigned storage location")).toHaveProperty(
+        "checked",
+        returnHandling === "RETURN_TO_STORAGE"
+      );
+    }
+  );
+
+  it("presets preparation when editing and changing quantity tracking to individual", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        showAssetModel={false}
+        type="QUANTITY_TRACKED"
+        requiresStaffPreparation={false}
+      />
+    );
+    fireEvent.click(screen.getByText("Advanced options"));
+    const preparation = screen.getByLabelText("Requires preparation");
+    expect(preparation).not.toBeChecked();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Individual QR tracking/ })
+    );
+    expect(preparation).toBeChecked();
+  });
+
+  it("submits individual tracking with both manual overrides and leaves assigned location unchanged", () => {
+    render(
+      <IoioAssetCreateForm
+        showAssetModel={false}
+        locationId="assigned-container-1"
+      />
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Individual QR tracking/ })
+    );
+    fireEvent.click(screen.getByText("Advanced options"));
+    fireEvent.click(screen.getByLabelText("Requires preparation"));
+    fireEvent.click(screen.getByLabelText("Assigned storage location"));
+
+    const form = (screen.getByLabelText("Name") as HTMLInputElement).form;
+    expect(form).toBeInTheDocument();
+    const formData = new FormData(form!);
+    expect(formData.get("type")).toBe("INDIVIDUAL");
+    expect(formData.get("requiresStaffPreparation")).toBeNull();
+    expect(formData.get("returnHandling")).toBe("RETURN_TO_STORAGE");
+    expect(screen.getByLabelText("Shelf location selector")).toHaveAttribute(
+      "data-location-id",
+      "assigned-container-1"
+    );
+    const parsed = NewAssetFormSchema.parse({
+      title: "Test asset",
+      description: "",
+      category: "uncategorized",
+      type: formData.get("type"),
+      returnHandling: formData.get("returnHandling"),
+      requiresStaffPreparation:
+        formData.get("requiresStaffPreparation") ?? undefined,
+    });
+    expect(parsed.requiresStaffPreparation).toBe(false);
+    expect(parsed.returnHandling).toBe("RETURN_TO_STORAGE");
+  });
+
   it("shows the latest IOIO creation sections and controls with empty data", () => {
     render(<IoioAssetCreateForm assetQueueMode showAssetModel={false} />);
 

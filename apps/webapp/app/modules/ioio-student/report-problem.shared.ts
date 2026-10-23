@@ -30,6 +30,11 @@ export const IOIO_REPORT_LABELS: Record<IoioReportType, string> = {
   OTHER: "Other",
 };
 
+export const IOIO_REPORT_SELECT_OPTIONS = IOIO_REPORT_TYPES.map((value) => ({
+  value,
+  label: IOIO_REPORT_LABELS[value],
+}));
+
 export type IoioReportClassification = "equipment-condition" | "general";
 
 /** Only physical-condition reports belong in Broken items. */
@@ -73,10 +78,29 @@ export const IOIO_REPORT_FORM_VALUES = [
   "WRONG_LOCATION",
   "LOCATION_FULL",
   "KIT_INCOMPLETE",
+  "FOUND_SOMETHING",
   "OTHER",
 ] as const;
 
 export type IoioReportFormValue = (typeof IOIO_REPORT_FORM_VALUES)[number];
+
+export const IOIO_REPORT_FORM_LABELS: Record<IoioReportFormValue, string> = {
+  DAMAGED: "Item damaged",
+  MISSING: "Item missing",
+  CANT_FIND: "Can't find item",
+  WRONG_LOCATION: "Wrong location",
+  LOCATION_FULL: "Location full",
+  KIT_INCOMPLETE: "Kit incomplete",
+  FOUND_SOMETHING: "Found something",
+  OTHER: "Other",
+};
+
+export const IOIO_REPORT_FORM_OPTIONS = IOIO_REPORT_FORM_VALUES.map(
+  (value) => ({
+    value,
+    label: IOIO_REPORT_FORM_LABELS[value],
+  })
+);
 
 export const IOIO_REPORT_TYPE_BY_FORM_VALUE: Record<
   IoioReportFormValue,
@@ -88,6 +112,7 @@ export const IOIO_REPORT_TYPE_BY_FORM_VALUE: Record<
   WRONG_LOCATION: "WRONG_LOCATION",
   LOCATION_FULL: "LOCATION_FULL",
   KIT_INCOMPLETE: "KIT_INCOMPLETE",
+  FOUND_SOMETHING: "FOUND_SOMETHING",
   OTHER: "OTHER",
 };
 
@@ -95,29 +120,59 @@ export const IOIO_REPORT_CONTEXT_RULES: Record<
   IoioReportFormValue,
   {
     asset: "required" | "optional" | "none";
+    kit: "required" | "none";
     location: "required" | "optional" | "none";
     exactUnit: "required-if-multiple" | "optional" | "none";
   }
 > = {
   DAMAGED: {
     asset: "required",
+    kit: "none",
     location: "none",
     exactUnit: "required-if-multiple",
   },
-  MISSING: { asset: "required", location: "none", exactUnit: "optional" },
-  CANT_FIND: { asset: "required", location: "none", exactUnit: "none" },
+  MISSING: {
+    asset: "required",
+    kit: "none",
+    location: "none",
+    exactUnit: "optional",
+  },
+  CANT_FIND: {
+    asset: "required",
+    kit: "none",
+    location: "none",
+    exactUnit: "none",
+  },
   WRONG_LOCATION: {
     asset: "required",
+    kit: "none",
     location: "required",
     exactUnit: "required-if-multiple",
   },
-  LOCATION_FULL: { asset: "none", location: "required", exactUnit: "none" },
-  KIT_INCOMPLETE: {
-    asset: "required",
-    location: "none",
-    exactUnit: "required-if-multiple",
+  LOCATION_FULL: {
+    asset: "none",
+    kit: "none",
+    location: "required",
+    exactUnit: "none",
   },
-  OTHER: { asset: "none", location: "none", exactUnit: "none" },
+  KIT_INCOMPLETE: {
+    asset: "none",
+    kit: "required",
+    location: "none",
+    exactUnit: "none",
+  },
+  FOUND_SOMETHING: {
+    asset: "optional",
+    kit: "none",
+    location: "none",
+    exactUnit: "none",
+  },
+  OTHER: {
+    asset: "none",
+    kit: "none",
+    location: "none",
+    exactUnit: "none",
+  },
 };
 
 export function getIoioReportAcknowledgement(reportType: string) {

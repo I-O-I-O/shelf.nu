@@ -34,7 +34,10 @@ import {
   fileErrorAtom,
 } from "~/atoms/file";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
-import { assetAdvancedSettingsSchema } from "~/modules/asset/advanced-settings";
+import {
+  ASSET_RETURN_HANDLING,
+  assetAdvancedSettingsSchema,
+} from "~/modules/asset/advanced-settings";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import { isQuantityTracked } from "~/modules/asset/utils";
 import {
@@ -332,7 +335,7 @@ export const IoioAssetCreateForm = ({
   consumptionType,
   unitOfMeasure,
   requiresBorrowApproval,
-  requiresStaffPreparation,
+  requiresStaffPreparation: initialRequiresStaffPreparation,
   requiresReturnPhoto,
   maxBorrowDays,
   extensionBorrowDays,
@@ -442,6 +445,12 @@ export const IoioAssetCreateForm = ({
   const [selectedAssetType, setSelectedAssetType] = useState<AssetType>(
     bulkMode ? AssetType.INDIVIDUAL : assetType ?? AssetType.QUANTITY_TRACKED
   );
+  const [staffPreparationEnabled, setStaffPreparationEnabled] = useState(
+    initialRequiresStaffPreparation ?? false
+  );
+  const [selectedReturnHandling, setSelectedReturnHandling] = useState(
+    returnHandling ?? ASSET_RETURN_HANDLING.RETURN_TO_STORAGE
+  );
   const isQtyTracked = isQuantityTracked(selectedAssetType);
   const [quantityInput, setQuantityInput] = useState(
     quantity == null ? "" : String(quantity)
@@ -519,6 +528,13 @@ export const IoioAssetCreateForm = ({
   }, [productGroupConversionFetcher.data, navigate]);
 
   const handleTrackingTypeChange = (nextType: AssetType) => {
+    if (
+      selectedAssetType !== AssetType.INDIVIDUAL &&
+      nextType === AssetType.INDIVIDUAL
+    ) {
+      setStaffPreparationEnabled(true);
+      setSelectedReturnHandling(ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE);
+    }
     setSelectedAssetType(nextType);
     setConversionResult(null);
     if (isProductGroupEdit && nextType === AssetType.QUANTITY_TRACKED) {
@@ -1788,11 +1804,13 @@ export const IoioAssetCreateForm = ({
                 unitOfMeasure: unitOfMeasure ?? null,
                 minQuantity: minQuantity ?? null,
                 requiresBorrowApproval: requiresBorrowApproval ?? false,
-                requiresStaffPreparation: requiresStaffPreparation ?? false,
+                requiresStaffPreparation: staffPreparationEnabled,
                 requiresReturnPhoto: requiresReturnPhoto ?? false,
-                returnHandling: returnHandling ?? "RETURN_TO_STORAGE",
+                returnHandling: selectedReturnHandling,
               }}
               disabled={disabled}
+              onRequiresStaffPreparationChange={setStaffPreparationEnabled}
+              onReturnHandlingChange={setSelectedReturnHandling}
             />
           </AdvancedOptions>
 

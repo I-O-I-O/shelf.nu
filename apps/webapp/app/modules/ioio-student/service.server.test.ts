@@ -13,6 +13,7 @@ import {
   getStudentAssets,
   getStudentKits,
   getStudentLocations,
+  getStudentReportLocations,
 } from "./service.server";
 
 vi.mock("~/database/db.server", () => ({
@@ -556,6 +557,77 @@ describe("student catalog source selectors", () => {
         children: [{ id: "shelf-1", assetCount: 1 }],
       },
     ]);
+  });
+
+  it("keeps only locations with active inventory and their hierarchy for new reports", async () => {
+    vi.mocked(db.location.findMany).mockResolvedValue([
+      {
+        id: "room-active",
+        name: "Active room",
+        parentId: null,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+      {
+        id: "shelf-active",
+        name: "Active shelf",
+        parentId: "room-active",
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+      {
+        id: "room-archived-only",
+        name: "Archived-only room",
+        parentId: null,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+      {
+        id: "room-kit",
+        name: "Kit room",
+        parentId: null,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+      {
+        id: "room-empty",
+        name: "Empty room",
+        parentId: null,
+        imageUrl: null,
+        thumbnailUrl: null,
+      },
+    ] as never);
+    vi.mocked(db.asset.findMany).mockResolvedValue([
+      { assetLocations: [{ locationId: "shelf-active" }] },
+    ] as never);
+    vi.mocked(db.kit.findMany).mockResolvedValue([
+      {
+        id: "active-kit",
+        organizationId: "org-1",
+        name: "Grove Kit",
+        status: "AVAILABLE",
+        image: null,
+        imageExpiration: null,
+        location: {
+          id: "room-kit",
+          name: "Kit room",
+          organizationId: "org-1",
+        },
+        qrCodes: [],
+        assetKits: [],
+      },
+    ] as never);
+
+    const locations = await getStudentReportLocations({
+      organizationId: "org-1",
+    });
+
+    expect(locations.map(({ id }) => id)).toEqual(["room-active", "room-kit"]);
+    expect(locations[0]?.children.map(({ id }) => id)).toEqual([
+      "shelf-active",
+    ]);
+    expect(JSON.stringify(locations)).not.toContain("room-archived-only");
+    expect(JSON.stringify(locations)).not.toContain("room-empty");
   });
 
   it("returns native active Shelf Kits with current image, canonical name, safe contents, and shared availability", async () => {

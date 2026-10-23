@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { SettingHelpLabel } from "~/components/shared/setting-help-label";
-import { getCompactLocationSummary } from "~/modules/location/compact-location";
+import { formatStudentAssetLocation } from "~/modules/location/compact-location";
 
 export type AssetDetailLocation = {
   path: string[];
@@ -27,31 +27,17 @@ type AssetDetailInformationProps = {
 };
 
 function LocationValue({ location }: { location: AssetDetailLocation }) {
-  const summary = getCompactLocationSummary(location.path, {
-    showIntermediateLocations: false,
-  });
-  const storageLabel = summary.storageLabel ? (
-    <span className="text-gray-600">
-      {summary.room ? " · " : ""}
-      {summary.storageLabel}
-    </span>
-  ) : null;
-  const content = (
-    <span className="block">
-      {summary.room}
-      {storageLabel}
-    </span>
-  );
+  const content = formatStudentAssetLocation(location.path);
 
   return location.href ? (
     <Link
       to={location.href}
       className="font-medium text-red-700 hover:underline"
     >
-      {content}
+      <span className="block">{content}</span>
     </Link>
   ) : (
-    content
+    <span className="block">{content}</span>
   );
 }
 
@@ -66,12 +52,9 @@ export function AssetDetailInformation({
   maxBorrowDays,
   additionalFields = [],
 }: AssetDetailInformationProps) {
-  const usefulLocations = locations.filter((location) => {
-    const summary = getCompactLocationSummary(location.path, {
-      showIntermediateLocations: false,
-    });
-    return summary.room || summary.storageLabel;
-  });
+  const usefulLocations = locations.filter((location) =>
+    formatStudentAssetLocation(location.path)
+  );
   const fields: AssetDetailField[] = [
     {
       label: "Location",

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { useEffect, useRef, useState } from "react";
 import {
   Form,
@@ -39,6 +40,7 @@ import {
 } from "~/modules/ioio-student/report-problem.server";
 import {
   IOIO_REPORT_CONTEXT_RULES,
+  IOIO_REPORT_FORM_OPTIONS,
   IOIO_REPORT_FORM_VALUES,
   IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES,
   IOIO_REPORT_TYPE_BY_FORM_VALUE,
@@ -49,22 +51,13 @@ import { getReportSubmissionFeedback } from "~/modules/ioio-student/report-submi
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import {
   getStudentAssets,
-  getStudentLocations,
+  getStudentKits,
+  getStudentReportLocations,
 } from "~/modules/ioio-student/service.server";
 import type { StudentLocation } from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, parseData, payload } from "~/utils/http.server";
-
-const problemTypes = [
-  { value: "DAMAGED", label: "Item damaged" },
-  { value: "MISSING", label: "Item missing" },
-  { value: "CANT_FIND", label: "Can't find item" },
-  { value: "WRONG_LOCATION", label: "Wrong location" },
-  { value: "LOCATION_FULL", label: "Location full" },
-  { value: "KIT_INCOMPLETE", label: "Kit incomplete" },
-  { value: "OTHER", label: "Other" },
-] as const;
 
 export const meta: MetaFunction<typeof loader> = () => [
   { title: "Report an issue" },
@@ -92,12 +85,12 @@ const ReportSchema = z.object({
   assetId: z.string().optional(),
   productId: z.string().optional(),
   unitId: z.string().optional(),
-  // Kept for compatibility with existing Shelf report integrations. The
-  // student form intentionally does not expose a separate kit field.
+  // Native IOIO Kit context is used for KIT_INCOMPLETE product reports.
   kitId: z.string().optional(),
   locationId: z.string().optional(),
   bookingId: z.string().optional(),
   bookingAssetId: z.string().optional(),
+  submissionToken: z.string().uuid().optional(),
   content: z.string().trim().min(3).max(2000),
 });
 
@@ -119,12 +112,24 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         { bookingId, bookingAssetId, assetId },
         { context, request }
       );
-      return data(payload({ mode: "borrowed" as const, borrowedItem }));
+      return data(
+        payload({
+          mode: "borrowed" as const,
+          borrowedItem,
+          submissionToken: randomUUID(),
+        })
+      );
     }
-    const [inventoryAssets, studentLocations] = await Promise.all([
+    const [inventoryAssets, studentKits] = await Promise.all([
       getStudentAssets({ organizationId }),
-      getStudentLocations({ organizationId }),
+      getStudentKits({ organizationId }),
     ]);
+    const studentLocations = await getStudentReportLocations({
+      organizationId,
+      activeKitLocationIds: studentKits.flatMap((kit) =>
+        kit.location ? [kit.location.id] : []
+      ),
+    });
     const assetOptions = getReportAssetOptions(
       inventoryAssets,
       formatStudentLabel
@@ -163,7 +168,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     return data(
       payload({
         mode: "generic" as const,
+        selectedProblemType:
+          params.get("mode") === "found" ? ("FOUND_SOMETHING" as const) : null,
         assets,
+        kits: studentKits.map(({ id, name }) => ({ id, name })),
         locations: studentLocations,
         selectedProductId: selectedAsset?.id ?? null,
         selectedUnitId: selectedUnit,
@@ -196,6 +204,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
       if (!values.bookingId || !values.bookingAssetId || !values.assetId) {
         throw new Error("The borrowed item reference is incomplete.");
       }
+      if (!values.submissionToken) {
+        throw new Error("Refresh the report form before submitting again.");
+      }
       const selectedType = borrowedProblemTypes.find(
         (item) => item.value === values.problemType
       );
@@ -212,7 +223,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
           description: values.content,
         },
         { context, request },
-        { source: "IOIO_STUDENT_REPORT" }
+        {
+          source: "IOIO_STUDENT_REPORT",
+          submissionToken: values.submissionToken,
+        }
       );
       if (!savedReport.reportId) {
         throw new Error(
@@ -222,7 +236,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       return redirect(getReportCompletionPath(savedReport.reportId));
     }
 
-    const problemType = problemTypes.find(
+    const problemType = IOIO_REPORT_FORM_OPTIONS.find(
       (item) => item.value === values.problemType
     );
     if (!problemType) {
@@ -243,12 +257,19 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
     const productId = values.productId?.trim() || "";
     const unitIdValue = values.unitId?.trim() || "";
+    const kitId = values.kitId?.trim() || "";
     const locationId = values.locationId?.trim() || "";
     if (contextRules.asset === "required" && !productId) {
       throw invalidReport("Choose the item this report is about.");
     }
     if (contextRules.asset === "none" && (productId || unitIdValue)) {
       throw invalidReport("This report type does not use an item or unit.");
+    }
+    if (contextRules.kit === "required" && !kitId) {
+      throw invalidReport("Choose the kit this report is about.");
+    }
+    if (contextRules.kit === "none" && kitId) {
+      throw invalidReport("This report type does not use a kit.");
     }
     if (contextRules.location === "required" && !locationId) {
       throw invalidReport("Choose the Shelf location for this report.");
@@ -267,12 +288,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "This report type cannot use a borrowed-item reference."
       );
     }
-    if (values.kitId || values.bookingId || values.bookingAssetId) {
+    if (values.bookingId || values.bookingAssetId) {
       throw invalidReport("This report contains unrelated item details.");
     }
 
     let exactAssetId: string | null = null;
-    let reportKitId: string | null = null;
+    let reportKitId: string | null = kitId || null;
     let reportDescription = values.content;
     if (productId) {
       const archivedAssetIds = await getIoioArchivedItemIds({
@@ -425,6 +446,7 @@ export default function IoioReport() {
     return (
       <BorrowedProblemForm
         item={loaderData.borrowedItem}
+        submissionToken={loaderData.submissionToken}
         result={result}
         isSubmitting={isSubmitting}
       />
@@ -433,7 +455,9 @@ export default function IoioReport() {
   return (
     <GenericReportForm
       assets={loaderData.assets}
+      kits={loaderData.kits}
       locations={loaderData.locations}
+      selectedProblemType={loaderData.selectedProblemType}
       selectedProductId={loaderData.selectedProductId}
       selectedUnitId={loaderData.selectedUnitId}
       result={result}
@@ -444,7 +468,9 @@ export default function IoioReport() {
 
 function GenericReportForm({
   assets,
+  kits,
   locations,
+  selectedProblemType,
   selectedProductId,
   selectedUnitId,
   result,
@@ -456,7 +482,9 @@ function GenericReportForm({
     units: Array<{ id: string; label: string; reported: boolean }>;
     defaultUnitId: string | null;
   }>;
+  kits: Array<{ id: string; name: string }>;
   locations: StudentLocation[];
+  selectedProblemType: IoioReportFormValue | null;
   selectedProductId: string | null;
   selectedUnitId: string | null;
   result: ReturnType<typeof useActionData<typeof action>>;
@@ -467,10 +495,11 @@ function GenericReportForm({
   useEffect(() => {
     if (!isSubmitting && feedback) submitLock.current = false;
   }, [feedback, isSubmitting]);
-  const [problemType, setProblemType] = useState("");
+  const [problemType, setProblemType] = useState(selectedProblemType ?? "");
   const [selectedProduct, setSelectedProduct] = useState(
     selectedProductId ?? ""
   );
+  const [selectedKit, setSelectedKit] = useState("");
   const currentProduct = assets.find((asset) => asset.id === selectedProduct);
   const [itemSearch, setItemSearch] = useState(currentProduct?.label ?? "");
   const [showItemResults, setShowItemResults] = useState(false);
@@ -632,9 +661,30 @@ function GenericReportForm({
         ) : null}
       </>
     ) : null;
+  const kitField =
+    rules?.kit === "required" ? (
+      <label className="block text-sm font-medium text-gray-800">
+        Which kit?
+        <select
+          name="kitId"
+          required
+          value={selectedKit}
+          onChange={(event) => setSelectedKit(event.currentTarget.value)}
+          className="mt-1 block min-h-11 w-full rounded-xl border border-gray-300 bg-white px-3 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
+        >
+          <option value="">Choose a kit</option>
+          {kits.map((kit) => (
+            <option key={kit.id} value={kit.id}>
+              {kit.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    ) : null;
   const contextFields = (
     <>
       {assetField}
+      {kitField}
       {locationField}
     </>
   );
@@ -677,6 +727,9 @@ function GenericReportForm({
                 setSelectedProduct("");
                 setItemSearch("");
               }
+              if (!nextRules || nextRules.kit === "none") {
+                setSelectedKit("");
+              }
               if (
                 !nextRules ||
                 nextRules.asset === "none" ||
@@ -689,7 +742,7 @@ function GenericReportForm({
             className="mt-1 block min-h-11 w-full rounded-xl border border-gray-300 bg-white px-3 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
           >
             <option value="">Choose an issue</option>
-            {problemTypes.map((type) => (
+            {IOIO_REPORT_FORM_OPTIONS.map((type) => (
               <option key={type.value} value={type.value}>
                 {type.label}
               </option>
@@ -828,10 +881,12 @@ function ReportLocationHierarchyField({
 
 function BorrowedProblemForm({
   item,
+  submissionToken,
   result,
   isSubmitting,
 }: {
   item: Awaited<ReturnType<typeof getBorrowedItemProblemContext>>;
+  submissionToken: string;
   result: ReturnType<typeof useActionData<typeof action>>;
   isSubmitting: boolean;
 }) {
@@ -905,6 +960,7 @@ function BorrowedProblemForm({
           name="bookingAssetId"
           value={item.bookingAssetId}
         />
+        <input type="hidden" name="submissionToken" value={submissionToken} />
         <label className="block text-sm font-medium text-gray-800">
           Problem type
           <select

@@ -3,6 +3,7 @@ import type { StudentAsset } from "~/modules/ioio-student/service.server";
 import {
   asksForPhysicalUnits,
   filterStudentInventory,
+  getStudentAssetLocationDisplay,
   groupStudentAssets,
   getStudentBrowseLocationIdForPath,
   getStudentLabAreaFilters,
@@ -87,6 +88,18 @@ describe("student inventory presentation", () => {
       "Container 4",
     ]);
     expect(getStudentLocationPath("missing", locations)).toBeNull();
+    expect(
+      getStudentAssetLocationDisplay(
+        { id: "container-4", name: "Container 4" },
+        locations
+      )
+    ).toBe("IOIO Lab - B477 · Container 4");
+    expect(
+      getStudentAssetLocationDisplay(
+        { id: "missing", name: "Shelf A2" },
+        locations
+      )
+    ).toBe("Shelf A2");
   });
 
   it("does not count out-of-service units as borrowable in a grouped product", () => {

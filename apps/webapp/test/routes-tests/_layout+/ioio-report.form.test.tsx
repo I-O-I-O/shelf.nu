@@ -7,8 +7,10 @@ import {
 } from "@testing-library/react";
 import { createRoutesStub, redirect } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import IoioReport from "~/routes/_layout+/ioio.report";
-import { action as submitIoioReport } from "~/routes/_layout+/ioio.report";
+import { loader as loadLegacyFoundRoute } from "~/routes/_layout+/ioio.found";
+import IoioReport, {
+  action as submitIoioReport,
+} from "~/routes/_layout+/ioio.report";
 
 const actionMocks = vi.hoisted(() => ({
   db: {
@@ -21,6 +23,8 @@ const actionMocks = vi.hoisted(() => ({
   reportProblem: vi.fn(),
   createBorrowedItemProblemReport: vi.fn(),
   getBorrowedItemProblemContext: vi.fn(),
+  getStudentKits: vi.fn(),
+  getStudentReportLocations: vi.fn(),
 }));
 
 // why: the route stub supplies the loader/action outcomes; database modules
@@ -34,7 +38,8 @@ vi.mock("~/modules/ioio-student/report-problem.server", () => ({
 }));
 vi.mock("~/modules/ioio-student/service.server", () => ({
   getStudentAssets: vi.fn(),
-  getStudentLocations: vi.fn(),
+  getStudentKits: actionMocks.getStudentKits,
+  getStudentReportLocations: actionMocks.getStudentReportLocations,
 }));
 vi.mock("~/modules/ioio-student/route.server", () => ({
   requireStudentRead: actionMocks.requireStudentRead,
@@ -95,6 +100,8 @@ const loaderData = {
   ],
   selectedProductId: null,
   selectedUnitId: null,
+  kits: [{ id: "grove-kit", name: "Grove Kit" }],
+  selectedProblemType: null as "FOUND_SOMETHING" | null,
 };
 
 function renderReport(action = vi.fn(() => ({ ok: true })), data = loaderData) {
@@ -233,6 +240,40 @@ describe("IOIO Student report form", () => {
     expect(screen.getByLabelText("Which unit?")).toHaveValue("");
   });
 
+  it("uses only a kit selector for Kit incomplete and clears stale unit context", async () => {
+    renderReport();
+    await screen.findByRole("heading", { name: "Report" });
+    fireEvent.change(screen.getByLabelText("What happened?"), {
+      target: { value: "DAMAGED" },
+    });
+    chooseMakeyProduct();
+    fireEvent.change(screen.getByLabelText("Which unit?"), {
+      target: { value: "makey-unit-002" },
+    });
+
+    fireEvent.change(screen.getByLabelText("What happened?"), {
+      target: { value: "KIT_INCOMPLETE" },
+    });
+
+    expect(screen.getByLabelText("Which kit?")).toBeRequired();
+    expect(screen.queryByLabelText("What item is this about?")).toBeNull();
+    expect(screen.queryByLabelText("Which unit?")).toBeNull();
+    expect(document.querySelector('[name="productId"]')).toBeNull();
+    expect(document.querySelector('[name="unitId"]')).toBeNull();
+    expect(document.querySelector('[name="content"]')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Which kit?"), {
+      target: { value: "grove-kit" },
+    });
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "One sensor is missing." },
+    });
+    const form = new FormData(document.querySelector("form")!);
+    expect(form.get("kitId")).toBe("grove-kit");
+    expect(form.get("productId")).toBeNull();
+    expect(form.get("unitId")).toBeNull();
+  });
+
   it("shows a required location and no asset or unit for Location full", async () => {
     renderReport();
     await screen.findByRole("heading", { name: "Report" });
@@ -279,13 +320,13 @@ describe("IOIO Student report form", () => {
     expect(screen.queryByText("Create new location")).toBeNull();
   });
 
-  it("omits Found something and shows only Description for Other", async () => {
+  it("shows Found something and only Description for Other", async () => {
     renderReport();
     await screen.findByRole("heading", { name: "Report" });
     const issueSelect = screen.getByLabelText("What happened?");
     expect(
-      screen.queryByRole("option", { name: "Found something" })
-    ).toBeNull();
+      screen.getByRole("option", { name: "Found something" })
+    ).toBeTruthy();
     fireEvent.change(issueSelect, { target: { value: "OTHER" } });
 
     expect(screen.getByLabelText("Description")).toBeTruthy();
@@ -445,6 +486,7 @@ describe("IOIO Student report form", () => {
     form.set("bookingId", "booking-1");
     form.set("bookingAssetId", "booking-asset-1");
     form.set("assetId", "unit-003");
+    form.set("submissionToken", "123e4567-e89b-42d3-a456-426614174000");
     form.set("problemType", "DAMAGED");
     form.set("content", "The casing is cracked.");
 
@@ -466,7 +508,242 @@ describe("IOIO Student report form", () => {
         reportType: "ITEM_DAMAGED",
       }),
       expect.anything(),
+      {
+        source: "IOIO_STUDENT_REPORT",
+        submissionToken: "123e4567-e89b-42d3-a456-426614174000",
+      }
+    );
+  });
+
+  it.each([
+    { formValue: "DAMAGED", reportType: "ITEM_DAMAGED" },
+    { formValue: "MISSING_PART", reportType: "PART_MISSING" },
+    { formValue: "NOT_WORKING", reportType: "ITEM_NOT_WORKING" },
+    { formValue: "OTHER", reportType: "OTHER" },
+  ])(
+    "preserves active-loan $formValue as $reportType with exact loan context",
+    async ({ formValue, reportType }) => {
+      actionMocks.requireStudentRead.mockResolvedValue({
+        userId: "student-1",
+        organizationId: "team-1",
+        role: "SELF_SERVICE",
+      });
+      actionMocks.createBorrowedItemProblemReport.mockResolvedValue({
+        ok: true,
+        reportId: `report-${formValue.toLowerCase()}`,
+        assetType: "INDIVIDUAL",
+      });
+      const form = new FormData();
+      form.set("bookingId", "booking-1");
+      form.set("bookingAssetId", "booking-asset-1");
+      form.set("assetId", "unit-003");
+      form.set("submissionToken", "123e4567-e89b-42d3-a456-426614174000");
+      form.set("problemType", formValue);
+      form.set("content", "The item needs staff attention.");
+
+      const response = await submitIoioReport({
+        context: {} as never,
+        request: new Request("http://localhost/ioio/report", {
+          method: "POST",
+          body: form,
+        }),
+        params: {},
+      } as never);
+
+      expect(actionMocks.createBorrowedItemProblemReport).toHaveBeenCalledWith(
+        {
+          bookingId: "booking-1",
+          bookingAssetId: "booking-asset-1",
+          assetId: "unit-003",
+          reportType,
+          description: "The item needs staff attention.",
+        },
+        expect.anything(),
+        {
+          source: "IOIO_STUDENT_REPORT",
+          submissionToken: "123e4567-e89b-42d3-a456-426614174000",
+        }
+      );
+      expect((response as Response).headers.get("Location")).toBe(
+        `/ioio/report/complete?reportId=report-${formValue.toLowerCase()}`
+      );
+    }
+  );
+
+  it("routes Found something through the canonical report proposal and completion flow", async () => {
+    actionMocks.requireStudentRead.mockResolvedValue({
+      userId: "student-1",
+      organizationId: "team-1",
+      role: "SELF_SERVICE",
+    });
+    actionMocks.prepareReportProblem.mockResolvedValue({
+      confirmationToken: "proposal-found",
+    });
+    actionMocks.reportProblem.mockResolvedValue({ reportId: "report-found" });
+    const form = new FormData();
+    form.set("problemType", "FOUND_SOMETHING");
+    form.set("content", "I found an unclaimed USB adapter.");
+
+    const response = await submitIoioReport({
+      context: {} as never,
+      request: new Request("http://localhost/ioio/report?mode=found", {
+        method: "POST",
+        body: form,
+      }),
+      params: {},
+    } as never);
+
+    expect(actionMocks.prepareReportProblem).toHaveBeenCalledWith(
+      {
+        report_type: "FOUND_SOMETHING",
+        asset_id: null,
+        kit_id: null,
+        location_id: null,
+        description: "I found an unclaimed USB adapter.",
+      },
+      expect.anything(),
       { source: "IOIO_STUDENT_REPORT" }
+    );
+    expect(actionMocks.reportProblem).toHaveBeenCalledWith(
+      {
+        confirmationToken: "proposal-found",
+        reportType: "FOUND_SOMETHING",
+        description: "I found an unclaimed USB adapter.",
+      },
+      expect.anything()
+    );
+    expect((response as Response).headers.get("Location")).toBe(
+      "/ioio/report/complete?reportId=report-found"
+    );
+  });
+
+  it("submits Kit incomplete against the selected native kit without a physical unit", async () => {
+    actionMocks.requireStudentRead.mockResolvedValue({
+      userId: "student-1",
+      organizationId: "team-1",
+      role: "SELF_SERVICE",
+    });
+    actionMocks.prepareReportProblem.mockResolvedValue({
+      confirmationToken: "proposal-kit-incomplete",
+    });
+    actionMocks.reportProblem.mockResolvedValue({
+      reportId: "report-kit-incomplete",
+    });
+    const form = new FormData();
+    form.set("problemType", "KIT_INCOMPLETE");
+    form.set("kitId", "grove-kit");
+    form.set("content", "One sensor is missing.");
+
+    const response = await submitIoioReport({
+      context: {} as never,
+      request: new Request("http://localhost/ioio/report", {
+        method: "POST",
+        body: form,
+      }),
+      params: {},
+    } as never);
+
+    expect(actionMocks.prepareReportProblem).toHaveBeenCalledWith(
+      {
+        report_type: "KIT_INCOMPLETE",
+        asset_id: null,
+        kit_id: "grove-kit",
+        location_id: null,
+        description: "One sensor is missing.",
+      },
+      expect.anything(),
+      { source: "IOIO_STUDENT_REPORT" }
+    );
+    expect(actionMocks.db.asset.findFirst).not.toHaveBeenCalled();
+    expect((response as Response).headers.get("Location")).toBe(
+      "/ioio/report/complete?reportId=report-kit-incomplete"
+    );
+  });
+
+  it("rejects Kit incomplete without a kit selection", async () => {
+    actionMocks.requireStudentRead.mockResolvedValue({
+      userId: "student-1",
+      organizationId: "team-1",
+      role: "SELF_SERVICE",
+    });
+    const form = new FormData();
+    form.set("problemType", "KIT_INCOMPLETE");
+    form.set("content", "One sensor is missing.");
+
+    const response = await submitIoioReport({
+      context: {} as never,
+      request: new Request("http://localhost/ioio/report", {
+        method: "POST",
+        body: form,
+      }),
+      params: {},
+    } as never);
+
+    expect(response).toHaveProperty(
+      "data.error.message",
+      "Choose the kit this report is about."
+    );
+    expect(actionMocks.prepareReportProblem).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale optional item in a Found something report", async () => {
+    actionMocks.requireStudentRead.mockResolvedValue({
+      userId: "student-1",
+      organizationId: "team-1",
+      role: "SELF_SERVICE",
+    });
+    actionMocks.db.asset.findFirst.mockResolvedValue(null);
+    const form = new FormData();
+    form.set("problemType", "FOUND_SOMETHING");
+    form.set("productId", "asset-from-another-workspace");
+    form.set("content", "I found an unclaimed USB adapter.");
+
+    const response = await submitIoioReport({
+      context: {} as never,
+      request: new Request("http://localhost/ioio/report?mode=found", {
+        method: "POST",
+        body: form,
+      }),
+      params: {},
+    } as never);
+
+    expect(response).toHaveProperty("data.error.message");
+    expect(actionMocks.prepareReportProblem).not.toHaveBeenCalled();
+    expect(actionMocks.reportProblem).not.toHaveBeenCalled();
+  });
+
+  it("preselects Found something and shows its optional item context", async () => {
+    renderReport(undefined, {
+      ...loaderData,
+      selectedProblemType: "FOUND_SOMETHING",
+    });
+    await screen.findByRole("heading", { name: "Report" });
+
+    expect(screen.getByLabelText("What happened?")).toHaveValue(
+      "FOUND_SOMETHING"
+    );
+    expect(
+      screen.getByLabelText("What item is this about? (optional)")
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Room")).toBeNull();
+    expect(screen.getByText("Found something")).toBeTruthy();
+  });
+
+  it("keeps the old Found something URL as a redirect into the canonical form", async () => {
+    actionMocks.requireStudentRead.mockResolvedValue({
+      userId: "student-1",
+      organizationId: "team-1",
+      role: "SELF_SERVICE",
+    });
+
+    const response = await loadLegacyFoundRoute({
+      context: {} as never,
+      request: new Request("http://localhost/ioio/found"),
+      params: {},
+    } as never);
+
+    expect((response as Response).headers.get("Location")).toBe(
+      "/ioio/report?mode=found"
     );
   });
 
@@ -893,7 +1170,7 @@ describe("IOIO Student report form", () => {
     expect(
       await screen.findByText("The report could not be submitted.")
     ).toBeTruthy();
-    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert")).toHaveClass("bg-red-50", "text-red-800");
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText(/Place the item in/)).toBeNull();
     expect(screen.getByLabelText("Description")).toHaveValue(

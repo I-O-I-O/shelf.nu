@@ -7,6 +7,7 @@ import type {
   StudentAsset,
   StudentLocation,
 } from "~/modules/ioio-student/service.server";
+import { formatStudentAssetLocation } from "~/modules/location/compact-location";
 import { isIoioOperationalRoot } from "~/modules/location/ioio-hierarchy";
 
 export type StudentInventoryItem = StudentAsset & {
@@ -96,6 +97,17 @@ export function getStudentLocationPath(
     if (childPath) return childPath;
   }
   return null;
+}
+
+/** Resolve an assigned location through Shelf's room hierarchy for student UI. */
+export function getStudentAssetLocationDisplay(
+  location: Pick<StudentAsset["locations"][number], "id" | "name">,
+  locations: StudentLocation[]
+) {
+  const path = getStudentLocationPath(location.id, locations) ?? [
+    location.name,
+  ];
+  return formatStudentAssetLocation(path) ?? location.name;
 }
 
 /**

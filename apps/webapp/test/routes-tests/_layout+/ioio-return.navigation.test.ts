@@ -22,7 +22,10 @@ vi.mock("~/modules/ioio-student/return-item.server", () => ({
 // why: the route's UI import includes an animation that needs browser canvas.
 vi.mock("lottie-react", () => ({ default: () => null }));
 
-import { action } from "~/routes/_layout+/ioio.return";
+import {
+  action,
+  IOIO_RETURN_REPORT_TYPES,
+} from "~/routes/_layout+/ioio.return";
 
 const confirmationToken = "123e4567-e89b-42d3-a456-426614174000";
 
@@ -31,6 +34,22 @@ function returnRequest(intent: "finish-return" | "cancel-return") {
   form.set("intent", intent);
   form.set("confirmationToken", confirmationToken);
   if (intent === "finish-return") form.set("quantity", "1");
+  return new Request("http://localhost/ioio/return", {
+    method: "POST",
+    body: form,
+  });
+}
+
+function prepareProblemRequest(reportType: string) {
+  const form = new FormData();
+  form.set("intent", "prepare-return");
+  form.set("bookingId", "booking-1");
+  form.set("bookingAssetId", "booking-asset-1");
+  form.set("assetId", "asset-1");
+  form.set("quantity", "1");
+  form.set("issueState", "problem");
+  form.set("reportType", reportType);
+  form.set("issueComment", "Student entered issue details.");
   return new Request("http://localhost/ioio/return", {
     method: "POST",
     body: form,
@@ -48,6 +67,15 @@ describe("student guided return navigation", () => {
     mocks.submitReturnItem.mockResolvedValue({ ok: true });
   });
 
+  it("keeps visible return issue labels mapped to explicit persisted enums", () => {
+    expect(IOIO_RETURN_REPORT_TYPES).toEqual([
+      { value: "ITEM_DAMAGED", label: "Broken or damaged" },
+      { value: "PART_MISSING", label: "Missing parts" },
+      { value: "ITEM_NOT_WORKING", label: "Not working" },
+      { value: "OTHER", label: "Other" },
+    ]);
+  });
+
   it("redirects a successful return to My Loans with its success notice", async () => {
     const request = returnRequest("finish-return");
     const response = await action({ context: {}, request } as never);
@@ -62,6 +90,37 @@ describe("student guided return navigation", () => {
       "/ioio/loans?return=submitted"
     );
   });
+
+  it.each([
+    { label: "Broken or damaged", reportType: "ITEM_DAMAGED" },
+    { label: "Missing parts", reportType: "PART_MISSING" },
+    { label: "Not working", reportType: "ITEM_NOT_WORKING" },
+    { label: "Other", reportType: "OTHER" },
+  ])(
+    "passes guided return issue $label as canonical $reportType",
+    async ({ reportType }) => {
+      const response = await action({
+        context: {},
+        request: prepareProblemRequest(reportType),
+      } as never);
+
+      expect(mocks.prepareReturnItem).toHaveBeenCalledWith(
+        {
+          booking_id: "booking-1",
+          booking_asset_id: "booking-asset-1",
+          asset_id: "asset-1",
+          quantity: 1,
+        },
+        expect.objectContaining({ context: {}, auth: expect.anything() }),
+        {
+          issueState: "problem",
+          reportType,
+          issueComment: "Student entered issue details.",
+        }
+      );
+      expect(response).toMatchObject({ data: { ok: true } });
+    }
+  );
 
   it("keeps a failed return on the form with its error", async () => {
     mocks.submitReturnItem.mockRejectedValue(

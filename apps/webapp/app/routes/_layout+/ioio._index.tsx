@@ -6,6 +6,7 @@ import { ErrorContent } from "~/components/errors";
 import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import {
   filterStudentInventory,
+  getStudentAssetLocationDisplay,
   getStudentLabAreaFilters,
   groupStudentAssets,
 } from "~/components/ioio-student/inventory-presentation";
@@ -95,10 +96,17 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             categoryId,
             locationId,
           });
-          const assets = filterStudentInventory(groupStudentAssets(allAssets), {
-            categoryId,
-            itemType,
-          });
+          const assetsWithLocationDisplays = allAssets.map((asset) => ({
+            ...asset,
+            locations: asset.locations.map((location) => ({
+              ...location,
+              displayPath: getStudentAssetLocationDisplay(location, locations),
+            })),
+          }));
+          const assets = filterStudentInventory(
+            groupStudentAssets(assetsWithLocationDisplays),
+            { categoryId, itemType }
+          );
 
           return {
             assets,

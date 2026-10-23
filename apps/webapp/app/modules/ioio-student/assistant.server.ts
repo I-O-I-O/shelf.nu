@@ -6,6 +6,7 @@ import {
   selectStudentAssistantDisplayAssets,
 } from "~/components/ioio-student/inventory-presentation";
 import { getHandbookContextForAssistant } from "~/modules/ioio-handbook/service.server";
+import { formatStudentAssetLocation } from "~/modules/location/compact-location";
 import {
   ANTHROPIC_API_KEY,
   ANTHROPIC_BASE_URL,
@@ -779,12 +780,11 @@ async function prepareStudentAssistantDisplayAssets(
     locations: asset.locations.map((location) => {
       const fullPath = formatStudentLocationPath(location.id, locationRows);
       const parts = fullPath.split(" → ").filter(Boolean);
-      const compactPath =
-        parts.length > 2 ? `${parts[0]} · ${parts.at(-1)}` : parts.join(" · ");
+      const compactPath = formatStudentAssetLocation(parts);
       return {
         ...location,
         displayPath:
-          compactPath || locationsById.get(location.id)?.name || location.name,
+          compactPath ?? locationsById.get(location.id)?.name ?? location.name,
       };
     }),
   }));

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { AssetDetailImage } from "~/components/assets/asset-image";
 import { IoioAssetDetailLayout } from "~/components/ioio-staff/ioio-asset-detail-layout";
 import {
+  getStudentAssetLocationDisplay,
   getStudentBrowseLocationIdForPath,
   groupStudentAssets,
 } from "~/components/ioio-student/inventory-presentation";
@@ -58,7 +59,15 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
           normalizeProductTitle(candidate.title) === normalizedTitle
       );
     }
-    return data(payload({ asset: groupedAsset ?? asset, locations }));
+    const selectedAsset = groupedAsset ?? asset;
+    const assetWithLocationDisplays = {
+      ...selectedAsset,
+      locations: selectedAsset.locations.map((location) => ({
+        ...location,
+        displayPath: getStudentAssetLocationDisplay(location, locations),
+      })),
+    };
+    return data(payload({ asset: assetWithLocationDisplays, locations }));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, assetId });
     throw data(error(reason), { status: reason.status });
@@ -113,6 +122,7 @@ export default function IoioAssetDetail() {
       backLabel="Back to inventory"
       title={formatStudentTitle(asset.title, asset.type)}
       description={asset.description}
+      descriptionPlacement="below-details"
       image={
         <AssetDetailImage
           asset={asset}

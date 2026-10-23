@@ -442,12 +442,22 @@ describe("student checkout action", () => {
   it("shares the selected state through the checkout provider", async () => {
     window.sessionStorage.clear();
     const user = userEvent.setup();
+    const asset = checkoutAsset({
+      locations: [
+        {
+          id: "container-a1-1",
+          name: "Container A1-1",
+          quantity: 1,
+          displayPath: "IOIO Lab - B477 · Container A1-1",
+        },
+      ],
+    });
 
     render(
       createElement(
         StudentCheckoutProvider,
         null,
-        createElement(StudentCheckoutButton, { asset: checkoutAsset() })
+        createElement(StudentCheckoutButton, { asset })
       )
     );
 
@@ -461,10 +471,11 @@ describe("student checkout action", () => {
     await waitFor(() => {
       const saved = JSON.parse(
         window.sessionStorage.getItem("ioio-student-checkout") ?? "[]"
-      ) as Array<{ preparationSubmissionToken: string }>;
+      ) as Array<{ preparationSubmissionToken: string; location: string }>;
       expect(saved[0]?.preparationSubmissionToken).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
       );
+      expect(saved[0]?.location).toBe("IOIO Lab - B477 · Container A1-1");
     });
     const firstSubmissionToken = (
       JSON.parse(
@@ -535,46 +546,51 @@ describe("student checkout action", () => {
 });
 
 describe("student inventory cards", () => {
-  it("keeps availability beside a solid-red borrow action below the location", () => {
-    const asset = checkoutAsset({
-      title: "Makey Kit",
-      availableQuantity: 5,
-      locations: [
-        {
-          id: "container-a1-1",
-          name: "Container A1-1",
-          quantity: 5,
-          displayPath: "Container A1-1",
-        },
-      ],
-    });
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/ioio",
-          element: createElement(
-            StudentCheckoutProvider,
-            null,
-            createElement(AssetCard, { asset })
-          ),
-        },
-      ],
-      { initialEntries: ["/ioio"] }
-    );
+  it.each(["Makey Kit", "Camera"])(
+    "shows room and assigned location for %s cards while keeping availability beside borrow",
+    (title) => {
+      const asset = checkoutAsset({
+        title,
+        availableQuantity: 5,
+        locations: [
+          {
+            id: "container-a1-1",
+            name: "Container A1-1",
+            quantity: 5,
+            displayPath: "IOIO Lab - B477 · Container A1-1",
+          },
+        ],
+      });
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/ioio",
+            element: createElement(
+              StudentCheckoutProvider,
+              null,
+              createElement(AssetCard, { asset })
+            ),
+          },
+        ],
+        { initialEntries: ["/ioio"] }
+      );
 
-    render(createElement(RouterProvider, { router }));
+      render(createElement(RouterProvider, { router }));
 
-    expect(screen.getByRole("link", { name: "Makey Kit" })).toBeTruthy();
-    expect(screen.getByText("Container A1-1")).toBeTruthy();
-    const availability = screen.getByText("5 ready to borrow");
-    const borrowAction = screen.getByRole("button", {
-      name: "Add to borrow list",
-    });
-    expect(availability.parentElement).toBe(borrowAction.parentElement);
-    expect(availability.parentElement?.className).not.toContain("mt-auto");
-    expect(availability.parentElement?.className).toContain("w-full");
-    expect(availability.parentElement?.className).toContain("justify-between");
-    expect(borrowAction.className).toContain("bg-red-700");
-    expect(borrowAction.className).not.toContain("bg-red-50");
-  });
+      expect(screen.getByRole("link", { name: title })).toBeTruthy();
+      expect(screen.getByText("IOIO Lab - B477 · Container A1-1")).toBeTruthy();
+      const availability = screen.getByText("5 ready to borrow");
+      const borrowAction = screen.getByRole("button", {
+        name: "Add to borrow list",
+      });
+      expect(availability.parentElement).toBe(borrowAction.parentElement);
+      expect(availability.parentElement?.className).not.toContain("mt-auto");
+      expect(availability.parentElement?.className).toContain("w-full");
+      expect(availability.parentElement?.className).toContain(
+        "justify-between"
+      );
+      expect(borrowAction.className).toContain("bg-red-700");
+      expect(borrowAction.className).not.toContain("bg-red-50");
+    }
+  );
 });

@@ -659,6 +659,50 @@ export async function getStudentLocations({
   return roots;
 }
 
+/**
+ * Locations students may reference in a new report. Location rows have no
+ * soft-delete/archive state in Shelf; deleted locations are hard-deleted.
+ * Keep only current locations containing visible, unarchived inventory, plus
+ * their ancestors so the hierarchical picker can still navigate to them.
+ */
+export async function getStudentReportLocations({
+  organizationId,
+  activeKitLocationIds: providedKitLocationIds,
+}: {
+  organizationId: Organization["id"];
+  activeKitLocationIds?: string[];
+}): Promise<StudentLocation[]> {
+  const [locations, activeKitLocationIds] = await Promise.all([
+    getStudentLocations({ organizationId }),
+    providedKitLocationIds
+      ? Promise.resolve(providedKitLocationIds)
+      : getStudentKits({ organizationId }).then((kits) =>
+          kits.flatMap((kit) => (kit.location ? [kit.location.id] : []))
+        ),
+  ]);
+  const activeKitLocations = new Set(activeKitLocationIds);
+
+  function keepActiveBranches(
+    location: StudentLocation
+  ): StudentLocation | null {
+    const children = location.children
+      .map(keepActiveBranches)
+      .filter((child): child is StudentLocation => child !== null);
+    if (
+      location.assetCount === 0 &&
+      !activeKitLocations.has(location.id) &&
+      children.length === 0
+    ) {
+      return null;
+    }
+    return { ...location, children };
+  }
+
+  return locations
+    .map(keepActiveBranches)
+    .filter((location): location is StudentLocation => location !== null);
+}
+
 export async function getStudentKits({
   organizationId,
 }: {

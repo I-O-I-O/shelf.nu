@@ -9,6 +9,7 @@ import type {
 import {
   data,
   Form,
+  redirect,
   useActionData,
   useLoaderData,
   useNavigation,
@@ -16,22 +17,25 @@ import {
 import { z } from "zod";
 import Input from "~/components/forms/input";
 import { Card } from "~/components/shared/card";
+import PasswordChangeForm from "~/components/user/password-change-form";
 import {
   changeEmailAddressHtmlEmail,
   changeEmailAddressTextEmail,
 } from "~/emails/change-user-email-address";
 import { sendEmail } from "~/emails/mail.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
+import { createPasswordChangeSchema } from "~/modules/auth/password-change-schema";
 import {
+  changeAccountPassword,
   refreshAccessToken,
   signInWithEmail,
-  updateAccountPassword,
+  sendResetPasswordLink,
 } from "~/modules/auth/service.server";
 import { assertEmailChangeAllowed } from "~/modules/auth/sso-enforcement.server";
 import { requireStudentAccountSettings } from "~/modules/ioio-student/route.server";
 import { getUserByID, updateUserEmail } from "~/modules/user/service.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
-import { error, payload } from "~/utils/http.server";
+import { error, parseData, payload } from "~/utils/http.server";
 
 const accountActionSchema = z.union([
   z.object({
@@ -39,12 +43,13 @@ const accountActionSchema = z.union([
     currentPassword: z.string().min(1, "Enter your current password."),
     newEmail: z.string().email("Enter a valid email address."),
   }),
+  createPasswordChangeSchema({
+    intent: z.literal("changePassword"),
+    type: z.literal("changePassword"),
+  }),
   z.object({
-    intent: z.literal("change-password"),
-    newPassword: z
-      .string()
-      .min(6, "Your new password must be at least 6 characters."),
-    confirmPassword: z.string().min(1, "Confirm your new password."),
+    intent: z.literal("requestPasswordReset"),
+    type: z.literal("requestPasswordReset"),
   }),
   z.object({
     intent: z.literal("verify-email"),
@@ -69,18 +74,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const { userId, email, accessToken } = authSession;
   try {
     await requireStudentAccountSettings({ context, request });
-    const parsed = accountActionSchema.parse(
-      Object.fromEntries(await request.formData())
-    );
-
-    if (
-      parsed.intent === "change-password" &&
-      parsed.newPassword !== parsed.confirmPassword
-    ) {
-      return data({
-        error: { message: "New passwords do not match.", label: "Auth" },
-      });
-    }
+    const parsed = parseData(await request.formData(), accountActionSchema, {
+      shouldBeCaptured: false,
+      additionalData: { userId },
+    });
 
     if (parsed.intent === "change-email" && parsed.newEmail === email) {
       return data({
@@ -194,23 +191,29 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
     }
 
-    await updateAccountPassword(userId, parsed.newPassword, accessToken);
-    const newSession = await signInWithEmail(email, parsed.newPassword);
-    if (newSession) context.setSession(newSession);
-    return data({
-      ok: true as const,
-      kind: "password" as const,
-      message: newSession
-        ? "Your password has been changed."
-        : "Your password has been changed. Please sign in again.",
+    if (parsed.intent === "requestPasswordReset") {
+      await sendResetPasswordLink(email);
+      return data({ resetEmailRequested: true as const });
+    }
+
+    await changeAccountPassword({
+      id: userId,
+      accessToken,
+      refreshToken: authSession.refreshToken,
+      currentPassword: parsed.currentPassword,
+      newPassword: parsed.newPassword,
     });
+    context.destroySession();
+    return redirect("/login?password_changed=true");
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });
   }
 }
 
-export const meta: MetaFunction = () => [{ title: "Email & password settings" }];
+export const meta: MetaFunction = () => [
+  { title: "Email & password settings" },
+];
 
 export default function StudentAccountSettings() {
   const { email, sso } = useLoaderData<typeof loader>();
@@ -348,38 +351,12 @@ export default function StudentAccountSettings() {
               </Form>
             )}
 
-            <Form
-              method="post"
-              className="mt-6 space-y-4 border-t border-gray-100 pt-5"
-            >
-              <input type="hidden" name="intent" value="change-password" />
-              <h3 className="text-sm font-black text-gray-950">
+            <section className="mt-6 border-t border-gray-100 pt-5">
+              <h3 className="mb-4 text-sm font-black text-gray-950">
                 Change password
               </h3>
-              <Input
-                label="New password"
-                name="newPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                className="mt-1"
-              />
-              <Input
-                label="Confirm new password"
-                name="confirmPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                className="mt-1"
-              />
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                className="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-wait disabled:bg-gray-300"
-              >
-                {isSubmitting ? "Saving..." : "Change password"}
-              </button>
-            </Form>
+              <PasswordChangeForm />
+            </section>
           </>
         )}
       </Card>

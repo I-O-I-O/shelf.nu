@@ -82,6 +82,16 @@ function getReportedUnitLabel() {
   );
 }
 
+function expectSuccessAcknowledgement(message: string) {
+  const status = screen.getByRole("status");
+  expect(status).toHaveClass("border-green-200", "bg-green-50");
+  expect(status).not.toHaveClass("bg-red-50", "text-red-900");
+  expect(
+    screen.getByRole("heading", { level: 1, name: "Report sent" })
+  ).toHaveClass("text-green-950");
+  expect(status).toHaveTextContent(message);
+}
+
 describe("IOIO Student report completion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -125,7 +135,7 @@ describe("IOIO Student report completion", () => {
       await screen.findByRole("heading", { name: "Makey Kit" })
     ).toBeTruthy();
     expect(getReportedUnitLabel()).toBeTruthy();
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expectSuccessAcknowledgement(
       "Thanks for reporting the damaged item. Staff will review it."
     );
     const assetImage = screen.getByAltText("Image of Makey Kit #003");
@@ -201,7 +211,7 @@ describe("IOIO Student report completion", () => {
     expect(getReportedUnitLabel()).toBeTruthy();
   });
 
-  it("shows the location-specific acknowledgement for Wrong location", async () => {
+  it("keeps the historical reported location visible for Wrong location", async () => {
     mocks.db.ioioWriteOperation.findFirst.mockResolvedValue({
       assetId: "unit-003",
       locationId: "container-13",
@@ -228,6 +238,9 @@ describe("IOIO Student report completion", () => {
     // inventory location; keep the report's historical context intact.
     expect(screen.getByText("IOIO Lab - B477 · Container A1-13")).toBeTruthy();
     expect(await screen.findByRole("status")).toHaveTextContent(
+      "Thanks for reporting the location issue. Staff will review it."
+    );
+    expectSuccessAcknowledgement(
       "Thanks for reporting the location issue. Staff will review it."
     );
     expect(
@@ -263,7 +276,7 @@ describe("IOIO Student report completion", () => {
     expect(screen.getByAltText("Image of Makey Kit").getAttribute("src")).toBe(
       "https://images.example.test/makey.jpg"
     );
-    expect(await screen.findByRole("status")).toHaveTextContent(
+    expectSuccessAcknowledgement(
       "Thanks for letting us know. Staff will help check where this item is."
     );
   });
@@ -295,7 +308,8 @@ describe("IOIO Student report completion", () => {
     });
     renderCompletion();
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
+    await screen.findByRole("status");
+    expectSuccessAcknowledgement(
       "Thanks for letting us know. Staff will review your report."
     );
     expect(screen.queryByRole("heading", { name: "Makey Kit" })).toBeNull();
@@ -310,11 +324,53 @@ describe("IOIO Student report completion", () => {
     });
     renderCompletion();
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Thanks for letting Staff know."
-    );
+    await screen.findByRole("status");
+    expectSuccessAcknowledgement("Thanks for letting Staff know.");
     expect(screen.queryByRole("heading", { name: "Makey Kit" })).toBeNull();
   });
+
+  it.each([
+    [
+      "ITEM_MISSING",
+      "Thanks for reporting the missing item. Staff will look into it.",
+    ],
+    [
+      "ITEM_NOT_WORKING",
+      "Thanks for reporting the item that is not working. Staff will review it.",
+    ],
+    [
+      "PART_MISSING",
+      "Thanks for reporting the missing part. Staff will review it.",
+    ],
+    [
+      "WRONG_LOCATION",
+      "Thanks for reporting the location issue. Staff will review it.",
+    ],
+    ["LOCATION_FULL", "Thanks for reporting the full location."],
+    [
+      "CANNOT_FIND",
+      "Thanks for letting us know. Staff will help check where this item is.",
+    ],
+    [
+      "KIT_INCOMPLETE",
+      "Thanks for reporting the incomplete kit. Staff will review it.",
+    ],
+    ["FOUND_SOMETHING", "Thanks for letting Staff know."],
+    ["OTHER", "Thanks for letting us know. Staff will review your report."],
+  ] as const)(
+    "styles %s acknowledgements as success",
+    async (reportType, message) => {
+      mocks.db.ioioWriteOperation.findFirst.mockResolvedValue({
+        assetId: null,
+        locationId: null,
+        reportType,
+      });
+      renderCompletion();
+
+      await screen.findByRole("status");
+      expectSuccessAcknowledgement(message);
+    }
+  );
 
   it("Finish returns the Student to /ioio", async () => {
     renderCompletion();

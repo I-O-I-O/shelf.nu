@@ -73,10 +73,14 @@ export function AssetAdvancedFields({
   values,
   disabled,
   fieldPrefix = "",
+  onRequiresStaffPreparationChange,
+  onReturnHandlingChange,
 }: {
   values: AssetAdvancedSettings;
   disabled: boolean;
   fieldPrefix?: string;
+  onRequiresStaffPreparationChange: (checked: boolean) => void;
+  onReturnHandlingChange: (returnHandling: Asset["returnHandling"]) => void;
 }) {
   return (
     <>
@@ -130,7 +134,10 @@ export function AssetAdvancedFields({
             type="checkbox"
             name={`${fieldPrefix}requiresStaffPreparation`}
             value="true"
-            defaultChecked={values.requiresStaffPreparation}
+            checked={values.requiresStaffPreparation}
+            onChange={(event) =>
+              onRequiresStaffPreparationChange(event.currentTarget.checked)
+            }
             disabled={disabled}
             className="mt-0.5 size-4 rounded border-gray-300 text-primary-500 focus:ring-primary-500"
           />
@@ -152,9 +159,12 @@ export function AssetAdvancedFields({
               type="radio"
               name={`${fieldPrefix}returnHandling`}
               value={ASSET_RETURN_HANDLING.RETURN_TO_STORAGE}
-              defaultChecked={
+              checked={
                 values.returnHandling ===
                 ASSET_RETURN_HANDLING.RETURN_TO_STORAGE
+              }
+              onChange={() =>
+                onReturnHandlingChange(ASSET_RETURN_HANDLING.RETURN_TO_STORAGE)
               }
               disabled={disabled}
               className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
@@ -166,9 +176,14 @@ export function AssetAdvancedFields({
               type="radio"
               name={`${fieldPrefix}returnHandling`}
               value={ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE}
-              defaultChecked={
+              checked={
                 values.returnHandling ===
                 ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE
+              }
+              onChange={() =>
+                onReturnHandlingChange(
+                  ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE
+                )
               }
               disabled={disabled}
               className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"

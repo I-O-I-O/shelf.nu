@@ -317,6 +317,39 @@ describe("getLabStatus", () => {
     });
   });
 
+  it("shows product-level Kit incomplete reports in the broken-kit Staff queue", async () => {
+    const report = {
+      id: "kit-incomplete-1",
+      source: "IOIO_STUDENT_REPORT",
+      reportType: "KIT_INCOMPLETE",
+      assetId: null,
+      kitId: "grove-kit",
+      locationId: null,
+      bookingAssetId: null,
+    };
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(where.operationType === "REPORT_PROBLEM" ? [report] : [])
+    );
+    database.kit.findMany.mockResolvedValue([
+      { id: "grove-kit", name: "Grove Kit" },
+    ]);
+
+    const result = await getLabStatus({ organizationId: "org-1" });
+
+    expect(result).toMatchObject({
+      incompleteKits: 1,
+      issues: [
+        expect.objectContaining({
+          kind: "incomplete-kit",
+          title: "Kit incomplete: Grove Kit",
+          href: "/operations?view=broken",
+          targetUnavailable: false,
+        }),
+      ],
+    });
+    expect(database.asset.update).not.toHaveBeenCalled();
+  });
+
   it("does not turn low-quantity assets below their minimum into Lab status issues", async () => {
     database.asset.findMany.mockImplementation(({ where }) => {
       if (where.type === "QUANTITY_TRACKED") {
@@ -500,6 +533,70 @@ describe("getLabStatus", () => {
         kind: "report",
         title: "Item damaged",
         href: "/operations?view=broken",
+      })
+    );
+  });
+
+  it("shows a Not working student report in Staff Broken items", async () => {
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "REPORT_PROBLEM"
+          ? [
+              {
+                id: "not-working-report-1",
+                source: "IOIO_STUDENT_RETURN",
+                userId: "student-1",
+                reportType: "ITEM_NOT_WORKING",
+                assetId: "unit-003",
+                kitId: null,
+                locationId: null,
+                bookingAssetId: "booking-asset-1",
+              },
+            ]
+          : []
+      )
+    );
+
+    const status = await getLabStatus({ organizationId: "org-1" });
+
+    expect(status.issues).toContainEqual(
+      expect.objectContaining({
+        id: "report:not-working-report-1",
+        kind: "report",
+        title: "Item not working",
+        href: "/operations?view=broken",
+      })
+    );
+  });
+
+  it("shows Found something in the existing Staff general report queue", async () => {
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "REPORT_PROBLEM"
+          ? [
+              {
+                id: "found-report-1",
+                source: "IOIO_STUDENT_REPORT",
+                userId: "student-1",
+                reportType: "FOUND_SOMETHING",
+                assetId: null,
+                kitId: null,
+                locationId: null,
+                bookingAssetId: null,
+              },
+            ]
+          : []
+      )
+    );
+
+    const status = await getLabStatus({ organizationId: "org-1" });
+
+    expect(status.issues).toContainEqual(
+      expect.objectContaining({
+        id: "report:found-report-1",
+        kind: "general-report",
+        title: "Found something",
+        href: "/operations?view=general",
       })
     );
   });

@@ -1,8 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
+import { z } from "zod";
 import { db } from "~/database/db.server";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
+import {
+  getIoioArchivedItemIds,
+  IOIO_ARCHIVE_ITEM_TYPE,
+} from "~/modules/ioio-staff/archive.server";
+import {
+  getStudentKits,
+  getStudentReportLocations,
+} from "~/modules/ioio-student/service.server";
 import { getIoioKitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import { refreshExpiredKitImages } from "~/modules/kit/service.server";
 import { createReport } from "~/modules/report-found/service.server";
@@ -145,6 +154,12 @@ export async function prepareReportProblem(
   if (description.length < 3) {
     throw reportError("Please provide a little more detail for staff.");
   }
+  if (
+    parsed.report_type === "KIT_INCOMPLETE" &&
+    (!parsed.kit_id || parsed.asset_id || parsed.location_id)
+  ) {
+    throw reportError("Choose the kit this report is about.");
+  }
 
   const [asset, kit, location] = await Promise.all([
     parsed.asset_id
@@ -179,11 +194,45 @@ export async function prepareReportProblem(
   if (parsed.kit_id && !kit) {
     throw reportError("The selected Shelf kit is not in this workspace.", 403);
   }
+  if (parsed.kit_id) {
+    const [activeKits, archivedKitIds] = await Promise.all([
+      getStudentKits({ organizationId: auth.organizationId }),
+      getIoioArchivedItemIds({
+        organizationId: auth.organizationId,
+        itemType: IOIO_ARCHIVE_ITEM_TYPE.KIT,
+      }),
+    ]);
+    if (
+      !activeKits.some((activeKit) => activeKit.id === parsed.kit_id) ||
+      archivedKitIds.includes(parsed.kit_id)
+    ) {
+      throw reportError("The selected Shelf kit is no longer available.", 404);
+    }
+  }
   if (parsed.location_id && !location) {
     throw reportError(
       "The selected Shelf location is not in this workspace.",
       403
     );
+  }
+  if (parsed.location_id) {
+    const selectableLocations = await getStudentReportLocations({
+      organizationId: auth.organizationId,
+    });
+    const selectableIds = new Set<string>();
+    const visit = (items: typeof selectableLocations) => {
+      for (const item of items) {
+        selectableIds.add(item.id);
+        visit(item.children);
+      }
+    };
+    visit(selectableLocations);
+    if (!selectableIds.has(parsed.location_id)) {
+      throw reportError(
+        "The selected Shelf location is no longer available.",
+        404
+      );
+    }
   }
 
   const token = randomUUID();
@@ -411,6 +460,7 @@ export async function createBorrowedItemProblemReport(
   options: {
     source?: "IOIO_STUDENT_RETURN" | "IOIO_STUDENT_REPORT";
     auth?: IoioAuthSnapshot;
+    submissionToken?: string;
   } = {}
 ) {
   const auth = await getIoioAuth({ context, request, auth: options.auth });
@@ -434,84 +484,176 @@ export async function createBorrowedItemProblemReport(
       };
     }
   }
+  const safeDescription = sanitizeReportText(description);
+  if (safeDescription.length < (source === "IOIO_STUDENT_RETURN" ? 1 : 3)) {
+    throw reportError("Please provide a little more detail for staff.");
+  }
+  if (options.submissionToken) {
+    if (!z.string().uuid().safeParse(options.submissionToken).success) {
+      throw reportError("Refresh the report form before submitting again.");
+    }
+    const existing = await db.ioioWriteOperation.findUnique({
+      where: { idempotencyKey: options.submissionToken },
+      select: {
+        userId: true,
+        organizationId: true,
+        operationType: true,
+        source: true,
+        status: true,
+        reportType: true,
+        description: true,
+        assetId: true,
+        bookingId: true,
+        bookingAssetId: true,
+        resultReportId: true,
+      },
+    });
+    if (existing) {
+      if (
+        existing.userId !== auth.userId ||
+        existing.organizationId !== auth.organizationId ||
+        existing.operationType !== IOIO_REPORT_OPERATION ||
+        existing.source !== source ||
+        existing.reportType !== reportType ||
+        existing.description !== safeDescription ||
+        existing.assetId !== assetId ||
+        existing.bookingId !== bookingId ||
+        existing.bookingAssetId !== bookingAssetId
+      ) {
+        throw reportError(
+          "This report submission is no longer available.",
+          409
+        );
+      }
+      if (existing.status === "SUCCEEDED" && existing.resultReportId) {
+        return {
+          ok: true as const,
+          reportId: existing.resultReportId,
+          assetType: null,
+        };
+      }
+      throw reportError(
+        "This report submission is already being processed.",
+        409
+      );
+    }
+  }
   const { bookingAsset, kit } = await loadBorrowedItem(auth, {
     bookingId,
     bookingAssetId,
     assetId,
   });
-  const safeDescription = sanitizeReportText(description);
-  if (safeDescription.length < (source === "IOIO_STUDENT_RETURN" ? 1 : 3)) {
-    throw reportError("Please provide a little more detail for staff.");
-  }
   const user = await db.user.findUniqueOrThrow({
     where: { id: auth.userId },
     select: { email: true },
   });
   const content = `[IOIO student report]\nIssue: ${reportType}\nDescription: ${safeDescription}`;
 
-  return db.$transaction(async (tx) => {
-    if (bookingAsset.asset.type === "INDIVIDUAL") {
-      const unresolved = await tx.ioioWriteOperation.findFirst({
-        where: {
-          organizationId: auth.organizationId,
-          operationType: IOIO_REPORT_OPERATION,
-          status: { in: ["SUCCEEDED", "PROCESSING"] },
-          reportType: { in: [...IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES] },
-          assetId: bookingAsset.asset.id,
-        },
-        select: { id: true },
+  try {
+    return await db.$transaction(async (tx) => {
+      if (bookingAsset.asset.type === "INDIVIDUAL") {
+        const unresolved = await tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId: auth.organizationId,
+            operationType: IOIO_REPORT_OPERATION,
+            status: { in: ["SUCCEEDED", "PROCESSING"] },
+            reportType: { in: [...IOIO_REPORTED_UNIT_LOCKING_REPORT_TYPES] },
+            assetId: bookingAsset.asset.id,
+          },
+          select: { id: true },
+        });
+        if (unresolved) {
+          throw reportError(
+            "This unit has already been reported and is waiting for Staff review.",
+            409
+          );
+        }
+      }
+
+      const report = await createReport({
+        email: user.email,
+        content,
+        assetId: bookingAsset.asset.id,
+        kitId: kit?.id,
+        client: tx,
       });
-      if (unresolved) {
-        throw reportError(
-          "This unit has already been reported and is waiting for Staff review.",
-          409
-        );
+      await tx.ioioWriteOperation.create({
+        data: {
+          operationType: IOIO_REPORT_OPERATION,
+          source,
+          status: "SUCCEEDED",
+          idempotencyKey: options.submissionToken ?? randomUUID(),
+          userId: auth.userId,
+          organizationId: auth.organizationId,
+          reportType,
+          description: safeDescription,
+          assetId: bookingAsset.asset.id,
+          kitId: kit?.id ?? null,
+          bookingId: bookingAsset.bookingId,
+          bookingAssetId: bookingAsset.id,
+          resultReportId: report.id,
+          completedAt: new Date(),
+        },
+      });
+      if (
+        bookingAsset.asset.type === "INDIVIDUAL" &&
+        isIoioPhysicalUnitBlockingReport(reportType)
+      ) {
+        await tx.asset.update({
+          where: {
+            id: bookingAsset.asset.id,
+            organizationId: auth.organizationId,
+          },
+          data: { availableToBook: false },
+        });
+      }
+      return {
+        ok: true as const,
+        reportId: report.id,
+        assetType: bookingAsset.asset.type,
+      };
+    });
+  } catch (cause) {
+    if (options.submissionToken) {
+      const completed = await db.ioioWriteOperation.findUnique({
+        where: { idempotencyKey: options.submissionToken },
+        select: {
+          userId: true,
+          organizationId: true,
+          operationType: true,
+          source: true,
+          status: true,
+          reportType: true,
+          description: true,
+          assetId: true,
+          bookingId: true,
+          bookingAssetId: true,
+          resultReportId: true,
+        },
+      });
+      if (
+        completed &&
+        completed.userId === auth.userId &&
+        completed.organizationId === auth.organizationId &&
+        completed.operationType === IOIO_REPORT_OPERATION &&
+        completed.source === source &&
+        completed.status === "SUCCEEDED" &&
+        completed.reportType === reportType &&
+        completed.description === safeDescription &&
+        completed.assetId === assetId &&
+        completed.bookingId === bookingId &&
+        completed.bookingAssetId === bookingAssetId &&
+        completed.resultReportId
+      ) {
+        return {
+          ok: true as const,
+          reportId: completed.resultReportId,
+          assetType: null,
+        };
       }
     }
-
-    const report = await createReport({
-      email: user.email,
-      content,
-      assetId: bookingAsset.asset.id,
-      kitId: kit?.id,
-      client: tx,
-    });
-    await tx.ioioWriteOperation.create({
-      data: {
-        operationType: IOIO_REPORT_OPERATION,
-        source,
-        status: "SUCCEEDED",
-        idempotencyKey: randomUUID(),
-        userId: auth.userId,
-        organizationId: auth.organizationId,
-        reportType,
-        description: safeDescription,
-        assetId: bookingAsset.asset.id,
-        kitId: kit?.id ?? null,
-        bookingId: bookingAsset.bookingId,
-        bookingAssetId: bookingAsset.id,
-        resultReportId: report.id,
-        completedAt: new Date(),
-      },
-    });
-    if (
-      bookingAsset.asset.type === "INDIVIDUAL" &&
-      isIoioPhysicalUnitBlockingReport(reportType)
-    ) {
-      await tx.asset.update({
-        where: {
-          id: bookingAsset.asset.id,
-          organizationId: auth.organizationId,
-        },
-        data: { availableToBook: false },
-      });
-    }
-    return {
-      ok: true as const,
-      reportId: report.id,
-      assetType: bookingAsset.asset.type,
-    };
-  });
+    throw cause;
+  }
 }
 
 export async function cancelReportProblem(
@@ -828,6 +970,24 @@ export async function reportProblem(
           "The referenced Shelf location no longer exists.",
           404
         );
+      }
+      if (
+        parsedType.data === "KIT_INCOMPLETE" &&
+        (!current.kitId || current.assetId || current.locationId)
+      ) {
+        throw reportError("Choose the kit this report is about.");
+      }
+      if (parsedType.data === "KIT_INCOMPLETE" && current.kitId) {
+        const archivedKitIds = await getIoioArchivedItemIds({
+          organizationId: auth.organizationId,
+          itemType: IOIO_ARCHIVE_ITEM_TYPE.KIT,
+        });
+        if (archivedKitIds.includes(current.kitId)) {
+          throw reportError(
+            "The selected Shelf kit is no longer available.",
+            404
+          );
+        }
       }
 
       const user = await tx.user.findUniqueOrThrow({
