@@ -537,11 +537,14 @@ model Category {
  * and provides default field values when creating new assets from the model.
  */
 model AssetModel {
-  id          String  @id @default(cuid())
-  name        String
-  description String?
+  id                String  @id @default(cuid())
+  name              String
+  description       String?
+  /// Deterministic product identity set only by the IOIO importer. Null keeps
+  /// native Shelf AssetModel name semantics unchanged.
+  importIdentityKey String?
   /// Hides the logical product and all linked units from IOIO student discovery.
-  ioioHidden  Boolean @default(false)
+  ioioHidden        Boolean @default(false)
 
   /// Public URL (bucket `files`) of the model's cover image. Rendered by any
   /// asset of this model that has no image of its own. Public — and therefore
@@ -576,6 +579,7 @@ model AssetModel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, importIdentityKey])
   @@index([organizationId, name])
   @@index([userId])
 }
@@ -872,11 +876,11 @@ model ReportFound {
 /// Durable coordination and audit record for narrowly scoped IOIO assistant
 /// writes. This is workflow state, not a second inventory representation.
 model IoioWriteOperation {
-  id               String    @id @default(cuid())
+  id               String           @id @default(cuid())
   operationType    String
-  source           String    @default("IOIO_ASSISTANT")
+  source           String           @default("IOIO_ASSISTANT")
   status           String
-  idempotencyKey   String    @unique
+  idempotencyKey   String           @unique
   userId           String
   organizationId   String
   reportType       String
@@ -892,16 +896,57 @@ model IoioWriteOperation {
   to               DateTime?
   resultReportId   String?
   failureCode      String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
   completedAt      DateTime?
   reviewComment    String?
   reviewedByUserId String?
   reviewedAt       DateTime?
+  /// Import-only hashes. NULL for every non-import IoioWriteOperation.
+  fileSha256       String?
+  proposalSha256   String?
+  importItems      IoioImportItem[]
 
+  @@unique([id, organizationId])
+  @@unique([organizationId, proposalSha256])
   @@index([organizationId, operationType, createdAt])
+  @@index([organizationId, fileSha256, status])
   @@index([userId, operationType, createdAt])
   @@index([bookingId])
+}
+
+/// Deterministic row-level work for the IOIO staff inventory importer.
+/// This records coordination state only; Shelf remains the inventory source.
+model IoioImportItem {
+  id             String    @id @default(cuid())
+  operationId    String
+  organizationId String
+  rowKey         String
+  /// NULL for row-level work; a zero-based physical unit index for later unit work.
+  unitIndex      Int?
+  /// Stable non-null identity component so row-level work is unique in PostgreSQL.
+  identityKey    String
+  kind           String
+  status         String    @default("PENDING")
+  idempotencyKey String    @unique
+  expectedPrior  Json?
+  writtenState   Json?
+  targetAssetId  String?   @unique
+  targetKitId    String?
+  qrId           String?   @unique
+  attempt        Int       @default(0)
+  heartbeatAt    DateTime?
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  operation IoioWriteOperation @relation(fields: [operationId, organizationId], references: [id, organizationId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([operationId, identityKey])
+  @@index([operationId, status])
+  @@index([organizationId, status])
+  @@index([status, heartbeatAt])
 }
 
 /// Shared database-backed fixed-window counters for IOIO assistant writes.
@@ -1214,21 +1259,21 @@ model Organization {
   // Custom footer text appended to workspace emails
   customEmailFooter String? @db.VarChar(500)
 
-  emailTemplates        EmailTemplate[]
+  emailTemplates             EmailTemplate[]
   ioioLabInformation         IoioLabInformation?
   ioioLabInformationSections IoioLabInformationSection[]
-  ioioAiGuidelines      IoioAiGuidelines?
-  ioioLabTAs            IoioLabTA[]
-  labTasks              LabTask[]
-  annualBudgets         AnnualBudget[]
-  purchaseRequests      PurchaseRequest[]
-  purchases             Purchase[]
-  purchaseReceiptDrafts PurchaseReceiptDraft[]
-  taHoursPeriods        TAHoursPeriod[]
-  taShifts              TAShift[]
-  handbookArticles      HandbookArticle[]
-  handbookSources       HandbookSource[]
-  handbookObservations  HandbookObservation[]
+  ioioAiGuidelines           IoioAiGuidelines?
+  ioioLabTAs                 IoioLabTA[]
+  labTasks                   LabTask[]
+  annualBudgets              AnnualBudget[]
+  purchaseRequests           PurchaseRequest[]
+  purchases                  Purchase[]
+  purchaseReceiptDrafts      PurchaseReceiptDraft[]
+  taHoursPeriods             TAHoursPeriod[]
+  taShifts                   TAShift[]
+  handbookArticles           HandbookArticle[]
+  handbookSources            HandbookSource[]
+  handbookObservations       HandbookObservation[]
 
   // Indexes for foreign keys
   @@index([userId])
@@ -1412,17 +1457,17 @@ model IoioLabInformation {
 /// Built-in section text remains in IoioLabInformation; only custom sections
 /// store content here.
 model IoioLabInformationSection {
-  id             String       @id @default(cuid())
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id             String                    @id @default(cuid())
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   organizationId String
-  key            String       @db.VarChar(80)
-  title          String?      @db.VarChar(120)
-  content        String?      @db.Text
+  key            String                    @db.VarChar(80)
+  title          String?                   @db.VarChar(120)
+  content        String?                   @db.Text
   position       Int
-  isCustom       Boolean      @default(false)
+  isCustom       Boolean                   @default(false)
   images         IoioLabInformationImage[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
 
   @@unique([organizationId, key])
   @@index([organizationId, position])
@@ -1430,15 +1475,15 @@ model IoioLabInformationSection {
 
 /// Storage metadata only; image bytes stay in the existing Supabase files bucket.
 model IoioLabInformationImage {
-  id             String                    @id @default(cuid())
-  section        IoioLabInformationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  sectionId      String
-  storagePath    String                    @db.Text
-  position       Int                       @default(0)
-  caption        String?                   @db.VarChar(300)
-  altText        String?                   @db.VarChar(300)
-  createdAt      DateTime                  @default(now())
-  updatedAt      DateTime                  @updatedAt
+  id          String                    @id @default(cuid())
+  section     IoioLabInformationSection @relation(fields: [sectionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  sectionId   String
+  storagePath String                    @db.Text
+  position    Int                       @default(0)
+  caption     String?                   @db.VarChar(300)
+  altText     String?                   @db.VarChar(300)
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
 
   @@index([sectionId, position])
 }
@@ -1509,20 +1554,20 @@ enum LabTaskStatus {
 }
 
 model TAHoursPeriod {
-  id                String                    @id @default(cuid())
-  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  organizationId    String
-  academicYear      String                    @db.VarChar(9)
-  startDate         DateTime                  @db.Date
-  endDate           DateTime                  @db.Date
-  totalHoursBudget      Decimal   @default(0) @db.Decimal(10, 2)
-  budgetAmountSek       Decimal?  @db.Decimal(14, 2)
-  hourlyRateSekPerHour  Decimal?  @db.Decimal(14, 2)
-  allocations       TAHoursAllocation[]
-  shifts            TAShift[]
-  budgetAdjustments TAHoursBudgetAdjustment[]
-  createdAt         DateTime                  @default(now())
-  updatedAt         DateTime                  @updatedAt
+  id                   String                    @id @default(cuid())
+  organization         Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId       String
+  academicYear         String                    @db.VarChar(9)
+  startDate            DateTime                  @db.Date
+  endDate              DateTime                  @db.Date
+  totalHoursBudget     Decimal                   @default(0) @db.Decimal(10, 2)
+  budgetAmountSek      Decimal?                  @db.Decimal(14, 2)
+  hourlyRateSekPerHour Decimal?                  @db.Decimal(14, 2)
+  allocations          TAHoursAllocation[]
+  shifts               TAShift[]
+  budgetAdjustments    TAHoursBudgetAdjustment[]
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
 
   @@unique([organizationId, academicYear])
   @@index([organizationId, startDate, endDate])
@@ -1615,18 +1660,18 @@ enum TAShiftStatus {
 }
 
 model AnnualBudget {
-  id               String                     @id @default(cuid())
-  organization     Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  organizationId   String
-  academicYear     String                     @db.VarChar(9)
-  amount           Decimal                    @default(0) @db.Decimal(14, 2)
+  id                String                     @id @default(cuid())
+  organization      Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId    String
+  academicYear      String                     @db.VarChar(9)
+  amount            Decimal                    @default(0) @db.Decimal(14, 2)
   accountingResetAt DateTime?                  @db.Timestamptz(3)
-  currency         Currency                   @default(SEK)
-  purchaseRequests PurchaseRequest[]
-  purchases        Purchase[]
-  adjustments      PurchaseBudgetAdjustment[]
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
+  currency          Currency                   @default(SEK)
+  purchaseRequests  PurchaseRequest[]
+  purchases         Purchase[]
+  adjustments       PurchaseBudgetAdjustment[]
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
 
   @@unique([organizationId, academicYear])
   @@index([organizationId, academicYear])
@@ -1670,28 +1715,28 @@ model PurchaseRequest {
 }
 
 model Purchase {
-  id                  String               @id @default(cuid())
-  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  organizationId      String
-  budget              AnnualBudget         @relation(fields: [budgetId], references: [id], onDelete: Restrict)
-  budgetId            String
-  purchaseRequest     PurchaseRequest?     @relation(fields: [purchaseRequestId], references: [id], onDelete: SetNull)
-  purchaseRequestId   String?              @unique
-  vendor              String?              @db.VarChar(240)
-  purchaseDate        DateTime             @db.Date
-  actualTotal         Decimal              @db.Decimal(14, 2)
-  removedFromPurchasedAt DateTime?          @db.Timestamptz(3)
-  note                String?              @db.VarChar(2000)
-  receiptPath         String?
-  receiptOriginalName String?              @db.VarChar(255)
-  receiptMimeType     String?              @db.VarChar(100)
-  receiptSize         Int?
-  createdBy           User                 @relation("PurchaseCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  createdByUserId     String
-  items               PurchaseItem[]
-  corrections         PurchaseCorrection[]
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
+  id                     String               @id @default(cuid())
+  organization           Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId         String
+  budget                 AnnualBudget         @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  budgetId               String
+  purchaseRequest        PurchaseRequest?     @relation(fields: [purchaseRequestId], references: [id], onDelete: SetNull)
+  purchaseRequestId      String?              @unique
+  vendor                 String?              @db.VarChar(240)
+  purchaseDate           DateTime             @db.Date
+  actualTotal            Decimal              @db.Decimal(14, 2)
+  removedFromPurchasedAt DateTime?            @db.Timestamptz(3)
+  note                   String?              @db.VarChar(2000)
+  receiptPath            String?
+  receiptOriginalName    String?              @db.VarChar(255)
+  receiptMimeType        String?              @db.VarChar(100)
+  receiptSize            Int?
+  createdBy              User                 @relation("PurchaseCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  createdByUserId        String
+  items                  PurchaseItem[]
+  corrections            PurchaseCorrection[]
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
 
   @@index([organizationId, budgetId, purchaseDate])
   @@index([createdByUserId])
@@ -1920,12 +1965,12 @@ model UserOrganization {
   organization   Organization @relation(fields: [organizationId], references: [id], onUpdate: Cascade, onDelete: Cascade)
   organizationId String
 
-  roles     OrganizationRoles[]
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
+  roles                    OrganizationRoles[]
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
   // Existing memberships are grandfathered; new Student memberships are
   // explicitly marked incomplete by the account-association service.
-  labIntroductionCompleted Boolean @default(true)
+  labIntroductionCompleted Boolean             @default(true)
 
   /// Secret, unguessable token for this member's iCal calendar-feed subscription
   /// in this workspace. Null until the user generates a feed; regenerating it

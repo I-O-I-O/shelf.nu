@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createLoaderArgs } from "@mocks/remix";
+import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 
 const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getDashboardLabTasks: vi.fn(),
   getTAHours: vi.fn(),
   getPurchasing: vi.fn(),
+  applyStaffInventoryImport: vi.fn(),
 }));
 
 // why: the loader's database reads are mocked so the fresh-organization case
@@ -31,8 +32,16 @@ vi.mock("~/modules/ioio-staff/ta-hours.server", () => ({
 vi.mock("~/modules/ioio-staff/purchasing.server", () => ({
   getPurchasingDashboardSummary: mocks.getPurchasing,
 }));
+// why: the Home route delegates import execution to the same import engine as
+// /staff/import; isolate route payload wiring from the database-backed engine.
+vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
+  applyStaffInventoryImport: mocks.applyStaffInventoryImport,
+  cancelStaffInventoryImport: vi.fn(),
+  getStaffInventoryImportProposal: vi.fn(),
+  prepareStaffInventoryImport: vi.fn(),
+}));
 
-import { loader } from "~/routes/_layout+/home";
+import { action, loader } from "~/routes/_layout+/home";
 
 describe("IOIO staff dashboard loader", () => {
   beforeEach(() => {
@@ -97,5 +106,51 @@ describe("IOIO staff dashboard loader", () => {
       awaitingConfirmationCount: 0,
     });
     expect(result.dashboardPreferences.hidden).toEqual([]);
+  });
+
+  it("routes the Home Apply form to the shared import engine", async () => {
+    const resultData = {
+      operationId: "operation-1",
+      createdIds: ["asset-1"],
+      updatedIds: [],
+      reusedIds: [],
+      failedRows: [],
+      conflictRows: [],
+      totalRows: 1,
+      succeededRows: 1,
+      failedRowsCount: 0,
+      conflictedRowsCount: 0,
+      ignoredRows: 0,
+    };
+    mocks.applyStaffInventoryImport.mockResolvedValue(resultData);
+    const form = new FormData();
+    form.set("intent", "apply-import");
+    form.set("operationId", "operation-1");
+    form.set("proposalHash", "reviewed-hash");
+    form.set("reviewDecisions", JSON.stringify([{ rowNumber: 1 }]));
+    const request = new Request("http://localhost/home", {
+      method: "POST",
+      body: form,
+    });
+
+    const result = await action(
+      createActionArgs({
+        request,
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+
+    expect(mocks.applyStaffInventoryImport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "operation-1",
+        proposalHash: "reviewed-hash",
+        reviewDecisions: expect.any(String),
+      })
+    );
+    expect(result).toMatchObject({
+      error: null,
+      kind: "import-result",
+      result: resultData,
+    });
   });
 });

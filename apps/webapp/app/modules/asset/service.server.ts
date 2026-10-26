@@ -1374,6 +1374,7 @@ export async function createAsset({
   categoryId,
   locationId,
   qrId,
+  newQrId,
   tags,
   custodian,
   customFieldsValues,
@@ -1404,6 +1405,8 @@ export async function createAsset({
 > & {
   kitId?: Kit["id"];
   qrId?: Qr["id"];
+  /** Stable ID for the QR nested into this Asset's create transaction. */
+  newQrId?: Qr["id"];
   locationId?: Location["id"];
   tags?: { set: { id: string }[] };
   custodian?: TeamMember["id"];
@@ -1505,7 +1508,7 @@ export async function createAsset({
           : {
               create: [
                 {
-                  id: id(),
+                  id: newQrId ?? id(),
                   version: 0,
                   errorCorrection: ErrorCorrection["L"],
                   user,

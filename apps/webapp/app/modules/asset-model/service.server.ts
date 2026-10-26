@@ -65,6 +65,8 @@ async function resolveAssetModelImages<T extends AssetModelImageFields>(
  * Asset models provide default values when creating new assets from them.
  */
 export async function createAssetModel({
+  id: modelId,
+  importIdentityKey,
   name,
   description,
   defaultCategoryId,
@@ -72,6 +74,9 @@ export async function createAssetModel({
   userId,
   organizationId,
 }: Pick<AssetModel, "name" | "organizationId"> & {
+  id?: AssetModel["id"];
+  /** Import-only exact identity; null/undefined preserves native semantics. */
+  importIdentityKey?: AssetModel["importIdentityKey"];
   description?: string | null;
   defaultCategoryId?: string | null;
   defaultValuation?: number | null;
@@ -92,6 +97,8 @@ export async function createAssetModel({
   try {
     return await db.assetModel.create({
       data: {
+        ...(modelId ? { id: modelId } : {}),
+        ...(importIdentityKey ? { importIdentityKey } : {}),
         name: name.trim(),
         description,
         defaultValuation,
@@ -107,6 +114,17 @@ export async function createAssetModel({
       },
     });
   } catch (cause) {
+    if (
+      importIdentityKey &&
+      cause instanceof Error &&
+      "code" in cause &&
+      cause.code === "P2002"
+    ) {
+      const concurrentWinner = await db.assetModel.findFirst({
+        where: { organizationId, importIdentityKey },
+      });
+      if (concurrentWinner) return concurrentWinner;
+    }
     throw maybeUniqueConstraintViolation(cause, "AssetModel", {
       additionalData: { userId, organizationId },
     });

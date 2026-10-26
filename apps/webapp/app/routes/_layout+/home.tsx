@@ -199,12 +199,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
           shouldBeCaptured: false,
         });
       }
-      const proposal = await prepareStaffInventoryImport({
+      const prepared = await prepareStaffInventoryImport({
         context,
         request,
         file,
       });
-      return payload({ kind: "import-proposal", proposal });
+      return prepared.status !== "PREPARED"
+        ? payload({ kind: "import-result", result: prepared.result })
+        : payload({ kind: "import-proposal", proposal: prepared.proposal });
     }
 
     const operationId = z
@@ -222,14 +224,35 @@ export async function action({ context, request }: ActionFunctionArgs) {
     }
     const pdfDecisions = formData.get("pdfDecisions");
     const reviewDecisions = formData.get("reviewDecisions");
+    const proposalHash = formData.get("proposalHash");
+    if (typeof proposalHash !== "string") {
+      throw new ShelfError({
+        cause: null,
+        message: "Reload the import proposal and confirm it again.",
+        label: "Assets",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
     const result = await applyStaffInventoryImport({
       context,
       request,
       operationId,
+      proposalHash,
+      allowSameFileReimport: formData.get("allowSameFileReimport") === "true",
       pdfDecisions: typeof pdfDecisions === "string" ? pdfDecisions : null,
       reviewDecisions:
         typeof reviewDecisions === "string" ? reviewDecisions : null,
     });
+    if ("status" in result) {
+      if (result.status === "DUPLICATE") {
+        return payload({ kind: "import-duplicate", duplicate: result });
+      }
+      return payload({
+        kind: "import-in-progress",
+        operationId: result.operationId,
+      });
+    }
     return payload({ kind: "import-result", result });
   } catch (cause) {
     const reason = makeShelfError(cause);

@@ -17,6 +17,11 @@ import {
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
+import {
+  PermissionAction,
+  PermissionEntity,
+} from "~/utils/permissions/permission.data";
+import { requirePermission } from "~/utils/roles.server";
 
 const ImportIntentSchema = z.enum([
   "analyze-file",
@@ -25,7 +30,22 @@ const ImportIntentSchema = z.enum([
 ]);
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
-  await requireIoioStaffAccess({ context, request });
+  const { userId } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  let canCreateCategory = false;
+  try {
+    await requirePermission({
+      userId,
+      request,
+      entity: PermissionEntity.category,
+      action: PermissionAction.create,
+    });
+    canCreateCategory = true;
+  } catch {
+    canCreateCategory = false;
+  }
   const operationId = new URL(request.url).searchParams.get("importOperation");
   let importProposal = null;
   let importNotice = null;
@@ -50,13 +70,14 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     header: { title: "Import inventory" },
     importProposal,
     importNotice,
+    canCreateCategory,
   });
 }
 
 export async function action({ context, request }: ActionFunctionArgs) {
-  const { userId } = await requireIoioStaffAccess({ context, request });
-
+  let userId: string | undefined;
   try {
+    ({ userId } = await requireIoioStaffAccess({ context, request }));
     const formData = await request.formData();
     const intent = ImportIntentSchema.parse(formData.get("intent"));
 
@@ -71,12 +92,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
           shouldBeCaptured: false,
         });
       }
-      const proposal = await prepareStaffInventoryImport({
+      const prepared = await prepareStaffInventoryImport({
         context,
         request,
         file,
       });
-      return payload({ kind: "import-proposal" as const, proposal });
+      return prepared.status !== "PREPARED"
+        ? payload({ kind: "import-result" as const, result: prepared.result })
+        : payload({
+            kind: "import-proposal" as const,
+            proposal: prepared.proposal,
+          });
     }
 
     const operationId = z
@@ -95,18 +121,44 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     const rawPdfDecisions = formData.get("pdfDecisions");
     const rawReviewDecisions = formData.get("reviewDecisions");
+    const rawProposalHash = formData.get("proposalHash");
+    if (typeof rawProposalHash !== "string") {
+      throw new ShelfError({
+        cause: null,
+        message: "Reload the import proposal and confirm it again.",
+        label: "Assets",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
     const result = await applyStaffInventoryImport({
       context,
       request,
       operationId,
+      proposalHash: rawProposalHash,
+      allowSameFileReimport: formData.get("allowSameFileReimport") === "true",
       pdfDecisions:
         typeof rawPdfDecisions === "string" ? rawPdfDecisions : null,
       reviewDecisions:
         typeof rawReviewDecisions === "string" ? rawReviewDecisions : null,
     });
+    if ("status" in result) {
+      if (result.status === "DUPLICATE") {
+        return payload({
+          kind: "import-duplicate" as const,
+          duplicate: result,
+        });
+      }
+      return payload({
+        kind: "import-in-progress" as const,
+        operationId: result.operationId,
+      });
+    }
     return payload({ kind: "import-result" as const, result });
   } catch (cause) {
-    const reason = makeShelfError(cause, { userId });
+    const reason = userId
+      ? makeShelfError(cause, { userId })
+      : makeShelfError(cause);
     return data(error(reason), { status: reason.status });
   }
 }
@@ -120,7 +172,8 @@ export const handle = {
 };
 
 export default function StaffImportPage() {
-  const { importProposal, importNotice } = useLoaderData<typeof loader>();
+  const { importProposal, importNotice, canCreateCategory } =
+    useLoaderData<typeof loader>();
   return (
     <div>
       <Header hideQuickFind />
@@ -129,6 +182,7 @@ export default function StaffImportPage() {
           actionPath="/staff/import"
           initialProposal={importProposal}
           initialNotice={importNotice}
+          canCreateCategory={canCreateCategory}
         />
       </div>
     </div>

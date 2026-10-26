@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFetcher, useLocation, useNavigate } from "react-router";
+import { resolveImportReviewState } from "~/modules/ioio-staff/import-review";
 import type {
   StaffImportProposal,
   StaffImportProposalRow,
@@ -11,6 +12,7 @@ type StaffImportResult = {
   updatedIds: string[];
   reusedIds: string[];
   failedRows: Array<{ rowNumber: number; reason: string }>;
+  conflictRows?: Array<{ rowNumber: number; reason: string }>;
   ignoredRows?: number;
   reviewedRows?: number;
 };
@@ -18,6 +20,18 @@ type StaffImportResult = {
 type StaffImportActionResponse =
   | { error: null; kind: "import-proposal"; proposal: StaffImportProposal }
   | { error: null; kind: "import-result"; result: StaffImportResult }
+  | { error: null; kind: "import-in-progress"; operationId: string }
+  | {
+      error: null;
+      kind: "import-duplicate";
+      duplicate: {
+        status: "DUPLICATE";
+        code: "SAME_PROPOSAL" | "SAME_FILE_DIFFERENT_PROPOSAL";
+        message: string;
+        existingOperationId: string;
+        canOverride: boolean;
+      };
+    }
   | {
       error: null;
       kind: "import-cancelled";
@@ -52,8 +66,15 @@ type ReviewDecision = {
   title: string;
   assetId: string | null;
   categoryId: string | null;
+  newCategoryName: string | null;
+  approveNewCategory: boolean;
   locationId: string | null;
   quantity: number | null;
+  type: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
+  productChoice: "EXISTING" | "NEW" | null;
+  minQuantity: number | null;
+  unitOfMeasure: string | null;
+  consumptionType: "ONE_WAY" | "TWO_WAY" | null;
 };
 
 function isSafeReviewAction(row: StaffImportProposalRow) {
@@ -82,10 +103,12 @@ export function StaffImportPanel({
   actionPath,
   initialProposal = null,
   initialNotice = null,
+  canCreateCategory = true,
 }: {
   actionPath: string;
   initialProposal?: StaffImportProposal | null;
   initialNotice?: string | null;
+  canCreateCategory?: boolean;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -282,9 +305,17 @@ export function StaffImportPanel({
         </div>
       ) : null}
       {result ? (
-        <p className="mt-3 text-sm text-green-700">
-          Applied. Created {result.createdIds.length}, updated{" "}
-          {result.updatedIds.length}, reused {result.reusedIds.length}.
+        <p
+          className={`mt-3 text-sm ${
+            result.failedRows.length || result.conflictRows?.length
+              ? "text-amber-700"
+              : "text-green-700"
+          }`}
+        >
+          Import finished. Created {result.createdIds.length}, updated{" "}
+          {result.updatedIds.length}, reused {result.reusedIds.length}, failed{" "}
+          {result.failedRows.length}, conflicts{" "}
+          {result.conflictRows?.length ?? 0}.
         </p>
       ) : null}
       {proposal ? (
@@ -293,6 +324,7 @@ export function StaffImportPanel({
           proposal={proposal}
           actionPath={actionPath}
           onReset={resetImportState}
+          canCreateCategory={canCreateCategory}
         />
       ) : null}
     </section>
@@ -303,16 +335,20 @@ function StaffImportProposalView({
   proposal,
   actionPath,
   onReset,
+  canCreateCategory,
 }: {
   proposal: StaffImportProposal;
   actionPath: string;
   onReset: (notice?: string | null) => void;
+  canCreateCategory: boolean;
 }) {
   const fetcher = useFetcher<StaffImportActionResponse>();
+  const response = fetcher.data;
   const [proposalState, setProposalState] = useState<
-    "review" | "applying" | "applied" | "cancelled" | "expired" | "error"
+    "review" | "in-progress" | "applied" | "cancelled" | "expired" | "error"
   >("review");
   const [reviewPage, setReviewPage] = useState(0);
+  const [allowSameFileReimport, setAllowSameFileReimport] = useState(false);
   const [editRowNumber, setEditRowNumber] = useState<number | null>(null);
   const [reviewDecisions, setReviewDecisions] = useState<
     Record<number, ReviewDecision>
@@ -330,29 +366,93 @@ function StaffImportProposalView({
           title: row.title,
           assetId: row.assetId,
           categoryId: row.categoryId,
+          newCategoryName: row.proposedCategoryName ?? null,
+          approveNewCategory: false,
           locationId: row.locationId,
           quantity:
             row.receivedQuantity ??
             (row.quantityStatus === "RECEIVED" ? row.quantity : null),
+          type: row.type,
+          productChoice:
+            row.action === "POSSIBLE_DUPLICATE" || row.action === "AMBIGUOUS"
+              ? null
+              : row.assetId
+              ? "EXISTING"
+              : "NEW",
+          minQuantity:
+            typeof row.helperCandidate?.settingsSuggestions.find(
+              (setting) => setting.key === "minQuantity"
+            )?.value === "number"
+              ? (row.helperCandidate.settingsSuggestions.find(
+                  (setting) => setting.key === "minQuantity"
+                )?.value as number)
+              : null,
+          unitOfMeasure:
+            (row.helperCandidate?.settingsSuggestions.find(
+              (setting) => setting.key === "unitOfMeasure"
+            )?.value as string | undefined) ??
+            (row.type === "QUANTITY_TRACKED" ? "pcs" : null),
+          consumptionType:
+            (row.helperCandidate?.settingsSuggestions.find(
+              (setting) => setting.key === "consumptionType"
+            )?.value as "ONE_WAY" | "TWO_WAY" | undefined) ??
+            (row.type === "QUANTITY_TRACKED" ? "TWO_WAY" : null),
         },
       ])
     )
   );
-  const approvedRows = proposal.rows.filter(
-    (row) => reviewDecisions[row.rowNumber]?.decision === "APPROVE"
-  );
-  const allRowsReviewed = proposal.rows.every((row) =>
-    Boolean(reviewDecisions[row.rowNumber]?.decision)
-  );
-  const allApprovedRowsHaveNames = approvedRows.every(
-    (row) => reviewDecisions[row.rowNumber]?.title.trim().length > 0
+  const [serverReviewStateOverrides, setServerReviewStateOverrides] = useState<
+    Record<number, "NEEDS_REVIEW" | "CONFLICT" | "INVALID">
+  >({});
+  const reviewStates = Object.fromEntries(
+    proposal.rows.map((row) => {
+      const decision = reviewDecisions[row.rowNumber];
+      return [
+        row.rowNumber,
+        serverReviewStateOverrides[row.rowNumber] ??
+          resolveImportReviewState({
+            row,
+            decision,
+            categoryAvailable: Boolean(
+              (decision?.categoryId &&
+                proposal.categoryOptions?.some(
+                  (category) =>
+                    category.id === decision.categoryId && !category.archived
+                )) ||
+                (decision?.approveNewCategory && decision.newCategoryName)
+            ),
+            categoryPermission: canCreateCategory,
+            locationAvailable:
+              !decision?.locationId ||
+              Boolean(
+                proposal.locationOptions?.some(
+                  (location) => location.id === decision.locationId
+                )
+              ),
+          }),
+      ];
+    })
+  ) as Record<
+    number,
+    "READY" | "NEEDS_REVIEW" | "CONFLICT" | "INVALID" | "SKIPPED"
+  >;
+  const hasBlockingReviewRows = Object.values(reviewStates).some(
+    (state) => !["READY", "SKIPPED"].includes(state)
   );
   const canApply =
-    allRowsReviewed &&
-    allApprovedRowsHaveNames &&
-    approvedRows.length > 0 &&
+    !hasBlockingReviewRows &&
+    proposal.rows.length > 0 &&
     fetcher.state === "idle" &&
-    (proposalState === "review" || proposalState === "error");
+    (proposalState === "review" ||
+      proposalState === "error" ||
+      proposalState === "in-progress");
+  const duplicateResponse =
+    response?.error === null && response.kind === "import-duplicate"
+      ? response.duplicate
+      : null;
+  const duplicateBlocksApply =
+    duplicateResponse !== null &&
+    (!duplicateResponse.canOverride || !allowSameFileReimport);
   const serializedReviewDecisions = JSON.stringify(
     proposal.rows
       .map((row) => {
@@ -363,8 +463,15 @@ function StaffImportProposalView({
           title: decision?.title,
           assetId: decision?.assetId,
           categoryId: decision?.categoryId,
+          newCategoryName: decision?.newCategoryName,
+          approveNewCategory: decision?.approveNewCategory,
           locationId: decision?.locationId,
           quantity: decision?.quantity,
+          type: decision?.type,
+          productChoice: decision?.productChoice,
+          minQuantity: decision?.minQuantity,
+          unitOfMeasure: decision?.unitOfMeasure,
+          consumptionType: decision?.consumptionType,
         };
       })
       .filter((decision) => decision.decision)
@@ -387,6 +494,11 @@ function StaffImportProposalView({
     rowNumber: number,
     changes: Partial<ReviewDecision>
   ) => {
+    setServerReviewStateOverrides((current) => {
+      const next = { ...current };
+      delete next[rowNumber];
+      return next;
+    });
     setReviewDecisions((current) => ({
       ...current,
       [rowNumber]: {
@@ -414,6 +526,18 @@ function StaffImportProposalView({
   useEffect(() => {
     if (!fetcher.data) return;
     if (fetcher.data.error) {
+      const rowStateMatch = fetcher.data.error.message.match(
+        /Row (\d+) is (NEEDS_REVIEW|CONFLICT|INVALID)/i
+      );
+      if (rowStateMatch) {
+        setServerReviewStateOverrides((current) => ({
+          ...current,
+          [Number(rowStateMatch[1])]: rowStateMatch[2].toUpperCase() as
+            | "NEEDS_REVIEW"
+            | "CONFLICT"
+            | "INVALID",
+        }));
+      }
       if (fetcher.data.error.message.includes("no longer available")) {
         setProposalState("expired");
         onReset(
@@ -427,8 +551,23 @@ function StaffImportProposalView({
     if (fetcher.data.kind === "import-result") {
       setProposalState("applied");
       onReset(
-        `Import applied. Created ${fetcher.data.result.createdIds.length}, updated ${fetcher.data.result.updatedIds.length}, reused ${fetcher.data.result.reusedIds.length}.`
+        `Import finished. Created ${
+          fetcher.data.result.createdIds.length
+        }, updated ${fetcher.data.result.updatedIds.length}, reused ${
+          fetcher.data.result.reusedIds.length
+        }, failed ${fetcher.data.result.failedRows.length}, conflicts ${
+          fetcher.data.result.conflictRows?.length ?? 0
+        }.`
       );
+      return;
+    }
+    if (fetcher.data.kind === "import-in-progress") {
+      setProposalState("in-progress");
+      return;
+    }
+    if (fetcher.data.kind === "import-duplicate") {
+      setProposalState("review");
+      setAllowSameFileReimport(false);
       return;
     }
     if (fetcher.data.kind === "import-cancelled") {
@@ -457,13 +596,26 @@ function StaffImportProposalView({
               name="operationId"
               value={proposal.operationId}
             />
+            <input
+              type="hidden"
+              name="proposalHash"
+              value={proposal.proposalHash}
+            />
+            <input
+              type="hidden"
+              name="allowSameFileReimport"
+              value={allowSameFileReimport ? "true" : "false"}
+            />
             <button
               type="submit"
-              disabled={!canApply}
-              onClick={() => setProposalState("applying")}
+              disabled={
+                !canApply || duplicateBlocksApply || fetcher.state !== "idle"
+              }
               className="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Apply approved changes
+              {allowSameFileReimport
+                ? "Apply changed proposal anyway"
+                : "Apply approved changes"}
             </button>
             <input
               type="hidden"
@@ -502,17 +654,44 @@ function StaffImportProposalView({
         </div>
       </div>
 
-      {proposalState === "applying" || fetcher.state !== "idle" ? (
+      {fetcher.state !== "idle" ? (
         <p className="mt-3 text-sm text-gray-500" role="status">
-          {proposalState === "applying"
+          {fetcher.state === "submitting"
             ? "Applying approved changes..."
             : "Cancelling import proposal..."}
+        </p>
+      ) : null}
+      {proposalState === "in-progress" ? (
+        <p role="status" className="mt-3 text-sm text-amber-700">
+          This import is still being processed. Wait a moment before checking
+          again.
         </p>
       ) : null}
       {fetcher.data?.error ? (
         <p className="mt-3 text-sm text-red-700" role="alert">
           {fetcher.data.error.message}
         </p>
+      ) : null}
+      {response?.error === null && response.kind === "import-duplicate" ? (
+        <div
+          className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+          role="alert"
+        >
+          <p>{response.duplicate.message}</p>
+          {response.duplicate.canOverride ? (
+            <label className="mt-2 flex items-start gap-2 font-semibold">
+              <input
+                type="checkbox"
+                checked={allowSameFileReimport}
+                onChange={(event) =>
+                  setAllowSameFileReimport(event.currentTarget.checked)
+                }
+              />
+              I reviewed the changed decisions and intend to apply this PDF
+              again.
+            </label>
+          ) : null}
+        </div>
       ) : null}
 
       <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
@@ -570,181 +749,464 @@ function StaffImportProposalView({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {reviewRows.map((row) => (
-              <tr key={row.rowNumber}>
-                <td className="p-2">{row.rowNumber}</td>
-                <td className="p-2 font-semibold">
-                  {row.title || "Unresolved item name"}
-                  {row.sourceDescription &&
-                  row.sourceDescription !== row.title ? (
-                    <p className="mt-1 text-xs font-normal text-gray-500">
-                      Source: {row.sourceDescription}
-                    </p>
-                  ) : null}
-                  {editRowNumber === row.rowNumber ? (
-                    <div className="mt-2 min-w-64 space-y-2 rounded-lg bg-gray-50 p-2 text-xs font-normal">
-                      <label className="block">
-                        Item name
-                        <input
-                          value={reviewDecisions[row.rowNumber]?.title ?? ""}
-                          onChange={(event) =>
-                            updateDecision(row.rowNumber, {
-                              title: event.target.value,
-                            })
-                          }
-                          className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-100"
-                        />
-                      </label>
-                      <label className="block">
-                        Shelf match
-                        <select
-                          value={reviewDecisions[row.rowNumber]?.assetId ?? ""}
-                          onChange={(event) =>
-                            updateDecision(row.rowNumber, {
-                              assetId: event.target.value || null,
-                            })
-                          }
-                          className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
-                        >
-                          <option value="">New Shelf asset</option>
-                          {(row.matchCandidates ?? []).map((candidate) => (
-                            <option key={candidate.id} value={candidate.id}>
-                              {candidate.title}
+            {reviewRows.map((row) => {
+              const decision = reviewDecisions[row.rowNumber];
+              const selectedCategory = decision?.categoryId
+                ? proposal.categoryOptions?.find(
+                    (category) => category.id === decision.categoryId
+                  )
+                : null;
+              const selectedLocation = decision?.locationId
+                ? proposal.locationOptions?.find(
+                    (location) => location.id === decision.locationId
+                  )
+                : null;
+              const selectedNewCategory = decision?.approveNewCategory
+                ? decision.newCategoryName?.trim()
+                : null;
+              return (
+                <tr key={row.rowNumber}>
+                  <td className="p-2">{row.rowNumber}</td>
+                  <td className="p-2 font-semibold">
+                    {row.title || "Unresolved item name"}
+                    {row.sourceDescription &&
+                    row.sourceDescription !== row.title ? (
+                      <p className="mt-1 text-xs font-normal text-gray-500">
+                        Source: {row.sourceDescription}
+                      </p>
+                    ) : null}
+                    {row.helperCandidate ? (
+                      <div className="mt-2 space-y-1 rounded-lg bg-blue-50 p-2 text-xs font-normal text-blue-950">
+                        <p>
+                          Helper suggestion:{" "}
+                          {row.helperCandidate.productMatch.matchType.toLocaleLowerCase()}{" "}
+                          product match (
+                          {Math.round(
+                            row.helperCandidate.productMatch.confidence * 100
+                          )}
+                          % confidence),{" "}
+                          {row.helperCandidate.trackingSuggestion.mode.toLocaleLowerCase()}{" "}
+                          tracking (
+                          {Math.round(
+                            row.helperCandidate.trackingSuggestion.confidence *
+                              100
+                          )}
+                          % confidence).
+                        </p>
+                        {row.helperCandidate.questions.length ? (
+                          <ul className="list-disc pl-4">
+                            {row.helperCandidate.questions.map((question) => (
+                              <li key={question}>{question}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {row.sourceEvidence?.map((evidence, index) => (
+                          <p key={`${evidence.sourceRef}-${index}`}>
+                            Source, page {evidence.page}: “{evidence.text}”
+                          </p>
+                        ))}
+                        {row.helperCandidate.settingsSuggestions.length ? (
+                          <p>
+                            Suggested settings:{" "}
+                            {row.helperCandidate.settingsSuggestions
+                              .map(
+                                ({ key, value }) => `${key}: ${String(value)}`
+                              )
+                              .join(", ")}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {!row.helperCandidate
+                      ? row.sourceEvidence?.map((evidence, index) => (
+                          <p
+                            key={`${evidence.sourceRef}-${index}`}
+                            className="mt-1 text-xs font-normal text-gray-500"
+                          >
+                            Source, page {evidence.page}: “{evidence.text}”
+                          </p>
+                        ))
+                      : null}
+                    {editRowNumber === row.rowNumber ? (
+                      <div className="mt-2 min-w-64 space-y-2 rounded-lg bg-gray-50 p-2 text-xs font-normal">
+                        <label className="block">
+                          Item name
+                          <input
+                            value={reviewDecisions[row.rowNumber]?.title ?? ""}
+                            onChange={(event) =>
+                              updateDecision(row.rowNumber, {
+                                title: event.target.value,
+                              })
+                            }
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1 focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-100"
+                          />
+                        </label>
+                        <label className="block">
+                          Shelf match
+                          <select
+                            value={
+                              reviewDecisions[row.rowNumber]?.productChoice ===
+                              "NEW"
+                                ? "__new__"
+                                : reviewDecisions[row.rowNumber]?.assetId ?? ""
+                            }
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              updateDecision(row.rowNumber, {
+                                assetId:
+                                  value && value !== "__new__" ? value : null,
+                                productChoice: value
+                                  ? value === "__new__"
+                                    ? "NEW"
+                                    : "EXISTING"
+                                  : null,
+                              });
+                            }}
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                          >
+                            {row.action === "POSSIBLE_DUPLICATE" ||
+                            row.action === "AMBIGUOUS" ? (
+                              <option value="">Choose product decision</option>
+                            ) : null}
+                            <option value="__new__">Create new product</option>
+                            {(row.matchCandidates ?? []).map((candidate) => (
+                              <option key={candidate.id} value={candidate.id}>
+                                {candidate.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="block">
+                          Received quantity
+                          <input
+                            type="number"
+                            min="1"
+                            value={
+                              reviewDecisions[row.rowNumber]?.quantity ?? ""
+                            }
+                            onChange={(event) =>
+                              updateDecision(row.rowNumber, {
+                                quantity: event.target.value
+                                  ? Number(event.target.value)
+                                  : null,
+                              })
+                            }
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                          />
+                        </label>
+                        <label className="block">
+                          Tracking mode
+                          <select
+                            value={reviewDecisions[row.rowNumber]?.type ?? ""}
+                            onChange={(event) =>
+                              updateDecision(row.rowNumber, {
+                                type:
+                                  event.target.value === "INDIVIDUAL" ||
+                                  event.target.value === "QUANTITY_TRACKED"
+                                    ? event.target.value
+                                    : null,
+                              })
+                            }
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                          >
+                            <option value="">Choose tracking mode</option>
+                            <option value="QUANTITY_TRACKED">
+                              Quantity tracked
                             </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="block">
-                        Received quantity
-                        <input
-                          type="number"
-                          min="1"
-                          value={reviewDecisions[row.rowNumber]?.quantity ?? ""}
-                          onChange={(event) =>
-                            updateDecision(row.rowNumber, {
-                              quantity: event.target.value
-                                ? Number(event.target.value)
-                                : null,
-                            })
-                          }
-                          className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
-                        />
-                      </label>
-                      {proposal.categoryOptions?.length ? (
-                        <label className="block">
-                          Category
-                          <select
-                            value={
-                              reviewDecisions[row.rowNumber]?.categoryId ?? ""
-                            }
-                            onChange={(event) =>
-                              updateDecision(row.rowNumber, {
-                                categoryId: event.target.value || null,
-                              })
-                            }
-                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
-                          >
-                            <option value="">Choose a category</option>
-                            {proposal.categoryOptions.map((category) => (
-                              <option key={category.id} value={category.id}>
-                                {category.name}
-                              </option>
-                            ))}
+                            <option value="INDIVIDUAL">Individual + QR</option>
                           </select>
                         </label>
-                      ) : null}
-                      {proposal.locationOptions?.length ? (
-                        <label className="block">
-                          Location
-                          <select
-                            value={
-                              reviewDecisions[row.rowNumber]?.locationId ?? ""
-                            }
-                            onChange={(event) =>
-                              updateDecision(row.rowNumber, {
-                                locationId: event.target.value || null,
-                              })
-                            }
-                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
-                          >
-                            <option value="">Unassigned</option>
-                            {proposal.locationOptions.map((location) => (
-                              <option key={location.id} value={location.id}>
-                                {location.name}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      ) : null}
+                        {reviewDecisions[row.rowNumber]?.type ===
+                        "QUANTITY_TRACKED" ? (
+                          <fieldset className="space-y-2 rounded border border-gray-200 p-2">
+                            <legend className="px-1 font-bold">
+                              Quantity settings
+                            </legend>
+                            <label className="block">
+                              Unit of measure
+                              <input
+                                value={
+                                  reviewDecisions[row.rowNumber]
+                                    ?.unitOfMeasure ?? ""
+                                }
+                                maxLength={100}
+                                onChange={(event) =>
+                                  updateDecision(row.rowNumber, {
+                                    unitOfMeasure: event.target.value || null,
+                                  })
+                                }
+                                className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                              />
+                            </label>
+                            <label className="block">
+                              Consumption type
+                              <select
+                                value={
+                                  reviewDecisions[row.rowNumber]
+                                    ?.consumptionType ?? ""
+                                }
+                                onChange={(event) =>
+                                  updateDecision(row.rowNumber, {
+                                    consumptionType:
+                                      event.target.value === "ONE_WAY" ||
+                                      event.target.value === "TWO_WAY"
+                                        ? event.target.value
+                                        : null,
+                                  })
+                                }
+                                className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                              >
+                                <option value="">
+                                  Choose consumption type
+                                </option>
+                                <option value="TWO_WAY">Returnable</option>
+                                <option value="ONE_WAY">Consumable</option>
+                              </select>
+                            </label>
+                            <label className="block">
+                              Minimum quantity
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={
+                                  reviewDecisions[row.rowNumber]?.minQuantity ??
+                                  ""
+                                }
+                                onChange={(event) =>
+                                  updateDecision(row.rowNumber, {
+                                    minQuantity: event.target.value
+                                      ? Number(event.target.value)
+                                      : null,
+                                  })
+                                }
+                                className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                              />
+                            </label>
+                          </fieldset>
+                        ) : null}
+                        {proposal.categoryOptions?.length ? (
+                          <label className="block">
+                            Category
+                            <select
+                              value={
+                                reviewDecisions[row.rowNumber]?.categoryId ?? ""
+                              }
+                              onChange={(event) =>
+                                updateDecision(row.rowNumber, {
+                                  categoryId: event.target.value || null,
+                                  approveNewCategory: false,
+                                })
+                              }
+                              className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                            >
+                              <option value="">Choose a category</option>
+                              {proposal.categoryOptions.map((category) => (
+                                <option
+                                  key={category.id}
+                                  value={category.id}
+                                  disabled={category.archived}
+                                >
+                                  {category.name}
+                                  {category.archived ? " (archived)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {!reviewDecisions[row.rowNumber]?.categoryId ? (
+                          <div className="rounded border border-amber-200 bg-amber-50 p-2">
+                            <label className="block">
+                              Proposed new category
+                              <input
+                                value={
+                                  reviewDecisions[row.rowNumber]
+                                    ?.newCategoryName ??
+                                  row.proposedCategoryName ??
+                                  ""
+                                }
+                                onChange={(event) =>
+                                  updateDecision(row.rowNumber, {
+                                    newCategoryName: event.target.value,
+                                    approveNewCategory: false,
+                                  })
+                                }
+                                className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                              />
+                            </label>
+                            <label className="mt-2 flex items-start gap-2">
+                              <input
+                                type="checkbox"
+                                checked={
+                                  reviewDecisions[row.rowNumber]
+                                    ?.approveNewCategory ?? false
+                                }
+                                onChange={(event) =>
+                                  updateDecision(row.rowNumber, {
+                                    approveNewCategory: event.target.checked,
+                                  })
+                                }
+                                disabled={!canCreateCategory}
+                              />
+                              <span>
+                                Approve creating this category (requires Shelf
+                                category:create permission)
+                                {!canCreateCategory
+                                  ? ". Your role cannot create categories; choose an active category instead."
+                                  : ""}
+                              </span>
+                            </label>
+                          </div>
+                        ) : null}
+                        {proposal.locationOptions?.length ? (
+                          <label className="block">
+                            Location
+                            <select
+                              value={
+                                reviewDecisions[row.rowNumber]?.locationId ?? ""
+                              }
+                              onChange={(event) =>
+                                updateDecision(row.rowNumber, {
+                                  locationId: event.target.value || null,
+                                })
+                              }
+                              className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                            >
+                              <option value="">Unassigned</option>
+                              {proposal.locationOptions.map((location) => (
+                                <option key={location.id} value={location.id}>
+                                  {location.pathLabel}
+                                  {location.operational ? " (operational)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="p-2">
+                    <div>
+                      Tracking:{" "}
+                      {reviewDecisions[row.rowNumber]?.type?.replaceAll(
+                        "_",
+                        " "
+                      ) ?? "Needs review"}
                     </div>
-                  ) : null}
-                </td>
-                <td className="p-2">
-                  <div>Ordered: {row.orderedQuantity ?? "Unknown"}</div>
-                  <div>Received: {row.receivedQuantity ?? "Unknown"}</div>
-                  <div>
-                    Proposed:{" "}
-                    {row.proposedQuantity ?? row.quantity ?? "Unknown"}
-                  </div>
-                </td>
-                <td className="p-2">
-                  <div>
-                    {row.suggestedCategory ?? row.category ?? "Needs review"}
-                  </div>
-                  {row.categoryConfidence ? (
-                    <div className="text-xs text-gray-500">
-                      {row.categoryConfidence}: {row.categoryReason}
+                    {reviewDecisions[row.rowNumber]?.type === "INDIVIDUAL" &&
+                    (reviewDecisions[row.rowNumber]?.quantity ?? 0) > 0 ? (
+                      <div className="mt-1 text-xs font-semibold text-gray-700">
+                        Quantity: {reviewDecisions[row.rowNumber]?.quantity};
+                        Tracking: Individual QR
+                        <br />
+                        Result: {reviewDecisions[row.rowNumber]?.quantity}{" "}
+                        physical units,{" "}
+                        {reviewDecisions[row.rowNumber]?.title || row.title}{" "}
+                        #001 – #
+                        {String(
+                          reviewDecisions[row.rowNumber]?.quantity
+                        ).padStart(
+                          Math.max(
+                            3,
+                            String(reviewDecisions[row.rowNumber]?.quantity)
+                              .length
+                          ),
+                          "0"
+                        )}
+                        , each with a distinct QR code
+                      </div>
+                    ) : null}
+                    <div>Ordered: {row.orderedQuantity ?? "Unknown"}</div>
+                    <div>Received: {row.receivedQuantity ?? "Unknown"}</div>
+                    <div>
+                      Proposed:{" "}
+                      {row.proposedQuantity ?? row.quantity ?? "Unknown"}
                     </div>
-                  ) : null}
-                </td>
-                <td className="p-2">
-                  {row.location ?? row.locationLabel ?? "Unassigned"}
-                </td>
-                <td className="p-2">
-                  <div className="mb-2 font-bold">
-                    {reviewDecisions[row.rowNumber]?.decision === "APPROVE"
-                      ? "Approved"
-                      : reviewDecisions[row.rowNumber]?.decision === "IGNORE"
-                      ? "Ignored"
-                      : "Needs review"}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      disabled={!reviewDecisions[row.rowNumber]?.title.trim()}
-                      onClick={() =>
-                        updateDecision(row.rowNumber, { decision: "APPROVE" })
-                      }
-                      className="rounded-lg bg-red-700 px-2 py-1 text-xs font-bold text-white hover:bg-red-800 disabled:opacity-50"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setEditRowNumber((current) =>
-                          current === row.rowNumber ? null : row.rowNumber
-                        )
-                      }
-                      className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateDecision(row.rowNumber, { decision: "IGNORE" })
-                      }
-                      className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
-                    >
-                      Ignore
-                    </button>
-                  </div>
-                </td>
-                <td className="p-2">{actionLabel(row.action)}</td>
-                <td className="p-2 text-gray-500">{row.reason}</td>
-              </tr>
-            ))}
+                  </td>
+                  <td className="p-2">
+                    <div>
+                      {selectedCategory?.name ??
+                        (selectedNewCategory
+                          ? `New: ${selectedNewCategory}`
+                          : row.suggestedCategory ??
+                            row.category ??
+                            "Needs review")}
+                    </div>
+                    {row.categoryConfidence ? (
+                      <div className="text-xs text-gray-500">
+                        {row.categoryConfidence}: {row.categoryReason}
+                      </div>
+                    ) : null}
+                    {!selectedCategory &&
+                    !selectedNewCategory &&
+                    row.categoryResolution === "ARCHIVED_MATCH" ? (
+                      <div className="text-xs text-amber-800">
+                        Matching category is archived; choose an active
+                        category.
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="p-2">
+                    {selectedLocation?.pathLabel ??
+                      row.locationLabel ??
+                      row.location ??
+                      "Unassigned"}
+                    {selectedLocation || row.locationContext ? (
+                      <div className="text-xs text-gray-500">
+                        Current units:{" "}
+                        {selectedLocation?.currentUnits ??
+                          row.locationContext?.currentUnits ??
+                          0}
+                        ; import adds:{" "}
+                        {row.locationContext?.proposedUnits ??
+                          row.quantity ??
+                          0}
+                        ; capacity: not configured
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="p-2">
+                    <div className="mb-2 font-bold">
+                      {reviewStates[row.rowNumber]}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={!reviewDecisions[row.rowNumber]?.title.trim()}
+                        onClick={() =>
+                          updateDecision(row.rowNumber, { decision: "APPROVE" })
+                        }
+                        className="rounded-lg bg-red-700 px-2 py-1 text-xs font-bold text-white hover:bg-red-800 disabled:opacity-50"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditRowNumber((current) =>
+                            current === row.rowNumber ? null : row.rowNumber
+                          )
+                        }
+                        className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateDecision(row.rowNumber, { decision: "IGNORE" })
+                        }
+                        className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                      >
+                        Ignore
+                      </button>
+                    </div>
+                  </td>
+                  <td className="p-2">{actionLabel(row.action)}</td>
+                  <td className="p-2 text-gray-500">{row.reason}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

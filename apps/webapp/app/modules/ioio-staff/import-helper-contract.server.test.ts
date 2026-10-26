@@ -1,0 +1,271 @@
+import { describe, expect, it, vi } from "vitest";
+import { requestImportHelperProposal } from "./import-helper-client.server";
+import {
+  createImportHelperRequest,
+  parseAndValidateImportHelperResponse,
+  type ImportHelperRequest,
+} from "./import-helper-contract.server";
+
+function makeRequest(): ImportHelperRequest {
+  return createImportHelperRequest({
+    document: {
+      pages: [
+        {
+          sourceRef: "page-1",
+          page: 1,
+          text: "Invoice line: Arduino Nano, quantity 5, by Arduino, MPN ABX00071.",
+        },
+      ],
+    },
+    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+    relevantLocations: [
+      {
+        id: "location-storage",
+        pathLabel: "IOIO Lab / Electronics / Shelf A",
+        occupancy: {
+          currentUnits: 18,
+          proposedUnits: 5,
+          capacity: null,
+          context: "Capacity is not configured",
+        },
+      },
+    ],
+    productCandidates: [
+      {
+        id: "model-nano",
+        name: "Arduino Nano",
+        manufacturer: "Arduino",
+        mpn: "ABX00071",
+      },
+    ],
+    allowedTrackingModes: ["INDIVIDUAL", "QUANTITY_TRACKED"],
+    allowedSettings: [
+      { key: "minQuantity", minimum: 0, maximum: 1000 },
+      { key: "unitOfMeasure", allowedValues: ["pcs", "boxes"] },
+      { key: "consumptionType", allowedValues: ["ONE_WAY", "TWO_WAY"] },
+    ],
+  });
+}
+
+function makeResponse() {
+  return {
+    schemaVersion: 1,
+    rows: [
+      {
+        sourceRef: "page-1",
+        productName: "Arduino Nano",
+        quantity: 5,
+        manufacturer: "Arduino",
+        mpn: "ABX00071",
+        description: null,
+        productMatch: {
+          matchType: "EXISTING",
+          candidateId: "model-nano",
+          confidence: 0.99,
+        },
+        categorySuggestion: {
+          categoryId: "category-electronics",
+          proposedName: null,
+          confidence: 0.9,
+        },
+        trackingSuggestion: { mode: "INDIVIDUAL", confidence: 0.95 },
+        kitHint: { isKit: false, name: null, confidence: 0.99 },
+        settingsSuggestions: [
+          { key: "unitOfMeasure", value: "pcs", confidence: 0.8 },
+        ],
+        locationSuggestions: [
+          { locationId: "location-storage", confidence: 0.75 },
+        ],
+        questions: [],
+        evidence: [{ sourceRef: "page-1", text: "Arduino Nano, quantity 5" }],
+      },
+    ],
+    questions: [],
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("import helper contract", () => {
+  it("accepts a valid versioned proposal and verifiable evidence", () => {
+    const request = makeRequest();
+    const response = parseAndValidateImportHelperResponse(
+      JSON.stringify(makeResponse()),
+      request
+    );
+
+    expect(response.rows[0]?.productMatch.candidateId).toBe("model-nano");
+    expect(request.document.sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects unknown response fields", () => {
+    const response = {
+      ...makeResponse(),
+      executableSql: "INSERT INTO Asset ...",
+    };
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(response),
+        makeRequest()
+      )
+    ).toThrow("malformed or unsupported response");
+  });
+
+  it("rejects IDs outside Shelf-provided allowlists", () => {
+    const response = makeResponse();
+    response.rows[0]!.categorySuggestion.categoryId = "category-from-helper";
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(response),
+        makeRequest()
+      )
+    ).toThrow("outside Shelf's allowlist");
+  });
+
+  it("rejects invalid quantities and unsupported tracking suggestions", () => {
+    const zeroQuantity = makeResponse();
+    zeroQuantity.rows[0]!.quantity = 0;
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(zeroQuantity),
+        makeRequest()
+      )
+    ).toThrow("malformed or unsupported response");
+
+    const unsupportedTracking = makeResponse();
+    unsupportedTracking.rows[0]!.trackingSuggestion.mode =
+      "SERIALIZED" as "INDIVIDUAL";
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(unsupportedTracking),
+        makeRequest()
+      )
+    ).toThrow("malformed or unsupported response");
+  });
+
+  it("rejects unsupported settings and unverifiable evidence", () => {
+    const invalidSetting = makeResponse();
+    invalidSetting.rows[0]!.settingsSuggestions[0]!.value = "not-allowed";
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(invalidSetting),
+        makeRequest()
+      )
+    ).toThrow("disallowed unitOfMeasure");
+
+    const invalidEvidence = makeResponse();
+    invalidEvidence.rows[0]!.evidence[0]!.text = "This quote is absent";
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(invalidEvidence),
+        makeRequest()
+      )
+    ).toThrow("evidence that cannot be verified");
+  });
+
+  it("enforces the individual-unit limits in the helper proposal", () => {
+    const tooManyOnRow = makeResponse();
+    tooManyOnRow.rows[0]!.quantity = 101;
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(tooManyOnRow),
+        makeRequest()
+      )
+    ).toThrow("individual-unit row limit");
+
+    const tooManyAcrossImport = makeResponse();
+    tooManyAcrossImport.rows = Array.from({ length: 6 }, (_, index) => ({
+      ...makeResponse().rows[0]!,
+      sourceRef: "page-1",
+      quantity: 100,
+      productName: `Arduino Nano ${index}`,
+    }));
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(tooManyAcrossImport),
+        makeRequest()
+      )
+    ).toThrow("individual-unit import limit");
+  });
+
+  it("returns safe manual mode for malformed JSON", async () => {
+    // why: exercise the HTTP boundary with an invalid body that cannot be represented by a valid response object.
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response("{not-json", { status: 200 }))
+    );
+    const result = await requestImportHelperProposal(makeRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+
+    expect(result).toEqual({ status: "manual", reason: "invalid-response" });
+  });
+
+  it("returns safe manual mode when the helper is not configured or unavailable", async () => {
+    const notConfigured = await requestImportHelperProposal(makeRequest(), {});
+    expect(notConfigured).toEqual({
+      status: "manual",
+      reason: "not-configured",
+    });
+
+    // why: simulate an upstream service outage without making a network request.
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response("unavailable", { status: 503 }))
+    );
+    const unavailable = await requestImportHelperProposal(makeRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+    expect(unavailable).toEqual({ status: "manual", reason: "unavailable" });
+  });
+
+  it("returns safe manual mode when the helper times out", async () => {
+    // why: hold the fake request open until the client's AbortController fires.
+    const fetchImpl = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError"))
+          );
+        })
+    );
+    const result = await requestImportHelperProposal(makeRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      timeoutMs: 1,
+      fetchImpl,
+    });
+
+    expect(result).toEqual({ status: "manual", reason: "timeout" });
+  });
+
+  it("sends only the schema payload and keeps credentials in the auth header", async () => {
+    const request = makeRequest();
+    const fetchImpl = vi.fn(
+      (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        expect(body).toEqual(request);
+        expect(JSON.stringify(body)).not.toContain("test-secret");
+        expect(new Headers(init?.headers).get("authorization")).toBe(
+          "Bearer test-secret"
+        );
+        return Promise.resolve(jsonResponse(makeResponse()));
+      }
+    );
+
+    const result = await requestImportHelperProposal(request, {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ready");
+  });
+});

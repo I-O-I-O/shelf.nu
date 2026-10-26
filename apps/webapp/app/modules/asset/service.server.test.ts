@@ -1339,6 +1339,32 @@ describe("createAsset quantity validation", () => {
       })
     ).resolves.toEqual({ id: "asset-new" });
   });
+
+  it("uses a reserved QR ID inside the atomic Asset create", async () => {
+    await createAsset({
+      title: "Arduino Nano #001",
+      description: null,
+      userId: "user-1",
+      categoryId: null,
+      valuation: null,
+      organizationId: "org-1",
+      id: "asset-reserved",
+      newQrId: "qr-reserved-1",
+      type: "INDIVIDUAL",
+    });
+
+    expect(db.asset.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          id: "asset-reserved",
+          qrCodes: {
+            create: [expect.objectContaining({ id: "qr-reserved-1" })],
+          },
+        }),
+      })
+    );
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function));
+  });
 });
 
 describe("checkOutQuantity — availability accounting", () => {

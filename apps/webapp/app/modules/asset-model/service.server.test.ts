@@ -129,6 +129,90 @@ describe("createAssetModel", () => {
       }),
     });
     expect(result).toEqual(mockModel);
+    expect(db.assetModel.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({
+          importIdentityKey: expect.any(String),
+        }),
+      })
+    );
+  });
+
+  it("accepts a pre-generated model ID for idempotent importer retries", async () => {
+    const mockModel = createAssetModelFactory({ id: "model-reserved" });
+    // @ts-expect-error mock setup
+    db.assetModel.create.mockResolvedValue(mockModel);
+
+    await createAssetModel({
+      id: "model-reserved",
+      name: "Arduino Nano",
+      userId: "user-123",
+      organizationId: "org-123",
+    });
+
+    expect(db.assetModel.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        id: "model-reserved",
+        name: "Arduino Nano",
+      }),
+    });
+  });
+
+  it("persists an optional importer identity key without changing native model creation", async () => {
+    const mockModel = createAssetModelFactory({
+      id: "model-import",
+      importIdentityKey: "ioio-import:v1:abc",
+    });
+    // why: the service contract is verified without a database write.
+    // @ts-expect-error mock setup
+    db.assetModel.create.mockResolvedValue(mockModel);
+
+    await createAssetModel({
+      id: "model-import",
+      importIdentityKey: "ioio-import:v1:abc",
+      name: "Arduino Nano",
+      userId: "user-123",
+      organizationId: "org-123",
+    });
+
+    expect(db.assetModel.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        id: "model-import",
+        importIdentityKey: "ioio-import:v1:abc",
+        name: "Arduino Nano",
+      }),
+    });
+  });
+
+  it("rereads the winner when concurrent importer creation hits the unique identity", async () => {
+    const winner = createAssetModelFactory({
+      id: "model-winner",
+      importIdentityKey: "ioio-import:v1:abc",
+    });
+    const uniqueError = Object.assign(new Error("unique identity"), {
+      code: "P2002",
+    });
+    // why: this simulates PostgreSQL's organization-scoped unique-key race.
+    // @ts-expect-error mock setup
+    db.assetModel.create.mockRejectedValue(uniqueError);
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue(winner);
+
+    const result = await createAssetModel({
+      id: "model-loser",
+      importIdentityKey: "ioio-import:v1:abc",
+      name: "Arduino Nano",
+      userId: "user-123",
+      organizationId: "org-123",
+    });
+
+    expect(result.id).toBe("model-winner");
+    expect(db.assetModel.findFirst).toHaveBeenCalledWith({
+      where: {
+        organizationId: "org-123",
+        importIdentityKey: "ioio-import:v1:abc",
+      },
+    });
   });
 
   it("trims whitespace from the name", async () => {
