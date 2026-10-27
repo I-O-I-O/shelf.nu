@@ -70,7 +70,9 @@ function makeProposal(): ImportHelperResponse {
       {
         sourceRef: "page-1",
         productName: "Arduino Nano",
+        supplierProductNumber: null,
         quantity: 5,
+        quantityStatus: "SHIPPED",
         manufacturer: "Arduino",
         mpn: null,
         description: null,
@@ -147,6 +149,7 @@ async function sendToHandler({
   url = "/import",
   authorization = `Bearer ${AUTH_TOKEN}`,
   contentType = "application/json",
+  contentLength,
   config = {},
   handler: suppliedHandler,
 }: {
@@ -155,6 +158,7 @@ async function sendToHandler({
   url?: string;
   authorization?: string | null;
   contentType?: string;
+  contentLength?: string | null;
   config?: Partial<Parameters<typeof createImportHelperRequestHandler>[0]>;
   handler?: RequestListener;
 } = {}) {
@@ -166,7 +170,10 @@ async function sendToHandler({
     headers: {
       authorization: authorization === null ? undefined : authorization,
       "content-type": contentType,
-      "content-length": String(Buffer.byteLength(body)),
+      "content-length":
+        contentLength === null
+          ? undefined
+          : contentLength ?? String(Buffer.byteLength(body)),
     },
   });
   const response = new MockServerResponse();
@@ -287,6 +294,25 @@ describe("standalone import helper HTTP service", () => {
     expect(result.status).toBe(413);
     expect(inference).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["missing", null],
+    ["understated", "10"],
+  ])(
+    "enforces the body limit while streaming with %s Content-Length",
+    async (_case, contentLength) => {
+      // why: fake the external Claude adapter to prove oversized bodies never reach inference.
+      const inference = vi.fn(() => Promise.resolve(envelope()));
+      const result = await sendToHandler({
+        body: JSON.stringify(makeRequest()),
+        contentLength,
+        config: { maxRequestBytes: 100, inference },
+      });
+
+      expect(result.status).toBe(413);
+      expect(inference).not.toHaveBeenCalled();
+    }
+  );
 
   it("enforces POST, JSON content type, and the minimal health endpoint", async () => {
     expect((await sendToHandler({ method: "GET" })).status).toBe(405);
@@ -430,6 +456,17 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).not.toContain('"id":"XYZ"');
   });
 
+  it("instructs the helper to group procurement fragments into one product line", () => {
+    const prompt = buildClaudeImportPrompt(makeRequest());
+    expect(prompt).toContain(
+      "Return exactly one product candidate per commercial line item"
+    );
+    expect(prompt).toContain("Keep supplierProductNumber separate from mpn");
+    expect(prompt).toContain("Never interpret a price, line total");
+    expect(prompt).toContain("Otherwise categoryId must be null");
+    expect(prompt).toContain("Return no more than one question per row");
+  });
+
   it("passes the verified no-tools argv and prompt through stdin without shell interpolation", async () => {
     const { child, spawn } = fakeSpawn();
     let stdin = "";
@@ -451,12 +488,19 @@ describe("standalone import helper HTTP service", () => {
     expect(spawn).toHaveBeenCalledOnce();
     const [executable, args, options] = spawn.mock.calls[0]!;
     expect(executable).toBe("/home/master/.local/bin/claude");
-    expect(args[0]).toBe("-p");
-    expect(args).toContain("--tools");
-    expect(args[args.indexOf("--tools") + 1]).toBe("");
-    expect(args[args.indexOf("--permission-prompts") + 1]).toBe("none");
-    expect(args).toContain("--no-session-persistence");
-    expect(args[args.indexOf("--output-format") + 1]).toBe("json");
+    expect(args).toEqual([
+      "-p",
+      "--output-format",
+      "json",
+      "--json-schema",
+      JSON.stringify(IMPORT_HELPER_RESPONSE_JSON_SCHEMA),
+      "--tools",
+      "",
+      "--permission-prompts",
+      "none",
+      "--no-session-persistence",
+    ]);
+    expect(args).not.toContain(prompt);
     expect(JSON.parse(args[args.indexOf("--json-schema") + 1]!)).toEqual(
       IMPORT_HELPER_RESPONSE_JSON_SCHEMA
     );
@@ -470,6 +514,20 @@ describe("standalone import helper HTTP service", () => {
     expect(childEnv).not.toHaveProperty("DATABASE_URL");
     expect(childEnv).not.toHaveProperty("SUPABASE_SERVICE_ROLE_KEY");
     expect(childEnv).not.toHaveProperty("IOIO_IMPORT_HELPER_AUTH_TOKEN");
+  });
+
+  it("keeps Claude stderr out of HTTP error responses", async () => {
+    // why: a fake child lets this verify the external process boundary without installing or invoking Claude.
+    const privateDiagnostic = "private Claude stderr diagnostic";
+    const { spawn } = fakeSpawn({ exitCode: 7, stderr: privateDiagnostic });
+    const inference = createClaudeCliProcessRunner({
+      spawnImpl: spawn as never,
+    });
+    const result = await sendToHandler({ config: { inference } });
+
+    expect(result.status).toBe(502);
+    expect(JSON.stringify(result.body)).not.toContain(privateDiagnostic);
+    expect(JSON.stringify(result.body)).not.toContain("Arduino Nano");
   });
 
   it("bounds stdout and stderr, and controls nonzero exits", async () => {

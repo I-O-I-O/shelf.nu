@@ -46,6 +46,13 @@ const productCandidateSchema = z
   })
   .strict();
 
+const quantityStatusSchema = z.enum([
+  "RECEIVED",
+  "SHIPPED",
+  "ORDERED",
+  "UNKNOWN",
+]);
+
 const settingRuleSchema = z.discriminatedUnion("key", [
   z
     .object({
@@ -138,7 +145,9 @@ const candidateProposalRowSchema = z
   .object({
     sourceRef: identifierSchema,
     productName: z.string().trim().min(1).max(500),
-    quantity: z.number().int().positive().max(1_000_000),
+    supplierProductNumber: z.string().max(300).nullable(),
+    quantity: z.number().int().positive().max(1_000_000).nullable(),
+    quantityStatus: quantityStatusSchema,
     manufacturer: z.string().max(300).nullable(),
     mpn: z.string().max(300).nullable(),
     description: z.string().max(5_000).nullable(),
@@ -152,7 +161,7 @@ const candidateProposalRowSchema = z
     categorySuggestion: z
       .object({
         categoryId: identifierSchema.nullable(),
-        proposedName: z.string().trim().min(1).max(300).nullable(),
+        proposedName: z.null(),
         confidence: confidenceSchema,
       })
       .strict()
@@ -161,7 +170,7 @@ const candidateProposalRowSchema = z
       ),
     trackingSuggestion: z
       .object({
-        mode: z.enum(["INDIVIDUAL", "QUANTITY_TRACKED"]),
+        mode: z.enum(["INDIVIDUAL", "QUANTITY_TRACKED"]).nullable(),
         confidence: confidenceSchema,
       })
       .strict(),
@@ -192,8 +201,8 @@ const candidateProposalRowSchema = z
           })
           .strict()
       )
-      .max(20),
-    questions: z.array(z.string().trim().min(1).max(1_000)).max(30),
+      .max(1),
+    questions: z.array(z.string().trim().min(1).max(1_000)).max(1),
     evidence: z
       .array(
         z
@@ -203,9 +212,22 @@ const candidateProposalRowSchema = z
           })
           .strict()
       )
+      .min(1)
       .max(30),
   })
-  .strict();
+  .strict()
+  .superRefine((row, context) => {
+    if (
+      (row.quantityStatus === "RECEIVED" || row.quantityStatus === "SHIPPED") &&
+      row.quantity === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A supplied quantity is required for a received/shipped row.",
+        path: ["quantity"],
+      });
+    }
+  });
 
 export const importHelperResponseSchema = z
   .object({
@@ -256,6 +278,147 @@ export function createImportHelperRequest(
   return parsed.data;
 }
 
+function filterInvoiceNoiseRows(rows: ImportHelperResponse["rows"]) {
+  return rows.flatMap((row) => {
+    const cleanText = (value: string | null) => {
+      const cleaned =
+        value
+          ?.replace(
+            /\s*(?:[,;|–—-]\s*)?(?:TARIC|HTS(?:\s+code)?|ECCN|COO|Country of Origin)\s*[:#-]?\s*[A-Z0-9./-]+(?:\s+.*)?$/i,
+            ""
+          )
+          .trim() ?? null;
+      if (!cleaned || !row.manufacturer?.trim()) return cleaned;
+      const duplicatedPrefix = `${row.manufacturer.trim()} ${row.manufacturer.trim()} `;
+      return cleaned
+        .toLocaleLowerCase("en")
+        .startsWith(duplicatedPrefix.toLocaleLowerCase("en"))
+        ? `${row.manufacturer.trim()} ${cleaned.slice(duplicatedPrefix.length)}`
+        : cleaned;
+    };
+    const description = cleanText(row.description);
+    const originalTitle = cleanText(row.productName) ?? "";
+    const normalizedTitle = originalTitle
+      .replace(/[.:]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const titleKey = normalizedTitle.toLocaleLowerCase("en");
+    const nonProductLabels = new Set([
+      "continued",
+      "fortsätter",
+      "radnr",
+      "line no",
+      "line number",
+      "mousers artikelnummer",
+      "kundens/tillv. artikelnr",
+      "tillv. artikelnr",
+      "beskrivning",
+      "ordered",
+      "shipped",
+      "pending",
+      "price",
+      "total",
+      "subtotal",
+      "currency",
+      "currency code",
+      "eur",
+      "usd",
+      "sek",
+      "dkk",
+      "gbp",
+      "nok",
+      "pln",
+      "vat",
+      "tax",
+      "tax total",
+      "freight",
+      "shipping charge",
+      "invoice number",
+      "order number",
+      "account number",
+      "taric",
+      "tariff code",
+      "hts",
+      "hts code",
+      "eccn",
+      "coo",
+      "country of origin",
+    ]);
+    const numericOrPrice = /^[€$£]?\s*\d[\d\s.,/-]*\s*[€$£]?$/u.test(
+      normalizedTitle
+    );
+    const shortProductTitles = new Set([
+      "led",
+      "usb",
+      "pcb",
+      "smd",
+      "lcd",
+      "ic",
+      "imu",
+      "mcu",
+      "cpu",
+      "ram",
+      "ssd",
+      "nvme",
+      "can",
+      "dvi",
+      "fan",
+      "fuse",
+      "gpio",
+      "chip",
+      "cap",
+      "res",
+      "pot",
+      "relay",
+      "bnc",
+      "rj45",
+      "rfid",
+      "nfc",
+      "pir",
+      "ttl",
+      "spi",
+      "i2c",
+      "uart",
+      "adc",
+      "dac",
+      "pwm",
+      "rtc",
+      "npn",
+      "pnp",
+    ]);
+    const shortFragment =
+      normalizedTitle.length <= 4 && !shortProductTitles.has(titleKey);
+    const metadataLabel =
+      /^(?:\.?\s*)?(?:tillv\.?\s*)?(?:artikelnr|artikelnummer)\s*[:#-]?/i.test(
+        normalizedTitle
+      );
+    const codeOnly =
+      numericOrPrice ||
+      [row.supplierProductNumber, row.mpn]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.trim().toLocaleLowerCase("en") === titleKey);
+    const productName =
+      (codeOnly ||
+        shortFragment ||
+        nonProductLabels.has(titleKey) ||
+        metadataLabel) &&
+      description &&
+      description.length >= 5
+        ? description
+        : normalizedTitle;
+    if (
+      !productName ||
+      (numericOrPrice && !description) ||
+      (nonProductLabels.has(titleKey) && !description) ||
+      (metadataLabel && !description) ||
+      (shortFragment && !description)
+    ) {
+      return [];
+    }
+    return [{ ...row, productName, description }];
+  });
+}
+
 export function validateImportHelperResponse(
   response: unknown,
   requestInput: ImportHelperRequest | unknown
@@ -274,7 +437,11 @@ export function validateImportHelperResponse(
   }
 
   const request = requestResult.data;
-  const result = responseResult.data;
+  const parsedResult = responseResult.data;
+  const result = {
+    ...parsedResult,
+    rows: filterInvoiceNoiseRows(parsedResult.rows),
+  };
   const categoryIds = new Set(request.activeCategories.map(({ id }) => id));
   const locationIds = new Set(request.relevantLocations.map(({ id }) => id));
   const productIds = new Set(request.productCandidates.map(({ id }) => id));
@@ -294,7 +461,10 @@ export function validateImportHelperResponse(
     };
     if (!pagesBySourceRef.has(row.sourceRef))
       invalid("references an unknown source", ["sourceRef"]);
-    if (!request.allowedTrackingModes.includes(row.trackingSuggestion.mode)) {
+    if (
+      row.trackingSuggestion.mode &&
+      !request.allowedTrackingModes.includes(row.trackingSuggestion.mode)
+    ) {
       invalid("uses a tracking mode not allowed by Shelf", [
         "trackingSuggestion",
         "mode",
@@ -401,7 +571,7 @@ export function validateImportHelperResponse(
         ]);
       }
     }
-    if (row.trackingSuggestion.mode === "INDIVIDUAL") {
+    if (row.trackingSuggestion.mode === "INDIVIDUAL" && row.quantity !== null) {
       if (row.quantity > MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_ROW) {
         invalid("exceeds the individual-unit row limit", ["quantity"]);
       }

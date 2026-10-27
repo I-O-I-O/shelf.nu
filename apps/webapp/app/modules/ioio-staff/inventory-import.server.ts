@@ -491,6 +491,10 @@ const PRIVATE_HEADER =
   /borrower|borrowed by|email|e-mail|student|phone|contact|lending.?id|user.?id|auth|role/i;
 const IGNORED_HEADER =
   /price|value|vat|tax|invoice|subtotal|total|address|payment|currency|account|page/i;
+const PDF_SCANNED_MESSAGE =
+  "This PDF appears to be scanned. Scanned-PDF OCR is not supported yet.";
+const PDF_AI_ANALYSIS_REQUIRED_MESSAGE =
+  "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items.";
 
 function importError(message: string) {
   return new ShelfError({
@@ -718,9 +722,17 @@ function extractPdfPages(buffer: Buffer): ExtractedPdfPage[] {
   }
   const readablePages = pages.filter((page) => page.text.length > 0);
   if (!readablePages.length) {
-    throw importError(
-      "This PDF appears to be scanned. Scanned-PDF OCR is not supported yet."
-    );
+    // Keep text that was decoded from content streams even if this PDF's page
+    // objects do not expose their Contents references in the expected form.
+    // Lack of a structured inventory table is handled later and must not be
+    // confused with lack of a text layer.
+    const recoveredText = [...streamTextByObjectId.values()].join("\n").trim();
+    if (recoveredText) {
+      return [{ sourceRef: "pdf-page-1", page: 1, text: recoveredText }];
+    }
+  }
+  if (!readablePages.length) {
+    throw importError(PDF_SCANNED_MESSAGE);
   }
   return readablePages;
 }
@@ -811,7 +823,7 @@ function parsePdfRowsFromText(text: string) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const delimiter = ["|", "\t", ";", ","]
+  const delimiter = ["|", "\t"]
     .map((candidate) => ({
       candidate,
       count: lines.reduce(
@@ -821,9 +833,9 @@ function parsePdfRowsFromText(text: string) {
     }))
     .sort((left, right) => right.count - left.count)[0];
 
-  if (!delimiter || delimiter.count === 0) {
+  if (!delimiter || delimiter.count < 2) {
     throw importError(
-      "The PDF text was readable, but no structured inventory rows were found. Use a table with columns for Name, Quantity, Category, or Location."
+      "The PDF text was readable, but no clearly delimited inventory table was found."
     );
   }
 
@@ -831,39 +843,22 @@ function parsePdfRowsFromText(text: string) {
     line.split(delimiter.candidate).map((cell) => cell.trim())
   );
   const headerIndex = matrix.findIndex((cells) => isPdfHeaderRow(cells));
-  const sourceMatrix =
-    headerIndex >= 0
-      ? matrix.slice(headerIndex)
-      : matrix.filter((cells) => !isPdfNoiseRow(cells, null));
-  if (sourceMatrix.length === 0) {
+  if (headerIndex < 0 || matrix.length <= headerIndex + 1) {
     throw importError(
-      "The PDF was readable, but no recoverable inventory rows were found."
+      "The PDF text was readable, but no clearly delimited inventory table with a recognized header was found."
     );
   }
+  const sourceMatrix = matrix.slice(headerIndex);
   const firstRow = sourceMatrix[0];
-  const header =
-    headerIndex >= 0
-      ? firstRow.map((cell) => cell.trim().toLocaleLowerCase())
-      : null;
+  const header = firstRow.map((cell) => cell.trim().toLocaleLowerCase());
   const filteredMatrix = sourceMatrix.filter(
     (cells, index) => index === 0 || !isPdfNoiseRow(cells, header)
   );
-  const parsedRows = parseRows(
-    header
-      ? filteredMatrix
-      : [
-          ["Name", "Quantity", "Category", "Location"].slice(
-            0,
-            firstRow.length
-          ),
-          ...filteredMatrix,
-        ],
-    {
-      allowMissingTitle: true,
-      ignoreUnsupportedColumns: true,
-      tolerateInvalidValues: true,
-    }
-  );
+  const parsedRows = parseRows(filteredMatrix, {
+    allowMissingTitle: true,
+    ignoreUnsupportedColumns: true,
+    tolerateInvalidValues: true,
+  });
   const rows = parsedRows.map((row) => {
     const uncertainFields = [
       ...(row.uncertainFields ?? []),
@@ -901,6 +896,40 @@ function parsePdfRowsFromText(text: string) {
       ignoredRows,
     } satisfies StaffImportPdfSummary,
   };
+}
+
+function parsePdfTablePages(pdfPages: ExtractedPdfPage[]) {
+  const parsed = parsePdfRowsFromText(
+    pdfPages.map(({ text }) => text).join("\n")
+  );
+  const rows = parsed.rows.map((row) => {
+    const sourcePage =
+      pdfPages.find((page) =>
+        page.text
+          .split(/\r?\n/)
+          .some((line) =>
+            line.toLocaleLowerCase().includes(row.title.toLocaleLowerCase())
+          )
+      ) ?? pdfPages[0];
+    const sourceLine = sourcePage.text
+      .split(/\r?\n/)
+      .find((line) =>
+        line.toLocaleLowerCase().includes(row.title.toLocaleLowerCase())
+      );
+    return {
+      ...row,
+      sourceEvidence: sourceLine
+        ? [
+            {
+              sourceRef: sourcePage.sourceRef,
+              page: sourcePage.page,
+              text: sourceLine.trim(),
+            },
+          ]
+        : [],
+    };
+  });
+  return { ...parsed, rows };
 }
 
 async function parseXlsx(buffer: Buffer) {
@@ -1131,47 +1160,10 @@ async function parseStaffImportFileWithSummary({
   }
   if (extension === "pdf") {
     const pdfPages = extractPdfPages(buffer);
-    const text = pdfPages.map((page) => page.text).join("\n");
-    try {
-      const parsed = parsePdfRowsFromText(text);
-      const rows = parsed.rows.map((row) => {
-        const sourcePage =
-          pdfPages.find((page) =>
-            page.text
-              .split(/\r?\n/)
-              .some((line) =>
-                line.toLocaleLowerCase().includes(row.title.toLocaleLowerCase())
-              )
-          ) ?? pdfPages[0];
-        const sourceLine = sourcePage.text
-          .split(/\r?\n/)
-          .find((line) =>
-            line.toLocaleLowerCase().includes(row.title.toLocaleLowerCase())
-          );
-        return {
-          ...row,
-          sourceEvidence: sourceLine
-            ? [
-                {
-                  sourceRef: sourcePage.sourceRef,
-                  page: sourcePage.page,
-                  text: sourceLine.trim(),
-                },
-              ]
-            : [],
-        };
-      });
-      return { ...parsed, rows, pdfPages };
-    } catch (cause) {
-      return {
-        rows: [],
-        pdfPages,
-        pdfParseError:
-          cause instanceof Error
-            ? cause.message
-            : "The PDF text could not be parsed into inventory rows.",
-      };
-    }
+    // Keep PDFs as page-level evidence until the semantic helper has had the
+    // first chance to group commercial line items. A conservative table parser
+    // is used only as a post-helper fallback for explicit pipe/tab tables.
+    return { rows: [], pdfPages };
   }
   const matrix =
     extension === "csv"
@@ -1190,6 +1182,13 @@ export async function parseStaffImportFile(args: {
   buffer: Buffer;
 }) {
   const parsed = await parseStaffImportFileWithSummary(args);
+  if (parsed.pdfPages && parsed.rows.length === 0) {
+    try {
+      return parsePdfTablePages(parsed.pdfPages).rows;
+    } catch {
+      throw importError(PDF_AI_ANALYSIS_REQUIRED_MESSAGE);
+    }
+  }
   if (parsed.pdfParseError && parsed.rows.length === 0) {
     throw importError(parsed.pdfParseError);
   }
@@ -1449,9 +1448,16 @@ function classifyRow(
       row.receivedQuantity !== undefined ||
       row.quantityStatus
   );
-  const categorySuggestion = inferProcurementCategory(row);
-  const categoryName = row.category ?? categorySuggestion.category;
-  const categoryResolution = resolveImportCategory(categoryName, categories);
+  const inferredCategory = inferProcurementCategory(row);
+  const categorySuggestion =
+    (row.helperCandidate && !row.category) ||
+    inferredCategory.confidence === "Low"
+      ? undefined
+      : inferredCategory;
+  const categoryName = row.category ?? categorySuggestion?.category ?? null;
+  const categoryResolution = categoryName
+    ? resolveImportCategory(categoryName, categories)
+    : { status: "MISSING" as const };
   const category =
     categoryResolution.status === "ACTIVE_MATCH"
       ? categoryResolution.category
@@ -1474,9 +1480,13 @@ function classifyRow(
     currentQuantity: null,
     currentCategoryId: null,
     currentLocationId: null,
-    suggestedCategory: categorySuggestion.category,
-    categoryConfidence: categorySuggestion.confidence,
-    categoryReason: categorySuggestion.reason,
+    ...(categorySuggestion
+      ? {
+          suggestedCategory: categorySuggestion.category,
+          categoryConfidence: categorySuggestion.confidence,
+          categoryReason: categorySuggestion.reason,
+        }
+      : {}),
     categoryLabel: category?.name ?? null,
     categoryResolution:
       categoryResolution.status === "MISSING"
@@ -1522,7 +1532,9 @@ function classifyRow(
           ? `A matching category (“${categoryResolution.category.name}”) is archived. Choose an active category or review its archive status.`
           : categoryResolution.status === "AMBIGUOUS"
           ? "Multiple categories match this normalized name. Choose an active category by ID."
-          : `Proposed new category: ${categorySuggestion.category}. Staff approval and category:create permission are required.`
+          : categorySuggestion
+          ? `Proposed new category: ${categorySuggestion.category}. Staff approval and category:create permission are required.`
+          : "Choose an active Shelf category during review."
         : categoryResolution.status === "ARCHIVED_MATCH"
         ? `The matching category (“${categoryResolution.category.name}”) is archived.`
         : categoryResolution.status === "AMBIGUOUS"
@@ -1577,9 +1589,7 @@ function classifyRow(
         : null);
     if (
       !receivedQuantity ||
-      (isProcurementRow &&
-        (quantityStatus === "ORDERED" ||
-          categorySuggestion.confidence === "Low"))
+      (isProcurementRow && quantityStatus === "ORDERED")
     ) {
       return {
         ...base,
@@ -1587,8 +1597,6 @@ function classifyRow(
         reason: isProcurementRow
           ? quantityStatus === "ORDERED"
             ? "Ordered quantity is known, but received quantity is unknown."
-            : categorySuggestion.confidence === "Low"
-            ? categorySuggestion.reason
             : "A positive received quantity is required."
           : "Quantity-tracked new items need a positive quantity.",
       };
@@ -1818,7 +1826,7 @@ function mapHelperProposalToRows({
     const category = candidate.categorySuggestion.categoryId
       ? categoriesById.get(candidate.categorySuggestion.categoryId)?.name ??
         null
-      : candidate.categorySuggestion.proposedName;
+      : null;
     const selectedLocation = candidate.locationSuggestions[0]
       ? locationsById.get(candidate.locationSuggestions[0].locationId)
       : undefined;
@@ -1841,17 +1849,30 @@ function mapHelperProposalToRows({
       category,
       location: selectedLocation?.pathLabel ?? null,
       type: candidate.trackingSuggestion.mode,
+      supplierPartNumber: candidate.supplierProductNumber,
       sourceDescription: candidate.description,
       manufacturer: candidate.manufacturer,
       manufacturerPartNumber: candidate.mpn,
-      receivedQuantity: null,
-      quantityStatus: "UNKNOWN",
+      receivedQuantity:
+        candidate.quantityStatus === "RECEIVED" ||
+        candidate.quantityStatus === "SHIPPED"
+          ? candidate.quantity
+          : null,
+      quantityStatus: candidate.quantityStatus,
       reviewRequired: true,
       pdfClassification: "PARTIAL",
       // Every helper candidate must receive an explicit staff review, even if
       // the helper reports high confidence. This marker is removed only when
       // an authenticated staff decision is reapplied for Apply.
-      uncertainFields: ["Helper proposal"],
+      uncertainFields: [
+        "Helper proposal",
+        ...(candidate.quantity === null ||
+        candidate.quantityStatus === "ORDERED" ||
+        candidate.quantityStatus === "UNKNOWN"
+          ? ["Quantity"]
+          : []),
+        ...(candidate.trackingSuggestion.mode ? [] : ["Tracking mode"]),
+      ],
       helperCandidate: candidate,
       sourceEvidence,
     };
@@ -1984,14 +2005,24 @@ export async function prepareStaffInventoryImport({
       rows = mapped.rows;
       pdfSummary = mapped.pdfSummary;
       extractionProvider = "import-helper:v1";
-    } else if (rows.length === 0) {
-      const fallbackMessage =
-        helperResult.status === "ready"
-          ? "The helper returned no inventory candidates, and no deterministic inventory rows were found. Upload a structured CSV or XLSX instead."
-          : helperResult.reason === "invalid-response"
-          ? "The helper response could not be validated, and no deterministic inventory rows were found. Upload a structured CSV or XLSX instead."
-          : "The helper is unavailable and no deterministic inventory rows were found. Upload a structured CSV or XLSX instead.";
-      throw importError(parsed.pdfParseError ?? fallbackMessage);
+    } else if (helperResult.status === "ready") {
+      throw importError(
+        "The helper found no commercial product line items in this PDF."
+      );
+    } else {
+      try {
+        const fallback = parsePdfTablePages(parsed.pdfPages);
+        rows = fallback.rows;
+        pdfSummary = fallback.pdfSummary;
+      } catch {
+        const fallbackMessage =
+          helperResult.reason === "not-configured"
+            ? PDF_AI_ANALYSIS_REQUIRED_MESSAGE
+            : helperResult.reason === "invalid-response"
+            ? "The helper response could not be validated, and no clearly delimited inventory table was found. Upload a structured CSV or XLSX instead."
+            : "The helper is unavailable and no clearly delimited inventory table was found. Upload a structured CSV or XLSX instead.";
+        throw importError(fallbackMessage);
+      }
     }
   }
   const classifiedRows = classifyStaffImportRows({

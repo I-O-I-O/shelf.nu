@@ -111,6 +111,79 @@ import {
   summarizeStaffImportRows,
   type StaffImportResult,
 } from "./inventory-import.server";
+import {
+  MOUSER_FRAGMENTED_EXPECTED_ROWS,
+  MOUSER_FRAGMENTED_PAGE_TEXT,
+} from "../../../test/fixtures/mouser-invoice-fragments";
+
+function makeMouserPdf() {
+  const content = MOUSER_FRAGMENTED_PAGE_TEXT.split("\n")
+    .map((line) => `(${line.replace(/[\\()]/g, "\\$&")}) Tj`)
+    .join("\n");
+  return Buffer.from(
+    `%PDF-1.4\n1 0 obj\n<< /Type /Page /Contents 3 0 R >>\nendobj\n3 0 obj\n<< /Length 1 >>\nstream\n${content}\nendstream\nendobj\n%%EOF`,
+    "utf8"
+  );
+}
+
+function makeMouserHelperResponse() {
+  return {
+    schemaVersion: 1,
+    rows: MOUSER_FRAGMENTED_EXPECTED_ROWS.map((item) => ({
+      sourceRef: "pdf-page-1",
+      productName:
+        item.supplierProductNumber === "713-114993388"
+          ? "713-114993388"
+          : item.productName,
+      supplierProductNumber: item.supplierProductNumber,
+      quantity: item.quantity,
+      quantityStatus: "SHIPPED" as const,
+      manufacturer: item.manufacturer,
+      mpn: item.mpn,
+      description:
+        item.supplierProductNumber === "713-114993388"
+          ? "Seeed Studio Seeed Studio 60GHz mmWave Sensor"
+          : item.productName,
+      productMatch: {
+        matchType: "NEW" as const,
+        candidateId: null,
+        confidence: 0.92,
+      },
+      categorySuggestion: {
+        categoryId:
+          item.supplierProductNumber === "713-114993388"
+            ? "cat-electronics"
+            : null,
+        proposedName: null,
+        confidence: 0.85,
+      },
+      trackingSuggestion: {
+        mode: "QUANTITY_TRACKED" as const,
+        confidence: 0.7,
+      },
+      kitHint: { isKit: false, name: null, confidence: 0.99 },
+      settingsSuggestions: [],
+      locationSuggestions: [],
+      questions: [],
+      evidence: [
+        {
+          sourceRef: "pdf-page-1",
+          text: [
+            item.supplierProductNumber,
+            `Tillv. Artikelnr: ${item.mpn}`,
+            item.supplierProductNumber === "713-114993388"
+              ? "Seeed Studio Seeed Studio 60GHz mmWave Sensor"
+              : item.productName,
+            String(item.quantity),
+            String(item.quantity),
+            "0",
+          ].join("\n"),
+        },
+      ],
+    })),
+    questions: [],
+  } as const;
+}
 
 beforeEach(() => {
   database.category.findMany.mockResolvedValue([]);
@@ -1207,15 +1280,35 @@ describe("staff inventory import safety", () => {
     });
   });
 
-  it("keeps a clear fatal error for an unreadable PDF", async () => {
+  it("shows the scanned-PDF message only when the PDF has no extracted text", async () => {
     await expect(
       parseStaffImportFile({
         filename: "inventory.pdf",
         contentType: "application/pdf",
-        buffer: Buffer.from("%PDF-1.4\nnot readable inventory text", "latin1"),
+        buffer: Buffer.from(
+          "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n%%EOF",
+          "latin1"
+        ),
       })
     ).rejects.toThrow(
       "This PDF appears to be scanned. Scanned-PDF OCR is not supported yet."
+    );
+  });
+
+  it("does not report scanned when decoded text cannot be linked to a page object", async () => {
+    const pdf = Buffer.from(
+      "%PDF-1.4\n1 0 obj\n<< /Type /Page /Contents 99 0 R >>\nendobj\n3 0 obj\nstream\n(Seeed Studio mmWave Sensor) Tj\nendstream\nendobj\n%%EOF",
+      "latin1"
+    );
+
+    await expect(
+      parseStaffImportFile({
+        filename: "mouser-invoice.pdf",
+        contentType: "application/pdf",
+        buffer: pdf,
+      })
+    ).rejects.toThrow(
+      "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items."
     );
   });
 
@@ -1231,45 +1324,49 @@ describe("staff inventory import safety", () => {
     expect(mockRequestImportHelperProposal).not.toHaveBeenCalled();
   });
 
-  it("calls the validated helper with page evidence and stores proposal-only candidates", async () => {
-    const firstPageText = "Supplier inventory";
-    const sourceText = "Order line: Arduino Nano quantity 3";
-    const pdf = Buffer.from(
-      `%PDF-1.4\n1 0 obj\n<< /Type /Page /Contents 3 0 R >>\nendobj\n2 0 obj\n<< /Type /Page /Contents 4 0 R >>\nendobj\n3 0 obj\n<< /Length 1 >>\nstream\n(${firstPageText}) Tj\nendstream\nendobj\n4 0 obj\n<< /Length 1 >>\nstream\n(${sourceText}) Tj\nendstream\nendobj\n%%EOF`,
-      "latin1"
+  it("requires AI analysis for readable Mouser text when the helper is not configured", async () => {
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    database.asset.findMany.mockResolvedValue([]);
+    database.assetModel.findMany.mockResolvedValue([]);
+    database.category.findMany.mockResolvedValue([]);
+    database.location.findMany.mockResolvedValue([]);
+    mockGetCategories.mockResolvedValue([]);
+    mockGetBrokenSection.mockResolvedValue(null);
+    mockGetReturnArea.mockResolvedValue(null);
+    mockGetArchivedCategoryIds.mockResolvedValue([]);
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "manual",
+      reason: "not-configured",
+    });
+
+    await expect(
+      prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File([makeMouserPdf()], "mouser-invoice.pdf", {
+          type: "application/pdf",
+        }),
+      })
+    ).rejects.toThrow(
+      "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items."
     );
-    const helperResponse = {
-      schemaVersion: 1,
-      rows: [
-        {
-          sourceRef: "pdf-page-2",
-          productName: "Arduino Nano",
-          quantity: 3,
-          manufacturer: "Arduino",
-          mpn: "ABX00028",
-          description: "Arduino Nano board",
-          productMatch: {
-            matchType: "NEW",
-            candidateId: null,
-            confidence: 0.88,
-          },
-          categorySuggestion: {
-            categoryId: "cat-electronics",
-            proposedName: null,
-            confidence: 0.96,
-          },
-          trackingSuggestion: { mode: "INDIVIDUAL", confidence: 0.9 },
-          kitHint: { isKit: false, name: null, confidence: 0.99 },
-          settingsSuggestions: [],
-          locationSuggestions: [{ locationId: "loc-shelf", confidence: 0.8 }],
-          questions: [],
-          evidence: [
-            { sourceRef: "pdf-page-2", text: "Arduino Nano quantity 3" },
-          ],
-        },
-      ],
-      questions: [],
-    } as const;
+
+    expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
+    const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
+    expect(helperRequest.document.pages[0]?.text).toBe(
+      MOUSER_FRAGMENTED_PAGE_TEXT
+    );
+    expect(database.ioioImportItem.createMany).not.toHaveBeenCalled();
+    expect(database.ioioWriteOperation.create).not.toHaveBeenCalled();
+  });
+
+  it("sends fragmented Mouser invoice pages to the helper and stores two grouped product candidates", async () => {
+    const pdf = makeMouserPdf();
+    const helperResponse = makeMouserHelperResponse();
 
     vi.clearAllMocks();
     mockStaffAccess.mockResolvedValue({
@@ -1321,19 +1418,16 @@ describe("staff inventory import safety", () => {
 
     expect(prepared.status).toBe("PREPARED");
     if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
     expect(helperRequest.document.pages).toEqual([
       {
         sourceRef: "pdf-page-1",
         page: 1,
-        text: firstPageText,
-      },
-      {
-        sourceRef: "pdf-page-2",
-        page: 2,
-        text: sourceText,
+        text: MOUSER_FRAGMENTED_PAGE_TEXT,
       },
     ]);
+    expect(helperRequest.document.pages[0]?.text.split("\n")).toHaveLength(36);
     expect(helperRequest.document.sha256).toBe(
       createHash("sha256").update(pdf).digest("hex")
     );
@@ -1367,23 +1461,55 @@ describe("staff inventory import safety", () => {
     expect(prepared.proposal.source.extractionProvider).toBe(
       "import-helper:v1"
     );
-    expect(prepared.proposal.rows[0]).toMatchObject({
-      title: "Arduino Nano",
-      quantity: 3,
-      receivedQuantity: null,
-      type: "INDIVIDUAL",
+    expect(prepared.proposal.rows).toHaveLength(2);
+    expect(
+      prepared.proposal.rows.map((row) => ({
+        supplierProductNumber: row.supplierPartNumber,
+        mpn: row.manufacturerPartNumber,
+        title: row.title,
+        quantity: row.quantity,
+        receivedQuantity: row.receivedQuantity,
+        categoryId: row.categoryId,
+        sourcePage: row.sourceEvidence?.[0]?.page,
+      }))
+    ).toEqual([
+      {
+        supplierProductNumber: "713-114993388",
+        mpn: "114993388",
+        title: "Seeed Studio 60GHz mmWave Sensor",
+        quantity: 1,
+        receivedQuantity: 1,
+        categoryId: "cat-electronics",
+        sourcePage: 1,
+      },
+      {
+        supplierProductNumber: "713-101010001",
+        mpn: "101010001",
+        title:
+          "Seeed Studio 24GHz mmWave Sensor / Avståndssensormoduler – öppen ram",
+        quantity: 4,
+        receivedQuantity: 4,
+        categoryId: null,
+        sourcePage: 1,
+      },
+    ]);
+    expect(prepared.proposal.rows[1]).toMatchObject({
+      proposedCategoryName: null,
+      categoryId: null,
       action: "NEEDS_REVIEW",
-      categoryId: "cat-electronics",
-      locationId: "loc-shelf",
-      sourceEvidence: [
-        {
-          sourceRef: "pdf-page-2",
-          page: 2,
-          text: "Arduino Nano quantity 3",
-        },
-      ],
-      helperCandidate: helperResponse.rows[0],
     });
+    expect(prepared.proposal.rows[1]?.suggestedCategory).toBeUndefined();
+    expect(
+      prepared.proposal.rows.flatMap(
+        (row) => row.helperCandidate?.questions ?? []
+      )
+    ).toHaveLength(0);
+    expect(
+      prepared.proposal.rows.map((row) => row.supplierPartNumber)
+    ).not.toContain("260,76");
+    expect(
+      prepared.proposal.rows[0]?.helperCandidate?.supplierProductNumber
+    ).toBe("713-114993388");
     expect(mockCreateAsset).not.toHaveBeenCalled();
     expect(mockUpdateAsset).not.toHaveBeenCalled();
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
@@ -1392,6 +1518,7 @@ describe("staff inventory import safety", () => {
   it.each([
     { reason: "invalid-response" as const, label: "invalid helper output" },
     { reason: "unavailable" as const, label: "unavailable helper" },
+    { reason: "not-configured" as const, label: "unconfigured helper" },
   ])(
     "uses deterministic rows when the $label cannot return a proposal",
     async ({ reason }) => {
@@ -1431,6 +1558,7 @@ describe("staff inventory import safety", () => {
       expect(prepared.status).toBe("PREPARED");
       if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
       expect(prepared.proposal.source.extractionProvider).toBe("deterministic");
+      expect(prepared.proposal.rows).toHaveLength(1);
       expect(prepared.proposal.rows[0]).toMatchObject({
         title: "Arduino Nano",
         quantity: 4,

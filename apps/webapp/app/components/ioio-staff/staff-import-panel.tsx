@@ -371,7 +371,9 @@ function StaffImportProposalView({
           locationId: row.locationId,
           quantity:
             row.receivedQuantity ??
-            (row.quantityStatus === "RECEIVED" ? row.quantity : null),
+            (["RECEIVED", "SHIPPED"].includes(row.quantityStatus ?? "")
+              ? row.quantity
+              : null),
           type: row.type,
           productChoice:
             row.action === "POSSIBLE_DUPLICATE" || row.action === "AMBIGUOUS"
@@ -775,6 +777,19 @@ function StaffImportProposalView({
                         Source: {row.sourceDescription}
                       </p>
                     ) : null}
+                    {row.supplierPartNumber || row.manufacturerPartNumber ? (
+                      <p className="mt-1 text-xs font-normal text-gray-500">
+                        {row.supplierPartNumber
+                          ? `Supplier product number: ${row.supplierPartNumber}`
+                          : null}
+                        {row.supplierPartNumber && row.manufacturerPartNumber
+                          ? " · "
+                          : null}
+                        {row.manufacturerPartNumber
+                          ? `MPN: ${row.manufacturerPartNumber}`
+                          : null}
+                      </p>
+                    ) : null}
                     {row.helperCandidate ? (
                       <div className="mt-2 space-y-1 rounded-lg bg-blue-50 p-2 text-xs font-normal text-blue-950">
                         <p>
@@ -785,13 +800,12 @@ function StaffImportProposalView({
                             row.helperCandidate.productMatch.confidence * 100
                           )}
                           % confidence),{" "}
-                          {row.helperCandidate.trackingSuggestion.mode.toLocaleLowerCase()}{" "}
-                          tracking (
-                          {Math.round(
-                            row.helperCandidate.trackingSuggestion.confidence *
-                              100
-                          )}
-                          % confidence).
+                          {row.helperCandidate.trackingSuggestion.mode
+                            ? `${row.helperCandidate.trackingSuggestion.mode.toLocaleLowerCase()} tracking (${Math.round(
+                                row.helperCandidate.trackingSuggestion
+                                  .confidence * 100
+                              )}% confidence).`
+                            : "tracking left for staff review."}
                         </p>
                         {row.helperCandidate.questions.length ? (
                           <ul className="list-disc pl-4">

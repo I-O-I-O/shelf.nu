@@ -13,7 +13,7 @@ function makeRequest(): ImportHelperRequest {
         {
           sourceRef: "page-1",
           page: 1,
-          text: "Invoice line: Arduino Nano, quantity 5, by Arduino, MPN ABX00071.",
+          text: "Invoice line: Arduino Nano, quantity 5, by Arduino, MPN ABX00071.\n713-101010001\nSeeed Studio Seeed Studio 24GHz mmWave Sensor – TARIC: 123456\nT\nillv\n. Artikelnr: 1\n260,76\nContinued\nRadnr\nLine No.\nBeskrivning",
         },
       ],
     },
@@ -54,7 +54,9 @@ function makeResponse() {
       {
         sourceRef: "page-1",
         productName: "Arduino Nano",
+        supplierProductNumber: null,
         quantity: 5,
+        quantityStatus: "SHIPPED",
         manufacturer: "Arduino",
         mpn: "ABX00071",
         description: null,
@@ -146,6 +148,55 @@ describe("import helper contract", () => {
         makeRequest()
       )
     ).toThrow("malformed or unsupported response");
+  });
+
+  it("filters invoice headers, prices, and fragments while cleaning code-only titles", () => {
+    const base = makeResponse().rows[0]!;
+    const noisyNames = [
+      "T",
+      "illv",
+      ". Artikelnr: 1",
+      "260,76",
+      "Continued",
+      "Radnr",
+      "Line No.",
+      "Beskrivning",
+    ];
+    const response = {
+      schemaVersion: 1,
+      rows: [
+        {
+          ...base,
+          productName: "713-101010001",
+          supplierProductNumber: "713-101010001",
+          manufacturer: "Seeed Studio",
+          mpn: "101010001",
+          description:
+            "Seeed Studio Seeed Studio 24GHz mmWave Sensor – TARIC: 123456",
+          evidence: [{ sourceRef: "page-1", text: "713-101010001" }],
+        },
+        ...noisyNames.map((productName) => ({
+          ...base,
+          productName,
+          description: null,
+          evidence: [{ sourceRef: "page-1", text: productName }],
+        })),
+      ],
+      questions: [],
+    };
+
+    const validated = parseAndValidateImportHelperResponse(
+      JSON.stringify(response),
+      makeRequest()
+    );
+
+    expect(validated.rows).toHaveLength(1);
+    expect(validated.rows[0]).toMatchObject({
+      productName: "Seeed Studio 24GHz mmWave Sensor",
+      description: "Seeed Studio 24GHz mmWave Sensor",
+      supplierProductNumber: "713-101010001",
+      mpn: "101010001",
+    });
   });
 
   it("rejects unsupported settings and unverifiable evidence", () => {
