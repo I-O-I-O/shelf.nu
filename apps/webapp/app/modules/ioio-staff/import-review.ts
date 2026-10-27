@@ -32,6 +32,8 @@ export type ImportReviewRow = {
   helperCandidate?: unknown;
   categoryResolution?: string;
   locationResolution?: string;
+  categoryOptional?: boolean;
+  mouserLineItem?: boolean;
   reviewConflictReason?: string | null;
   uncertainFields?: string[];
 };
@@ -88,14 +90,19 @@ export function resolveImportReviewState({
       return "NEEDS_REVIEW";
     }
     if (!categoryPermission) return "NEEDS_REVIEW";
-  } else if (!decision.categoryId) {
+  } else if (
+    !decision.categoryId &&
+    !row.categoryOptional &&
+    !row.mouserLineItem
+  ) {
     return "NEEDS_REVIEW";
   }
   const requiresTracking =
-    row.action === "CREATE" ||
-    Boolean(row.helperCandidate) ||
-    (!row.assetId &&
-      (row.action === "NEEDS_REVIEW" || decision.productChoice === "NEW"));
+    !row.mouserLineItem &&
+    (row.action === "CREATE" ||
+      Boolean(row.helperCandidate) ||
+      (!row.assetId &&
+        (row.action === "NEEDS_REVIEW" || decision.productChoice === "NEW")));
   if (requiresTracking && !decision.type) return "NEEDS_REVIEW";
   if (
     requiresTracking &&
@@ -128,6 +135,7 @@ export function resolveImportReviewState({
     ...(decision.title?.trim() ? ["Item name"] : []),
     ...(decision.productChoice ? ["Product match"] : []),
     ...(decision.categoryId || decision.approveNewCategory ? ["Category"] : []),
+    ...(row.categoryOptional || row.mouserLineItem ? ["Category"] : []),
     ...(decision.locationId !== undefined ? ["Location"] : []),
     ...(decision.quantity !== null ? ["Quantity", "Received quantity"] : []),
     ...(decision.type ? ["Tracking type", "Tracking mode"] : []),

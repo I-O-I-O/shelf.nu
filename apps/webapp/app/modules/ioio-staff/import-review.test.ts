@@ -47,6 +47,22 @@ describe("staff import review readiness", () => {
     );
   });
 
+  it("allows a grouped Mouser row to remain uncategorized when no category was suggested", () => {
+    const mouserRow: ImportReviewRow = {
+      ...readyRow,
+      categoryId: null,
+      mouserLineItem: true,
+      type: null,
+    };
+    expect(
+      evaluate(mouserRow, {
+        ...approved,
+        categoryId: null,
+        type: null,
+      })
+    ).toBe("READY");
+  });
+
   it.each([
     ["unapproved category", { ...approved, categoryId: null }],
     ["missing tracking", { ...approved, type: null }],

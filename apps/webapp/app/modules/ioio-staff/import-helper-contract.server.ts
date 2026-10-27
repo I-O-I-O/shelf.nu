@@ -5,8 +5,10 @@ const identifierSchema = z.string().trim().min(1).max(200);
 const confidenceSchema = z.number().finite().min(0).max(1);
 
 export const IMPORT_HELPER_SCHEMA_VERSION = 1 as const;
+export const MOUSER_ENRICHMENT_SCHEMA_VERSION = 2 as const;
 export const MAX_IMPORT_HELPER_CANDIDATES = 50;
-export const MAX_IMPORT_HELPER_ROWS = 500;
+export const MAX_IMPORT_HELPER_ROWS = 100;
+export const MOUSER_ENRICHMENT_BATCH_SIZE = 50;
 export const MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_ROW = 100;
 export const MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_IMPORT = 500;
 
@@ -78,7 +80,7 @@ const settingRuleSchema = z.discriminatedUnion("key", [
     .strict(),
 ]);
 
-export const importHelperRequestSchema = z
+const genericImportHelperRequestSchema = z
   .object({
     schemaVersion: z.literal(IMPORT_HELPER_SCHEMA_VERSION),
     document: z
@@ -140,6 +142,53 @@ export const importHelperRequestSchema = z
       }
     });
   });
+
+const mouserLineItemSchema = z
+  .object({
+    sourceRef: identifierSchema,
+    sourcePage: z.number().int().positive(),
+    supplierProductNumber: z.string().trim().min(1).max(300),
+    mpn: z.string().trim().min(1).max(300).nullable(),
+    rawDescription: z.string().trim().min(3).max(5_000),
+    quantity: z.number().int().positive().max(1_000_000),
+  })
+  .strict();
+
+const mouserEnrichmentRequestSchema = z
+  .object({
+    mode: z.literal("MOUSER_LINE_ITEM_ENRICHMENT"),
+    schemaVersion: z.literal(MOUSER_ENRICHMENT_SCHEMA_VERSION),
+    document: z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    lineItems: z
+      .array(mouserLineItemSchema)
+      .min(1)
+      .max(MOUSER_ENRICHMENT_BATCH_SIZE),
+    activeCategories: z.array(categoryAllowlistEntrySchema).max(500),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const refs = request.lineItems.map(({ sourceRef }) => sourceRef);
+    if (new Set(refs).size !== refs.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Duplicate line item sourceRef",
+        path: ["lineItems"],
+      });
+    }
+    const categoryIds = request.activeCategories.map(({ id }) => id);
+    if (new Set(categoryIds).size !== categoryIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Duplicate category ID",
+        path: ["activeCategories"],
+      });
+    }
+  });
+
+export const importHelperRequestSchema = z.union([
+  genericImportHelperRequestSchema,
+  mouserEnrichmentRequestSchema,
+]);
 
 const candidateProposalRowSchema = z
   .object({
@@ -237,9 +286,45 @@ export const importHelperResponseSchema = z
   })
   .strict();
 
-export type ImportHelperRequest = z.infer<typeof importHelperRequestSchema>;
+const mouserEnrichmentRowSchema = z
+  .object({
+    sourceRef: identifierSchema,
+    supplierProductNumber: z.string().trim().min(1).max(300),
+    mpn: z.string().trim().min(1).max(300).nullable(),
+    productName: z.string().trim().min(1).max(500),
+    manufacturer: z.string().trim().min(1).max(300).nullable(),
+    description: z.string().trim().min(1).max(5_000).nullable(),
+    quantity: z.number().int().positive().max(1_000_000),
+    categoryId: identifierSchema.nullable(),
+    confidence: confidenceSchema,
+  })
+  .strict();
+
+export const mouserEnrichmentResponseSchema = z
+  .object({
+    mode: z.literal("MOUSER_LINE_ITEM_ENRICHMENT"),
+    schemaVersion: z.literal(MOUSER_ENRICHMENT_SCHEMA_VERSION),
+    rows: z.array(mouserEnrichmentRowSchema).max(MOUSER_ENRICHMENT_BATCH_SIZE),
+  })
+  .strict();
+
+export type ImportHelperRequest = z.infer<
+  typeof genericImportHelperRequestSchema
+>;
+export type MouserLineItemInput = z.infer<typeof mouserLineItemSchema>;
+export type MouserEnrichmentRequest = z.infer<
+  typeof mouserEnrichmentRequestSchema
+>;
+export type AnyImportHelperRequest = z.infer<typeof importHelperRequestSchema>;
 export type ImportHelperResponse = z.infer<typeof importHelperResponseSchema>;
+export type MouserEnrichmentResponse = z.infer<
+  typeof mouserEnrichmentResponseSchema
+>;
+export type AnyImportHelperResponse =
+  | ImportHelperResponse
+  | MouserEnrichmentResponse;
 export type ImportHelperCandidateRow = ImportHelperResponse["rows"][number];
+export type MouserEnrichmentRow = MouserEnrichmentResponse["rows"][number];
 
 export class ImportHelperValidationError extends Error {
   constructor(message: string) {
@@ -265,7 +350,7 @@ export function createImportHelperRequest(
           .join("\0")
       )
       .digest("hex");
-  const parsed = importHelperRequestSchema.safeParse({
+  const parsed = genericImportHelperRequestSchema.safeParse({
     ...request,
     schemaVersion: IMPORT_HELPER_SCHEMA_VERSION,
     document: { ...request.document, sha256 },
@@ -273,6 +358,30 @@ export function createImportHelperRequest(
   if (!parsed.success) {
     throw new ImportHelperValidationError(
       "Shelf generated an invalid import helper request."
+    );
+  }
+  return parsed.data;
+}
+
+export function createMouserEnrichmentRequest({
+  fileSha256,
+  lineItems,
+  activeCategories,
+}: {
+  fileSha256: string;
+  lineItems: MouserLineItemInput[];
+  activeCategories: MouserEnrichmentRequest["activeCategories"];
+}): MouserEnrichmentRequest {
+  const parsed = mouserEnrichmentRequestSchema.safeParse({
+    mode: "MOUSER_LINE_ITEM_ENRICHMENT",
+    schemaVersion: MOUSER_ENRICHMENT_SCHEMA_VERSION,
+    document: { sha256: fileSha256 },
+    lineItems,
+    activeCategories,
+  });
+  if (!parsed.success) {
+    throw new ImportHelperValidationError(
+      "Shelf generated an invalid Mouser enrichment request."
     );
   }
   return parsed.data;
@@ -421,14 +530,59 @@ function filterInvoiceNoiseRows(rows: ImportHelperResponse["rows"]) {
 
 export function validateImportHelperResponse(
   response: unknown,
-  requestInput: ImportHelperRequest | unknown
-): ImportHelperResponse {
+  requestInput: AnyImportHelperRequest | unknown
+): AnyImportHelperResponse {
   const requestResult = importHelperRequestSchema.safeParse(requestInput);
   if (!requestResult.success) {
     throw new ImportHelperValidationError(
       "The Shelf helper request is invalid."
     );
   }
+  const request = requestResult.data;
+  if ("mode" in request) {
+    const responseResult = mouserEnrichmentResponseSchema.safeParse(response);
+    if (!responseResult.success) {
+      throw new ImportHelperValidationError(
+        "The helper returned a malformed Mouser enrichment response."
+      );
+    }
+    const parsedResult = responseResult.data;
+    const inputBySourceRef = new Map(
+      request.lineItems.map((lineItem) => [lineItem.sourceRef, lineItem])
+    );
+    const categoryIds = new Set(request.activeCategories.map(({ id }) => id));
+    if (parsedResult.rows.length !== request.lineItems.length) {
+      throw new ImportHelperValidationError(
+        "The helper must return exactly one enriched row for each grouped Mouser line item."
+      );
+    }
+    const seenSourceRefs = new Set<string>();
+    parsedResult.rows.forEach((row, rowIndex) => {
+      const input = inputBySourceRef.get(row.sourceRef);
+      if (!input || seenSourceRefs.has(row.sourceRef)) {
+        throw new ImportHelperValidationError(
+          `Helper response references an unknown or duplicate Mouser line at rows.${rowIndex}.sourceRef.`
+        );
+      }
+      seenSourceRefs.add(row.sourceRef);
+      if (
+        row.supplierProductNumber !== input.supplierProductNumber ||
+        row.mpn !== input.mpn ||
+        row.quantity !== input.quantity
+      ) {
+        throw new ImportHelperValidationError(
+          `Helper response changed a deterministic Mouser identifier or quantity at rows.${rowIndex}.`
+        );
+      }
+      if (row.categoryId && !categoryIds.has(row.categoryId)) {
+        throw new ImportHelperValidationError(
+          `Helper response references a category outside Shelf's allowlist at rows.${rowIndex}.categoryId.`
+        );
+      }
+    });
+    return parsedResult;
+  }
+
   const responseResult = importHelperResponseSchema.safeParse(response);
   if (!responseResult.success) {
     throw new ImportHelperValidationError(
@@ -436,7 +590,6 @@ export function validateImportHelperResponse(
     );
   }
 
-  const request = requestResult.data;
   const parsedResult = responseResult.data;
   const result = {
     ...parsedResult,
@@ -590,8 +743,8 @@ export function validateImportHelperResponse(
 
 export function parseAndValidateImportHelperResponse(
   responseText: string,
-  request: ImportHelperRequest
-): ImportHelperResponse {
+  request: AnyImportHelperRequest
+): AnyImportHelperResponse {
   let response: unknown;
   try {
     response = JSON.parse(responseText);

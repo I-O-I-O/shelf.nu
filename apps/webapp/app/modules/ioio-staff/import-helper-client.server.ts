@@ -2,8 +2,8 @@ import {
   ImportHelperValidationError,
   importHelperRequestSchema,
   parseAndValidateImportHelperResponse,
-  type ImportHelperRequest,
-  type ImportHelperResponse,
+  type AnyImportHelperRequest,
+  type AnyImportHelperResponse,
 } from "./import-helper-contract.server";
 
 export const DEFAULT_IMPORT_HELPER_TIMEOUT_MS = 20_000;
@@ -16,7 +16,7 @@ export type ImportHelperManualReason =
   | "invalid-response";
 
 export type ImportHelperClientResult =
-  | { status: "ready"; proposal: ImportHelperResponse }
+  | { status: "ready"; proposal: AnyImportHelperResponse }
   | { status: "manual"; reason: ImportHelperManualReason };
 
 export type ImportHelperClientConfig = {
@@ -60,7 +60,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 export async function requestImportHelperProposal(
-  requestInput: ImportHelperRequest | unknown,
+  requestInput: AnyImportHelperRequest | unknown,
   config: ImportHelperClientConfig = getRuntimeConfig()
 ): Promise<ImportHelperClientResult> {
   const parsedRequest = importHelperRequestSchema.safeParse(requestInput);

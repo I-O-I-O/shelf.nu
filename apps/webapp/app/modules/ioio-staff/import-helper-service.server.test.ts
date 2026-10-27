@@ -7,6 +7,7 @@ import type {
 import { PassThrough, Readable } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createMouserEnrichmentRequest,
   createImportHelperRequest,
   validateImportHelperResponse,
   type ImportHelperRequest,
@@ -19,6 +20,7 @@ import {
   ClaudeProcessFailure,
   DEFAULT_IMPORT_HELPER_MAX_CONCURRENCY,
   IMPORT_HELPER_RESPONSE_JSON_SCHEMA,
+  MOUSER_ENRICHMENT_RESPONSE_JSON_SCHEMA,
   parseClaudeImportOutputForTest,
   type ClaudeProcessInput,
   type ClaudeProcessRunner,
@@ -98,6 +100,43 @@ function makeProposal(): ImportHelperResponse {
     ],
     questions: [],
   };
+}
+
+function makeMouserRequest() {
+  return createMouserEnrichmentRequest({
+    fileSha256: "b".repeat(64),
+    lineItems: [
+      {
+        sourceRef: "mouser-p1-line1",
+        sourcePage: 1,
+        supplierProductNumber: "713-101010001",
+        mpn: "101010001",
+        rawDescription: "Seeed Studio 24GHz mmWave Sensor",
+        quantity: 4,
+      },
+    ],
+    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+  });
+}
+
+function makeMouserProposal() {
+  return {
+    mode: "MOUSER_LINE_ITEM_ENRICHMENT",
+    schemaVersion: 2,
+    rows: [
+      {
+        sourceRef: "mouser-p1-line1",
+        supplierProductNumber: "713-101010001",
+        mpn: "101010001",
+        productName: "Seeed Studio 24GHz mmWave Sensor",
+        manufacturer: "Seeed Studio",
+        description: "Seeed Studio 24GHz mmWave Sensor",
+        quantity: 4,
+        categoryId: "category-electronics",
+        confidence: 0.95,
+      },
+    ],
+  } as const;
 }
 
 function envelope(
@@ -236,6 +275,31 @@ function fakeSpawn({
 
 describe("standalone import helper HTTP service", () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it("uses grouped line items and the minimal schema for Mouser enrichment", async () => {
+    const request = makeMouserRequest();
+    const inference = vi.fn((_input: ClaudeProcessInput) =>
+      Promise.resolve(envelope(makeMouserProposal()))
+    );
+    const result = await sendToHandler({
+      body: JSON.stringify(request),
+      config: { inference },
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(makeMouserProposal());
+    expect(inference).toHaveBeenCalledOnce();
+    const inferenceInput = inference.mock.calls[0]?.[0];
+    expect(inferenceInput?.prompt).toContain("DETERMINISTICALLY GROUPED");
+    expect(inferenceInput?.prompt).toContain("713-101010001");
+    expect(inferenceInput?.prompt).not.toContain("Invoice line:");
+    expect(inferenceInput?.jsonSchema).toEqual(
+      MOUSER_ENRICHMENT_RESPONSE_JSON_SCHEMA
+    );
+    expect(() =>
+      validateImportHelperResponse(result.body, request)
+    ).not.toThrow();
+  });
 
   it("accepts an authenticated Shelf request and returns only validated structured output", async () => {
     const inference = vi.fn((_input: ClaudeProcessInput) =>
@@ -465,6 +529,23 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).toContain("Never interpret a price, line total");
     expect(prompt).toContain("Otherwise categoryId must be null");
     expect(prompt).toContain("Return no more than one question per row");
+    expect(prompt).toContain("legal text, addresses, order metadata");
+    expect(prompt).toContain("isolated numeric fragments");
+  });
+
+  it("keeps Mouser enrichment focused on title and category cleanup", () => {
+    const prompt = buildClaudeImportPrompt(makeMouserRequest());
+    expect(prompt).toContain("already-grouped Mouser invoice line items");
+    expect(prompt).toContain(
+      "Do not reconstruct, split, merge, add, or remove rows"
+    );
+    expect(prompt).toContain(
+      "Preserve sourceRef, supplierProductNumber, mpn, and quantity exactly"
+    );
+    expect(prompt).not.toContain("relevantLocations");
+    expect(prompt).not.toContain("trackingSuggestion");
+    expect(prompt).not.toContain('"locationSuggestions"');
+    expect(prompt).not.toContain('"trackingSuggestion"');
   });
 
   it("passes the verified no-tools argv and prompt through stdin without shell interpolation", async () => {

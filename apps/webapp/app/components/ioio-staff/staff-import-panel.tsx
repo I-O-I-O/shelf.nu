@@ -344,6 +344,8 @@ function StaffImportProposalView({
 }) {
   const fetcher = useFetcher<StaffImportActionResponse>();
   const response = fetcher.data;
+  const isMouserInvoice =
+    proposal.source.extractionProvider?.startsWith("mouser-") ?? false;
   const [proposalState, setProposalState] = useState<
     "review" | "in-progress" | "applied" | "cancelled" | "expired" | "error"
   >("review");
@@ -413,7 +415,7 @@ function StaffImportProposalView({
         row.rowNumber,
         serverReviewStateOverrides[row.rowNumber] ??
           resolveImportReviewState({
-            row,
+            row: { ...row, categoryOptional: row.mouserLineItem === true },
             decision,
             categoryAvailable: Boolean(
               (decision?.categoryId &&
@@ -583,11 +585,13 @@ function StaffImportProposalView({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h3 className="text-lg font-black text-gray-950">
-            Review inventory change proposal
+            {isMouserInvoice
+              ? "Review invoice products"
+              : "Review inventory change proposal"}
           </h3>
           <p className="mt-1 text-sm text-gray-500">
-            {proposal.source.filename}, {proposal.rows.length} rows, no changes
-            have been applied.
+            {proposal.source.filename}, {proposal.rows.length} product rows, no
+            changes have been applied.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -696,43 +700,67 @@ function StaffImportProposalView({
         </div>
       ) : null}
 
-      <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-        {Object.entries(proposal.counts).map(([action, count]) => (
-          <div
-            key={action}
-            className="rounded-lg bg-gray-50 px-3 py-2 text-gray-700"
-          >
-            <span className="font-bold">{action}</span>: {count}
-          </div>
-        ))}
-      </div>
+      {!isMouserInvoice ? (
+        <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+          {Object.entries(proposal.counts).map(([action, count]) => (
+            <div
+              key={action}
+              className="rounded-lg bg-gray-50 px-3 py-2 text-gray-700"
+            >
+              <span className="font-bold">{action}</span>: {count}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm">
-        <span className="text-gray-600">
-          Approve safe matches first, then review duplicate and uncertain rows.
-        </span>
-        <button
-          type="button"
-          onClick={approveSafeRows}
-          className="rounded-lg border border-red-200 px-3 py-2 font-bold text-red-800 hover:bg-red-50"
-        >
-          Approve safe matches
-        </button>
-      </div>
+      {!isMouserInvoice ? (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm">
+          <span className="text-gray-600">
+            Approve safe matches first, then review duplicate and uncertain
+            rows.
+          </span>
+          <button
+            type="button"
+            onClick={approveSafeRows}
+            className="rounded-lg border border-red-200 px-3 py-2 font-bold text-red-800 hover:bg-red-50"
+          >
+            Approve safe matches
+          </button>
+        </div>
+      ) : null}
 
       {proposal.pdfSummary ? (
-        <div className="mt-4 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-gray-700">
-          <p className="font-bold text-gray-950">PDF review</p>
-          <p className="mt-1">
-            Valid inventory rows: {proposal.pdfSummary.validItemRows}. Needs
-            review: {proposal.pdfSummary.needsReview}. Ignored non-inventory
-            rows: {proposal.pdfSummary.ignoredRows}.
-          </p>
-          {proposal.pdfSummary.needsReview > 0 ? (
-            <p className="mt-1 text-red-800">
-              Some rows need review before import.
-            </p>
-          ) : null}
+        <div
+          className={`mt-4 rounded-xl p-3 text-sm ${
+            isMouserInvoice
+              ? "border border-gray-200 bg-gray-50 text-gray-700"
+              : "border border-red-100 bg-red-50 text-gray-700"
+          }`}
+        >
+          {isMouserInvoice ? (
+            (proposal.pdfSummary.unresolvedLines ?? 0) > 0 ? (
+              <p>
+                {proposal.pdfSummary.unresolvedLines} invoice lines could not be
+                reconstructed.
+              </p>
+            ) : (
+              <p>All detected invoice lines were reconstructed.</p>
+            )
+          ) : (
+            <>
+              <p className="font-bold text-gray-950">PDF review</p>
+              <p className="mt-1">
+                Valid inventory rows: {proposal.pdfSummary.validItemRows}. Needs
+                review: {proposal.pdfSummary.needsReview}. Ignored non-inventory
+                rows: {proposal.pdfSummary.ignoredRows}.
+              </p>
+              {proposal.pdfSummary.needsReview > 0 ? (
+                <p className="mt-1 text-red-800">
+                  Some rows need review before import.
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
 
@@ -740,14 +768,28 @@ function StaffImportProposalView({
         <table className="min-w-full text-left text-sm">
           <thead className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
             <tr>
-              <th className="p-2">Row</th>
-              <th className="p-2">Item</th>
-              <th className="p-2">Quantity</th>
-              <th className="p-2">Category</th>
-              <th className="p-2">Location</th>
-              <th className="p-2">Review</th>
-              <th className="p-2">Action</th>
-              <th className="p-2">Reason</th>
+              {isMouserInvoice ? (
+                <>
+                  <th className="p-2">Supplier SKU</th>
+                  <th className="p-2">MPN</th>
+                  <th className="p-2">Product</th>
+                  <th className="p-2">Quantity</th>
+                  <th className="p-2">Category</th>
+                  <th className="p-2">Status</th>
+                  <th className="p-2">Review</th>
+                </>
+              ) : (
+                <>
+                  <th className="p-2">Row</th>
+                  <th className="p-2">Item</th>
+                  <th className="p-2">Quantity</th>
+                  <th className="p-2">Category</th>
+                  <th className="p-2">Location</th>
+                  <th className="p-2">Review</th>
+                  <th className="p-2">Action</th>
+                  <th className="p-2">Reason</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -768,16 +810,34 @@ function StaffImportProposalView({
                 : null;
               return (
                 <tr key={row.rowNumber}>
-                  <td className="p-2">{row.rowNumber}</td>
+                  {isMouserInvoice ? (
+                    <>
+                      <td className="whitespace-nowrap p-2 font-mono text-xs">
+                        {row.supplierPartNumber || "—"}
+                      </td>
+                      <td className="whitespace-nowrap p-2 font-mono text-xs">
+                        {row.manufacturerPartNumber || "—"}
+                      </td>
+                    </>
+                  ) : (
+                    <td className="p-2">{row.rowNumber}</td>
+                  )}
                   <td className="p-2 font-semibold">
                     {row.title || "Unresolved item name"}
-                    {row.sourceDescription &&
+                    {!isMouserInvoice &&
+                    row.sourceDescription &&
                     row.sourceDescription !== row.title ? (
                       <p className="mt-1 text-xs font-normal text-gray-500">
                         Source: {row.sourceDescription}
                       </p>
                     ) : null}
-                    {row.supplierPartNumber || row.manufacturerPartNumber ? (
+                    {isMouserInvoice && row.manufacturer ? (
+                      <p className="mt-1 text-xs font-normal text-gray-500">
+                        {row.manufacturer}
+                      </p>
+                    ) : null}
+                    {!isMouserInvoice &&
+                    (row.supplierPartNumber || row.manufacturerPartNumber) ? (
                       <p className="mt-1 text-xs font-normal text-gray-500">
                         {row.supplierPartNumber
                           ? `Supplier product number: ${row.supplierPartNumber}`
@@ -790,7 +850,7 @@ function StaffImportProposalView({
                           : null}
                       </p>
                     ) : null}
-                    {row.helperCandidate ? (
+                    {!isMouserInvoice && row.helperCandidate ? (
                       <div className="mt-2 space-y-1 rounded-lg bg-blue-50 p-2 text-xs font-normal text-blue-950">
                         <p>
                           Helper suggestion:{" "}
@@ -831,7 +891,7 @@ function StaffImportProposalView({
                         ) : null}
                       </div>
                     ) : null}
-                    {!row.helperCandidate
+                    {!isMouserInvoice && !row.helperCandidate
                       ? row.sourceEvidence?.map((evidence, index) => (
                           <p
                             key={`${evidence.sourceRef}-${index}`}
@@ -1028,7 +1088,8 @@ function StaffImportProposalView({
                             </select>
                           </label>
                         ) : null}
-                        {!reviewDecisions[row.rowNumber]?.categoryId ? (
+                        {!isMouserInvoice &&
+                        !reviewDecisions[row.rowNumber]?.categoryId ? (
                           <div className="rounded border border-amber-200 bg-amber-50 p-2">
                             <label className="block">
                               Proposed new category
@@ -1100,58 +1161,74 @@ function StaffImportProposalView({
                     ) : null}
                   </td>
                   <td className="p-2">
-                    <div>
-                      Tracking:{" "}
-                      {reviewDecisions[row.rowNumber]?.type?.replaceAll(
-                        "_",
-                        " "
-                      ) ?? "Needs review"}
-                    </div>
-                    {reviewDecisions[row.rowNumber]?.type === "INDIVIDUAL" &&
-                    (reviewDecisions[row.rowNumber]?.quantity ?? 0) > 0 ? (
-                      <div className="mt-1 text-xs font-semibold text-gray-700">
-                        Quantity: {reviewDecisions[row.rowNumber]?.quantity};
-                        Tracking: Individual QR
-                        <br />
-                        Result: {reviewDecisions[row.rowNumber]?.quantity}{" "}
-                        physical units,{" "}
-                        {reviewDecisions[row.rowNumber]?.title || row.title}{" "}
-                        #001 – #
-                        {String(
-                          reviewDecisions[row.rowNumber]?.quantity
-                        ).padStart(
-                          Math.max(
-                            3,
-                            String(reviewDecisions[row.rowNumber]?.quantity)
-                              .length
-                          ),
-                          "0"
-                        )}
-                        , each with a distinct QR code
+                    {isMouserInvoice ? (
+                      <div>
+                        {reviewDecisions[row.rowNumber]?.quantity ??
+                          row.quantity ??
+                          "—"}
                       </div>
-                    ) : null}
-                    <div>Ordered: {row.orderedQuantity ?? "Unknown"}</div>
-                    <div>Received: {row.receivedQuantity ?? "Unknown"}</div>
-                    <div>
-                      Proposed:{" "}
-                      {row.proposedQuantity ?? row.quantity ?? "Unknown"}
-                    </div>
+                    ) : (
+                      <>
+                        <div>
+                          Tracking:{" "}
+                          {reviewDecisions[row.rowNumber]?.type?.replaceAll(
+                            "_",
+                            " "
+                          ) ?? "Needs review"}
+                        </div>
+                        {reviewDecisions[row.rowNumber]?.type ===
+                          "INDIVIDUAL" &&
+                        (reviewDecisions[row.rowNumber]?.quantity ?? 0) > 0 ? (
+                          <div className="mt-1 text-xs font-semibold text-gray-700">
+                            Quantity: {reviewDecisions[row.rowNumber]?.quantity}
+                            ; Tracking: Individual QR
+                            <br />
+                            Result: {
+                              reviewDecisions[row.rowNumber]?.quantity
+                            }{" "}
+                            physical units,{" "}
+                            {reviewDecisions[row.rowNumber]?.title || row.title}{" "}
+                            #001 – #
+                            {String(
+                              reviewDecisions[row.rowNumber]?.quantity
+                            ).padStart(
+                              Math.max(
+                                3,
+                                String(reviewDecisions[row.rowNumber]?.quantity)
+                                  .length
+                              ),
+                              "0"
+                            )}
+                            , each with a distinct QR code
+                          </div>
+                        ) : null}
+                        <div>Ordered: {row.orderedQuantity ?? "Unknown"}</div>
+                        <div>Received: {row.receivedQuantity ?? "Unknown"}</div>
+                        <div>
+                          Proposed:{" "}
+                          {row.proposedQuantity ?? row.quantity ?? "Unknown"}
+                        </div>
+                      </>
+                    )}
                   </td>
                   <td className="p-2">
                     <div>
-                      {selectedCategory?.name ??
-                        (selectedNewCategory
-                          ? `New: ${selectedNewCategory}`
-                          : row.suggestedCategory ??
-                            row.category ??
-                            "Needs review")}
+                      {isMouserInvoice
+                        ? selectedCategory?.name ?? row.category ?? "—"
+                        : selectedCategory?.name ??
+                          (selectedNewCategory
+                            ? `New: ${selectedNewCategory}`
+                            : row.suggestedCategory ??
+                              row.category ??
+                              "Needs review")}
                     </div>
-                    {row.categoryConfidence ? (
+                    {!isMouserInvoice && row.categoryConfidence ? (
                       <div className="text-xs text-gray-500">
                         {row.categoryConfidence}: {row.categoryReason}
                       </div>
                     ) : null}
-                    {!selectedCategory &&
+                    {!isMouserInvoice &&
+                    !selectedCategory &&
                     !selectedNewCategory &&
                     row.categoryResolution === "ARCHIVED_MATCH" ? (
                       <div className="text-xs text-amber-800">
@@ -1160,29 +1237,43 @@ function StaffImportProposalView({
                       </div>
                     ) : null}
                   </td>
+                  {!isMouserInvoice ? (
+                    <td className="p-2">
+                      {selectedLocation?.pathLabel ??
+                        row.locationLabel ??
+                        row.location ??
+                        "Unassigned"}
+                      {selectedLocation || row.locationContext ? (
+                        <div className="text-xs text-gray-500">
+                          Current units:{" "}
+                          {selectedLocation?.currentUnits ??
+                            row.locationContext?.currentUnits ??
+                            0}
+                          ; import adds:{" "}
+                          {row.locationContext?.proposedUnits ??
+                            row.quantity ??
+                            0}
+                          ; capacity: not configured
+                        </div>
+                      ) : null}
+                    </td>
+                  ) : null}
+                  {isMouserInvoice ? (
+                    <td className="p-2 text-xs">
+                      <div className="font-semibold">
+                        {actionLabel(reviewStates[row.rowNumber])}
+                      </div>
+                      <div className="text-gray-500">
+                        {actionLabel(row.action)}
+                      </div>
+                    </td>
+                  ) : null}
                   <td className="p-2">
-                    {selectedLocation?.pathLabel ??
-                      row.locationLabel ??
-                      row.location ??
-                      "Unassigned"}
-                    {selectedLocation || row.locationContext ? (
-                      <div className="text-xs text-gray-500">
-                        Current units:{" "}
-                        {selectedLocation?.currentUnits ??
-                          row.locationContext?.currentUnits ??
-                          0}
-                        ; import adds:{" "}
-                        {row.locationContext?.proposedUnits ??
-                          row.quantity ??
-                          0}
-                        ; capacity: not configured
+                    {!isMouserInvoice ? (
+                      <div className="mb-2 font-bold">
+                        {reviewStates[row.rowNumber]}
                       </div>
                     ) : null}
-                  </td>
-                  <td className="p-2">
-                    <div className="mb-2 font-bold">
-                      {reviewStates[row.rowNumber]}
-                    </div>
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
@@ -1216,8 +1307,12 @@ function StaffImportProposalView({
                       </button>
                     </div>
                   </td>
-                  <td className="p-2">{actionLabel(row.action)}</td>
-                  <td className="p-2 text-gray-500">{row.reason}</td>
+                  {!isMouserInvoice ? (
+                    <>
+                      <td className="p-2">{actionLabel(row.action)}</td>
+                      <td className="p-2 text-gray-500">{row.reason}</td>
+                    </>
+                  ) : null}
                 </tr>
               );
             })}

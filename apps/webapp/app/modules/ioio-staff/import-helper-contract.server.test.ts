@@ -1,10 +1,49 @@
 import { describe, expect, it, vi } from "vitest";
 import { requestImportHelperProposal } from "./import-helper-client.server";
 import {
+  createMouserEnrichmentRequest,
   createImportHelperRequest,
   parseAndValidateImportHelperResponse,
+  validateImportHelperResponse,
   type ImportHelperRequest,
 } from "./import-helper-contract.server";
+
+function makeMouserRequest() {
+  return createMouserEnrichmentRequest({
+    fileSha256: "a".repeat(64),
+    lineItems: [
+      {
+        sourceRef: "mouser-p1-line1",
+        sourcePage: 1,
+        supplierProductNumber: "713-101010001",
+        mpn: "101010001",
+        rawDescription: "Seeed Studio 24GHz mmWave Sensor",
+        quantity: 4,
+      },
+    ],
+    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+  });
+}
+
+function makeMouserResponse() {
+  return {
+    mode: "MOUSER_LINE_ITEM_ENRICHMENT",
+    schemaVersion: 2,
+    rows: [
+      {
+        sourceRef: "mouser-p1-line1",
+        supplierProductNumber: "713-101010001",
+        mpn: "101010001",
+        productName: "Seeed Studio 24GHz mmWave Sensor",
+        manufacturer: "Seeed Studio",
+        description: "Seeed Studio 24GHz mmWave Sensor",
+        quantity: 4,
+        categoryId: "category-electronics",
+        confidence: 0.94,
+      },
+    ],
+  };
+}
 
 function makeRequest(): ImportHelperRequest {
   return createImportHelperRequest({
@@ -94,6 +133,43 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("import helper contract", () => {
+  it("accepts minimal Mouser enrichment while preserving deterministic fields", () => {
+    const request = makeMouserRequest();
+    const response = parseAndValidateImportHelperResponse(
+      JSON.stringify(makeMouserResponse()),
+      request
+    );
+
+    expect("mode" in response).toBe(true);
+    if (!("mode" in response)) throw new Error("Expected Mouser response");
+    expect(response.rows).toEqual([makeMouserResponse().rows[0]]);
+  });
+
+  it.each([
+    ["quantity", { quantity: 99 }],
+    ["supplier product number", { supplierProductNumber: "713-000000000" }],
+    ["MPN", { mpn: "different-mpn" }],
+  ])("rejects a Claude change to deterministic %s", (_label, change) => {
+    const response = makeMouserResponse();
+    Object.assign(response.rows[0], change);
+    expect(() =>
+      validateImportHelperResponse(response, makeMouserRequest())
+    ).toThrow("changed a deterministic Mouser identifier or quantity");
+  });
+
+  it("rejects invented Mouser categories and missing or duplicated line rows", () => {
+    const inventedCategory = makeMouserResponse();
+    inventedCategory.rows[0]!.categoryId = "invented-category";
+    expect(() =>
+      validateImportHelperResponse(inventedCategory, makeMouserRequest())
+    ).toThrow("outside Shelf's allowlist");
+
+    const missing = { ...makeMouserResponse(), rows: [] };
+    expect(() =>
+      validateImportHelperResponse(missing, makeMouserRequest())
+    ).toThrow("exactly one enriched row");
+  });
+
   it("accepts a valid versioned proposal and verifiable evidence", () => {
     const request = makeRequest();
     const response = parseAndValidateImportHelperResponse(
@@ -197,6 +273,22 @@ describe("import helper contract", () => {
       supplierProductNumber: "713-101010001",
       mpn: "101010001",
     });
+  });
+
+  it("rejects oversized generic helper output instead of returning hundreds of candidate rows", () => {
+    const baseRow = makeResponse().rows[0]!;
+    const oversizedResponse = {
+      schemaVersion: 1,
+      rows: Array.from({ length: 101 }, () => ({ ...baseRow })),
+      questions: [],
+    };
+
+    expect(() =>
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(oversizedResponse),
+        makeRequest()
+      )
+    ).toThrow("malformed or unsupported response");
   });
 
   it("rejects unsupported settings and unverifiable evidence", () => {
