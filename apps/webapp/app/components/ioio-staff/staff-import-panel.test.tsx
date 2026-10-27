@@ -114,6 +114,39 @@ describe("StaffImportPanel review gate", () => {
     expect(screen.getByLabelText("Location")).toBeTruthy();
   });
 
+  it("does not count unassigned Mouser rows as ready in the summary", () => {
+    renderPanel(
+      {
+        action: "CREATE",
+        categoryId: null,
+        locationId: null,
+        category: null,
+        location: null,
+        mouserLineItem: true,
+      },
+      true,
+      {
+        source: {
+          filename: "mouser.pdf",
+          size: 100,
+          sha256: "a".repeat(64),
+          extractionProvider: "mouser-deterministic+claude-enrichment:v2",
+        },
+      }
+    );
+
+    const summary = screen.getByText(/1 unassigned category/).parentElement;
+    expect(summary).toBeTruthy();
+    expect(summary).toHaveTextContent("1 unassigned category");
+    expect(summary).toHaveTextContent("1 unassigned location");
+    expect(summary).not.toHaveTextContent("ready");
+    expect(
+      screen.getByText(
+        "Location assignment is optional when applying the import."
+      )
+    ).toBeTruthy();
+  });
+
   it("shows medium-confidence suggestions without silently selecting them", () => {
     renderPanel(
       {

@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Logger } from "~/utils/logger";
 import { requestImportHelperProposal } from "./import-helper-client.server";
 import {
   createMouserEnrichmentRequest,
   createImportHelperRequest,
+  importHelperRequestSchema,
   parseAndValidateImportHelperResponse,
   validateImportHelperResponse,
   type ImportHelperRequest,
@@ -21,7 +23,13 @@ function makeMouserRequest() {
         quantity: 4,
       },
     ],
-    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+    activeCategories: [
+      {
+        id: "category-electronics",
+        name: "Electronics",
+        description: "General storage and electronic equipment",
+      },
+    ],
     relevantLocations: [
       {
         id: "sensors-drawer",
@@ -145,7 +153,49 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function expectDiagnostic(
+  loggerInfo: ReturnType<typeof vi.spyOn>,
+  result: string,
+  httpStatus: number | null,
+  requestMode = "GENERIC_IMPORT"
+) {
+  expect(loggerInfo).toHaveBeenCalledWith(
+    expect.objectContaining({
+      event: "ioio_import_helper_client_result",
+      httpStatus,
+      result,
+      requestMode,
+      requestBytes: expect.any(Number),
+      durationMs: expect.any(Number),
+    })
+  );
+}
+
 describe("import helper contract", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps both request modes compatible with the strict helper schema at 2c17389d", () => {
+    const genericRequest = makeRequest();
+    const mouserRequest = makeMouserRequest();
+
+    expect(importHelperRequestSchema.parse(genericRequest)).toEqual(
+      genericRequest
+    );
+    expect(importHelperRequestSchema.parse(mouserRequest)).toEqual(
+      mouserRequest
+    );
+    expect(genericRequest.activeCategories[0]).not.toHaveProperty("color");
+    expect(genericRequest.relevantLocations[0]).not.toHaveProperty(
+      "operational"
+    );
+    expect(mouserRequest.lineItems[0]).not.toHaveProperty(
+      "supplierDescription"
+    );
+    expect(mouserRequest.relevantLocations?.[0]).not.toHaveProperty(
+      "operational"
+    );
+  });
+
   it("accepts minimal Mouser enrichment while preserving deterministic fields", () => {
     const request = makeMouserRequest();
     const response = parseAndValidateImportHelperResponse(
@@ -201,6 +251,12 @@ describe("import helper contract", () => {
 
     if ("mode" in response) throw new Error("Expected generic proposal");
     expect(response.rows[0]?.productMatch.candidateId).toBe("model-nano");
+    expect(response.rows[0]?.categorySuggestion.categoryId).toBe(
+      "category-electronics"
+    );
+    expect(response.rows[0]?.locationSuggestions[0]?.locationId).toBe(
+      "location-storage"
+    );
     expect(request.document.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -229,6 +285,16 @@ describe("import helper contract", () => {
       categoryId: null,
       confidence: 0,
     });
+
+    const invalidLocation = makeResponse();
+    invalidLocation.rows[0]!.locationSuggestions[0]!.locationId =
+      "location-from-helper";
+    const checkedLocation = parseAndValidateImportHelperResponse(
+      JSON.stringify(invalidLocation),
+      makeRequest()
+    );
+    if ("mode" in checkedLocation) throw new Error("Expected generic proposal");
+    expect(checkedLocation.rows[0]?.locationSuggestions).toEqual([]);
   });
 
   it("rejects invalid quantities and unsupported tracking suggestions", () => {
@@ -364,6 +430,7 @@ describe("import helper contract", () => {
 
   it("returns safe manual mode for malformed JSON", async () => {
     // why: exercise the HTTP boundary with an invalid body that cannot be represented by a valid response object.
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     const fetchImpl = vi.fn(() =>
       Promise.resolve(new Response("{not-json", { status: 200 }))
     );
@@ -373,15 +440,18 @@ describe("import helper contract", () => {
       fetchImpl,
     });
 
-    expect(result).toEqual({ status: "manual", reason: "invalid-response" });
+    expect(result).toEqual({ status: "manual", reason: "invalid_response" });
+    expectDiagnostic(loggerInfo, "invalid_response", 200);
   });
 
   it("returns safe manual mode when the helper is not configured or unavailable", async () => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     const notConfigured = await requestImportHelperProposal(makeRequest(), {});
     expect(notConfigured).toEqual({
       status: "manual",
-      reason: "not-configured",
+      reason: "helper_not_configured",
     });
+    expectDiagnostic(loggerInfo, "helper_not_configured", null);
 
     // why: simulate an upstream service outage without making a network request.
     const fetchImpl = vi.fn(() =>
@@ -392,10 +462,56 @@ describe("import helper contract", () => {
       authToken: "test-secret",
       fetchImpl,
     });
-    expect(unavailable).toEqual({ status: "manual", reason: "unavailable" });
+    expect(unavailable).toEqual({
+      status: "manual",
+      reason: "helper_busy_503",
+    });
+    expectDiagnostic(loggerInfo, "helper_busy_503", 503);
+  });
+
+  it.each([
+    [400, "invalid_request_400"],
+    [401, "unauthorized_401"],
+    [502, "helper_inference_502"],
+  ] as const)("classifies helper HTTP %s", async (status, classification) => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response("ignored", { status }))
+    );
+
+    const result = await requestImportHelperProposal(makeRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+
+    expect(result).toEqual({ status: "manual", reason: classification });
+    expectDiagnostic(loggerInfo, classification, status);
+    expect(JSON.stringify(loggerInfo.mock.calls)).not.toContain("test-secret");
+  });
+
+  it("classifies network failures without logging exception or request content", async () => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+    const fetchImpl = vi.fn(() =>
+      Promise.reject(new TypeError("socket error: sensitive detail"))
+    );
+
+    const result = await requestImportHelperProposal(makeRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+
+    expect(result).toEqual({ status: "manual", reason: "network_error" });
+    expectDiagnostic(loggerInfo, "network_error", null);
+    const logged = JSON.stringify(loggerInfo.mock.calls);
+    expect(logged).not.toContain("test-secret");
+    expect(logged).not.toContain("socket error");
+    expect(logged).not.toContain("Arduino Nano");
   });
 
   it("returns safe manual mode when the helper times out", async () => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     // why: hold the fake request open until the client's AbortController fires.
     const fetchImpl = vi.fn(
       (_url: string | URL | Request, init?: RequestInit) =>
@@ -413,9 +529,11 @@ describe("import helper contract", () => {
     });
 
     expect(result).toEqual({ status: "manual", reason: "timeout" });
+    expectDiagnostic(loggerInfo, "timeout", null);
   });
 
   it("sends only the schema payload and keeps credentials in the auth header", async () => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     const request = makeRequest();
     const fetchImpl = vi.fn(
       (_url: string | URL | Request, init?: RequestInit) => {
@@ -436,5 +554,23 @@ describe("import helper contract", () => {
     });
 
     expect(result.status).toBe("ready");
+    expectDiagnostic(loggerInfo, "success", 200);
+    expect(JSON.stringify(loggerInfo.mock.calls)).not.toContain("test-secret");
+  });
+
+  it("logs the Mouser request mode on success", async () => {
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(jsonResponse(makeMouserResponse()))
+    );
+
+    const result = await requestImportHelperProposal(makeMouserRequest(), {
+      endpoint: "https://helper.example.test/import",
+      authToken: "test-secret",
+      fetchImpl,
+    });
+
+    expect(result.status).toBe("ready");
+    expectDiagnostic(loggerInfo, "success", 200, "MOUSER_LINE_ITEM_ENRICHMENT");
   });
 });

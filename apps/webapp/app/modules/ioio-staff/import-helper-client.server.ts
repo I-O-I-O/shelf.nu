@@ -1,3 +1,4 @@
+import { Logger } from "~/utils/logger";
 import {
   ImportHelperValidationError,
   importHelperRequestSchema,
@@ -10,10 +11,19 @@ export const DEFAULT_IMPORT_HELPER_TIMEOUT_MS = 20_000;
 export const MAX_IMPORT_HELPER_RESPONSE_BYTES = 2_000_000;
 
 export type ImportHelperManualReason =
-  | "not-configured"
+  | "helper_not_configured"
+  | "network_error"
   | "timeout"
-  | "unavailable"
-  | "invalid-response";
+  | "unauthorized_401"
+  | "invalid_request_400"
+  | "helper_busy_503"
+  | "helper_inference_502"
+  | "helper_http_error"
+  | "invalid_response";
+
+export type ImportHelperResultClassification =
+  | ImportHelperManualReason
+  | "success";
 
 export type ImportHelperClientResult =
   | { status: "ready"; proposal: AnyImportHelperResponse }
@@ -59,6 +69,21 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function classifyHttpFailure(status: number): ImportHelperManualReason {
+  switch (status) {
+    case 400:
+      return "invalid_request_400";
+    case 401:
+      return "unauthorized_401";
+    case 502:
+      return "helper_inference_502";
+    case 503:
+      return "helper_busy_503";
+    default:
+      return "helper_http_error";
+  }
+}
+
 export async function requestImportHelperProposal(
   requestInput: AnyImportHelperRequest | unknown,
   config: ImportHelperClientConfig = getRuntimeConfig()
@@ -70,10 +95,30 @@ export async function requestImportHelperProposal(
     );
   }
 
+  const mode =
+    "mode" in parsedRequest.data ? parsedRequest.data.mode : "GENERIC_IMPORT";
+  const requestBody = JSON.stringify(parsedRequest.data);
+  const requestBytes = new TextEncoder().encode(requestBody).byteLength;
+  const startedAt = Date.now();
+  const logResult = (
+    result: ImportHelperResultClassification,
+    status: number | null
+  ) => {
+    Logger.info({
+      event: "ioio_import_helper_client_result",
+      httpStatus: status,
+      result,
+      requestMode: mode,
+      requestBytes,
+      durationMs: Date.now() - startedAt,
+    });
+  };
+
   const endpoint = config.endpoint?.trim();
   const authToken = config.authToken?.trim();
   if (!endpoint || !authToken || !isValidEndpoint(endpoint)) {
-    return { status: "manual", reason: "not-configured" };
+    logResult("helper_not_configured", null);
+    return { status: "manual", reason: "helper_not_configured" };
   }
 
   const controller = new AbortController();
@@ -86,35 +131,44 @@ export async function requestImportHelperProposal(
         "content-type": "application/json",
         authorization: `Bearer ${authToken}`,
       },
-      body: JSON.stringify(parsedRequest.data),
+      body: requestBody,
       redirect: "error",
       signal: controller.signal,
     });
-    if (!response.ok) return { status: "manual", reason: "unavailable" };
+    if (!response.ok) {
+      const reason = classifyHttpFailure(response.status);
+      logResult(reason, response.status);
+      return { status: "manual", reason };
+    }
 
     const responseText = await response.text();
     if (
       new TextEncoder().encode(responseText).byteLength >
       MAX_IMPORT_HELPER_RESPONSE_BYTES
     ) {
-      return { status: "manual", reason: "invalid-response" };
+      logResult("invalid_response", response.status);
+      return { status: "manual", reason: "invalid_response" };
     }
     try {
       const proposal = parseAndValidateImportHelperResponse(
         responseText,
         parsedRequest.data
       );
+      logResult("success", response.status);
       return { status: "ready", proposal };
     } catch (error) {
       if (error instanceof ImportHelperValidationError) {
-        return { status: "manual", reason: "invalid-response" };
+        logResult("invalid_response", response.status);
+        return { status: "manual", reason: "invalid_response" };
       }
       throw error;
     }
   } catch (error) {
+    const reason = isAbortError(error) ? "timeout" : "network_error";
+    logResult(reason, null);
     return {
       status: "manual",
-      reason: isAbortError(error) ? "timeout" : "unavailable",
+      reason,
     };
   } finally {
     clearTimeout(timeout);

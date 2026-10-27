@@ -13,7 +13,7 @@ const database = vi.hoisted(() => ({
   assetModel: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
   category: { findFirst: vi.fn(), findMany: vi.fn() },
   qr: { findFirst: vi.fn() },
-  location: { findMany: vi.fn() },
+  location: { findMany: vi.fn(), count: vi.fn() },
   ioioWriteOperation: {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
@@ -286,6 +286,7 @@ function preparePdfImportMocks(operationId: string) {
   database.assetModel.findMany.mockResolvedValue([]);
   database.category.findMany.mockResolvedValue([]);
   database.location.findMany.mockResolvedValue([]);
+  database.location.count.mockResolvedValue(0);
   database.ioioWriteOperation.findUnique.mockResolvedValue(null);
   database.ioioWriteOperation.findFirst.mockResolvedValue({ id: operationId });
   database.ioioWriteOperation.create.mockResolvedValue({});
@@ -693,7 +694,12 @@ describe("staff inventory import safety", () => {
   it("rejects an MPN label returned as a Claude product title", async () => {
     preparePdfImportMocks("operation-mouser-clean-title");
     mockGetCategories.mockResolvedValue([
-      { id: "cat-electronics", name: "Electronics", color: "#2878b8" },
+      {
+        id: "cat-electronics",
+        name: "Electronics",
+        description: "General electronic equipment",
+        color: "#2878b8",
+      },
     ]);
     const helperResponse = {
       mode: "MOUSER_LINE_ITEM_ENRICHMENT" as const,
@@ -789,7 +795,7 @@ describe("staff inventory import safety", () => {
     mockGetArchivedCategoryIds.mockResolvedValue([]);
     mockRequestImportHelperProposal.mockResolvedValue({
       status: "manual",
-      reason: "not-configured",
+      reason: "helper_not_configured",
     });
     // why: verify page extraction and vendor routing diagnostics omit document text.
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
@@ -2009,6 +2015,49 @@ describe("staff inventory import safety", () => {
         ],
       })
     );
+    mockGetCategories.mockResolvedValue([
+      {
+        id: "cat-cables",
+        name: "Cables & adapters",
+        description: "Cables, connectors, and adapters",
+        color: "#2878b8",
+      },
+    ]);
+    database.location.count.mockResolvedValue(2);
+    database.location.findMany.mockResolvedValue([
+      {
+        id: "location-lab",
+        name: "Lab",
+        parentId: null,
+        description: null,
+        color: null,
+      },
+      {
+        id: "location-cable-drawer",
+        name: "USB Cable Drawer",
+        parentId: "location-lab",
+        description: "Cable and connector storage",
+        color: null,
+      },
+    ]);
+    database.asset.findMany.mockResolvedValue(
+      Array.from({ length: 3 }, (_, index) => ({
+        id: `existing-cable-${index}`,
+        title: `Existing cable ${index}`,
+        type: "QUANTITY_TRACKED",
+        quantity: 1,
+        description: null,
+        categoryId: "cat-cables",
+        assetModelId: null,
+        assetLocations: [
+          {
+            locationId: "location-cable-drawer",
+            quantity: 1,
+            assetKitId: null,
+          },
+        ],
+      }))
+    );
     // why: capture privacy-safe extraction and routing diagnostics without
     // emitting test log output.
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
@@ -2032,9 +2081,51 @@ describe("staff inventory import safety", () => {
     });
     expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
+    expect(helperRequest.activeCategories).toEqual([
+      expect.objectContaining({ id: "cat-cables", name: "Cables & adapters" }),
+    ]);
+    expect(helperRequest.relevantLocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "location-cable-drawer",
+          pathLabel: "Lab · USB Cable Drawer",
+          occupancy: expect.objectContaining({
+            context: expect.stringContaining("Cables & adapters: 3 assets"),
+          }),
+        }),
+      ])
+    );
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      categoryId: "cat-cables",
+      locationId: "location-cable-drawer",
+    });
     expect(helperRequest.document.pages).toEqual([
       { sourceRef: "pdf-page-1", page: 1, text: pageText },
     ]);
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_generic_suggestion_resolution",
+        categoryCandidateCount: 1,
+        categoryCandidates: [
+          {
+            id: "cat-cables",
+            name: "Cables & adapters",
+            hierarchyDepth: 0,
+            descriptionPresent: true,
+          },
+        ],
+        locationCandidateCount: 2,
+        locationCandidates: expect.arrayContaining([
+          expect.objectContaining({
+            id: "location-cable-drawer",
+            name: "USB Cable Drawer",
+            pathDepth: 2,
+            descriptionPresent: true,
+            assignable: true,
+          }),
+        ]),
+      })
+    );
     expect(loggerInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "ioio_staff_import_pdf_text_extracted",
@@ -2246,7 +2337,7 @@ describe("staff inventory import safety", () => {
     });
     mockRequestImportHelperProposal.mockResolvedValue({
       status: "manual",
-      reason: "not-configured",
+      reason: "helper_not_configured",
     });
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
 
@@ -2343,7 +2434,7 @@ describe("staff inventory import safety", () => {
     const pageText = "Northstar invoice\nItem K-42\nUSB adapter\n4\n21,50";
     mockRequestImportHelperProposal.mockResolvedValue({
       status: "manual",
-      reason: "unavailable",
+      reason: "helper_busy_503",
     });
     // why: inspect route diagnostics while keeping test logs free of document text.
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
@@ -2368,7 +2459,7 @@ describe("staff inventory import safety", () => {
         meaningfulText: true,
         detectedVendorParser: null,
         genericClaudeFallbackInvoked: true,
-        genericClaudeResult: "unavailable",
+        genericClaudeResult: "helper_busy_503",
       })
     );
   });
@@ -2385,7 +2476,7 @@ describe("staff inventory import safety", () => {
     const pageText = ["Acme invoice", ...fragments].join("\n");
     mockRequestImportHelperProposal.mockResolvedValue({
       status: "manual",
-      reason: "not-configured",
+      reason: "helper_not_configured",
     });
 
     await expect(
@@ -2548,7 +2639,7 @@ describe("staff inventory import safety", () => {
     mockGetArchivedCategoryIds.mockResolvedValue([]);
     mockRequestImportHelperProposal.mockResolvedValue({
       status: "manual",
-      reason: "not-configured",
+      reason: "helper_not_configured",
     });
     database.asset.findMany.mockResolvedValue([]);
     database.assetModel.findMany.mockResolvedValue([]);
@@ -2611,16 +2702,51 @@ describe("staff inventory import safety", () => {
       },
     ]);
     database.location.findMany.mockResolvedValue([
-      { id: "room", name: "IOIO Lab – B477", parentId: null },
-      { id: "loc-shelf", name: "Container A1-1.1", parentId: "room" },
-      { id: "broken", name: "Problem / Broken Zone", parentId: "room" },
-      { id: "pickup", name: "Pickup Zone", parentId: "room" },
-      { id: "return", name: "Return Section", parentId: "room" },
+      {
+        id: "room",
+        name: "IOIO Lab – B477",
+        parentId: null,
+        description: null,
+        color: null,
+      },
+      {
+        id: "loc-shelf",
+        name: "Container A1-1.1",
+        parentId: "room",
+        description: "General storage",
+        color: "#2878b8",
+      },
+      {
+        id: "broken",
+        name: "Problem / Broken Zone",
+        parentId: "room",
+        description: null,
+        color: null,
+      },
+      {
+        id: "pickup",
+        name: "Pickup Zone",
+        parentId: "room",
+        description: null,
+        color: null,
+      },
+      {
+        id: "return",
+        name: "Return Section",
+        parentId: "room",
+        description: null,
+        color: null,
+      },
     ]);
     mockGetBrokenSection.mockResolvedValue({ id: "broken" });
     mockGetReturnArea.mockResolvedValue("IOIO Lab – B477 · Return Section");
     mockGetCategories.mockResolvedValue([
-      { id: "cat-electronics", name: "Electronics", color: "#2878b8" },
+      {
+        id: "cat-electronics",
+        name: "Electronics",
+        description: "General electronic equipment",
+        color: "#2878b8",
+      },
     ]);
     database.ioioWriteOperation.findUnique.mockResolvedValue(null);
     database.ioioWriteOperation.findFirst.mockResolvedValue({
@@ -2665,7 +2791,13 @@ describe("staff inventory import safety", () => {
           quantity: 4,
         },
       ],
-      activeCategories: [{ id: "cat-electronics", name: "Electronics" }],
+      activeCategories: [
+        {
+          id: "cat-electronics",
+          name: "Electronics",
+          description: "General electronic equipment",
+        },
+      ],
     });
     expect(helperRequest).not.toHaveProperty("document.pages");
     expect(helperRequest.relevantLocations).toEqual(
@@ -2673,6 +2805,9 @@ describe("staff inventory import safety", () => {
         expect.objectContaining({
           id: "loc-shelf",
           pathLabel: expect.stringContaining("Container A1-1.1"),
+          description: expect.stringContaining(
+            "General storage | Existing category placement: Electronics: 1 asset"
+          ),
         }),
       ])
     );
@@ -2693,8 +2828,10 @@ describe("staff inventory import safety", () => {
         where: { organizationId: "org-1", id: { in: [] } },
       })
     );
-    expect(database.location.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organizationId: "org-1" } })
+    expect(database.location.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ organizationId: "org-1" }),
+      })
     );
     expect(prepared.proposal.source.extractionProvider).toBe(
       "mouser-deterministic+claude-enrichment:v2"
@@ -2758,9 +2895,12 @@ describe("staff inventory import safety", () => {
   });
 
   it.each([
-    { reason: "invalid-response" as const, label: "invalid helper output" },
-    { reason: "unavailable" as const, label: "unavailable helper" },
-    { reason: "not-configured" as const, label: "unconfigured helper" },
+    { reason: "invalid_response" as const, label: "invalid helper output" },
+    { reason: "network_error" as const, label: "unavailable helper" },
+    {
+      reason: "helper_not_configured" as const,
+      label: "unconfigured helper",
+    },
   ])(
     "uses deterministic rows when the $label cannot return a proposal",
     async ({ reason }) => {

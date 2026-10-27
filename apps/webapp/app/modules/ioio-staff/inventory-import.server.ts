@@ -17,6 +17,7 @@ import { getConfiguredBrokenSection } from "~/modules/ioio-lab-information/broke
 import { getIoioArchivedCategoryIds } from "~/modules/ioio-staff/archive.server";
 import { PICKUP_ZONE_NAME } from "~/modules/ioio-staff/pickup-zone.server";
 import { getConfiguredReportReturnArea } from "~/modules/ioio-student/report-return-location.server";
+import { getLocations } from "~/modules/location/service.server";
 import { ShelfError } from "~/utils/error";
 import { getRandomColor } from "~/utils/get-random-color";
 import { id } from "~/utils/id/id.server";
@@ -63,12 +64,16 @@ import {
   resolveIndividualUnitTitles,
 } from "./import-planner";
 import {
+  buildImportLocationAffinities,
   getImportLocationPath,
   getOperationalImportLocationIds,
   matchesReviewedImportLocationPath,
   normalizeImportLabel,
   resolveImportCategory,
+  resolveImportCategorySuggestion,
   resolveImportLocation,
+  resolveImportLocationSuggestion,
+  type ImportSuggestionMethod,
 } from "./import-resolution";
 import {
   resolveImportReviewState,
@@ -148,6 +153,8 @@ export type StaffImportRow = {
   categorySuggestionConfidence?: number;
   suggestedLocationId?: string | null;
   locationSuggestionConfidence?: number;
+  categorySuggestionMethod?: ImportSuggestionMethod | "unresolved";
+  locationSuggestionMethod?: ImportSuggestionMethod | "unresolved";
   categoryConfidence?: "High" | "Medium" | "Low";
   categoryReason?: string;
   reviewRequired?: boolean;
@@ -434,13 +441,126 @@ function matchesExpectedAssetState(
   );
 }
 
-type NamedRecord = { id: string; name: string; description?: string | null };
+type NamedRecord = {
+  id: string;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+};
 type ImportLocationOption = NamedRecord & {
   parentId: string | null;
   pathLabel: string;
   operational: boolean;
   currentUnits: number;
+  categoryAffinities?: Array<{
+    categoryId: string;
+    categoryName: string;
+    assetCount: number;
+    units: number;
+  }>;
 };
+
+function formatLocationPlacementContext(
+  categoryAffinities: ImportLocationOption["categoryAffinities"]
+) {
+  const summaries = (categoryAffinities ?? [])
+    .slice(0, 5)
+    .map(
+      ({ categoryName, assetCount, units }) =>
+        `${categoryName}: ${assetCount} ${
+          assetCount === 1 ? "asset" : "assets"
+        }, ${units} ${units === 1 ? "unit" : "units"}`
+    );
+  return summaries.length
+    ? `Existing category placement: ${summaries.join("; ")}`.slice(0, 1_000)
+    : null;
+}
+
+function getLocationHelperDescription(location: ImportLocationOption) {
+  const context = formatLocationPlacementContext(location.categoryAffinities);
+  if (!context) return location.description?.slice(0, 500) ?? null;
+  const descriptionBudget = Math.max(0, 500 - context.length - 3);
+  const description = location.description?.slice(0, descriptionBudget);
+  return [description, context].filter(Boolean).join(" | ").slice(0, 500);
+}
+
+function getImportCandidateDiagnostics(
+  categories: NamedRecord[],
+  locations: ImportLocationOption[]
+) {
+  const categoryCandidates = categories.slice(0, 500).map((category) => ({
+    id: category.id,
+    name: category.name,
+    // Shelf categories are flat records in the current schema.
+    hierarchyDepth: 0,
+    descriptionPresent: Boolean(category.description?.trim()),
+  }));
+  const locationCandidates = locations
+    .filter((location) => !location.operational)
+    .slice(0, 1_000)
+    .map((location) => ({
+      id: location.id,
+      name: location.name,
+      pathDepth: location.pathLabel.split(" · ").filter(Boolean).length,
+      descriptionPresent: Boolean(location.description?.trim()),
+      assignable: !location.operational,
+    }));
+  const nonAssignableLocations = locations
+    .filter((location) => location.operational)
+    .slice(0, 1_000)
+    .map((location) => ({
+      id: location.id,
+      name: location.name,
+      pathDepth: location.pathLabel.split(" · ").filter(Boolean).length,
+      descriptionPresent: Boolean(location.description?.trim()),
+      assignable: false,
+    }));
+  return {
+    categoryCandidateCount: categoryCandidates.length,
+    categoryCandidates,
+    locationCandidateCount: locationCandidates.length,
+    loadedLocationCount: locations.length,
+    locationCandidates,
+    nonAssignableLocationCount: locations.filter(
+      (location) => location.operational
+    ).length,
+    nonAssignableLocations,
+  };
+}
+
+async function getAllImportLocations(organizationId: string) {
+  const pageSize = 500;
+  const locations: Array<{
+    id: string;
+    name: string;
+    parentId: string | null;
+    description: string | null;
+    color: string | null;
+  }> = [];
+  let page = 1;
+  let totalLocations = 0;
+  do {
+    const result = await getLocations({
+      organizationId,
+      page,
+      perPage: pageSize,
+      orderBy: "name",
+      orderDirection: "asc",
+    });
+    totalLocations = result.totalLocations;
+    locations.push(
+      ...result.locations.map(({ id, name, parentId, description, color }) => ({
+        id,
+        name,
+        parentId,
+        description,
+        color,
+      }))
+    );
+    page += 1;
+  } while (locations.length < totalLocations);
+  return locations;
+}
 
 async function isReviewedImportLocationCurrent({
   organizationId,
@@ -3200,20 +3320,26 @@ function buildStaffImportHelperRequest({
     relevantLocations: locations
       .filter((location) => !location.operational)
       .slice(0, 1_000)
-      .map(({ id, name, pathLabel, parentId, description, currentUnits }) => ({
-        id,
-        name,
-        pathLabel,
-        parentId,
-        description: description?.slice(0, 500) ?? null,
-        hasChildren: locations.some((location) => location.parentId === id),
-        occupancy: {
-          currentUnits: currentUnits || occupancyByLocation.get(id) || 0,
-          proposedUnits: 0,
-          capacity: null,
-          context: null,
-        },
-      })),
+      .map((location) => {
+        const { id, name, pathLabel, parentId, description, currentUnits } =
+          location;
+        return {
+          id,
+          name,
+          pathLabel,
+          parentId,
+          description: description?.slice(0, 500) ?? null,
+          hasChildren: locations.some((location) => location.parentId === id),
+          occupancy: {
+            currentUnits: currentUnits || occupancyByLocation.get(id) || 0,
+            proposedUnits: 0,
+            capacity: null,
+            context: formatLocationPlacementContext(
+              location.categoryAffinities
+            ),
+          },
+        };
+      }),
     productCandidates: productModels.slice(0, 50).map(({ id, name }) => ({
       id,
       name,
@@ -3238,24 +3364,31 @@ function mapHelperProposalToRows({
   locations: ImportLocationOption[];
 }): { rows: StaffImportRow[]; pdfSummary: StaffImportPdfSummary } {
   const pagesByRef = new Map(pdfPages.map((page) => [page.sourceRef, page]));
-  const categoriesById = new Map(
-    categories.map((category) => [category.id, category])
-  );
-  const locationsById = new Map(
-    locations.map((location) => [location.id, location])
-  );
   const rows = candidates.map((candidate, index): StaffImportRow => {
-    const category =
-      candidate.categorySuggestion.categoryId &&
-      candidate.categorySuggestion.confidence >= 0.8
-        ? categoriesById.get(candidate.categorySuggestion.categoryId)?.name ??
-          null
-        : null;
+    const evidence = {
+      manufacturer: candidate.manufacturer,
+      productName: candidate.productName,
+      rawDescription: candidate.evidence.map(({ text }) => text).join(" "),
+      description: candidate.description,
+      supplierDescription: candidate.description,
+      mpn: candidate.mpn,
+    };
+    const categorySelection = resolveImportCategorySuggestion({
+      claudeCategoryId: candidate.categorySuggestion.categoryId,
+      claudeConfidence: candidate.categorySuggestion.confidence,
+      evidence,
+      categories,
+    });
+    const category = categorySelection.category;
     const firstLocationSuggestion = candidate.locationSuggestions[0];
-    const selectedLocation =
-      firstLocationSuggestion && firstLocationSuggestion.confidence >= 0.8
-        ? locationsById.get(firstLocationSuggestion.locationId)
-        : undefined;
+    const locationSelection = resolveImportLocationSuggestion({
+      claudeLocationId: firstLocationSuggestion?.locationId,
+      claudeConfidence: firstLocationSuggestion?.confidence,
+      evidence,
+      category,
+      locations,
+    });
+    const selectedLocation = locationSelection.location;
     const sourceEvidence = candidate.evidence.flatMap((evidence) => {
       const page = pagesByRef.get(evidence.sourceRef);
       return page
@@ -3272,13 +3405,24 @@ function mapHelperProposalToRows({
       rowNumber: index + 2,
       title: candidate.productName,
       quantity: candidate.quantity,
-      category,
+      category: category?.name ?? null,
       location: selectedLocation?.pathLabel ?? null,
-      suggestedCategoryId: candidate.categorySuggestion.categoryId,
-      categorySuggestionConfidence: candidate.categorySuggestion.confidence,
-      suggestedLocationId: candidate.locationSuggestions[0]?.locationId ?? null,
+      suggestedCategoryId: category?.id ?? null,
+      categorySuggestionConfidence:
+        categorySelection.method === "claude"
+          ? candidate.categorySuggestion.confidence
+          : category
+          ? 0.9
+          : 0,
+      suggestedLocationId: selectedLocation?.id ?? null,
       locationSuggestionConfidence:
-        candidate.locationSuggestions[0]?.confidence ?? 0,
+        locationSelection.method === "claude"
+          ? firstLocationSuggestion?.confidence ?? 0
+          : selectedLocation
+          ? 0.9
+          : 0,
+      categorySuggestionMethod: categorySelection.method,
+      locationSuggestionMethod: locationSelection.method,
       type: candidate.trackingSuggestion.mode,
       supplierPartNumber: candidate.supplierProductNumber,
       sourceDescription: candidate.description,
@@ -3332,14 +3476,6 @@ function mapMouserInvoiceRows({
   const enrichedBySourceRef = new Map(
     (enrichedRows ?? []).map((row) => [row.sourceRef, row])
   );
-  const categoriesById = new Map(
-    categories.map((category) => [category.id, category])
-  );
-  const locationsById = new Map(
-    locations
-      .filter((location) => !location.operational)
-      .map((location) => [location.id, location])
-  );
   return lineItems.map((lineItem, index) => {
     const enriched = enrichedBySourceRef.get(lineItem.sourceRef);
     const sourceManufacturer = getMouserSourceManufacturer(
@@ -3360,27 +3496,51 @@ function mapMouserInvoiceRows({
       lineItem,
       manufacturer
     );
-    const category =
-      enriched &&
-      (enriched.categoryConfidence ?? enriched.confidence) >= 0.8 &&
-      enriched.categoryId
-        ? categoriesById.get(enriched.categoryId)?.name ?? null
-        : null;
-    const selectedLocation =
-      enriched?.locationId && (enriched.locationConfidence ?? 0) >= 0.8
-        ? locationsById.get(enriched.locationId)
-        : null;
+    const evidence = {
+      manufacturer,
+      productName: enriched?.productName ?? title,
+      rawDescription: lineItem.rawDescription,
+      description: enriched?.description,
+      supplierDescription: lineItem.rawDescription,
+      mpn: lineItem.mpn,
+    };
+    const categorySelection = resolveImportCategorySuggestion({
+      claudeCategoryId: enriched?.categoryId,
+      claudeConfidence: enriched?.categoryConfidence ?? enriched?.confidence,
+      evidence,
+      categories,
+    });
+    const category = categorySelection.category;
+    const locationSelection = resolveImportLocationSuggestion({
+      claudeLocationId: enriched?.locationId,
+      claudeConfidence: enriched?.locationConfidence,
+      evidence,
+      category,
+      locations,
+    });
+    const selectedLocation = locationSelection.location;
     return {
       rowNumber: index + 2,
       title,
       quantity: lineItem.shippedQuantity,
-      category,
+      category: category?.name ?? null,
       location: selectedLocation?.pathLabel ?? null,
-      suggestedCategoryId: enriched?.categoryId ?? null,
+      suggestedCategoryId: category?.id ?? null,
       categorySuggestionConfidence:
-        enriched?.categoryConfidence ?? enriched?.confidence ?? 0,
-      suggestedLocationId: enriched?.locationId ?? null,
-      locationSuggestionConfidence: enriched?.locationConfidence ?? 0,
+        categorySelection.method === "claude"
+          ? enriched?.categoryConfidence ?? enriched?.confidence ?? 0
+          : category
+          ? 0.9
+          : 0,
+      suggestedLocationId: selectedLocation?.id ?? null,
+      locationSuggestionConfidence:
+        locationSelection.method === "claude"
+          ? enriched?.locationConfidence ?? 0
+          : selectedLocation
+          ? 0.9
+          : 0,
+      categorySuggestionMethod: categorySelection.method,
+      locationSuggestionMethod: locationSelection.method,
       // Shelf resolves the default tracking type at Apply (quantity tracked
       // above one unit; individual for one unit). Staff can override in Edit.
       type: null,
@@ -3431,7 +3591,7 @@ async function enrichMouserLineItems({
       name: location.name,
       pathLabel: location.pathLabel,
       parentId: location.parentId,
-      description: location.description?.slice(0, 500) ?? null,
+      description: getLocationHelperDescription(location),
       hasChildren: locations.some(
         (candidate) => candidate.parentId === location.id
       ),
@@ -3443,23 +3603,14 @@ async function enrichMouserLineItems({
   ) {
     const lineItemBatch = lineItems
       .slice(start, start + MOUSER_ENRICHMENT_BATCH_SIZE)
-      .map(
-        ({
-          sourceRef,
-          sourcePage,
-          supplierProductNumber,
-          mpn,
-          rawDescription,
-          quantity,
-        }) => ({
-          sourceRef,
-          sourcePage,
-          supplierProductNumber,
-          mpn,
-          rawDescription,
-          quantity,
-        })
-      );
+      .map((lineItem) => ({
+        sourceRef: lineItem.sourceRef,
+        sourcePage: lineItem.sourcePage,
+        supplierProductNumber: lineItem.supplierProductNumber,
+        mpn: lineItem.mpn,
+        rawDescription: lineItem.rawDescription,
+        quantity: lineItem.shippedQuantity,
+      }));
     const helperRequest = createMouserEnrichmentRequest({
       fileSha256,
       lineItems: lineItemBatch,
@@ -3467,7 +3618,13 @@ async function enrichMouserLineItems({
       relevantLocations,
     });
     const helperResult = await requestImportHelperProposal(helperRequest);
-    if (helperResult.status !== "ready" || !("mode" in helperResult.proposal)) {
+    if (helperResult.status !== "ready") {
+      return null;
+    }
+    if (
+      !("mode" in helperResult.proposal) ||
+      helperResult.proposal.mode !== "MOUSER_LINE_ITEM_ENRICHMENT"
+    ) {
       return null;
     }
     enrichedRows.push(...helperResult.proposal.rows);
@@ -3515,16 +3672,14 @@ export async function prepareStaffInventoryImport({
         description: true,
         categoryId: true,
         assetModelId: true,
+        assetModel: { select: { defaultCategoryId: true } },
         assetLocations: {
           select: { locationId: true, quantity: true, assetKitId: true },
         },
       },
     }),
     getActiveCategoriesForOrganization({ organizationId }),
-    db.location.findMany({
-      where: { organizationId },
-      select: { id: true, name: true, parentId: true, description: true },
-    }),
+    getAllImportLocations(organizationId),
     db.category.findMany({
       where: { organizationId, id: { in: archivedCategoryIds } },
       select: { id: true, name: true, color: true },
@@ -3549,11 +3704,26 @@ export async function prepareStaffInventoryImport({
     pickupZoneName: PICKUP_ZONE_NAME,
     reportReturnPath,
   });
-  const locations: ImportLocationOption[] = rawLocations.map((location) => ({
+  const locationsWithoutAffinity: ImportLocationOption[] = rawLocations.map(
+    (location) => ({
+      ...location,
+      pathLabel: getImportLocationPath(location.id, rawLocations),
+      operational: operationalLocationIds.has(location.id),
+      currentUnits: occupancyByLocation.get(location.id) ?? 0,
+      categoryAffinities: [],
+    })
+  );
+  const categoryAffinitiesByLocation = buildImportLocationAffinities({
+    assets: assets.map((asset) => ({
+      ...asset,
+      modelDefaultCategoryId: asset.assetModel?.defaultCategoryId,
+    })),
+    categories,
+    locations: locationsWithoutAffinity,
+  });
+  const locations = locationsWithoutAffinity.map((location) => ({
     ...location,
-    pathLabel: getImportLocationPath(location.id, rawLocations),
-    operational: operationalLocationIds.has(location.id),
-    currentUnits: occupancyByLocation.get(location.id) ?? 0,
+    categoryAffinities: categoryAffinitiesByLocation.get(location.id) ?? [],
   }));
   const archivedCategoryCandidates = archivedCategories.map((category) => ({
     ...category,
@@ -3588,6 +3758,37 @@ export async function prepareStaffInventoryImport({
       enrichedRows,
       categories,
       locations,
+    });
+    Logger.info({
+      event: "ioio_staff_import_mouser_suggestion_resolution",
+      ...getImportCandidateDiagnostics(categories, locations),
+      rows: rows.map((row, index) => {
+        const claudeRow = enrichedRows?.[index];
+        return {
+          rowNumber: row.rowNumber,
+          claudeCategoryIdPresent: Boolean(claudeRow?.categoryId),
+          claudeCategoryIdAllowed: Boolean(
+            claudeRow?.categoryId &&
+              categories.some(
+                (category) => category.id === claudeRow.categoryId
+              )
+          ),
+          categoryConfidence: claudeRow?.categoryConfidence ?? 0,
+          claudeLocationIdPresent: Boolean(claudeRow?.locationId),
+          claudeLocationIdAssignable: Boolean(
+            claudeRow?.locationId &&
+              locations.some(
+                (location) =>
+                  location.id === claudeRow.locationId && !location.operational
+              )
+          ),
+          locationConfidence: claudeRow?.locationConfidence ?? 0,
+          resolvedCategory: Boolean(row.suggestedCategoryId),
+          resolvedLocation: Boolean(row.suggestedLocationId),
+          categorySelectionMethod: row.categorySuggestionMethod,
+          locationSelectionMethod: row.locationSuggestionMethod,
+        };
+      }),
     });
     pdfSummary = {
       validItemRows: rows.length,
@@ -3627,17 +3828,64 @@ export async function prepareStaffInventoryImport({
             : "no-line-items"
           : helperResult.reason,
     });
-    if (helperResult.status === "ready" && helperResult.proposal.rows.length) {
+    if (
+      helperResult.status === "ready" &&
+      !("mode" in helperResult.proposal) &&
+      helperResult.proposal.rows.length
+    ) {
+      const helperRows = helperResult.proposal.rows;
       const mapped = mapHelperProposalToRows({
-        candidates: helperResult.proposal.rows,
+        candidates: helperRows,
         pdfPages: parsed.pdfPages,
         categories,
         locations,
       });
+      Logger.info({
+        event: "ioio_staff_import_generic_suggestion_resolution",
+        ...getImportCandidateDiagnostics(categories, locations),
+        rows: mapped.rows.map((row, index) => {
+          const claudeRow = helperRows[index];
+          return {
+            rowNumber: row.rowNumber,
+            claudeCategoryIdPresent: Boolean(
+              claudeRow?.categorySuggestion.categoryId
+            ),
+            claudeCategoryIdAllowed: Boolean(
+              claudeRow?.categorySuggestion.categoryId &&
+                categories.some(
+                  (category) =>
+                    category.id === claudeRow.categorySuggestion.categoryId
+                )
+            ),
+            categoryConfidence: claudeRow?.categorySuggestion.confidence ?? 0,
+            claudeLocationIdPresent: Boolean(
+              claudeRow?.locationSuggestions[0]?.locationId
+            ),
+            claudeLocationIdAssignable: Boolean(
+              claudeRow?.locationSuggestions[0]?.locationId &&
+                locations.some(
+                  (location) =>
+                    location.id ===
+                      claudeRow.locationSuggestions[0]?.locationId &&
+                    !location.operational
+                )
+            ),
+            locationConfidence:
+              claudeRow?.locationSuggestions[0]?.confidence ?? 0,
+            resolvedCategory: Boolean(row.suggestedCategoryId),
+            resolvedLocation: Boolean(row.suggestedLocationId),
+            categorySelectionMethod: row.categorySuggestionMethod,
+            locationSelectionMethod: row.locationSuggestionMethod,
+          };
+        }),
+      });
       rows = mapped.rows;
       pdfSummary = mapped.pdfSummary;
       extractionProvider = "import-helper:v1";
-    } else if (helperResult.status === "ready") {
+    } else if (
+      helperResult.status === "ready" &&
+      !("mode" in helperResult.proposal)
+    ) {
       throw importError(
         "Claude could not confidently identify product line items in this document."
       );
@@ -3657,7 +3905,7 @@ export async function prepareStaffInventoryImport({
     categories,
     locations,
   });
-  const proposalRows = classifiedRows.map((classifiedRow, index) => {
+  const proposalRows = classifiedRows.map((classifiedRow) => {
     const categoryName =
       classifiedRow.category ?? classifiedRow.suggestedCategory ?? null;
     const categoryResolution = resolveImportCategory(
@@ -3692,37 +3940,7 @@ export async function prepareStaffInventoryImport({
                     categoryName ?? "(unnamed)"
                   }. Explicit approval and category:create permission are required.`,
           };
-    const helperCandidate = rows[index]?.helperCandidate;
-    if (!helperCandidate) return row;
-    const helperCategoryId =
-      helperCandidate.categorySuggestion.confidence >= 0.8
-        ? helperCandidate.categorySuggestion.categoryId
-        : null;
-    const helperLocationId =
-      (helperCandidate.locationSuggestions[0]?.confidence ?? 0) >= 0.8
-        ? helperCandidate.locationSuggestions[0]?.locationId
-        : null;
-    const helperCategory = categories.find(
-      (category) => category.id === helperCategoryId
-    );
-    const helperLocation = locations.find(
-      (location) => location.id === helperLocationId
-    );
-    return {
-      ...row,
-      categoryId: helperCategoryId ?? row.categoryId,
-      categoryLabel: helperCategory?.name ?? row.categoryLabel,
-      locationId: helperLocationId ?? row.locationId,
-      locationLabel: helperLocation?.pathLabel ?? row.locationLabel,
-      locationContext: helperLocation
-        ? {
-            currentUnits: helperLocation.currentUnits,
-            proposedUnits: row.quantity ?? 0,
-            capacity: null,
-            operational: helperLocation.operational,
-          }
-        : row.locationContext,
-    };
+    return row;
   });
   const operationId = randomUUID();
   const proposalContent: Omit<StaffImportProposal, "proposalHash"> = {

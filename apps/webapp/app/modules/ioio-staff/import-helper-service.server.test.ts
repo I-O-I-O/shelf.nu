@@ -39,16 +39,27 @@ function makeRequest(): ImportHelperRequest {
         },
       ],
     },
-    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+    activeCategories: [
+      {
+        id: "category-electronics",
+        name: "Electronics",
+        description: "General equipment",
+      },
+    ],
     relevantLocations: [
       {
         id: "location-storage",
+        name: "Shelf A",
         pathLabel: "IOIO Lab / Shelf A",
+        parentId: "location-lab",
+        description: "Storage for small electronics",
+        hasChildren: false,
         occupancy: {
           currentUnits: 18,
           proposedUnits: 5,
           capacity: null,
-          context: null,
+          context:
+            "Existing category placement: Development Boards: 31 assets, 31 units",
         },
       },
     ],
@@ -115,7 +126,24 @@ function makeMouserRequest() {
         quantity: 4,
       },
     ],
-    activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+    activeCategories: [
+      {
+        id: "category-electronics",
+        name: "Electronics",
+        description: "General equipment",
+      },
+    ],
+    relevantLocations: [
+      {
+        id: "location-sensor-drawer",
+        name: "Sensor drawer",
+        pathLabel: "IOIO Lab / Sensors / Sensor drawer",
+        description:
+          "Presence and distance sensors | Existing category placement: Sensors: 27 assets, 27 units",
+        parentId: "location-sensors",
+        hasChildren: false,
+      },
+    ],
   });
 }
 
@@ -528,6 +556,10 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).toContain("Keep supplierProductNumber separate from mpn");
     expect(prompt).toContain("Never interpret a price, line total");
     expect(prompt).toContain("otherwise categoryId must be null");
+    expect(prompt).toContain(
+      "category placement counts supplied in location occupancy context"
+    );
+    expect(prompt).toContain("Development Boards: 31 assets, 31 units");
     expect(prompt).toContain("Return no more than one question per row");
     expect(prompt).toContain("legal text, addresses, order metadata");
     expect(prompt).toContain("isolated numeric fragments");
@@ -548,12 +580,18 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).toContain("DO NOT summarize away identifying tokens");
     expect(prompt).toContain("Seeed Studio XIAO ESP32-S3");
     expect(prompt).toContain("Seeed Studio XIAO nRF52840 Sense");
-    expect(prompt).toContain(
-      "Development Boards category better than Electronics"
-    );
-    expect(prompt).toContain("Sensors category better than Electronics");
-    expect(prompt).toContain("Sensors drawer");
     expect(prompt).toContain("ASSIGNABLE SHELF LOCATIONS");
+    expect(prompt).toContain('"description":"General equipment"');
+    expect(prompt).toContain(
+      "category placement counts included with a location description"
+    );
+    expect(prompt).toContain("Sensors: 27 assets, 27 units");
+    expect(prompt).toContain(
+      '"pathLabel":"IOIO Lab / Sensors / Sensor drawer"'
+    );
+    expect(prompt).toContain("supplierDescription");
+    expect(prompt).toContain("shortened or imperfect productName");
+    expect(prompt).toContain("Use the organization's actual allowlist values");
     expect(prompt).not.toContain("trackingSuggestion");
     expect(prompt).not.toContain('"locationSuggestions"');
     expect(prompt).not.toContain('"trackingSuggestion"');

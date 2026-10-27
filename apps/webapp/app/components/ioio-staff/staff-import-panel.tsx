@@ -489,9 +489,33 @@ function StaffImportProposalView({
       reviewBadges[row.rowNumber].label
     )
   ).length;
-  const readyCount = proposal.rows.filter(
-    (row) => reviewBadges[row.rowNumber].label === "Ready"
-  ).length;
+  const readyCount = proposal.rows.filter((row) => {
+    if (reviewBadges[row.rowNumber].label !== "Ready") return false;
+    if (!isMouserInvoice) return true;
+    const decision = reviewDecisions[row.rowNumber];
+    const hasCategory = Boolean(
+      decision?.categoryId ||
+        (decision?.approveNewCategory && decision.newCategoryName?.trim())
+    );
+    return hasCategory && Boolean(decision?.locationId);
+  }).length;
+  const unresolvedCategoryCount = isMouserInvoice
+    ? proposal.rows.filter((row) => {
+        const decision = reviewDecisions[row.rowNumber];
+        return (
+          decision?.decision !== "IGNORE" &&
+          !decision?.categoryId &&
+          !(decision?.approveNewCategory && decision.newCategoryName?.trim())
+        );
+      }).length
+    : 0;
+  const unresolvedLocationCount = isMouserInvoice
+    ? proposal.rows.filter(
+        (row) =>
+          reviewDecisions[row.rowNumber]?.decision !== "IGNORE" &&
+          !reviewDecisions[row.rowNumber]?.locationId
+      ).length
+    : 0;
   const ignoredCount = proposal.rows.filter(
     (row) => reviewBadges[row.rowNumber].label === "Ignored"
   ).length;
@@ -811,6 +835,12 @@ function StaffImportProposalView({
           {proposal.rows.length === 1 ? "product" : "products"} found ·{" "}
           {reviewCount > 0 ? `${reviewCount} need review` : ""}
           {readyCount > 0 ? ` · ${readyCount} ready` : ""}
+          {unresolvedCategoryCount > 0
+            ? ` · ${unresolvedCategoryCount} unassigned category`
+            : ""}
+          {unresolvedLocationCount > 0
+            ? ` · ${unresolvedLocationCount} unassigned location`
+            : ""}
           {ignoredCount > 0 ? ` · ${ignoredCount} ignored` : ""}
         </p>
         {safeReviewRows.length > 0 ? (
@@ -823,6 +853,11 @@ function StaffImportProposalView({
           </button>
         ) : null}
       </div>
+      {isMouserInvoice ? (
+        <p className="mt-1 text-xs text-gray-500">
+          Location assignment is optional when applying the import.
+        </p>
+      ) : null}
 
       {(proposal.pdfSummary?.unresolvedLines ?? 0) > 0 ? (
         <p className="mt-2 text-sm text-amber-800">
