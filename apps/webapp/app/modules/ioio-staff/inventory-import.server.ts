@@ -74,6 +74,8 @@ import {
   resolveImportReviewState,
   type StaffImportReviewState,
 } from "./import-review";
+import { PDF_OCR_MAX_PAGES, PdfOcrError, ocrPdfPages } from "./pdf-ocr.server";
+import { pdfjsResourceUrl } from "./pdfjs-runtime.server";
 
 export const STAFF_IMPORT_OPERATION = "INVENTORY_IMPORT";
 export const STAFF_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
@@ -142,6 +144,10 @@ export type StaffImportRow = {
   receivedQuantity?: number | null;
   quantityStatus?: ProcurementQuantityStatus;
   enrichmentConfidence?: number;
+  suggestedCategoryId?: string | null;
+  categorySuggestionConfidence?: number;
+  suggestedLocationId?: string | null;
+  locationSuggestionConfidence?: number;
   categoryConfidence?: "High" | "Medium" | "Low";
   categoryReason?: string;
   reviewRequired?: boolean;
@@ -228,7 +234,7 @@ export type StaffImportProposal = {
   rows: StaffImportProposalRow[];
   counts: Record<StaffImportAction, number>;
   createdAt: string;
-  categoryOptions?: Array<NamedRecord & { archived?: boolean }>;
+  categoryOptions?: Array<NamedRecord & { color?: string; archived?: boolean }>;
   locationOptions?: ImportLocationOption[];
   pdfSummary?: StaffImportPdfSummary;
 };
@@ -428,7 +434,7 @@ function matchesExpectedAssetState(
   );
 }
 
-type NamedRecord = { id: string; name: string };
+type NamedRecord = { id: string; name: string; description?: string | null };
 type ImportLocationOption = NamedRecord & {
   parentId: string | null;
   pathLabel: string;
@@ -498,12 +504,15 @@ const PRIVATE_HEADER =
   /borrower|borrowed by|email|e-mail|student|phone|contact|lending.?id|user.?id|auth|role/i;
 const IGNORED_HEADER =
   /price|value|vat|tax|invoice|subtotal|total|address|payment|currency|account|page/i;
-const PDF_SCANNED_MESSAGE =
-  "This PDF appears to be scanned. Scanned-PDF OCR is not supported yet.";
 const PDF_AI_ANALYSIS_REQUIRED_MESSAGE =
   "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items.";
-const PDF_TEXT_EXTRACTION_UNSUPPORTED_MESSAGE =
-  "This PDF contains a text layer, but readable text could not be extracted. Re-export it as a text-searchable PDF and try again.";
+const PDF_OCR_REQUIRED_MESSAGE =
+  "This PDF requires OCR before it can be analyzed.";
+const PDF_OCR_UNRECOVERABLE_MESSAGE =
+  "Readable text could not be recovered from this PDF.";
+const PDF_OCR_PAGE_LIMIT_MESSAGE = `This PDF exceeds the ${PDF_OCR_MAX_PAGES}-page limit for OCR analysis.`;
+const PDF_OCR_BUSY_MESSAGE =
+  "PDF analysis is busy. Please try again in a moment.";
 
 function importError(message: string) {
   return new ShelfError({
@@ -645,7 +654,24 @@ function extractPdfStrings(value: string) {
 
 type ExtractedPdfPage = ImportHelperRequest["document"]["pages"][number];
 
-type PdfTextDiagnostics = {
+type PositionedPdfTextItem = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  page: number;
+};
+
+type PositionedPdfPage = {
+  sourceRef: string;
+  page: number;
+  items: PositionedPdfTextItem[];
+};
+
+type PdfExtractorName = "primary" | "pdfjs" | "ocr";
+
+type PdfTextMetrics = {
   pageCount: number;
   extractedCharsPerPage: number[];
   totalExtractedChars: number;
@@ -653,8 +679,29 @@ type PdfTextDiagnostics = {
   hasTextLayerEvidence: boolean;
 };
 
+type PdfExtractorAttempt = PdfTextMetrics & {
+  extractor: PdfExtractorName;
+  status:
+    | "readable"
+    | "empty"
+    | "error"
+    | "unavailable"
+    | "page-limit"
+    | "timeout"
+    | "busy";
+};
+
+type PdfTextDiagnostics = PdfTextMetrics & {
+  selectedExtractor: PdfExtractorName | null;
+  extractorAttempts: PdfExtractorAttempt[];
+  ocrPagesAttempted: number;
+  ocrPagesSuccessful: number;
+};
+
 type PdfPageExtraction = {
   pages: ExtractedPdfPage[];
+  positionedPages?: PositionedPdfPage[];
+  positionedExtractor?: "pdfjs" | "ocr";
   diagnostics: PdfTextDiagnostics;
 };
 
@@ -691,10 +738,14 @@ function getPdfTextDiagnostics(
   pages: readonly ExtractedPdfPage[],
   pageCount = pages.length,
   hasTextLayerEvidence = false
-): PdfTextDiagnostics {
-  const extractedCharsPerPage = pages.map(({ text }) => text.length);
+): PdfTextMetrics {
+  const diagnosticPageCount = pageCount || pages.length;
+  const extractedCharsPerPage = Array.from(
+    { length: diagnosticPageCount },
+    (_, index) => pages[index]?.text.length ?? 0
+  );
   return {
-    pageCount,
+    pageCount: diagnosticPageCount,
     extractedCharsPerPage,
     totalExtractedChars: extractedCharsPerPage.reduce(
       (total, count) => total + count,
@@ -709,6 +760,10 @@ function getPdfTextDiagnostics(
       ) >= 3,
     hasTextLayerEvidence,
   };
+}
+
+function isMeaningfulPdfText(diagnostics: PdfTextMetrics) {
+  return diagnostics.pageCount > 0 && diagnostics.meaningfulText;
 }
 
 function extractPdfObjectText(objectBody: string) {
@@ -747,7 +802,10 @@ function extractPdfObjectText(objectBody: string) {
   };
 }
 
-function extractPdfPages(buffer: Buffer): PdfPageExtraction {
+function extractPdfPagesPrimary(buffer: Buffer): {
+  pages: ExtractedPdfPage[];
+  diagnostics: PdfTextMetrics;
+} {
   if (!buffer.subarray(0, 5).toString("ascii").startsWith("%PDF-")) {
     throw importError("The uploaded file is not a valid PDF.");
   }
@@ -837,35 +895,346 @@ function extractPdfPages(buffer: Buffer): PdfPageExtraction {
     pageCount || extractionPages.length,
     hasTextLayerEvidence
   );
-  if (!diagnostics.pageCount || !diagnostics.meaningfulText) {
-    Logger.info({
-      event: "ioio_staff_import_pdf_text_extracted",
-      ...diagnostics,
-      detectedVendorParser: null,
-      genericClaudeFallbackInvoked: false,
-      classification: !diagnostics.pageCount
-        ? "unreadable"
-        : diagnostics.hasTextLayerEvidence
-        ? "text-layer-unreadable"
-        : "scanned-or-no-readable-text",
-    });
-    if (!diagnostics.pageCount) {
-      throw importError(
-        "This PDF's page structure could not be read. Export it again as a standard PDF and retry."
-      );
-    }
-    if (diagnostics.hasTextLayerEvidence) {
-      throw importError(PDF_TEXT_EXTRACTION_UNSUPPORTED_MESSAGE);
-    }
-    throw importError(PDF_SCANNED_MESSAGE);
-  }
   return {
-    pages: extractionPages.filter((page) => page.text.length > 0),
+    pages: extractionPages,
     diagnostics,
   };
 }
 
+type PdfJsTextItem = {
+  str?: string;
+  transform?: number[];
+  width?: number;
+  height?: number;
+  hasEOL?: boolean;
+};
+
+function normalizePdfJsPageText(value: string) {
+  return value
+    .split("\u0000")
+    .join("")
+    .replace(/[\u00a0\u2007\u202f]/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function reconstructPdfJsText(items: readonly PdfJsTextItem[]) {
+  let text = "";
+  let previous: PdfJsTextItem | null = null;
+  let previousXEnd: number | null = null;
+  let previousY: number | null = null;
+
+  for (const item of items) {
+    const value = item.str ?? "";
+    if (!value) continue;
+
+    const x = item.transform?.[4];
+    const y = item.transform?.[5];
+    const itemHeight = Math.abs(item.height ?? item.transform?.[3] ?? 12);
+    const previousHeight = Math.abs(
+      previous?.height ?? previous?.transform?.[3] ?? itemHeight
+    );
+    const isNewLine =
+      previous !== null &&
+      (previous.hasEOL === true ||
+        (typeof y === "number" &&
+          typeof previousY === "number" &&
+          Math.abs(y - previousY) > Math.max(2, itemHeight * 0.45)));
+
+    if (isNewLine) {
+      text += "\n";
+    } else if (
+      text.length > 0 &&
+      typeof x === "number" &&
+      previousXEnd !== null &&
+      x - previousXEnd >
+        Math.max(1.5, Math.min(itemHeight, previousHeight) * 0.16)
+    ) {
+      text += " ";
+    } else if (
+      text.length > 0 &&
+      (typeof x !== "number" || previousXEnd === null) &&
+      !/[\s]$/.test(text) &&
+      !/^[\s]/.test(value)
+    ) {
+      text += " ";
+    }
+
+    text += value;
+    previousXEnd =
+      typeof x === "number" && typeof item.width === "number"
+        ? x + item.width
+        : null;
+    previousY = typeof y === "number" ? y : null;
+    previous = item;
+  }
+
+  return normalizePdfJsPageText(text);
+}
+
+async function extractPdfPagesWithPdfJs(buffer: Buffer) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(buffer),
+    cMapUrl: pdfjsResourceUrl("cmaps"),
+    cMapPacked: true,
+    standardFontDataUrl: pdfjsResourceUrl("standard_fonts"),
+    useSystemFonts: true,
+    isEvalSupported: false,
+    verbosity: 0,
+  });
+
+  let pageCount = 0;
+  let hasTextLayerEvidence = false;
+  try {
+    const document = await loadingTask.promise;
+    pageCount = document.numPages;
+    if (pageCount > STAFF_IMPORT_MAX_PAGES) {
+      throw importError(
+        `The PDF contains more than ${STAFF_IMPORT_MAX_PAGES} pages.`
+      );
+    }
+
+    const pages: ExtractedPdfPage[] = [];
+    const positionedPages: PositionedPdfPage[] = [];
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const items = content.items as PdfJsTextItem[];
+      hasTextLayerEvidence ||= items.some((item) => Boolean(item.str));
+      positionedPages.push({
+        sourceRef: `pdf-page-${pageNumber}`,
+        page: pageNumber,
+        items: items.flatMap((item) => {
+          const text = item.str?.trim();
+          const x = item.transform?.[4];
+          const y = item.transform?.[5];
+          if (
+            !text ||
+            typeof x !== "number" ||
+            typeof y !== "number" ||
+            !Number.isFinite(x) ||
+            !Number.isFinite(y)
+          ) {
+            return [];
+          }
+          return [
+            {
+              text,
+              x,
+              y,
+              width: Math.abs(item.width ?? 0),
+              height: Math.abs(item.height ?? item.transform?.[3] ?? 0),
+              page: pageNumber,
+            },
+          ];
+        }),
+      });
+      pages.push({
+        sourceRef: `pdf-page-${pageNumber}`,
+        page: pageNumber,
+        text: reconstructPdfJsText(items),
+      });
+    }
+
+    return {
+      pages,
+      positionedPages,
+      diagnostics: getPdfTextDiagnostics(
+        pages,
+        pageCount,
+        hasTextLayerEvidence
+      ),
+    };
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+function createPdfExtractorAttempt(
+  extractor: PdfExtractorName,
+  diagnostics: PdfTextMetrics,
+  status?: PdfExtractorAttempt["status"]
+): PdfExtractorAttempt {
+  return {
+    extractor,
+    ...diagnostics,
+    status: status ?? (diagnostics.meaningfulText ? "readable" : "empty"),
+  };
+}
+
+async function extractPdfPages(buffer: Buffer): Promise<PdfPageExtraction> {
+  const primary = extractPdfPagesPrimary(buffer);
+  const primaryAttempt = createPdfExtractorAttempt(
+    "primary",
+    primary.diagnostics
+  );
+  if (isMeaningfulPdfText(primary.diagnostics)) {
+    return {
+      pages: primary.pages,
+      diagnostics: {
+        ...primary.diagnostics,
+        selectedExtractor: "primary",
+        extractorAttempts: [primaryAttempt],
+        ocrPagesAttempted: 0,
+        ocrPagesSuccessful: 0,
+      },
+    };
+  }
+
+  let secondary: Awaited<ReturnType<typeof extractPdfPagesWithPdfJs>> | null =
+    null;
+  let secondaryAttempt: PdfExtractorAttempt;
+  try {
+    secondary = await extractPdfPagesWithPdfJs(buffer);
+    secondaryAttempt = createPdfExtractorAttempt(
+      "pdfjs",
+      secondary.diagnostics
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("more than")) {
+      throw error;
+    }
+    secondaryAttempt = createPdfExtractorAttempt(
+      "pdfjs",
+      getPdfTextDiagnostics(
+        [],
+        primary.diagnostics.pageCount,
+        primary.diagnostics.hasTextLayerEvidence
+      ),
+      "error"
+    );
+  }
+
+  const secondaryDiagnostics = secondary?.diagnostics;
+  const pageCount = Math.max(
+    primary.diagnostics.pageCount,
+    secondaryDiagnostics?.pageCount ?? 0
+  );
+  const hasTextLayerEvidence =
+    primary.diagnostics.hasTextLayerEvidence ||
+    Boolean(secondaryDiagnostics?.hasTextLayerEvidence);
+  const pages = secondary?.pages ?? primary.pages;
+  const finalMetrics = getPdfTextDiagnostics(
+    pages,
+    pageCount || pages.length,
+    hasTextLayerEvidence
+  );
+  const diagnostics: PdfTextDiagnostics = {
+    ...finalMetrics,
+    selectedExtractor: secondaryDiagnostics?.meaningfulText ? "pdfjs" : null,
+    extractorAttempts: [primaryAttempt, secondaryAttempt],
+    ocrPagesAttempted: 0,
+    ocrPagesSuccessful: 0,
+  };
+
+  if (isMeaningfulPdfText(finalMetrics)) {
+    return {
+      pages,
+      ...(secondary?.positionedPages?.length
+        ? {
+            positionedPages: secondary.positionedPages,
+            positionedExtractor: "pdfjs" as const,
+          }
+        : {}),
+      diagnostics,
+    };
+  }
+
+  if (!diagnostics.pageCount) {
+    Logger.info({
+      event: "ioio_staff_import_pdf_text_extracted",
+      ...diagnostics,
+      classification: "unreadable",
+      detectedVendorParser: null,
+      genericClaudeFallbackInvoked: false,
+    });
+    throw importError(
+      "This PDF's page structure could not be read. Export it again as a standard PDF and retry."
+    );
+  }
+
+  let ocrResult: Awaited<ReturnType<typeof ocrPdfPages>> | null = null;
+  let ocrFailure: PdfOcrError | null = null;
+  try {
+    ocrResult = await ocrPdfPages(buffer);
+  } catch (error) {
+    ocrFailure =
+      error instanceof PdfOcrError ? error : new PdfOcrError("failed");
+  }
+
+  const recoveredOcrPages = ocrResult?.pages ?? [];
+  const recoveredPages: ExtractedPdfPage[] = recoveredOcrPages.map(
+    ({ sourceRef, page, text }) => ({ sourceRef, page, text })
+  );
+  const recoveredPageCount = Math.max(
+    pageCount,
+    ocrResult?.pageCount ?? ocrFailure?.pageCount ?? 0
+  );
+  const recoveredMetrics = getPdfTextDiagnostics(
+    recoveredPages,
+    recoveredPageCount,
+    hasTextLayerEvidence
+  );
+  const ocrAttempt = createPdfExtractorAttempt(
+    "ocr",
+    recoveredMetrics,
+    (ocrFailure?.code === "failed" ? "error" : ocrFailure?.code) ??
+      (recoveredMetrics.meaningfulText ? "readable" : "empty")
+  );
+  const finalDiagnostics: PdfTextDiagnostics = {
+    ...recoveredMetrics,
+    selectedExtractor: recoveredMetrics.meaningfulText ? "ocr" : null,
+    extractorAttempts: [primaryAttempt, secondaryAttempt, ocrAttempt],
+    ocrPagesAttempted:
+      ocrResult?.ocrPagesAttempted ?? ocrFailure?.ocrPagesAttempted ?? 0,
+    ocrPagesSuccessful:
+      ocrResult?.ocrPagesSuccessful ?? ocrFailure?.ocrPagesSuccessful ?? 0,
+  };
+
+  if (isMeaningfulPdfText(recoveredMetrics)) {
+    return {
+      pages: recoveredPages,
+      positionedPages: recoveredOcrPages.map(
+        ({ sourceRef, page, positionedItems = [] }) => ({
+          sourceRef,
+          page,
+          items: positionedItems,
+        })
+      ),
+      positionedExtractor: "ocr",
+      diagnostics: finalDiagnostics,
+    };
+  }
+
+  const classification = ocrFailure
+    ? `ocr-${ocrFailure.code}`
+    : "ocr-no-readable-text";
+  Logger.info({
+    event: "ioio_staff_import_pdf_text_extracted",
+    ...finalDiagnostics,
+    classification,
+    detectedVendorParser: null,
+    genericClaudeFallbackInvoked: false,
+  });
+
+  if (ocrFailure?.code === "unavailable") {
+    throw importError(PDF_OCR_REQUIRED_MESSAGE);
+  }
+  if (ocrFailure?.code === "page-limit") {
+    throw importError(PDF_OCR_PAGE_LIMIT_MESSAGE);
+  }
+  if (ocrFailure?.code === "busy") {
+    throw importError(PDF_OCR_BUSY_MESSAGE);
+  }
+  throw importError(PDF_OCR_UNRECOVERABLE_MESSAGE);
+}
+
 export type MouserInvoiceLineItem = MouserLineItemInput & {
+  lineNumber: number;
   orderedQuantity: number;
   shippedQuantity: number;
   pendingQuantity: number;
@@ -876,12 +1245,19 @@ export type MouserInvoiceParseResult = {
   detected: boolean;
   lineItems: MouserInvoiceLineItem[];
   unresolvedLines: number;
+  detectedLineNumbers: number[];
+  detectedSupplierSkus: string[];
+  positionSource: "pdfjs" | "ocr" | "text";
 };
 
 const MOUSER_SKU_PATTERN = /\b\d{3}-[A-Z0-9][A-Z0-9_-]{5,}\b/i;
 const MOUSER_SKU_GLOBAL_PATTERN = /\b\d{3}-[A-Z0-9][A-Z0-9_-]{5,}\b/gi;
 const MOUSER_MPN_LABEL_PATTERN =
-  /(?:tillv\.?\s*artikelnr|kundens\/tillv\.?\s*artikelnr|mfr\.?\s*part(?:\s*(?:number|no\.?))?|manufacturer\s*part(?:\s*(?:number|no\.?))?|mpn)\s*[:#-]?\s*(.*)$/i;
+  /^(?:kundens\s*\/\s*t\s*illv|t\s*illv|manufacturer\s+part(?:\s+(?:number|no\.?))?|mfg\s+part(?:\s+(?:number|no\.?))?|mpn)\s*\.?\s*artikelnr?\s*[:#-]?\s*(.*)$/i;
+const MOUSER_GENERAL_MPN_LABEL_PATTERN =
+  /^(?:manufacturer\s+part(?:\s+(?:number|no\.?))?|mfg\s+part(?:\s+(?:number|no\.?))?|mpn)\s*[:#-]?\s*(.*)$/i;
+const MOUSER_MPN_FIELD_PATTERN =
+  /(?:\b(?:kundens\s*\/\s*)?t\s*illv\s*\.?\s*(?:artikelnr?\.?|artikelnummer)|\bmanufacturer\s+part(?:\s+(?:number|no\.?))?|\bmfg\s+part(?:\s+(?:number|no\.?))?|\bmpn)\s*[:#-]?\s*((?=[A-Z0-9./_-]{3,})(?=[A-Z0-9./_-]*(?:\d|[./_-]))[A-Z0-9][A-Z0-9./_-]*)?/i;
 const MOUSER_HEADER_LABELS = new Set([
   "radnr",
   "line no",
@@ -895,59 +1271,81 @@ const MOUSER_HEADER_LABELS = new Set([
   "beskrivning",
   "description",
   "ordered",
+  "quantity ordered",
   "shipped",
+  "quantity shipped",
   "pending",
+  "quantity pending",
   "price",
+  "unit price",
   "total",
+  "extended price",
   "continued",
   "fortsätter",
 ]);
+const MOUSER_REGULATORY_PREFIX_PATTERN =
+  /^\s*(?:US\s+HTS|HTS(?:\s+code)?|TARIC|ECCN|COO|Country\s+of\s+Origin|ACO|COD|VAT|Tax|Freight)\s*[:#-]?/i;
+
+type MouserLineAnchor = {
+  lineNumber: number;
+  supplierProductNumber: string;
+  page: number;
+  sourceRef: string;
+  lineIndex: number;
+  skuIndex: number;
+  y?: number;
+  skuX?: number;
+  lineItems?: PositionedPdfTextItem[];
+};
+
+type MouserPositionedLine = {
+  y: number;
+  items: PositionedPdfTextItem[];
+  text: string;
+};
+
+type MouserHeaderCenters = {
+  lineNumber: number | null;
+  supplier: number | null;
+  ordered: number | null;
+  shipped: number | null;
+  pending: number | null;
+  price: number | null;
+};
 
 function normalizeMouserLabel(value: string) {
   return value
     .trim()
     .toLocaleLowerCase("en")
-    .replace(/[.:]+$/g, "")
+    .replace(/\s*([.:])\s*/g, "$1")
     .replace(/\s+/g, " ");
+}
+
+function compactMouserLabel(value: string) {
+  return normalizeMouserLabel(value).replace(/[^a-z0-9]/g, "");
+}
+
+const MOUSER_HEADER_LABELS_COMPACT = new Set(
+  [...MOUSER_HEADER_LABELS].map(compactMouserLabel)
+);
+
+function isMouserHeaderLine(value: string) {
+  return MOUSER_HEADER_LABELS_COMPACT.has(compactMouserLabel(value));
+}
+
+function isMouserRegulatoryLine(value: string) {
+  return MOUSER_REGULATORY_PREFIX_PATTERN.test(value.trim());
 }
 
 function isMouserNoiseFragment(value: string) {
   const normalized = normalizeMouserLabel(value);
   return (
     !normalized ||
-    MOUSER_HEADER_LABELS.has(normalized) ||
+    isMouserHeaderLine(value) ||
     /^(?:page\s+)?\d+\s*(?:of|\/)\s*\d+$/i.test(normalized) ||
-    /^(?:taric|hts|eccn|coo|country of origin|vat|tax|freight)\b/i.test(
-      normalized
-    ) ||
+    isMouserRegulatoryLine(value) ||
+    /^continued\b|^fortsätter\b/i.test(normalized) ||
     /^[€$£]?\s*\d{1,3}(?:[,.]\d{2,4})\s*[€$£]?$/u.test(value.trim())
-  );
-}
-
-function splitMouserPdfFragments(
-  pages: ExtractedPdfPage[]
-): Array<{ text: string; page: number; sourceRef: string }> {
-  return pages.flatMap((page) =>
-    page.text.split(/\r?\n/).flatMap((rawLine) => {
-      const matches = [...rawLine.matchAll(MOUSER_SKU_GLOBAL_PATTERN)];
-      if (!matches.length) {
-        return [
-          { text: rawLine.trim(), page: page.page, sourceRef: page.sourceRef },
-        ];
-      }
-      const fragments: string[] = [];
-      let start = 0;
-      for (const match of matches) {
-        const index = match.index ?? 0;
-        if (index > start) fragments.push(rawLine.slice(start, index).trim());
-        fragments.push(match[0]);
-        start = index + match[0].length;
-      }
-      if (start < rawLine.length) fragments.push(rawLine.slice(start).trim());
-      return fragments
-        .filter(Boolean)
-        .map((text) => ({ text, page: page.page, sourceRef: page.sourceRef }));
-    })
   );
 }
 
@@ -983,109 +1381,267 @@ function findMouserQuantityTriple(lines: string[]) {
   return null;
 }
 
-function extractMouserMpn(lines: string[]) {
-  for (let index = 1; index < lines.length; index += 1) {
-    const match = MOUSER_MPN_LABEL_PATTERN.exec(lines[index] ?? "");
-    if (!match) continue;
-    const inlineValue = match[1]?.trim();
-    if (inlineValue) {
-      return inlineValue.split(/\s+/)[0]?.replace(/[,;.]$/, "") ?? null;
-    }
-    const next = lines[index + 1]?.trim();
-    if (
-      next &&
-      !MOUSER_SKU_PATTERN.test(next) &&
-      /^(?=.*\d)[A-Z0-9][A-Z0-9./_-]{2,}$/i.test(next)
-    ) {
-      return next;
-    }
-    return null;
+function parseMouserMpnValue(value: string) {
+  return /^([A-Z0-9][A-Z0-9./_-]{2,})/i.exec(value.trim())?.[1] ?? null;
+}
+
+function extractMouserDescription(
+  lines: readonly string[],
+  supplierSku: string
+) {
+  let mpn: string | null = null;
+  const sourceText = lines
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line && !isMouserNoiseFragment(line))
+    .join(" ")
+    .replace(/\s+([.:])/g, "$1")
+    .replace(MOUSER_SKU_GLOBAL_PATTERN, " ");
+  const mpnField = MOUSER_MPN_FIELD_PATTERN.exec(sourceText);
+  let descriptionText = sourceText;
+  if (mpnField?.[0]) {
+    mpn = parseMouserMpnValue(mpnField[1] ?? "");
+    descriptionText = `${sourceText.slice(
+      0,
+      mpnField.index
+    )} ${sourceText.slice(mpnField.index + mpnField[0].length)}`;
   }
-  return null;
+  const rawDescription = cleanMouserDescription(
+    descriptionText
+      .split(/\s+/)
+      .filter((fragment) => fragment && !/^\d+$/u.test(fragment))
+      .join(" ")
+  );
+  const metadataLeaked =
+    MOUSER_MPN_LABEL_PATTERN.test(rawDescription) ||
+    MOUSER_GENERAL_MPN_LABEL_PATTERN.test(rawDescription) ||
+    isMouserRegulatoryLine(rawDescription);
+  if (
+    rawDescription.length < 3 ||
+    metadataLeaked ||
+    normalizeMouserLabel(rawDescription) ===
+      normalizeMouserLabel(supplierSku) ||
+    (mpn && normalizeMouserLabel(rawDescription) === normalizeMouserLabel(mpn))
+  ) {
+    return { mpn, rawDescription: "" };
+  }
+  return { mpn, rawDescription };
 }
 
 function cleanMouserDescription(value: string) {
   return value
     .replace(
-      /\s*(?:[,;|–—-]\s*)?(?:TARIC|HTS(?:\s+code)?|ECCN|COO|Country of Origin)\s*[:#-]?\s*[A-Z0-9./-]+(?:\s+.*)?$/i,
+      /\s*[,;|–—-]?\s*\b(?:US\s+HTS|HTS(?:\s+code)?|TARIC|ECCN|COO|Country\s+of\s+Origin|ACO|COD|VAT|Tax|Freight)\s*[:#-]?\s*[A-Z0-9./-]+(?:\s+.*)?$/i,
       ""
     )
     .replace(/\s+/g, " ")
     .trim();
 }
 
-export function parseMouserInvoicePages(
-  pages: readonly ExtractedPdfPage[]
-): MouserInvoiceParseResult {
-  const documentText = pages.map((page) => page.text).join("\n");
-  const hasMouserHeader =
-    /mousers?\s+artikelnummer|mouser(?:\s+electronics)?\s+part\s+(?:number|no\.?)/i.test(
-      documentText
-    );
-  const hasFulfilmentColumns =
-    /\bordered\b/i.test(documentText) &&
-    /\bshipped\b/i.test(documentText) &&
-    /\bpending\b/i.test(documentText);
-  if (!hasMouserHeader || !hasFulfilmentColumns) {
-    return { detected: false, lineItems: [], unresolvedLines: 0 };
+function cleanMouserProductTitle(
+  value: string,
+  lineItem: MouserInvoiceLineItem
+) {
+  let title = cleanMouserDescription(value)
+    .replace(/\s+([.:])/g, "$1")
+    .trim();
+  for (const identifier of [lineItem.supplierProductNumber, lineItem.mpn]) {
+    if (!identifier) continue;
+    const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    title = title.replace(new RegExp(`^${escaped}\\s*[-:|]?\\s*`, "i"), "");
+  }
+  if (
+    title.length < 3 ||
+    isMouserNoiseFragment(title) ||
+    MOUSER_MPN_LABEL_PATTERN.test(title) ||
+    MOUSER_GENERAL_MPN_LABEL_PATTERN.test(title) ||
+    /\bt\s*illv\s*\.?\s*artikelnr\b/i.test(title) ||
+    /\b(?:TARIC|US\s+HTS|HTS|ECCN|COO|ACO|COD)\s*[:#-]?/i.test(title) ||
+    normalizeMouserLabel(title) ===
+      normalizeMouserLabel(lineItem.supplierProductNumber) ||
+    (lineItem.mpn &&
+      normalizeMouserLabel(title) === normalizeMouserLabel(lineItem.mpn))
+  ) {
+    return null;
+  }
+  return normalizeMouserTitleText(title);
+}
+
+function normalizeMouserTitleText(value: string) {
+  let title = value
+    // Mouser often places a translated description after a slash. Keep the
+    // source-language product identity before that procurement translation.
+    .split(/\s+\/\s+/u, 1)[0]!
+    .replace(/\s+\((?:pre-soldered)\)\s*$/i, "")
+    .replace(
+      /\s+(?:(?:multi[- ]?protocol|ARM)\s+)?development\s+(?:tool|board)\s*$/i,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Some Mouser descriptions repeat the manufacturer before the family name.
+  // Collapse only an identical repeated leading phrase.
+  while (/^(.+?)\s+\1(?=\s|$)/i.test(title)) {
+    title = title.replace(/^(.+?)\s+\1(?=\s|$)/i, "$1");
+  }
+  return title;
+}
+
+function getMouserIdentityTokens(value: string) {
+  const patterns = [
+    /\bSeeed\s+Studio\b/gi,
+    /\bXIAO\s+ES\b/gi,
+    /\bXIAO\b/gi,
+    /\b(?:nRF\s*-?\s*\d{4,}|ESP32\s*-?\s*[SC]\d{1,2}|MR\d{2}[A-Z]{2,}\d+)\b/gi,
+    /\b\d{2}\s*GHz\b/gi,
+    /\bmmWave\b/gi,
+    /\bSense\b/gi,
+    /\bHuman\s+Presence\b/gi,
+    /\bBreathing\b/gi,
+    /\bHeartbeat\b/gi,
+    /\bFall\s+Detection\b/gi,
+    /\bSensors?\b/gi,
+  ];
+  return patterns.flatMap((pattern) =>
+    Array.from(value.matchAll(pattern), ([token]) =>
+      token.toLocaleLowerCase().replace(/[^a-z0-9]/g, "")
+    )
+  );
+}
+
+function getMouserSourceManufacturer(value: string) {
+  if (/^Seeed\s+Studio\b/i.test(value.trim())) return "Seeed Studio";
+  const firstIdentityIndex = value.search(
+    /\b(?:XIAO|nRF\s*-?\s*\d{4,}|ESP32\s*-?\s*[SC]\d{1,2}|MR\d{2}[A-Z]{2,}\d+|\d{2}\s*GHz)\b/i
+  );
+  if (firstIdentityIndex <= 0) return null;
+  const leadingName = normalizeMouserTitleText(
+    value.slice(0, firstIdentityIndex).trim()
+  );
+  return leadingName && leadingName.split(/\s+/u).length <= 4
+    ? leadingName
+    : null;
+}
+
+function preservesMouserProductIdentity(
+  candidate: string,
+  lineItem: MouserInvoiceLineItem,
+  manufacturer: string | null
+) {
+  const normalizedCandidate = candidate
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  const sourceTokens = getMouserIdentityTokens(lineItem.rawDescription);
+  const candidateTokens = getMouserIdentityTokens(candidate);
+  if (
+    sourceTokens.some((token) => !normalizedCandidate.includes(token)) ||
+    candidateTokens.some((token) => !sourceTokens.includes(token))
+  ) {
+    return false;
   }
 
-  const fragments = splitMouserPdfFragments(pages);
-  const starts: number[] = [];
-  fragments.forEach((fragment, index) => {
-    if (MOUSER_SKU_PATTERN.test(fragment.text)) starts.push(index);
+  if (
+    manufacturer &&
+    !normalizedCandidate.startsWith(
+      manufacturer.toLocaleLowerCase().replace(/[^a-z0-9]/g, "")
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function resolveMouserProductName(
+  enrichedName: string | null,
+  lineItem: MouserInvoiceLineItem,
+  manufacturer: string | null
+) {
+  const sourceName = cleanMouserProductTitle(lineItem.rawDescription, lineItem);
+  if (!sourceName) return lineItem.rawDescription;
+
+  const cleanedEnrichedName = enrichedName
+    ? cleanMouserProductTitle(enrichedName, lineItem)
+    : null;
+  return cleanedEnrichedName &&
+    preservesMouserProductIdentity(cleanedEnrichedName, lineItem, manufacturer)
+    ? cleanedEnrichedName
+    : sourceName;
+}
+
+function buildMouserTextLines(pages: readonly ExtractedPdfPage[]) {
+  return pages.flatMap((page) =>
+    page.text.split(/\r?\n/).map((text, index) => ({
+      text: text.trim(),
+      page: page.page,
+      sourceRef: page.sourceRef,
+      index,
+    }))
+  );
+}
+
+function collectMouserTextAnchors(pages: readonly ExtractedPdfPage[]) {
+  const lines = buildMouserTextLines(pages);
+  const anchors: MouserLineAnchor[] = [];
+  const detectedSkus: string[] = [];
+  lines.forEach((line, index) => {
+    const sameLine = /^(\d{1,4})\s+/.exec(line.text);
+    const skuMatch = line.text.match(MOUSER_SKU_PATTERN);
+    if (!skuMatch) return;
+    detectedSkus.push(skuMatch[0]);
+    let lineNumber = sameLine ? Number(sameLine[1]) : null;
+    let lineIndex = index;
+    if (lineNumber === null) {
+      const previous = lines[index - 1]?.text ?? "";
+      const numericLine = /^(\d{1,4})$/.exec(previous);
+      if (numericLine) {
+        lineNumber = Number(numericLine[1]);
+        lineIndex = index - 1;
+      }
+    }
+    if (lineNumber === null || lineNumber < 1 || lineNumber > 9999) return;
+    anchors.push({
+      lineNumber,
+      supplierProductNumber: skuMatch[0],
+      page: line.page,
+      sourceRef: line.sourceRef,
+      lineIndex,
+      skuIndex: index,
+    });
   });
-  if (starts.length === 0) {
-    return { detected: true, lineItems: [], unresolvedLines: 1 };
-  }
+  return { anchors, detectedSkus, lines };
+}
 
+function parseMouserTextRows(pages: readonly ExtractedPdfPage[]) {
+  const { anchors, detectedSkus, lines } = collectMouserTextAnchors(pages);
   const lineItems: MouserInvoiceLineItem[] = [];
-  let unresolvedLines = 0;
-  starts.forEach((startIndex, lineIndex) => {
-    const endIndex = starts[lineIndex + 1] ?? fragments.length;
-    const block = fragments.slice(startIndex, endIndex);
-    const skuFragment = block[0];
-    const supplierProductNumber =
-      skuFragment?.text.match(MOUSER_SKU_PATTERN)?.[0];
-    if (!skuFragment || !supplierProductNumber) return;
-    const blockLines = block.map(({ text }) => text);
-    const quantity = findMouserQuantityTriple(blockLines);
-    if (!quantity || quantity.shipped <= 0) {
-      unresolvedLines += 1;
-      return;
-    }
-
-    const mpn = extractMouserMpn(blockLines);
-    const descriptionLines = blockLines
-      .slice(1, quantity.index)
-      .filter((line) => {
-        if (isMouserNoiseFragment(line) || MOUSER_SKU_PATTERN.test(line)) {
-          return false;
-        }
-        if (MOUSER_MPN_LABEL_PATTERN.test(line)) return false;
-        if (mpn && normalizeMouserLabel(line) === normalizeMouserLabel(mpn)) {
-          return false;
-        }
-        if (/^\d+\s*$/u.test(line.trim())) return false;
-        return true;
-      });
-    const rawDescription = cleanMouserDescription(descriptionLines.join(" "));
-    if (rawDescription.length < 3) {
-      unresolvedLines += 1;
-      return;
-    }
-
-    const sourceRef = `mouser-p${skuFragment.page}-line${lineIndex + 1}`;
-    const sourceEvidence = block
-      .slice(0, quantity.index + 3)
-      .map(({ text }) => text)
-      .filter((line) => !isMouserNoiseFragment(line))
+  const orderedAnchors = [...anchors].sort(
+    (left, right) => left.page - right.page || left.lineIndex - right.lineIndex
+  );
+  orderedAnchors.forEach((anchor, anchorIndex) => {
+    const nextAnchor = orderedAnchors[anchorIndex + 1];
+    const sectionEnd = nextAnchor?.lineIndex ?? lines.length;
+    const section = lines
+      .slice(anchor.skuIndex, sectionEnd)
+      .map(({ text }) => text);
+    const quantity = findMouserQuantityTriple(section);
+    if (!quantity || quantity.shipped <= 0) return;
+    const { mpn, rawDescription } = extractMouserDescription(
+      section.slice(0, quantity.index),
+      anchor.supplierProductNumber
+    );
+    if (!rawDescription) return;
+    const sourceEvidence = [
+      String(anchor.lineNumber),
+      ...section.slice(0, quantity.index + 3),
+    ]
+      .filter((line) => line.trim())
       .join("\n")
       .slice(0, 2_000);
     lineItems.push({
-      sourceRef,
-      sourcePage: skuFragment.page,
-      supplierProductNumber,
+      sourceRef: `mouser-p${anchor.page}-line${anchor.lineNumber}`,
+      sourcePage: anchor.page,
+      lineNumber: anchor.lineNumber,
+      supplierProductNumber: anchor.supplierProductNumber,
       mpn,
       rawDescription,
       quantity: quantity.shipped,
@@ -1095,22 +1651,424 @@ export function parseMouserInvoicePages(
       sourceEvidence,
     });
   });
-
-  return { detected: true, lineItems, unresolvedLines };
+  return {
+    anchors: orderedAnchors,
+    detectedSkus,
+    lineItems,
+    detectedLineNumbers: orderedAnchors.map(({ lineNumber }) => lineNumber),
+  };
 }
 
-function extractPdfText(buffer: Buffer) {
-  return extractPdfPages(buffer)
-    .pages.map(({ text }) => text)
+function groupMouserPositionedItems(page: PositionedPdfPage) {
+  const sorted = [...page.items].sort((left, right) => left.y - right.y);
+  const groups: MouserPositionedLine[] = [];
+  for (const item of sorted) {
+    const current = groups.at(-1);
+    const groupHeight = current?.items.length
+      ? current.items.reduce((sum, row) => sum + row.height, 0) /
+        current.items.length
+      : item.height;
+    const tolerance = Math.max(
+      2.5,
+      Math.min(item.height || 10, groupHeight || 10) * 0.55
+    );
+    if (current && Math.abs(current.y - item.y) <= tolerance) {
+      current.items.push(item);
+      current.y =
+        current.items.reduce((sum, row) => sum + row.y, 0) /
+        current.items.length;
+      current.text = current.items
+        .slice()
+        .sort((left, right) => left.x - right.x)
+        .map(({ text }) => text)
+        .join(" ");
+    } else {
+      groups.push({ y: item.y, items: [item], text: item.text });
+    }
+  }
+  return groups;
+}
+
+function positionedItemCenter(item: PositionedPdfTextItem) {
+  return item.x + item.width / 2;
+}
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor(sorted.length / 2)] ?? null;
+}
+
+function findMouserHeaderCenters(
+  items: readonly PositionedPdfTextItem[]
+): MouserHeaderCenters {
+  const groupedLines = groupMouserPositionedItems({
+    sourceRef: "mouser-header",
+    page: items[0]?.page ?? 1,
+    items: [...items],
+  });
+  const getCenter = (
+    lineMatches: (text: string) => boolean,
+    itemMatches: (text: string) => boolean
+  ) => {
+    const headerLines = groupedLines.filter((line) =>
+      lineMatches(compactMouserLabel(line.text))
+    );
+    const headerItems = headerLines.flatMap((line) =>
+      line.items.filter((item) => itemMatches(compactMouserLabel(item.text)))
+    );
+    return median(headerItems.map(positionedItemCenter));
+  };
+  return {
+    lineNumber: getCenter(
+      (text) => /radnr|lineno|linenumber/.test(text),
+      (text) => /^(?:radnr|line|no|linenumber)$/.test(text)
+    ),
+    supplier: getCenter(
+      (text) =>
+        /mouser.*artikelnummer|artikelnummer.*mouser|kundens.*artikelnr|beskrivning|description/.test(
+          text
+        ),
+      (text) =>
+        /mouser|artikelnummer|artikelnr|beskrivning|description/.test(text)
+    ),
+    ordered: getCenter(
+      (text) => /ordered|orderquantity/.test(text),
+      (text) => /ordered/.test(text)
+    ),
+    shipped: getCenter(
+      (text) => /shipped|received|delivered/.test(text),
+      (text) => /shipped|received|delivered/.test(text)
+    ),
+    pending: getCenter(
+      (text) => /pending/.test(text),
+      (text) => /pending/.test(text)
+    ),
+    price: getCenter(
+      (text) => /unitprice|extendedprice|price|total/.test(text),
+      (text) => /unitprice|extendedprice|price|total/.test(text)
+    ),
+  };
+}
+
+function collectMouserPositionedAnchors(pages: readonly PositionedPdfPage[]) {
+  const anchors: MouserLineAnchor[] = [];
+  for (const page of pages) {
+    const lines = groupMouserPositionedItems(page);
+    const headerCenters = findMouserHeaderCenters(page.items);
+    for (const line of lines) {
+      const compactText = line.text.replace(/\s+/g, "");
+      const skuMatch =
+        line.text.match(MOUSER_SKU_PATTERN) ??
+        compactText.match(MOUSER_SKU_PATTERN);
+      if (!skuMatch) continue;
+      const supplierProductNumber = skuMatch[0];
+      const skuItem = line.items.find((item) =>
+        MOUSER_SKU_PATTERN.test(item.text)
+      );
+      const skuX = skuItem
+        ? positionedItemCenter(skuItem)
+        : line.items.find(
+            (item) => item.x > (headerCenters.lineNumber ?? -Infinity)
+          )?.x ?? Math.min(...line.items.map((item) => item.x));
+      const possibleLineNumbers = line.items.flatMap((item) => {
+        const value = /^(\d{1,4})$/.exec(item.text.trim());
+        if (!value || positionedItemCenter(item) >= skuX) return [];
+        return [{ number: Number(value[1]), x: positionedItemCenter(item) }];
+      });
+      const lineNumberFromText = /^(\d{1,4})\s+/.exec(line.text.trim());
+      const lineNumberCandidate =
+        possibleLineNumbers.sort((left, right) =>
+          headerCenters.lineNumber === null
+            ? left.x - right.x
+            : Math.abs(left.x - headerCenters.lineNumber) -
+              Math.abs(right.x - headerCenters.lineNumber)
+        )[0]?.number ??
+        (lineNumberFromText ? Number(lineNumberFromText[1]) : null);
+      if (
+        lineNumberCandidate === null ||
+        lineNumberCandidate < 1 ||
+        lineNumberCandidate > 9999
+      ) {
+        continue;
+      }
+      anchors.push({
+        lineNumber: lineNumberCandidate,
+        supplierProductNumber,
+        page: page.page,
+        sourceRef: page.sourceRef,
+        lineIndex: lines.indexOf(line),
+        skuIndex: lines.indexOf(line),
+        y: line.y,
+        skuX,
+        lineItems: line.items,
+      });
+    }
+  }
+  return anchors.sort(
+    (left, right) =>
+      left.page - right.page || left.lineNumber - right.lineNumber
+  );
+}
+
+function extractMouserPositionedQuantities(
+  region: readonly MouserPositionedLine[],
+  centers: MouserHeaderCenters
+) {
+  if (
+    centers.ordered === null ||
+    centers.shipped === null ||
+    centers.pending === null
+  ) {
+    return null;
+  }
+  const pageLeft = centers.supplier ?? centers.lineNumber ?? 0;
+  const orderedLower = (pageLeft + centers.ordered) / 2;
+  const orderedRange: [number, number] = [
+    orderedLower,
+    (centers.ordered + centers.shipped) / 2,
+  ];
+  const shippedRange: [number, number] = [
+    orderedRange[1],
+    (centers.shipped + centers.pending) / 2,
+  ];
+  const pendingRange: [number, number] = [
+    shippedRange[1],
+    centers.price === null
+      ? centers.pending + (centers.pending - centers.shipped) / 2
+      : (centers.pending + centers.price) / 2,
+  ];
+  const valueInColumn = (range: [number, number], center: number) => {
+    const candidates = region.flatMap((line) =>
+      line.items.flatMap((item) => {
+        const quantity = parseMouserQuantity(item.text);
+        const x = positionedItemCenter(item);
+        if (quantity === null || x < range[0] || x >= range[1]) {
+          return [];
+        }
+        return [{ quantity, distance: Math.abs(x - center), y: line.y }];
+      })
+    );
+    return (
+      candidates.sort((left, right) => left.distance - right.distance)[0]
+        ?.quantity ?? null
+    );
+  };
+  const ordered = valueInColumn(orderedRange, centers.ordered);
+  const shipped = valueInColumn(shippedRange, centers.shipped);
+  const pending = valueInColumn(pendingRange, centers.pending);
+  return ordered === null || shipped === null || pending === null
+    ? null
+    : { ordered, shipped, pending };
+}
+
+function parseMouserPositionedRows(
+  pages: readonly PositionedPdfPage[],
+  source: "pdfjs" | "ocr"
+) {
+  const anchors = collectMouserPositionedAnchors(pages);
+  const lineItems: MouserInvoiceLineItem[] = [];
+  for (const page of pages) {
+    const pageLines = groupMouserPositionedItems(page);
+    const headerCenters = findMouserHeaderCenters(page.items);
+    const pageAnchors = anchors
+      .filter((anchor) => anchor.page === page.page)
+      .sort((left, right) => (left.y ?? 0) - (right.y ?? 0));
+    const readingDirection = (() => {
+      const lineOrdered = [...pageAnchors].sort(
+        (left, right) => left.lineNumber - right.lineNumber
+      );
+      const first = lineOrdered[0]?.y;
+      const second = lineOrdered[1]?.y;
+      return first !== undefined && second !== undefined && second < first
+        ? -1
+        : 1;
+    })();
+
+    pageAnchors.forEach((anchor, anchorIndex) => {
+      const anchorY = anchor.y ?? 0;
+      const previousY = pageAnchors[anchorIndex - 1]?.y;
+      const nextY = pageAnchors[anchorIndex + 1]?.y;
+      const previousGap =
+        previousY === undefined ? undefined : Math.abs(anchorY - previousY);
+      const nextGap =
+        nextY === undefined ? undefined : Math.abs(nextY - anchorY);
+      const lower =
+        previousY === undefined
+          ? anchorY - (nextGap ?? 80) / 2
+          : (previousY + anchorY) / 2;
+      const upper =
+        nextY === undefined
+          ? anchorY + (previousGap ?? 80) / 2
+          : (anchorY + nextY) / 2;
+      const region = pageLines.filter(
+        (line) => line.y >= lower && line.y <= upper
+      );
+      const orderedRegion = [...region].sort(
+        (left, right) => readingDirection * (left.y - right.y)
+      );
+      const quantity = extractMouserPositionedQuantities(
+        orderedRegion,
+        headerCenters
+      );
+      if (!quantity || quantity.shipped <= 0) return;
+
+      const descriptionStart =
+        headerCenters.lineNumber === null
+          ? (anchor.skuX ?? 0) - 40
+          : headerCenters.lineNumber +
+            Math.max(
+              5,
+              ((anchor.skuX ?? headerCenters.lineNumber + 80) -
+                headerCenters.lineNumber) *
+                0.2
+            );
+      const descriptionEnd =
+        headerCenters.ordered === null
+          ? Infinity
+          : headerCenters.shipped === null
+          ? headerCenters.ordered + 10
+          : headerCenters.ordered -
+            Math.max(8, (headerCenters.shipped - headerCenters.ordered) * 0.35);
+      const descriptionLines = orderedRegion.flatMap((line) => {
+        const text = line.items
+          .filter((item) => {
+            const x = positionedItemCenter(item);
+            return (
+              x >= descriptionStart &&
+              x < descriptionEnd &&
+              parseMouserQuantity(item.text) === null
+            );
+          })
+          .sort((left, right) => left.x - right.x)
+          .map(({ text }) => text)
+          .join(" ")
+          .trim();
+        return text ? [text] : [];
+      });
+      const { mpn, rawDescription } = extractMouserDescription(
+        descriptionLines,
+        anchor.supplierProductNumber
+      );
+      if (!rawDescription) return;
+      const sourceEvidence = orderedRegion
+        .flatMap((line) => (line.text.trim() ? [line.text.trim()] : []))
+        .join("\n")
+        .slice(0, 2_000);
+      lineItems.push({
+        sourceRef: `mouser-p${anchor.page}-line${anchor.lineNumber}`,
+        sourcePage: anchor.page,
+        lineNumber: anchor.lineNumber,
+        supplierProductNumber: anchor.supplierProductNumber,
+        mpn,
+        rawDescription,
+        quantity: quantity.shipped,
+        orderedQuantity: quantity.ordered,
+        shippedQuantity: quantity.shipped,
+        pendingQuantity: quantity.pending,
+        sourceEvidence,
+      });
+    });
+  }
+  return { anchors, lineItems, positionSource: source };
+}
+
+function createMouserParseResult({
+  detected,
+  lineItems,
+  detectedLineNumbers,
+  detectedSupplierSkus,
+  positionSource,
+}: {
+  detected: boolean;
+  lineItems: MouserInvoiceLineItem[];
+  detectedLineNumbers: number[];
+  detectedSupplierSkus: string[];
+  positionSource: "pdfjs" | "ocr" | "text";
+}): MouserInvoiceParseResult {
+  const identifiableLines = Math.max(
+    detectedLineNumbers.length,
+    detectedSupplierSkus.length
+  );
+  return {
+    detected,
+    lineItems,
+    unresolvedLines:
+      identifiableLines > 0
+        ? Math.max(0, identifiableLines - lineItems.length)
+        : detected
+        ? 1
+        : 0,
+    detectedLineNumbers,
+    detectedSupplierSkus,
+    positionSource,
+  };
+}
+
+export function parseMouserInvoicePages(
+  pages: readonly ExtractedPdfPage[],
+  positionedPages: readonly PositionedPdfPage[] = [],
+  positionedExtractor: "pdfjs" | "ocr" = "pdfjs"
+): MouserInvoiceParseResult {
+  const documentText = pages.map((page) => page.text).join("\n");
+  const hasMouserHeader =
+    /mousers?\s+artikelnummer|mouser(?:\s+electronics)?\s+part\s+(?:number|no\.?)/i.test(
+      documentText
+    );
+  const hasFulfilmentColumns =
+    /\b(?:ordered|quantity\s+ordered)\b/i.test(documentText) &&
+    /\b(?:shipped|quantity\s+shipped)\b/i.test(documentText) &&
+    /\bpending\b/i.test(documentText);
+  if (!hasMouserHeader || !hasFulfilmentColumns) {
+    return createMouserParseResult({
+      detected: false,
+      lineItems: [],
+      detectedLineNumbers: [],
+      detectedSupplierSkus: [],
+      positionSource: "text",
+    });
+  }
+
+  const textParse = parseMouserTextRows(pages);
+  const positionedParse = positionedPages.length
+    ? parseMouserPositionedRows(positionedPages, positionedExtractor)
+    : null;
+  const usePositioned = Boolean(
+    positionedParse &&
+      positionedParse.lineItems.length >= textParse.lineItems.length
+  );
+  const lineItems = usePositioned
+    ? positionedParse?.lineItems ?? []
+    : textParse.lineItems;
+  const detectedSkus = textParse.detectedSkus.length
+    ? textParse.detectedSkus
+    : positionedParse?.anchors.map(
+        ({ supplierProductNumber }) => supplierProductNumber
+      ) ?? [];
+  const detectedLineNumbers = usePositioned
+    ? positionedParse?.anchors.map(({ lineNumber }) => lineNumber) ?? []
+    : textParse.detectedLineNumbers;
+  return createMouserParseResult({
+    detected: true,
+    lineItems,
+    detectedLineNumbers,
+    detectedSupplierSkus: detectedSkus,
+    positionSource: usePositioned ? positionedExtractor : "text",
+  });
+}
+
+async function extractPdfText(buffer: Buffer) {
+  return (await extractPdfPages(buffer)).pages
+    .map(({ text }) => text)
     .join("\n")
     .trim();
 }
 
 /** Best-effort local text extraction for receipt review. No document data is
  * sent to an external provider; unreadable/scanned files use manual entry. */
-export function extractPdfTextForReceiptReview(buffer: Buffer) {
+export async function extractPdfTextForReceiptReview(buffer: Buffer) {
   try {
-    return extractPdfText(buffer);
+    return await extractPdfText(buffer);
   } catch {
     return "";
   }
@@ -1260,7 +2218,7 @@ function parsePdfRowsFromText(text: string) {
   };
 }
 
-function parsePdfTablePages(pdfPages: ExtractedPdfPage[]) {
+function parsePdfTablePages(pdfPages: readonly ExtractedPdfPage[]) {
   const parsed = parsePdfRowsFromText(
     pdfPages.map(({ text }) => text).join("\n")
   );
@@ -1523,13 +2481,84 @@ async function parseStaffImportFileWithSummary({
     throw importError("Macro-enabled workbooks are not accepted.");
   }
   if (extension === "pdf") {
-    const { pages: pdfPages, diagnostics } = extractPdfPages(buffer);
-    const mouserInvoice = parseMouserInvoicePages(pdfPages);
+    const {
+      pages: pdfPages,
+      diagnostics,
+      positionedPages = [],
+      positionedExtractor = "pdfjs",
+    } = await extractPdfPages(buffer);
+    let mouserInvoice = parseMouserInvoicePages(
+      pdfPages,
+      positionedPages,
+      positionedExtractor
+    );
+
+    // The primary safe extractor preserves readable text but has no glyph
+    // coordinates. For detected Mouser invoices only, supplement it with
+    // PDF.js positioned items so row and quantity columns can be reconstructed.
+    if (
+      mouserInvoice.detected &&
+      !positionedPages.some((page) => page.items.length > 0)
+    ) {
+      try {
+        const positionedExtraction = await extractPdfPagesWithPdfJs(buffer);
+        if (
+          positionedExtraction.positionedPages.some(
+            (page) => page.items.length > 0
+          )
+        ) {
+          const positionedParse = parseMouserInvoicePages(
+            positionedExtraction.pages,
+            positionedExtraction.positionedPages,
+            "pdfjs"
+          );
+          if (
+            positionedParse.detected &&
+            positionedParse.lineItems.length >= mouserInvoice.lineItems.length
+          ) {
+            mouserInvoice = positionedParse;
+          }
+        }
+      } catch {
+        // Keep the line-number-anchored text parser as a deterministic fallback.
+      }
+    }
     Logger.info({
       event: "ioio_staff_import_pdf_text_extracted",
       ...diagnostics,
       detectedVendorParser: mouserInvoice.detected ? "mouser" : null,
     });
+    if (mouserInvoice.detected) {
+      for (const lineItem of mouserInvoice.lineItems) {
+        Logger.info({
+          event: "ioio_staff_import_mouser_line_reconstructed",
+          lineNumber: lineItem.lineNumber,
+          supplierSku: lineItem.supplierProductNumber,
+          mpnPresent: Boolean(lineItem.mpn),
+          descriptionCharCount: lineItem.rawDescription.length,
+          ordered: lineItem.orderedQuantity,
+          shipped: lineItem.shippedQuantity,
+          pending: lineItem.pendingQuantity,
+        });
+      }
+      Logger.info({
+        event: "ioio_staff_import_mouser_parse_summary",
+        detectedLineNumbers: mouserInvoice.detectedLineNumbers,
+        detectedSupplierSkus: mouserInvoice.detectedSupplierSkus,
+        reconstructedRowCount: mouserInvoice.lineItems.length,
+        unresolvedLines: mouserInvoice.unresolvedLines,
+        positionSource: mouserInvoice.positionSource,
+      });
+      if (mouserInvoice.unresolvedLines > 0) {
+        Logger.warn({
+          event: "ioio_staff_import_mouser_reconstruction_incomplete",
+          detectedLineNumbers: mouserInvoice.detectedLineNumbers,
+          detectedSupplierSkus: mouserInvoice.detectedSupplierSkus,
+          reconstructedRowCount: mouserInvoice.lineItems.length,
+          unresolvedLines: mouserInvoice.unresolvedLines,
+        });
+      }
+    }
     // Keep PDFs as page-level evidence until the semantic helper has had the
     // first chance to group generic documents. Detected Mouser invoices use
     // the deterministic commercial-line parser before any helper request.
@@ -1562,6 +2591,7 @@ export async function parseStaffImportFile(args: {
       lineItems: parsed.mouserInvoice.lineItems,
       enrichedRows: null,
       categories: [],
+      locations: [],
     });
   }
   if (parsed.pdfPages && parsed.rows.length === 0) {
@@ -2160,16 +3190,23 @@ function buildStaffImportHelperRequest({
   }
   return createImportHelperRequest({
     document: { sha256: fileSha256, pages: pdfPages },
-    activeCategories: categories.slice(0, 500).map(({ id, name }) => ({
-      id,
-      name,
-    })),
+    activeCategories: categories
+      .slice(0, 500)
+      .map(({ id, name, description }) => ({
+        id,
+        name,
+        description: description?.slice(0, 500) ?? null,
+      })),
     relevantLocations: locations
       .filter((location) => !location.operational)
       .slice(0, 1_000)
-      .map(({ id, pathLabel, currentUnits }) => ({
+      .map(({ id, name, pathLabel, parentId, description, currentUnits }) => ({
         id,
+        name,
         pathLabel,
+        parentId,
+        description: description?.slice(0, 500) ?? null,
+        hasChildren: locations.some((location) => location.parentId === id),
         occupancy: {
           currentUnits: currentUnits || occupancyByLocation.get(id) || 0,
           proposedUnits: 0,
@@ -2208,13 +3245,17 @@ function mapHelperProposalToRows({
     locations.map((location) => [location.id, location])
   );
   const rows = candidates.map((candidate, index): StaffImportRow => {
-    const category = candidate.categorySuggestion.categoryId
-      ? categoriesById.get(candidate.categorySuggestion.categoryId)?.name ??
-        null
-      : null;
-    const selectedLocation = candidate.locationSuggestions[0]
-      ? locationsById.get(candidate.locationSuggestions[0].locationId)
-      : undefined;
+    const category =
+      candidate.categorySuggestion.categoryId &&
+      candidate.categorySuggestion.confidence >= 0.8
+        ? categoriesById.get(candidate.categorySuggestion.categoryId)?.name ??
+          null
+        : null;
+    const firstLocationSuggestion = candidate.locationSuggestions[0];
+    const selectedLocation =
+      firstLocationSuggestion && firstLocationSuggestion.confidence >= 0.8
+        ? locationsById.get(firstLocationSuggestion.locationId)
+        : undefined;
     const sourceEvidence = candidate.evidence.flatMap((evidence) => {
       const page = pagesByRef.get(evidence.sourceRef);
       return page
@@ -2233,6 +3274,11 @@ function mapHelperProposalToRows({
       quantity: candidate.quantity,
       category,
       location: selectedLocation?.pathLabel ?? null,
+      suggestedCategoryId: candidate.categorySuggestion.categoryId,
+      categorySuggestionConfidence: candidate.categorySuggestion.confidence,
+      suggestedLocationId: candidate.locationSuggestions[0]?.locationId ?? null,
+      locationSuggestionConfidence:
+        candidate.locationSuggestions[0]?.confidence ?? 0,
       type: candidate.trackingSuggestion.mode,
       supplierPartNumber: candidate.supplierProductNumber,
       sourceDescription: candidate.description,
@@ -2276,10 +3322,12 @@ function mapMouserInvoiceRows({
   lineItems,
   enrichedRows,
   categories,
+  locations,
 }: {
   lineItems: MouserInvoiceLineItem[];
   enrichedRows: MouserEnrichmentResponse["rows"] | null;
   categories: NamedRecord[];
+  locations: ImportLocationOption[];
 }): StaffImportRow[] {
   const enrichedBySourceRef = new Map(
     (enrichedRows ?? []).map((row) => [row.sourceRef, row])
@@ -2287,30 +3335,57 @@ function mapMouserInvoiceRows({
   const categoriesById = new Map(
     categories.map((category) => [category.id, category])
   );
+  const locationsById = new Map(
+    locations
+      .filter((location) => !location.operational)
+      .map((location) => [location.id, location])
+  );
   return lineItems.map((lineItem, index) => {
     const enriched = enrichedBySourceRef.get(lineItem.sourceRef);
+    const sourceManufacturer = getMouserSourceManufacturer(
+      lineItem.rawDescription
+    );
+    const enrichedManufacturer =
+      enriched &&
+      enriched.confidence >= 0.7 &&
+      enriched.manufacturer &&
+      lineItem.rawDescription
+        .toLocaleLowerCase()
+        .includes(enriched.manufacturer.toLocaleLowerCase())
+        ? enriched.manufacturer
+        : null;
+    const manufacturer = enrichedManufacturer ?? sourceManufacturer;
+    const title = resolveMouserProductName(
+      enriched && enriched.confidence >= 0.5 ? enriched.productName : null,
+      lineItem,
+      manufacturer
+    );
     const category =
-      enriched && enriched.confidence >= 0.7 && enriched.categoryId
+      enriched &&
+      (enriched.categoryConfidence ?? enriched.confidence) >= 0.8 &&
+      enriched.categoryId
         ? categoriesById.get(enriched.categoryId)?.name ?? null
+        : null;
+    const selectedLocation =
+      enriched?.locationId && (enriched.locationConfidence ?? 0) >= 0.8
+        ? locationsById.get(enriched.locationId)
         : null;
     return {
       rowNumber: index + 2,
-      title:
-        enriched && enriched.confidence >= 0.5
-          ? enriched.productName
-          : lineItem.rawDescription,
+      title,
       quantity: lineItem.shippedQuantity,
       category,
-      location: null,
+      location: selectedLocation?.pathLabel ?? null,
+      suggestedCategoryId: enriched?.categoryId ?? null,
+      categorySuggestionConfidence:
+        enriched?.categoryConfidence ?? enriched?.confidence ?? 0,
+      suggestedLocationId: enriched?.locationId ?? null,
+      locationSuggestionConfidence: enriched?.locationConfidence ?? 0,
       // Shelf resolves the default tracking type at Apply (quantity tracked
       // above one unit; individual for one unit). Staff can override in Edit.
       type: null,
-      sourceDescription:
-        enriched && enriched.confidence >= 0.5
-          ? enriched.description ?? lineItem.rawDescription
-          : lineItem.rawDescription,
-      manufacturer:
-        enriched && enriched.confidence >= 0.7 ? enriched.manufacturer : null,
+      sourceDescription: lineItem.rawDescription,
+      manufacturer,
       manufacturerPartNumber: lineItem.mpn,
       supplierPartNumber: lineItem.supplierProductNumber,
       orderedQuantity: lineItem.orderedQuantity,
@@ -2333,16 +3408,34 @@ async function enrichMouserLineItems({
   fileSha256,
   lineItems,
   categories,
+  locations,
 }: {
   fileSha256: string;
   lineItems: MouserInvoiceLineItem[];
   categories: NamedRecord[];
+  locations: ImportLocationOption[];
 }): Promise<MouserEnrichmentResponse["rows"] | null> {
   const enrichedRows: MouserEnrichmentResponse["rows"] = [];
-  const activeCategories = categories.slice(0, 500).map(({ id, name }) => ({
-    id,
-    name,
-  }));
+  const activeCategories = categories
+    .slice(0, 500)
+    .map(({ id, name, description }) => ({
+      id,
+      name,
+      description: description?.slice(0, 500) ?? null,
+    }));
+  const relevantLocations = locations
+    .filter((location) => !location.operational)
+    .slice(0, 1_000)
+    .map((location) => ({
+      id: location.id,
+      name: location.name,
+      pathLabel: location.pathLabel,
+      parentId: location.parentId,
+      description: location.description?.slice(0, 500) ?? null,
+      hasChildren: locations.some(
+        (candidate) => candidate.parentId === location.id
+      ),
+    }));
   for (
     let start = 0;
     start < lineItems.length;
@@ -2371,6 +3464,7 @@ async function enrichMouserLineItems({
       fileSha256,
       lineItems: lineItemBatch,
       activeCategories,
+      relevantLocations,
     });
     const helperResult = await requestImportHelperProposal(helperRequest);
     if (helperResult.status !== "ready" || !("mode" in helperResult.proposal)) {
@@ -2429,11 +3523,11 @@ export async function prepareStaffInventoryImport({
     getActiveCategoriesForOrganization({ organizationId }),
     db.location.findMany({
       where: { organizationId },
-      select: { id: true, name: true, parentId: true },
+      select: { id: true, name: true, parentId: true, description: true },
     }),
     db.category.findMany({
       where: { organizationId, id: { in: archivedCategoryIds } },
-      select: { id: true, name: true },
+      select: { id: true, name: true, color: true },
     }),
     getConfiguredBrokenSection(organizationId),
     getConfiguredReportReturnArea(organizationId),
@@ -2478,6 +3572,7 @@ export async function prepareStaffInventoryImport({
           fileSha256,
           lineItems: parsed.mouserInvoice.lineItems,
           categories,
+          locations,
         })
       : null;
     Logger.info({
@@ -2492,6 +3587,7 @@ export async function prepareStaffInventoryImport({
       lineItems: parsed.mouserInvoice.lineItems,
       enrichedRows,
       categories,
+      locations,
     });
     pdfSummary = {
       validItemRows: rows.length,
@@ -2599,9 +3695,13 @@ export async function prepareStaffInventoryImport({
     const helperCandidate = rows[index]?.helperCandidate;
     if (!helperCandidate) return row;
     const helperCategoryId =
-      helperCandidate.categorySuggestion.categoryId ?? null;
+      helperCandidate.categorySuggestion.confidence >= 0.8
+        ? helperCandidate.categorySuggestion.categoryId
+        : null;
     const helperLocationId =
-      helperCandidate.locationSuggestions[0]?.locationId ?? null;
+      (helperCandidate.locationSuggestions[0]?.confidence ?? 0) >= 0.8
+        ? helperCandidate.locationSuggestions[0]?.locationId
+        : null;
     const helperCategory = categories.find(
       (category) => category.id === helperCategoryId
     );

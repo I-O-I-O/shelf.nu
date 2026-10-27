@@ -22,6 +22,16 @@ function makeMouserRequest() {
       },
     ],
     activeCategories: [{ id: "category-electronics", name: "Electronics" }],
+    relevantLocations: [
+      {
+        id: "sensors-drawer",
+        name: "Sensors drawer",
+        pathLabel: "Electronics / Sensors drawer",
+        description: null,
+        parentId: null,
+        hasChildren: false,
+      },
+    ],
   });
 }
 
@@ -39,6 +49,9 @@ function makeMouserResponse() {
         description: "Seeed Studio 24GHz mmWave Sensor",
         quantity: 4,
         categoryId: "category-electronics",
+        categoryConfidence: 0.94,
+        locationId: "sensors-drawer",
+        locationConfidence: 0.88,
         confidence: 0.94,
       },
     ],
@@ -157,12 +170,21 @@ describe("import helper contract", () => {
     ).toThrow("changed a deterministic Mouser identifier or quantity");
   });
 
-  it("rejects invented Mouser categories and missing or duplicated line rows", () => {
+  it("clears invented Mouser category and location IDs and rejects missing line rows", () => {
     const inventedCategory = makeMouserResponse();
     inventedCategory.rows[0]!.categoryId = "invented-category";
-    expect(() =>
-      validateImportHelperResponse(inventedCategory, makeMouserRequest())
-    ).toThrow("outside Shelf's allowlist");
+    inventedCategory.rows[0]!.locationId = "invented-location";
+    const validated = validateImportHelperResponse(
+      inventedCategory,
+      makeMouserRequest()
+    );
+    if (!("mode" in validated)) throw new Error("Expected Mouser response");
+    expect(validated.rows[0]).toMatchObject({
+      categoryId: null,
+      categoryConfidence: 0,
+      locationId: null,
+      locationConfidence: 0,
+    });
 
     const missing = { ...makeMouserResponse(), rows: [] };
     expect(() =>
@@ -177,6 +199,7 @@ describe("import helper contract", () => {
       request
     );
 
+    if ("mode" in response) throw new Error("Expected generic proposal");
     expect(response.rows[0]?.productMatch.candidateId).toBe("model-nano");
     expect(request.document.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
@@ -194,15 +217,18 @@ describe("import helper contract", () => {
     ).toThrow("malformed or unsupported response");
   });
 
-  it("rejects IDs outside Shelf-provided allowlists", () => {
+  it("clears category IDs outside Shelf-provided allowlists", () => {
     const response = makeResponse();
     response.rows[0]!.categorySuggestion.categoryId = "category-from-helper";
-    expect(() =>
-      parseAndValidateImportHelperResponse(
-        JSON.stringify(response),
-        makeRequest()
-      )
-    ).toThrow("outside Shelf's allowlist");
+    const validated = parseAndValidateImportHelperResponse(
+      JSON.stringify(response),
+      makeRequest()
+    );
+    if ("mode" in validated) throw new Error("Expected generic proposal");
+    expect(validated.rows[0]?.categorySuggestion).toMatchObject({
+      categoryId: null,
+      confidence: 0,
+    });
   });
 
   it("rejects invalid quantities and unsupported tracking suggestions", () => {

@@ -527,7 +527,7 @@ describe("standalone import helper HTTP service", () => {
     );
     expect(prompt).toContain("Keep supplierProductNumber separate from mpn");
     expect(prompt).toContain("Never interpret a price, line total");
-    expect(prompt).toContain("Otherwise categoryId must be null");
+    expect(prompt).toContain("otherwise categoryId must be null");
     expect(prompt).toContain("Return no more than one question per row");
     expect(prompt).toContain("legal text, addresses, order metadata");
     expect(prompt).toContain("isolated numeric fragments");
@@ -542,7 +542,18 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).toContain(
       "Preserve sourceRef, supplierProductNumber, mpn, and quantity exactly"
     );
-    expect(prompt).not.toContain("relevantLocations");
+    expect(prompt).toContain(
+      "preserves the manufacturer, product family, exact model or chip identifier"
+    );
+    expect(prompt).toContain("DO NOT summarize away identifying tokens");
+    expect(prompt).toContain("Seeed Studio XIAO ESP32-S3");
+    expect(prompt).toContain("Seeed Studio XIAO nRF52840 Sense");
+    expect(prompt).toContain(
+      "Development Boards category better than Electronics"
+    );
+    expect(prompt).toContain("Sensors category better than Electronics");
+    expect(prompt).toContain("Sensors drawer");
+    expect(prompt).toContain("ASSIGNABLE SHELF LOCATIONS");
     expect(prompt).not.toContain("trackingSuggestion");
     expect(prompt).not.toContain('"locationSuggestions"');
     expect(prompt).not.toContain('"trackingSuggestion"');

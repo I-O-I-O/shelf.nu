@@ -48,7 +48,9 @@ function renderPanel(
       REJECT: 0,
     },
     createdAt: new Date().toISOString(),
-    categoryOptions: [{ id: "category-1", name: "Electronics" }],
+    categoryOptions: [
+      { id: "category-1", name: "Electronics", color: "#2878b8" },
+    ],
     locationOptions: [],
     ...proposalOverrides,
   } as unknown as StaffImportProposal;
@@ -72,6 +74,80 @@ function renderPanel(
 }
 
 describe("StaffImportPanel review gate", () => {
+  it("keeps ready rows quiet without a Status column", () => {
+    renderPanel({
+      action: "CREATE",
+      locationId: "location-1",
+      locationLabel: "Development Boards Drawer",
+    });
+
+    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    expect(screen.queryByText("Ready")).toBeNull();
+    expect(screen.getByText("Development Boards Drawer")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ignore" })).toBeTruthy();
+  });
+
+  it("shows unresolved category and location as choices", () => {
+    renderPanel(
+      { categoryId: null, locationId: null, category: null, location: null },
+      true,
+      {
+        locationOptions: [
+          {
+            id: "location-1",
+            name: "Shelf",
+            pathLabel: "Lab / Shelf",
+            operational: false,
+            currentUnits: 0,
+            parentId: null,
+          },
+        ],
+      }
+    );
+
+    expect(screen.getByText("Choose category")).toBeTruthy();
+    expect(screen.getByText("Choose location")).toBeTruthy();
+    expect(screen.getByLabelText("Category for Arduino Nano")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Location")).toBeTruthy();
+  });
+
+  it("shows medium-confidence suggestions without silently selecting them", () => {
+    renderPanel(
+      {
+        categoryId: null,
+        locationId: null,
+        category: null,
+        location: null,
+        suggestedCategoryId: "category-1",
+        categorySuggestionConfidence: 0.65,
+        suggestedLocationId: "location-1",
+        locationSuggestionConfidence: 0.65,
+      },
+      true,
+      {
+        locationOptions: [
+          {
+            id: "location-1",
+            name: "Sensors Drawer",
+            pathLabel: "Electronics Room / Sensors Drawer",
+            operational: false,
+            currentUnits: 0,
+            parentId: null,
+          },
+        ],
+      }
+    );
+
+    expect(screen.getByText("Suggested: Electronics · choose")).toBeTruthy();
+    expect(
+      screen.getByText("Suggested: Electronics Room / Sensors Drawer · choose")
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Category for Arduino Nano")).toHaveValue("");
+  });
+
   it("keeps Apply disabled after Approve when category is unresolved", () => {
     renderPanel({
       action: "NEEDS_REVIEW",
@@ -85,7 +161,7 @@ describe("StaffImportPanel review gate", () => {
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
     ).toBeDisabled();
-    expect(screen.getAllByText("NEEDS_REVIEW").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
   });
 
   it.each([
@@ -111,7 +187,7 @@ describe("StaffImportPanel review gate", () => {
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
     ).toBeEnabled();
-    expect(screen.getByText(/5 physical units/)).toBeTruthy();
+    expect(screen.getByText("Individual")).toBeTruthy();
   });
 
   it("submits Apply and exits the pending state after success", async () => {
@@ -217,8 +293,18 @@ describe("StaffImportPanel review gate", () => {
       true,
       {
         categoryOptions: [
-          { id: "active-cables", name: "Cables & adapters", archived: false },
-          { id: "archived-cables", name: "Cables", archived: true },
+          {
+            id: "active-cables",
+            name: "Cables & adapters",
+            color: "#2878b8",
+            archived: false,
+          },
+          {
+            id: "archived-cables",
+            name: "Cables",
+            color: "#777777",
+            archived: true,
+          },
         ],
         locationOptions: [
           {
@@ -233,22 +319,25 @@ describe("StaffImportPanel review gate", () => {
       }
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.change(screen.getByLabelText("Category"), {
+    fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
       target: { value: "active-cables" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText("Location"), {
       target: { value: "container-1" },
     });
+    fireEvent.click(screen.getByText("Details"));
 
-    expect(screen.getAllByText("Cables & adapters").length).toBe(2);
+    expect(screen.getByLabelText("Category for Arduino Nano")).toHaveValue(
+      "active-cables"
+    );
     expect(
       screen.getAllByText("IOIO Lab – B477 · Shelf A1 · Container A1-1.1")
         .length
     ).toBe(2);
     expect(
       screen.getByText(
-        "Current units: 18; import adds: 20; capacity: not configured"
+        "Location capacity context: 18 current units; 20 proposed units; capacity not configured."
       )
     ).toBeTruthy();
     expect(
@@ -256,5 +345,212 @@ describe("StaffImportPanel review gate", () => {
         "Matching category is archived; choose an active category."
       )
     ).toBeNull();
+  });
+
+  it("shows one compact row and keeps source and confidence details collapsed", () => {
+    renderPanel(
+      {
+        title: "Relay Module",
+        action: "NEEDS_REVIEW",
+        supplierPartNumber: "713-101010001",
+        manufacturerPartNumber: "101010001",
+        categoryId: null,
+        categoryResolution: "NEW_PROPOSED",
+        proposedCategoryName: "Electronics",
+        quantity: 4,
+        orderedQuantity: null,
+        receivedQuantity: null,
+        type: "QUANTITY_TRACKED",
+        categoryConfidence: "Medium",
+        categoryReason: "An electronic component category is likely.",
+        enrichmentConfidence: 0.83,
+        sourceEvidence: [
+          {
+            sourceRef: "page-1-line-1",
+            page: 1,
+            text: "Private source excerpt for the relay module",
+          },
+        ],
+      },
+      true,
+      {
+        counts: {
+          CREATE: 0,
+          INCREASE_QUANTITY: 0,
+          NO_CHANGE: 0,
+          POSSIBLE_DUPLICATE: 0,
+          NEEDS_REVIEW: 1,
+          IGNORE: 0,
+          UPDATE_QUANTITY: 0,
+          UPDATE_LOCATION: 0,
+          UPDATE_CATEGORY: 0,
+          AMBIGUOUS: 0,
+          REJECT: 0,
+        },
+      }
+    );
+
+    expect(screen.getAllByRole("row")).toHaveLength(2);
+    expect(screen.getByText(/1 product found · 1 need review/)).toBeTruthy();
+    expect(screen.getByText("713-101010001")).not.toBeVisible();
+    expect(screen.getByText("101010001")).not.toBeVisible();
+    expect(screen.queryByRole("columnheader", { name: "Tracking" })).toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Category" })).toBeTruthy();
+    expect(screen.queryByText("Ordered quantity:")).toBeNull();
+    expect(screen.queryByText("Received quantity:")).toBeNull();
+    expect(
+      screen.getByText("Private source excerpt for the relay module")
+    ).not.toBeVisible();
+    expect(
+      screen.getByText(/An electronic component category is likely\./)
+    ).not.toBeVisible();
+    expect(screen.queryByText("INCREASE_QUANTITY")).toBeNull();
+    expect(screen.queryByText("CREATE: 0")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Approve safe matches" })
+    ).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    expect(screen.queryByText("QUANTITY_TRACKED")).toBeNull();
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("713-101010001")).toBeVisible();
+    expect(screen.getByText("101010001")).toBeVisible();
+    expect(screen.getByText("Tracking:").parentElement).toHaveTextContent(
+      "Tracking: Quantity"
+    );
+  });
+
+  it("labels a concrete existing Shelf candidate as a possible match", () => {
+    renderPanel({
+      action: "POSSIBLE_DUPLICATE",
+      matchCandidates: [
+        {
+          id: "asset-model-1",
+          title: "Relay Module",
+          quantity: 4,
+          type: "QUANTITY_TRACKED",
+          category: "Electronics",
+          location: null,
+        },
+      ],
+    });
+
+    expect(screen.getByText("Possible match")).toBeTruthy();
+    expect(screen.queryByText("Duplicate")).toBeNull();
+  });
+
+  it("renders selected categories with Shelf's colored category badge", () => {
+    const { container } = renderPanel({
+      categoryId: "category-1",
+      category: "Electronics",
+    });
+
+    const categoryBadge = container.querySelector('[style*="#2878b833"]');
+    expect(categoryBadge).toHaveTextContent("Electronics");
+    expect(screen.getByLabelText("Category for Arduino Nano")).toBeTruthy();
+  });
+
+  it("does not label a possible-duplicate action without a Shelf candidate", () => {
+    renderPanel({ action: "POSSIBLE_DUPLICATE", matchCandidates: [] });
+
+    expect(screen.queryByText("Possible match")).toBeNull();
+    expect(screen.queryByText("Possible match")).toBeNull();
+  });
+
+  it("renders the twelve-product review sample as twelve compact rows", () => {
+    const productNames = [
+      "TinkerKit boards",
+      "Button Module",
+      "Relay Module",
+      "Relay Module",
+      "LED Module",
+      "Joystick",
+      "Potentiometer",
+      "Linear Potentiometer",
+      "2/3 Axis Accelerometer",
+      "RobotDyn 1 Relay 5V",
+      "TinkerKit Sensor Shield",
+      "Rotary encoder / potentiometer",
+    ];
+    const rows = productNames.map((title, index) => ({
+      rowNumber: index + 1,
+      title,
+      action: "NEEDS_REVIEW",
+      assetId: null,
+      categoryId: null,
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      quantity: index < 3 ? index + 5 : 1,
+      receivedQuantity: null,
+      type: index === 0 || index === 8 ? "INDIVIDUAL" : "QUANTITY_TRACKED",
+      category: "Electronics",
+      reason: "Awaiting staff review",
+    }));
+
+    renderPanel({}, true, { rows } as Partial<StaffImportProposal>);
+
+    expect(screen.getAllByRole("row")).toHaveLength(13);
+    expect(screen.getByText(/12 products found · 12 need review/)).toBeTruthy();
+    expect(screen.getAllByText("Relay Module")).toHaveLength(2);
+    productNames
+      .filter((title) => title !== "Relay Module")
+      .forEach((title) => expect(screen.getByText(title)).toBeTruthy());
+    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    screen
+      .getAllByText("Awaiting staff review")
+      .forEach((reason) => expect(reason).not.toBeVisible());
+  });
+
+  it("reveals source and confidence evidence only when Details is expanded", () => {
+    renderPanel({
+      sourceEvidence: [
+        {
+          sourceRef: "page-1-line-1",
+          page: 1,
+          text: "Private source excerpt for Arduino Nano",
+        },
+      ],
+      categoryConfidence: "High",
+      categoryReason: "The name identifies a development board.",
+      enrichmentConfidence: 0.91,
+    });
+
+    expect(
+      screen.getByText("Private source excerpt for Arduino Nano")
+    ).not.toBeVisible();
+    fireEvent.click(screen.getByText("Details"));
+    expect(
+      screen.getByText("Private source excerpt for Arduino Nano")
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/The name identifies a development board\./)
+    ).toBeVisible();
+  });
+
+  it("supports row selection and bulk ignore without changing Apply or Cancel controls", () => {
+    renderPanel({ action: "NEEDS_REVIEW" });
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Select Arduino Nano" })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Ignore selected" }));
+
+    expect(screen.getByText("Ignored")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
+
+  it("submits Cancel through the existing import action", async () => {
+    const cancelAction = vi.fn(() =>
+      Promise.resolve({ error: null, kind: "import-cancelled" })
+    );
+    renderPanel({ action: "NEEDS_REVIEW" }, true, {}, cancelAction);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(cancelAction).toHaveBeenCalledOnce());
   });
 });

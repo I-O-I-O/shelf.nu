@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFetcher, useLocation, useNavigate } from "react-router";
+import { CategoryBadge } from "~/components/assets/category-badge";
 import { resolveImportReviewState } from "~/modules/ioio-staff/import-review";
 import type {
   StaffImportProposal,
@@ -93,6 +94,38 @@ function actionLabel(action: string) {
     .replaceAll("_", " ")
     .toLocaleLowerCase()
     .replace(/(^|\s)\S/g, (character) => character.toUpperCase());
+}
+
+function getReviewBadge(
+  row: StaffImportProposalRow,
+  state: "READY" | "NEEDS_REVIEW" | "CONFLICT" | "INVALID" | "SKIPPED",
+  decision: ReviewDecision | undefined
+) {
+  if (decision?.decision === "IGNORE" || state === "SKIPPED") {
+    return { label: "Ignored", className: "bg-gray-100 text-gray-600" };
+  }
+  if (state === "CONFLICT") {
+    return { label: "Conflict", className: "bg-red-100 text-red-800" };
+  }
+  if (
+    (row.action === "POSSIBLE_DUPLICATE" || row.action === "AMBIGUOUS") &&
+    (row.matchCandidates?.length ?? 0) > 0
+  ) {
+    return {
+      label: "Possible match",
+      className: "bg-amber-100 text-amber-800",
+    };
+  }
+  if (state === "READY") {
+    return { label: "Ready", className: "bg-green-100 text-green-800" };
+  }
+  return { label: "Review", className: "bg-amber-100 text-amber-800" };
+}
+
+function trackingLabel(type: ReviewDecision["type"]) {
+  if (type === "INDIVIDUAL") return "Individual";
+  if (type === "QUANTITY_TRACKED") return "Quantity";
+  return "Needs review";
 }
 
 function isImportFormat(value: string | null): value is ImportFormat {
@@ -352,6 +385,7 @@ function StaffImportProposalView({
   const [reviewPage, setReviewPage] = useState(0);
   const [allowSameFileReimport, setAllowSameFileReimport] = useState(false);
   const [editRowNumber, setEditRowNumber] = useState<number | null>(null);
+  const [selectedRowNumbers, setSelectedRowNumbers] = useState<number[]>([]);
   const [reviewDecisions, setReviewDecisions] = useState<
     Record<number, ReviewDecision>
   >(() =>
@@ -440,6 +474,32 @@ function StaffImportProposalView({
     number,
     "READY" | "NEEDS_REVIEW" | "CONFLICT" | "INVALID" | "SKIPPED"
   >;
+  const reviewBadges = Object.fromEntries(
+    proposal.rows.map((row) => [
+      row.rowNumber,
+      getReviewBadge(
+        row,
+        reviewStates[row.rowNumber],
+        reviewDecisions[row.rowNumber]
+      ),
+    ])
+  );
+  const reviewCount = proposal.rows.filter((row) =>
+    ["Review", "Possible match", "Conflict"].includes(
+      reviewBadges[row.rowNumber].label
+    )
+  ).length;
+  const readyCount = proposal.rows.filter(
+    (row) => reviewBadges[row.rowNumber].label === "Ready"
+  ).length;
+  const ignoredCount = proposal.rows.filter(
+    (row) => reviewBadges[row.rowNumber].label === "Ignored"
+  ).length;
+  const safeReviewRows = proposal.rows.filter(isSafeReviewAction);
+  const selectedSafeRows = proposal.rows.filter(
+    (row) =>
+      selectedRowNumbers.includes(row.rowNumber) && isSafeReviewAction(row)
+  );
   const hasBlockingReviewRows = Object.values(reviewStates).some(
     (state) => !["READY", "SKIPPED"].includes(state)
   );
@@ -488,6 +548,11 @@ function StaffImportProposalView({
     reviewPage * IMPORT_REVIEW_PAGE_SIZE,
     (reviewPage + 1) * IMPORT_REVIEW_PAGE_SIZE
   );
+  const selectedVisibleCount = reviewRows.filter((row) =>
+    selectedRowNumbers.includes(row.rowNumber)
+  ).length;
+  const allVisibleSelected =
+    reviewRows.length > 0 && selectedVisibleCount === reviewRows.length;
   const firstReviewRow = reviewPage * IMPORT_REVIEW_PAGE_SIZE + 1;
   const lastReviewRow = Math.min(
     (reviewPage + 1) * IMPORT_REVIEW_PAGE_SIZE,
@@ -522,6 +587,45 @@ function StaffImportProposalView({
             decision: "APPROVE",
           };
         }
+      });
+      return next;
+    });
+  };
+
+  const toggleSelectedRow = (rowNumber: number, checked: boolean) => {
+    setSelectedRowNumbers((current) =>
+      checked
+        ? current.includes(rowNumber)
+          ? current
+          : [...current, rowNumber]
+        : current.filter((number) => number !== rowNumber)
+    );
+  };
+
+  const toggleVisibleRows = (checked: boolean) => {
+    const visibleNumbers = reviewRows.map((row) => row.rowNumber);
+    setSelectedRowNumbers((current) =>
+      checked
+        ? [...new Set([...current, ...visibleNumbers])]
+        : current.filter((number) => !visibleNumbers.includes(number))
+    );
+  };
+
+  const approveSelectedSafeRows = () => {
+    setReviewDecisions((current) => {
+      const next = { ...current };
+      selectedSafeRows.forEach((row) => {
+        next[row.rowNumber] = { ...next[row.rowNumber], decision: "APPROVE" };
+      });
+      return next;
+    });
+  };
+
+  const ignoreSelectedRows = () => {
+    setReviewDecisions((current) => {
+      const next = { ...current };
+      selectedRowNumbers.forEach((rowNumber) => {
+        next[rowNumber] = { ...next[rowNumber], decision: "IGNORE" };
       });
       return next;
     });
@@ -584,14 +688,15 @@ function StaffImportProposalView({
     <div className="mt-5 border-t border-gray-100 pt-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h3 className="text-lg font-black text-gray-950">
-            {isMouserInvoice
-              ? "Review invoice products"
-              : "Review inventory change proposal"}
+          <h3 className="max-w-2xl break-words text-lg font-black text-gray-950">
+            {proposal.source.filename}
           </h3>
-          <p className="mt-1 text-sm text-gray-500">
-            {proposal.source.filename}, {proposal.rows.length} product rows, no
-            changes have been applied.
+          <p className="mt-1 text-sm font-semibold text-gray-700">
+            {proposal.rows.length}{" "}
+            {proposal.rows.length === 1 ? "product" : "products"} found
+          </p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Nothing changes until you confirm the import.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -700,106 +805,79 @@ function StaffImportProposalView({
         </div>
       ) : null}
 
-      {!isMouserInvoice ? (
-        <div className="mt-4 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-          {Object.entries(proposal.counts).map(([action, count]) => (
-            <div
-              key={action}
-              className="rounded-lg bg-gray-50 px-3 py-2 text-gray-700"
-            >
-              <span className="font-bold">{action}</span>: {count}
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {!isMouserInvoice ? (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm">
-          <span className="text-gray-600">
-            Approve safe matches first, then review duplicate and uncertain
-            rows.
-          </span>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-gray-700" aria-live="polite">
+          {proposal.rows.length}{" "}
+          {proposal.rows.length === 1 ? "product" : "products"} found ·{" "}
+          {reviewCount > 0 ? `${reviewCount} need review` : ""}
+          {readyCount > 0 ? ` · ${readyCount} ready` : ""}
+          {ignoredCount > 0 ? ` · ${ignoredCount} ignored` : ""}
+        </p>
+        {safeReviewRows.length > 0 ? (
           <button
             type="button"
             onClick={approveSafeRows}
-            className="rounded-lg border border-red-200 px-3 py-2 font-bold text-red-800 hover:bg-red-50"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
           >
             Approve safe matches
+          </button>
+        ) : null}
+      </div>
+
+      {(proposal.pdfSummary?.unresolvedLines ?? 0) > 0 ? (
+        <p className="mt-2 text-sm text-amber-800">
+          {proposal.pdfSummary?.unresolvedLines} invoice lines could not be
+          reconstructed.
+        </p>
+      ) : null}
+
+      {selectedRowNumbers.length > 0 ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm">
+          <span className="mr-2 text-gray-600">
+            {selectedRowNumbers.length} selected
+          </span>
+          <button
+            type="button"
+            disabled={selectedSafeRows.length === 0}
+            onClick={approveSelectedSafeRows}
+            className="rounded-md bg-red-700 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Approve selected safe rows
+          </button>
+          <button
+            type="button"
+            onClick={ignoreSelectedRows}
+            className="rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-bold text-gray-700 hover:bg-white"
+          >
+            Ignore selected
           </button>
         </div>
       ) : null}
 
-      {proposal.pdfSummary ? (
-        <div
-          className={`mt-4 rounded-xl p-3 text-sm ${
-            isMouserInvoice
-              ? "border border-gray-200 bg-gray-50 text-gray-700"
-              : "border border-red-100 bg-red-50 text-gray-700"
-          }`}
-        >
-          {isMouserInvoice ? (
-            (proposal.pdfSummary.unresolvedLines ?? 0) > 0 ? (
-              <p>
-                {proposal.pdfSummary.unresolvedLines} invoice lines could not be
-                reconstructed.
-              </p>
-            ) : (
-              <p>All detected invoice lines were reconstructed.</p>
-            )
-          ) : (
-            <>
-              <p className="font-bold text-gray-950">PDF review</p>
-              <p className="mt-1">
-                Valid inventory rows: {proposal.pdfSummary.validItemRows}. Needs
-                review: {proposal.pdfSummary.needsReview}. Ignored non-inventory
-                rows: {proposal.pdfSummary.ignoredRows}.
-              </p>
-              {proposal.pdfSummary.needsReview > 0 ? (
-                <p className="mt-1 text-red-800">
-                  Some rows need review before import.
-                </p>
-              ) : null}
-            </>
-          )}
-        </div>
-      ) : null}
-
-      <div className="mt-4 overflow-x-auto">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
+      <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200">
+        <table className="w-full min-w-[920px] text-left text-sm">
+          <thead className="border-b border-gray-200 bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
             <tr>
-              {isMouserInvoice ? (
-                <>
-                  <th className="p-2">Supplier SKU</th>
-                  <th className="p-2">MPN</th>
-                  <th className="p-2">Product</th>
-                  <th className="p-2">Quantity</th>
-                  <th className="p-2">Category</th>
-                  <th className="p-2">Status</th>
-                  <th className="p-2">Review</th>
-                </>
-              ) : (
-                <>
-                  <th className="p-2">Row</th>
-                  <th className="p-2">Item</th>
-                  <th className="p-2">Quantity</th>
-                  <th className="p-2">Category</th>
-                  <th className="p-2">Location</th>
-                  <th className="p-2">Review</th>
-                  <th className="p-2">Action</th>
-                  <th className="p-2">Reason</th>
-                </>
-              )}
+              <th className="w-10 p-2">
+                <input
+                  type="checkbox"
+                  aria-label="Select all products on this page"
+                  checked={allVisibleSelected}
+                  onChange={(event) =>
+                    toggleVisibleRows(event.currentTarget.checked)
+                  }
+                />
+              </th>
+              <th className="p-2">Product</th>
+              <th className="w-16 p-2">Qty</th>
+              <th className="p-2">Category</th>
+              <th className="p-2">Location</th>
+              <th className="p-2">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {reviewRows.map((row) => {
               const decision = reviewDecisions[row.rowNumber];
-              const selectedCategory = decision?.categoryId
-                ? proposal.categoryOptions?.find(
-                    (category) => category.id === decision.categoryId
-                  )
-                : null;
               const selectedLocation = decision?.locationId
                 ? proposal.locationOptions?.find(
                     (location) => location.id === decision.locationId
@@ -808,99 +886,333 @@ function StaffImportProposalView({
               const selectedNewCategory = decision?.approveNewCategory
                 ? decision.newCategoryName?.trim()
                 : null;
+              const rowCategoryLabel =
+                selectedNewCategory ||
+                row.suggestedCategory ||
+                row.category ||
+                null;
+              const selectedCategoryOption =
+                proposal.categoryOptions?.find(
+                  (category) =>
+                    category.id === (decision?.categoryId ?? row.categoryId)
+                ) ??
+                proposal.categoryOptions?.find(
+                  (category) =>
+                    rowCategoryLabel && category.name === rowCategoryLabel
+                );
+              const selectedCategoryBadge = selectedCategoryOption?.color
+                ? {
+                    id: selectedCategoryOption.id,
+                    name: selectedCategoryOption.name,
+                    color: selectedCategoryOption.color,
+                  }
+                : null;
+              const helperMatchCandidate = row.matchCandidates?.find(
+                (candidate) =>
+                  candidate.id === row.helperCandidate?.productMatch.candidateId
+              );
+              const badge = reviewBadges[row.rowNumber];
+              const suggestedCategory = row.suggestedCategoryId
+                ? proposal.categoryOptions?.find(
+                    (category) => category.id === row.suggestedCategoryId
+                  )
+                : null;
+              const suggestedLocation = row.suggestedLocationId
+                ? proposal.locationOptions?.find(
+                    (location) => location.id === row.suggestedLocationId
+                  )
+                : null;
+              const quantity =
+                decision?.quantity ?? row.quantity ?? row.proposedQuantity;
               return (
-                <tr key={row.rowNumber}>
-                  {isMouserInvoice ? (
-                    <>
-                      <td className="whitespace-nowrap p-2 font-mono text-xs">
-                        {row.supplierPartNumber || "—"}
-                      </td>
-                      <td className="whitespace-nowrap p-2 font-mono text-xs">
-                        {row.manufacturerPartNumber || "—"}
-                      </td>
-                    </>
-                  ) : (
-                    <td className="p-2">{row.rowNumber}</td>
-                  )}
-                  <td className="p-2 font-semibold">
-                    {row.title || "Unresolved item name"}
-                    {!isMouserInvoice &&
-                    row.sourceDescription &&
-                    row.sourceDescription !== row.title ? (
-                      <p className="mt-1 text-xs font-normal text-gray-500">
-                        Source: {row.sourceDescription}
-                      </p>
+                <tr key={row.rowNumber} className="align-top">
+                  <td className="p-2">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${
+                        row.title || `row ${row.rowNumber}`
+                      }`}
+                      checked={selectedRowNumbers.includes(row.rowNumber)}
+                      onChange={(event) =>
+                        toggleSelectedRow(
+                          row.rowNumber,
+                          event.currentTarget.checked
+                        )
+                      }
+                    />
+                  </td>
+                  <td className="max-w-[280px] p-2">
+                    <div className="line-clamp-2 break-words font-semibold leading-5 text-gray-950">
+                      {row.title || "Unresolved item name"}
+                    </div>
+                    {badge.label === "Possible match" ||
+                    badge.label === "Conflict" ||
+                    badge.label === "Ignored" ? (
+                      <span className="text-xs font-medium text-amber-700">
+                        {badge.label}
+                      </span>
+                    ) : row.action === "REJECT" ? (
+                      <span className="text-xs font-medium text-red-700">
+                        Invalid proposal · see Details
+                      </span>
+                    ) : row.action === "AMBIGUOUS" ? (
+                      <span className="text-xs font-medium text-amber-700">
+                        Match needs review
+                      </span>
                     ) : null}
-                    {isMouserInvoice && row.manufacturer ? (
-                      <p className="mt-1 text-xs font-normal text-gray-500">
-                        {row.manufacturer}
-                      </p>
-                    ) : null}
-                    {!isMouserInvoice &&
-                    (row.supplierPartNumber || row.manufacturerPartNumber) ? (
-                      <p className="mt-1 text-xs font-normal text-gray-500">
-                        {row.supplierPartNumber
-                          ? `Supplier product number: ${row.supplierPartNumber}`
-                          : null}
-                        {row.supplierPartNumber && row.manufacturerPartNumber
-                          ? " · "
-                          : null}
-                        {row.manufacturerPartNumber
-                          ? `MPN: ${row.manufacturerPartNumber}`
-                          : null}
-                      </p>
-                    ) : null}
-                    {!isMouserInvoice && row.helperCandidate ? (
-                      <div className="mt-2 space-y-1 rounded-lg bg-blue-50 p-2 text-xs font-normal text-blue-950">
-                        <p>
-                          Helper suggestion:{" "}
-                          {row.helperCandidate.productMatch.matchType.toLocaleLowerCase()}{" "}
-                          product match (
-                          {Math.round(
-                            row.helperCandidate.productMatch.confidence * 100
-                          )}
-                          % confidence),{" "}
-                          {row.helperCandidate.trackingSuggestion.mode
-                            ? `${row.helperCandidate.trackingSuggestion.mode.toLocaleLowerCase()} tracking (${Math.round(
+                    <details className="mt-1 text-xs text-gray-500">
+                      <summary className="w-fit cursor-pointer select-none hover:text-gray-800">
+                        Details
+                      </summary>
+                      <div className="mt-2 max-w-md space-y-1.5 rounded-md bg-gray-50 p-2 text-xs leading-4 text-gray-700">
+                        {row.manufacturer ? (
+                          <p>
+                            <span className="font-semibold">Manufacturer:</span>{" "}
+                            {row.manufacturer}
+                          </p>
+                        ) : null}
+                        {row.sourceDescription &&
+                        row.sourceDescription !== row.title ? (
+                          <p>
+                            <span className="font-semibold">Description:</span>{" "}
+                            {row.sourceDescription}
+                          </p>
+                        ) : null}
+                        {row.unitDescription ? (
+                          <p>
+                            <span className="font-semibold">Unit:</span>{" "}
+                            {row.unitDescription}
+                          </p>
+                        ) : null}
+                        {row.sourceNotes ? (
+                          <p>
+                            <span className="font-semibold">Source notes:</span>{" "}
+                            {row.sourceNotes}
+                          </p>
+                        ) : null}
+                        {row.supplierPartNumber ? (
+                          <p>
+                            <span className="font-semibold">Supplier SKU:</span>{" "}
+                            {row.supplierPartNumber}
+                          </p>
+                        ) : null}
+                        {row.manufacturerPartNumber ? (
+                          <p>
+                            <span className="font-semibold">MPN:</span>{" "}
+                            {row.manufacturerPartNumber}
+                          </p>
+                        ) : null}
+                        {decision?.type || row.type ? (
+                          <p>
+                            <span className="font-semibold">Tracking:</span>{" "}
+                            {trackingLabel(decision?.type ?? row.type)}
+                          </p>
+                        ) : null}
+                        {row.helperCandidate ? (
+                          <>
+                            <p>
+                              <span className="font-semibold">
+                                Product match:
+                              </span>{" "}
+                              {row.helperCandidate.productMatch.matchType.toLocaleLowerCase()}{" "}
+                              ·{" "}
+                              {Math.round(
+                                row.helperCandidate.productMatch.confidence *
+                                  100
+                              )}
+                              % confidence
+                              {helperMatchCandidate
+                                ? ` · ${helperMatchCandidate.title}`
+                                : row.helperCandidate.productMatch.candidateId
+                                ? ` · ${row.helperCandidate.productMatch.candidateId}`
+                                : ""}
+                            </p>
+                            <p>
+                              <span className="font-semibold">
+                                Tracking suggestion:
+                              </span>{" "}
+                              {trackingLabel(
+                                row.helperCandidate.trackingSuggestion.mode
+                              )}{" "}
+                              ·{" "}
+                              {Math.round(
                                 row.helperCandidate.trackingSuggestion
                                   .confidence * 100
-                              )}% confidence).`
-                            : "tracking left for staff review."}
-                        </p>
-                        {row.helperCandidate.questions.length ? (
-                          <ul className="list-disc pl-4">
+                              )}
+                              % confidence
+                            </p>
+                            {row.helperCandidate.kitHint.isKit ? (
+                              <p>
+                                <span className="font-semibold">
+                                  Kit suggestion:
+                                </span>{" "}
+                                {row.helperCandidate.kitHint.name ??
+                                  "Possible kit"}{" "}
+                                ·{" "}
+                                {Math.round(
+                                  row.helperCandidate.kitHint.confidence * 100
+                                )}
+                                % confidence
+                              </p>
+                            ) : null}
                             {row.helperCandidate.questions.map((question) => (
-                              <li key={question}>{question}</li>
+                              <p key={question}>
+                                <span className="font-semibold">Question:</span>{" "}
+                                {question}
+                              </p>
                             ))}
-                          </ul>
+                            {row.helperCandidate.settingsSuggestions.length >
+                            0 ? (
+                              <p>
+                                <span className="font-semibold">
+                                  Suggested settings:
+                                </span>{" "}
+                                {row.helperCandidate.settingsSuggestions
+                                  .map(
+                                    ({ key, value }) =>
+                                      `${key}: ${String(value)}`
+                                  )
+                                  .join(", ")}
+                              </p>
+                            ) : null}
+                            {row.helperCandidate.locationSuggestions.length >
+                            0 ? (
+                              <p>
+                                <span className="font-semibold">
+                                  Location suggestions:
+                                </span>{" "}
+                                {row.helperCandidate.locationSuggestions
+                                  .map(({ locationId, confidence }) => {
+                                    const location =
+                                      proposal.locationOptions?.find(
+                                        (option) => option.id === locationId
+                                      );
+                                    return `${
+                                      location?.pathLabel ?? locationId
+                                    } (${Math.round(confidence * 100)}%)`;
+                                  })
+                                  .join(", ")}
+                              </p>
+                            ) : null}
+                          </>
                         ) : null}
-                        {row.sourceEvidence?.map((evidence, index) => (
-                          <p key={`${evidence.sourceRef}-${index}`}>
-                            Source, page {evidence.page}: “{evidence.text}”
+                        {row.matchCandidates?.map((candidate) => (
+                          <p key={candidate.id}>
+                            <span className="font-semibold">
+                              Match candidate:
+                            </span>{" "}
+                            {candidate.title} · {candidate.id}
+                            {candidate.quantity != null
+                              ? ` · quantity ${candidate.quantity}`
+                              : ""}
+                            {candidate.category
+                              ? ` · ${candidate.category}`
+                              : ""}
+                            {candidate.location
+                              ? ` · ${candidate.location}`
+                              : ""}
                           </p>
                         ))}
-                        {row.helperCandidate.settingsSuggestions.length ? (
+                        {row.enrichmentConfidence !== undefined ? (
                           <p>
-                            Suggested settings:{" "}
-                            {row.helperCandidate.settingsSuggestions
-                              .map(
-                                ({ key, value }) => `${key}: ${String(value)}`
-                              )
-                              .join(", ")}
+                            <span className="font-semibold">
+                              Enrichment confidence:
+                            </span>{" "}
+                            {Math.round(row.enrichmentConfidence * 100)}%
                           </p>
                         ) : null}
-                      </div>
-                    ) : null}
-                    {!isMouserInvoice && !row.helperCandidate
-                      ? row.sourceEvidence?.map((evidence, index) => (
+                        {row.categoryConfidence ? (
+                          <p>
+                            <span className="font-semibold">
+                              Category confidence:
+                            </span>{" "}
+                            {row.categoryConfidence}
+                            {row.categoryReason
+                              ? ` · ${row.categoryReason}`
+                              : ""}
+                          </p>
+                        ) : null}
+                        {row.categoryResolution ? (
+                          <p>
+                            <span className="font-semibold">
+                              Category match state:
+                            </span>{" "}
+                            {actionLabel(row.categoryResolution)}
+                          </p>
+                        ) : null}
+                        {row.locationResolution ? (
+                          <p>
+                            <span className="font-semibold">
+                              Location match state:
+                            </span>{" "}
+                            {actionLabel(row.locationResolution)}
+                          </p>
+                        ) : null}
+                        {row.uncertainFields?.length ? (
+                          <p>
+                            <span className="font-semibold">
+                              Unresolved fields:
+                            </span>{" "}
+                            {row.uncertainFields.join(", ")}
+                          </p>
+                        ) : null}
+                        {row.pdfClassification ? (
+                          <p>
+                            <span className="font-semibold">
+                              PDF row classification:
+                            </span>{" "}
+                            {actionLabel(row.pdfClassification)}
+                          </p>
+                        ) : null}
+                        {row.orderedQuantity != null ? (
+                          <p>Ordered quantity: {row.orderedQuantity}</p>
+                        ) : null}
+                        {row.receivedQuantity != null ? (
+                          <p>Received quantity: {row.receivedQuantity}</p>
+                        ) : null}
+                        {quantity != null ? (
+                          <p>Proposed quantity: {quantity}</p>
+                        ) : null}
+                        {row.quantityStatus ? (
+                          <p>
+                            Quantity status: {actionLabel(row.quantityStatus)}
+                          </p>
+                        ) : null}
+                        {selectedLocation || row.locationContext ? (
+                          <p>
+                            Location capacity context:{" "}
+                            {selectedLocation?.currentUnits ??
+                              row.locationContext?.currentUnits ??
+                              0}{" "}
+                            current units;{" "}
+                            {row.locationContext?.proposedUnits ??
+                              row.quantity ??
+                              quantity ??
+                              0}{" "}
+                            proposed units; capacity not configured.
+                          </p>
+                        ) : null}
+                        <p>
+                          <span className="font-semibold">Review reason:</span>{" "}
+                          {row.reviewConflictReason || row.reason}
+                        </p>
+                        <p>
+                          <span className="font-semibold">Import action:</span>{" "}
+                          {actionLabel(row.action)}
+                        </p>
+                        {row.sourceEvidence?.map((evidence, index) => (
                           <p
                             key={`${evidence.sourceRef}-${index}`}
-                            className="mt-1 text-xs font-normal text-gray-500"
+                            className="break-words"
                           >
-                            Source, page {evidence.page}: “{evidence.text}”
+                            <span className="font-semibold">
+                              Source page {evidence.page}:
+                            </span>{" "}
+                            {evidence.text}
                           </p>
-                        ))
-                      : null}
+                        ))}
+                      </div>
+                    </details>
                     {editRowNumber === row.rowNumber ? (
                       <div className="mt-2 min-w-64 space-y-2 rounded-lg bg-gray-50 p-2 text-xs font-normal">
                         <label className="block">
@@ -1160,128 +1472,79 @@ function StaffImportProposalView({
                       </div>
                     ) : null}
                   </td>
-                  <td className="p-2">
-                    {isMouserInvoice ? (
-                      <div>
-                        {reviewDecisions[row.rowNumber]?.quantity ??
-                          row.quantity ??
-                          "—"}
-                      </div>
+                  <td className="whitespace-nowrap p-2 font-semibold tabular-nums">
+                    {quantity ?? "—"}
+                  </td>
+                  <td className="min-w-36 p-2">
+                    {proposal.categoryOptions?.length ? (
+                      <label className="relative inline-flex items-center rounded-md focus-within:ring-2 focus-within:ring-red-200">
+                        {selectedCategoryBadge ? (
+                          <CategoryBadge category={selectedCategoryBadge} />
+                        ) : suggestedCategory &&
+                          (row.categorySuggestionConfidence ?? 0) >= 0.5 ? (
+                          <span className="text-amber-700">
+                            Suggested: {suggestedCategory.name} · choose
+                          </span>
+                        ) : (
+                          <span className="text-amber-700">
+                            Choose category
+                          </span>
+                        )}
+                        <span aria-hidden="true" className="px-1 text-gray-500">
+                          ▾
+                        </span>
+                        <select
+                          aria-label={`Category for ${row.title}`}
+                          value={decision?.categoryId ?? row.categoryId ?? ""}
+                          onChange={(event) =>
+                            updateDecision(row.rowNumber, {
+                              categoryId: event.currentTarget.value || null,
+                              approveNewCategory: false,
+                            })
+                          }
+                          className="absolute inset-0 size-full cursor-pointer opacity-0"
+                        >
+                          <option value="">Choose a category</option>
+                          {proposal.categoryOptions.map((category) => (
+                            <option
+                              key={category.id}
+                              value={category.id}
+                              disabled={category.archived}
+                            >
+                              {category.name}
+                              {category.archived ? " (archived)" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     ) : (
-                      <>
-                        <div>
-                          Tracking:{" "}
-                          {reviewDecisions[row.rowNumber]?.type?.replaceAll(
-                            "_",
-                            " "
-                          ) ?? "Needs review"}
-                        </div>
-                        {reviewDecisions[row.rowNumber]?.type ===
-                          "INDIVIDUAL" &&
-                        (reviewDecisions[row.rowNumber]?.quantity ?? 0) > 0 ? (
-                          <div className="mt-1 text-xs font-semibold text-gray-700">
-                            Quantity: {reviewDecisions[row.rowNumber]?.quantity}
-                            ; Tracking: Individual QR
-                            <br />
-                            Result: {
-                              reviewDecisions[row.rowNumber]?.quantity
-                            }{" "}
-                            physical units,{" "}
-                            {reviewDecisions[row.rowNumber]?.title || row.title}{" "}
-                            #001 – #
-                            {String(
-                              reviewDecisions[row.rowNumber]?.quantity
-                            ).padStart(
-                              Math.max(
-                                3,
-                                String(reviewDecisions[row.rowNumber]?.quantity)
-                                  .length
-                              ),
-                              "0"
-                            )}
-                            , each with a distinct QR code
-                          </div>
-                        ) : null}
-                        <div>Ordered: {row.orderedQuantity ?? "Unknown"}</div>
-                        <div>Received: {row.receivedQuantity ?? "Unknown"}</div>
-                        <div>
-                          Proposed:{" "}
-                          {row.proposedQuantity ?? row.quantity ?? "Unknown"}
-                        </div>
-                      </>
+                      <CategoryBadge category={selectedCategoryBadge} />
                     )}
                   </td>
-                  <td className="p-2">
-                    <div>
-                      {isMouserInvoice
-                        ? selectedCategory?.name ?? row.category ?? "—"
-                        : selectedCategory?.name ??
-                          (selectedNewCategory
-                            ? `New: ${selectedNewCategory}`
-                            : row.suggestedCategory ??
-                              row.category ??
-                              "Needs review")}
-                    </div>
-                    {!isMouserInvoice && row.categoryConfidence ? (
-                      <div className="text-xs text-gray-500">
-                        {row.categoryConfidence}: {row.categoryReason}
-                      </div>
-                    ) : null}
-                    {!isMouserInvoice &&
-                    !selectedCategory &&
-                    !selectedNewCategory &&
-                    row.categoryResolution === "ARCHIVED_MATCH" ? (
-                      <div className="text-xs text-amber-800">
-                        Matching category is archived; choose an active
-                        category.
-                      </div>
-                    ) : null}
-                  </td>
-                  {!isMouserInvoice ? (
-                    <td className="p-2">
+                  <td className="max-w-48 p-2 text-gray-700">
+                    <span className="line-clamp-2 break-words">
                       {selectedLocation?.pathLabel ??
-                        row.locationLabel ??
-                        row.location ??
-                        "Unassigned"}
-                      {selectedLocation || row.locationContext ? (
-                        <div className="text-xs text-gray-500">
-                          Current units:{" "}
-                          {selectedLocation?.currentUnits ??
-                            row.locationContext?.currentUnits ??
-                            0}
-                          ; import adds:{" "}
-                          {row.locationContext?.proposedUnits ??
-                            row.quantity ??
-                            0}
-                          ; capacity: not configured
-                        </div>
-                      ) : null}
-                    </td>
-                  ) : null}
-                  {isMouserInvoice ? (
-                    <td className="p-2 text-xs">
-                      <div className="font-semibold">
-                        {actionLabel(reviewStates[row.rowNumber])}
-                      </div>
-                      <div className="text-gray-500">
-                        {actionLabel(row.action)}
-                      </div>
-                    </td>
-                  ) : null}
+                        (row.locationId ? row.locationLabel : null) ??
+                        (row.locationId ? row.location : null) ??
+                        (suggestedLocation &&
+                        (row.locationSuggestionConfidence ?? 0) >= 0.5
+                          ? `Suggested: ${suggestedLocation.pathLabel} · choose`
+                          : "Choose location")}
+                    </span>
+                  </td>
                   <td className="p-2">
-                    {!isMouserInvoice ? (
-                      <div className="mb-2 font-bold">
-                        {reviewStates[row.rowNumber]}
-                      </div>
-                    ) : null}
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
-                        disabled={!reviewDecisions[row.rowNumber]?.title.trim()}
+                        disabled={!decision?.title.trim()}
                         onClick={() =>
                           updateDecision(row.rowNumber, { decision: "APPROVE" })
                         }
-                        className="rounded-lg bg-red-700 px-2 py-1 text-xs font-bold text-white hover:bg-red-800 disabled:opacity-50"
+                        className={`rounded-md px-2 py-1 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          badge.label === "Ready"
+                            ? "bg-red-700 text-white hover:bg-red-800"
+                            : "border border-gray-300 text-gray-700 hover:bg-gray-50"
+                        }`}
                       >
                         Approve
                       </button>
@@ -1292,7 +1555,11 @@ function StaffImportProposalView({
                             current === row.rowNumber ? null : row.rowNumber
                           )
                         }
-                        className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                        className={`rounded-md px-2 py-1 text-xs font-bold transition ${
+                          badge.label === "Ready"
+                            ? "border border-gray-300 text-gray-700 hover:bg-gray-50"
+                            : "bg-red-700 text-white hover:bg-red-800"
+                        }`}
                       >
                         Edit
                       </button>
@@ -1301,18 +1568,12 @@ function StaffImportProposalView({
                         onClick={() =>
                           updateDecision(row.rowNumber, { decision: "IGNORE" })
                         }
-                        className="rounded-lg border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                        className="rounded-md border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
                       >
                         Ignore
                       </button>
                     </div>
                   </td>
-                  {!isMouserInvoice ? (
-                    <>
-                      <td className="p-2">{actionLabel(row.action)}</td>
-                      <td className="p-2 text-gray-500">{row.reason}</td>
-                    </>
-                  ) : null}
                 </tr>
               );
             })}

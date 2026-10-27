@@ -19,7 +19,10 @@ import {
 
 const label: ErrorLabel = "Category";
 
-export type ActiveCategoryRecord = Pick<Category, "id" | "name" | "color">;
+export type ActiveCategoryRecord = Pick<
+  Category,
+  "id" | "name" | "color" | "description"
+>;
 
 /**
  * The single source of current category records used by assignment and filter pickers.
@@ -55,7 +58,7 @@ export async function getActiveCategoriesForOrganization({
           }
         : {}),
     },
-    select: { id: true, name: true, color: true },
+    select: { id: true, name: true, color: true, description: true },
     orderBy: [{ name: "asc" }, { id: "asc" }],
   });
   return orderUntouchedIoioDefaults(categories);

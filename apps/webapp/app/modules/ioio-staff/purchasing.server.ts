@@ -1516,7 +1516,7 @@ export async function uploadPurchaseReceipt({
   try {
     let extractedData: ReturnType<typeof getReceiptGuesses> | null = null;
     if (file.type === "application/pdf") {
-      const text = extractPdfTextForReceiptReview(bytes);
+      const text = await extractPdfTextForReceiptReview(bytes);
       extractedData = getReceiptGuesses(text);
     }
     return await db.purchaseReceiptDraft.create({

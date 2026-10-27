@@ -40,6 +40,13 @@ RUN pnpm prune --prod
 # Finally, build the production image with minimal footprint
 FROM base AS release
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      tesseract-ocr \
+      tesseract-ocr-eng \
+      tesseract-ocr-swe && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /src/node_modules /src/node_modules
 COPY --from=build /src/apps/webapp/node_modules /src/apps/webapp/node_modules
 COPY --from=build /src/packages/database /src/packages/database

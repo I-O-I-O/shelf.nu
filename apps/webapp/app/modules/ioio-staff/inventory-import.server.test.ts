@@ -6,6 +6,7 @@ import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
+import type { MouserEnrichmentRequest } from "./import-helper-contract.server";
 
 const database = vi.hoisted(() => ({
   asset: { findMany: vi.fn(), findFirst: vi.fn() },
@@ -38,6 +39,7 @@ const mockGetBrokenSection = vi.hoisted(() => vi.fn());
 const mockGetReturnArea = vi.hoisted(() => vi.fn());
 const mockGetArchivedCategoryIds = vi.hoisted(() => vi.fn());
 const mockRequestImportHelperProposal = vi.hoisted(() => vi.fn());
+const mockOcrPdfPages = vi.hoisted(() => vi.fn());
 
 // why: the tests exercise the pure file parsing and row classification logic;
 // database and Shelf mutation services must not be initialized for those tests.
@@ -101,6 +103,18 @@ vi.mock("./import-helper-client.server", () => ({
   requestImportHelperProposal: mockRequestImportHelperProposal,
 }));
 
+// why: importer routing tests need deterministic OCR output and must not depend
+// on a Tesseract installation in the unit-test runtime.
+vi.mock("./pdf-ocr.server", () => ({
+  PDF_OCR_MAX_PAGES: 20,
+  PdfOcrError: class PdfOcrError extends Error {
+    constructor(readonly code: "unavailable") {
+      super(`PDF OCR ${code}.`);
+    }
+  },
+  ocrPdfPages: mockOcrPdfPages,
+}));
+
 import { validateImportHelperResponse } from "./import-helper-contract.server";
 import {
   applyStaffInventoryImport,
@@ -113,9 +127,13 @@ import {
   summarizeStaffImportRows,
   type StaffImportResult,
 } from "./inventory-import.server";
+import { PdfOcrError } from "./pdf-ocr.server";
 import {
   MOUSER_FRAGMENTED_EXPECTED_ROWS,
   MOUSER_FRAGMENTED_PAGE_TEXT,
+  MOUSER_REAL_FIRST_PAGE_EXPECTED,
+  MOUSER_REAL_FIRST_PAGE_PAGES,
+  MOUSER_REAL_FIRST_PAGE_TEXT,
   MOUSER_SIX_LINE_EXPECTED,
   MOUSER_SIX_LINE_PAGES,
 } from "../../../test/fixtures/mouser-invoice-fragments";
@@ -154,6 +172,108 @@ function makeHexTextPdf(text: string) {
     `%PDF-1.4\n1 0 obj\n<< /Type /Page /Contents 2 0 R >>\nendobj\n2 0 obj\n<< /Length 1 >>\nstream\n<${encodedText}> Tj\nendstream\nendobj\n%%EOF`,
     "latin1"
   );
+}
+
+function makeToUnicodePdf(text: string) {
+  const characters = [...new Set(Array.from(text))];
+  const codes = new Map(
+    characters.map((character, index) => [
+      character,
+      (index + 1).toString(16).padStart(4, "0"),
+    ])
+  );
+  const cmap = [
+    "/CIDInit /ProcSet findresource begin",
+    "12 dict begin",
+    "begincmap",
+    "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+    "/CMapName /Adobe-Identity-UCS def",
+    "/CMapType 2 def",
+    "1 begincodespacerange",
+    "<0000> <FFFF>",
+    "endcodespacerange",
+    `${characters.length} beginbfchar`,
+    ...characters.map((character) => {
+      const destination = character.charCodeAt(0).toString(16).padStart(4, "0");
+      return `<${codes.get(character)}> <${destination}>`;
+    }),
+    "endbfchar",
+    "endcmap",
+    "CMapName currentdict /CMap defineresource pop",
+    "end",
+    "end",
+  ].join("\n");
+  const glyphs = text
+    .split(" ")
+    .map((word) => {
+      const encodedWord = Array.from(word)
+        .map((character) => codes.get(character))
+        .join("");
+      return `<${encodedWord}> Tj`;
+    })
+    .join(` <${codes.get(" ")}> Tj 40 0 Td `);
+  const content = `BT /F1 12 Tf 30 700 Td ${glyphs} ET`;
+  const streamObject = (stream: string) =>
+    `<< /Length ${Buffer.byteLength(
+      stream,
+      "ascii"
+    )} >>\nstream\n${stream}\nendstream`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>",
+    "<< /Type /Font /Subtype /Type0 /BaseFont /MockSubset /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 6 0 R >>",
+    `<< /Type /Font /Subtype /CIDFontType2 /BaseFont /MockSubset /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 600 /W [1 [${characters
+      .map(() => "600")
+      .join(" ")}]] >>`,
+    streamObject(cmap),
+    streamObject(content),
+  ];
+
+  let pdf = "%PDF-1.7\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets
+    .slice(1)
+    .map((offset) => `${offset.toString().padStart(10, "0")} 00000 n \n`)
+    .join("");
+  pdf += `trailer\n<< /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, "ascii");
+}
+
+function makeImageOnlyPdf() {
+  const imageStream = "FF>";
+  const contentStream = "q 100 0 0 100 10 10 cm /Im0 Do Q";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length ${imageStream.length} >>\nstream\n${imageStream}\nendstream`,
+    `<< /Length ${contentStream.length} >>\nstream\n${contentStream}\nendstream`,
+  ];
+  let pdf = "%PDF-1.7\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets
+    .slice(1)
+    .map((offset) => `${offset.toString().padStart(10, "0")} 00000 n \n`)
+    .join("");
+  pdf += `trailer\n<< /Size ${
+    objects.length + 1
+  } /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, "ascii");
 }
 
 function preparePdfImportMocks(operationId: string) {
@@ -243,12 +363,19 @@ function makeMouserHelperResponse() {
         item.supplierProductNumber === "713-114993388"
           ? "cat-electronics"
           : null,
+      categoryConfidence:
+        item.supplierProductNumber === "713-114993388" ? 0.9 : 0,
+      locationId:
+        item.supplierProductNumber === "713-114993388" ? "loc-shelf" : null,
+      locationConfidence:
+        item.supplierProductNumber === "713-114993388" ? 0.9 : 0,
       confidence: 0.9,
     })),
   } as const;
 }
 
 beforeEach(() => {
+  mockOcrPdfPages.mockReset().mockRejectedValue(new PdfOcrError("unavailable"));
   database.category.findMany.mockResolvedValue([]);
   database.location.findMany.mockResolvedValue([]);
   mockCreateCategory.mockImplementation(({ name }) => ({
@@ -308,6 +435,318 @@ describe("staff inventory import safety", () => {
     ).not.toContain("713-100000008");
   });
 
+  it("reconstructs all six visible Mouser first-page commercial lines", () => {
+    const parsed = parseMouserInvoicePages(MOUSER_REAL_FIRST_PAGE_PAGES);
+
+    expect(parsed.detected).toBe(true);
+    expect(parsed.lineItems).toHaveLength(6);
+    expect(
+      parsed.lineItems.map(
+        ({
+          lineNumber,
+          supplierProductNumber,
+          mpn,
+          rawDescription,
+          quantity,
+        }) => ({
+          lineNumber,
+          supplierProductNumber,
+          mpn,
+          description: rawDescription,
+          quantity,
+        })
+      )
+    ).toEqual(MOUSER_REAL_FIRST_PAGE_EXPECTED);
+
+    const xiaoEs = parsed.lineItems.find(
+      ({ supplierProductNumber }) => supplierProductNumber === "713-102010634"
+    );
+    const xiaoBoard = parsed.lineItems.find(
+      ({ supplierProductNumber }) => supplierProductNumber === "713-113991115"
+    );
+    expect(xiaoEs?.rawDescription).toContain("XIAO");
+    expect(xiaoEs?.rawDescription).not.toContain("Tillv. Artikelnr");
+    expect(xiaoBoard?.rawDescription).toContain("XIAO");
+
+    for (const lineItem of parsed.lineItems) {
+      expect(lineItem.rawDescription).not.toBe(lineItem.supplierProductNumber);
+      expect(lineItem.rawDescription).not.toBe(lineItem.mpn);
+      expect(lineItem.rawDescription).not.toMatch(/Tillv\. Artikelnr/i);
+    }
+  });
+
+  it("uses positioned Mouser columns to associate row identity, description, and shipped quantity", () => {
+    const positionedItems: Array<{
+      text: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      page: number;
+    }> = [];
+    const add = (text: string, x: number, y: number, width = 36) => {
+      positionedItems.push({ text, x, y, width, height: 10, page: 1 });
+    };
+    add("Line", 36, 100, 18);
+    add("No.", 58, 100, 14);
+    add("Mousers", 140, 100, 48);
+    add("Artikelnummer", 192, 100, 96);
+    add("Beskrivning", 310, 100, 80);
+    add("Ordered", 600, 100, 50);
+    add("Shipped", 690, 100, 52);
+    add("Pending", 780, 100, 56);
+    add("Unit Price", 880, 100, 65);
+
+    MOUSER_REAL_FIRST_PAGE_EXPECTED.forEach((item) => {
+      const y = 180 + item.lineNumber * 80;
+      add(String(item.lineNumber), 44, y, 12);
+      add(item.supplierProductNumber, 145, y, 110);
+      add("T", 145, y + 5, 7);
+      add("illv", 153, y + 12, 18);
+      add(".", 172, y + 19, 3);
+      add("Artikelnr:", 178, y + 26, 52);
+      add(item.mpn, 233, y + 28, 72);
+      add(item.description, 145, y + 34, 330);
+      add(
+        "TARIC:8471500000 ECCN:5A992.C COO:CN ACO:-- COD:--",
+        145,
+        y + 38,
+        300
+      );
+      add(String(item.quantity), 610, y + 34, 12);
+      add(String(item.quantity), 700, y + 34, 12);
+      add("0", 790, y + 34, 8);
+      add("260,76", 890, y + 34, 30);
+    });
+
+    const fragmentedText = MOUSER_REAL_FIRST_PAGE_TEXT.replace(
+      "3\n713-114993387",
+      "713-114993387"
+    ).replace("4\n713-102010634", "713-102010634");
+    const textOnlyPages = [
+      { sourceRef: "pdf-page-1", page: 1, text: fragmentedText },
+    ];
+    const textOnly = parseMouserInvoicePages(textOnlyPages);
+    expect(textOnly.lineItems).toHaveLength(4);
+
+    const parsed = parseMouserInvoicePages(
+      textOnlyPages,
+      [{ sourceRef: "pdf-page-1", page: 1, items: positionedItems }],
+      "pdfjs"
+    );
+
+    expect(parsed.positionSource).toBe("pdfjs");
+    expect(parsed.lineItems).toHaveLength(6);
+    expect(
+      parsed.lineItems.map(
+        ({
+          lineNumber,
+          supplierProductNumber,
+          mpn,
+          rawDescription,
+          quantity,
+        }) => ({
+          lineNumber,
+          supplierProductNumber,
+          mpn,
+          description: rawDescription,
+          quantity,
+        })
+      )
+    ).toEqual(MOUSER_REAL_FIRST_PAGE_EXPECTED);
+  });
+
+  it("keeps Mouser product titles on descriptions instead of SKU or MPN labels", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "mouser-real-first-page.pdf",
+      contentType: "application/pdf",
+      buffer: makePdfFromPages(MOUSER_REAL_FIRST_PAGE_PAGES),
+    });
+
+    expect(rows).toHaveLength(6);
+    const xiaoEs = rows.find(
+      (row) => row.supplierPartNumber === "713-102010634"
+    );
+    const xiaoBoard = rows.find(
+      (row) => row.supplierPartNumber === "713-113991115"
+    );
+    expect(xiaoEs).toMatchObject({
+      manufacturerPartNumber: "102010634",
+      quantity: 2,
+    });
+    expect(xiaoEs?.title).toContain("XIAO");
+    expect(xiaoEs?.title).toBe("Seeed Studio XIAO ES");
+    expect(xiaoEs?.title).not.toContain("Tillv. Artikelnr");
+    expect(xiaoBoard?.title).toContain("XIAO");
+    expect(xiaoBoard?.title).toBe("Seeed Studio XIAO ESP32C6");
+    expect(
+      rows.find((row) => row.supplierPartNumber === "713-102010631")?.title
+    ).toBe("Seeed Studio XIAO ESP32C3");
+    expect(
+      rows.find((row) => row.supplierPartNumber === "713-101010001")?.title
+    ).toBe("Seeed Studio 24GHz mmWave Sensor");
+    expect(
+      rows.find((row) => row.supplierPartNumber === "713-114993387")?.title
+    ).toBe("Seeed Studio 60GHz mmWave Sensor");
+    expect(
+      rows.find((row) => row.supplierPartNumber === "713-114993388")?.title
+    ).toBe("Seeed Studio 60GHz mmWave Sensor");
+    for (const row of rows) {
+      expect(row.title).not.toBe(row.supplierPartNumber);
+      expect(row.title).not.toBe(row.manufacturerPartNumber);
+      expect(row.title).not.toMatch(/Tillv\. Artikelnr/i);
+    }
+  });
+
+  it("preserves manufacturer, family, chipset, and variants in Mouser product names", async () => {
+    preparePdfImportMocks("operation-mouser-naming-identity");
+    const descriptions = [
+      "Seeed Studio Seeed Studio XIAO nRF52840",
+      "Seeed Studio XIAO nRF52840 Sense (Pre-Soldered)",
+      "Seeed Studio Seeed Studio XIAO ESP32-S3 / Utvecklingsverktyg för multiprotokoll",
+    ];
+    const pdfText = [
+      "Radnr",
+      "Line No.",
+      "Mousers Artikelnummer",
+      "Kundens/tillv. Artikelnr",
+      "Beskrivning",
+      "Ordered",
+      "Shipped",
+      "Pending",
+      "Price",
+      ...descriptions.flatMap((description, index) => [
+        String(index + 1),
+        `713-90000000${index + 1}`,
+        `Manufacturer Part No: 90000000${index + 1}`,
+        description,
+        "1",
+        "1",
+        "0",
+      ]),
+    ].join("\n");
+    const weakHelperTitles = [
+      "XIAO nRF52840",
+      "Seeed Studio XIAO nRF52840 Multiprotocol Development Tool",
+      "XIAO ES Multiprotocol Development Tool",
+    ];
+    mockRequestImportHelperProposal.mockImplementation(
+      (request: MouserEnrichmentRequest) => {
+        if (request.mode !== "MOUSER_LINE_ITEM_ENRICHMENT") {
+          throw new Error("Expected Mouser enrichment input");
+        }
+        const response = {
+          mode: "MOUSER_LINE_ITEM_ENRICHMENT" as const,
+          schemaVersion: 2,
+          rows: request.lineItems.map((item, index) => ({
+            sourceRef: item.sourceRef,
+            supplierProductNumber: item.supplierProductNumber,
+            mpn: item.mpn,
+            productName: weakHelperTitles[index]!,
+            manufacturer: "Seeed Studio",
+            description: item.rawDescription,
+            quantity: item.quantity,
+            categoryId: null,
+            confidence: 0.95,
+          })),
+        };
+        return {
+          status: "ready",
+          proposal: validateImportHelperResponse(response, request),
+        };
+      }
+    );
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: pdfText }])],
+        "mouser-names.pdf",
+        {
+          type: "application/pdf",
+        }
+      ),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows.map((row) => row.title)).toEqual([
+      "Seeed Studio XIAO nRF52840",
+      "Seeed Studio XIAO nRF52840 Sense",
+      "Seeed Studio XIAO ESP32-S3",
+    ]);
+    for (const row of prepared.proposal.rows) {
+      expect(row.title).toContain("Seeed Studio");
+      expect(row.title).not.toMatch(
+        /^(?:Multiprotocol Development Tool|ARM Development Board|Development Tool)$/i
+      );
+    }
+    expect(prepared.proposal.rows[1]?.sourceDescription).toContain(
+      "(Pre-Soldered)"
+    );
+    expect(prepared.proposal.rows[2]?.sourceDescription).toContain(
+      "Utvecklingsverktyg för multiprotokoll"
+    );
+  });
+
+  it("rejects an MPN label returned as a Claude product title", async () => {
+    preparePdfImportMocks("operation-mouser-clean-title");
+    mockGetCategories.mockResolvedValue([
+      { id: "cat-electronics", name: "Electronics", color: "#2878b8" },
+    ]);
+    const helperResponse = {
+      mode: "MOUSER_LINE_ITEM_ENRICHMENT" as const,
+      schemaVersion: 2,
+      rows: MOUSER_REAL_FIRST_PAGE_EXPECTED.map((line) => ({
+        sourceRef: `mouser-p1-line${line.lineNumber}`,
+        supplierProductNumber: line.supplierProductNumber,
+        mpn: line.mpn,
+        productName:
+          line.supplierProductNumber === "713-102010634"
+            ? "T illv . Artikelnr: 102010634 T"
+            : line.description,
+        manufacturer: "Seeed Studio",
+        description: line.description,
+        quantity: line.quantity,
+        categoryId: null,
+        confidence: 0.9,
+      })),
+    };
+    mockRequestImportHelperProposal.mockImplementation((request) => ({
+      status: "ready",
+      proposal: validateImportHelperResponse(helperResponse, request),
+    }));
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        [makePdfFromPages(MOUSER_REAL_FIRST_PAGE_PAGES)],
+        "mouser-real-first-page.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows).toHaveLength(6);
+    const xiaoEs = prepared.proposal.rows.find(
+      (row) => row.supplierPartNumber === "713-102010634"
+    );
+    const xiaoBoard = prepared.proposal.rows.find(
+      (row) => row.supplierPartNumber === "713-113991115"
+    );
+    expect(xiaoEs?.title).toContain("XIAO");
+    expect(xiaoEs?.title).not.toContain("Tillv. Artikelnr");
+    expect(xiaoBoard?.title).toContain("XIAO");
+    for (const row of prepared.proposal.rows) {
+      expect(row.title).not.toBe(row.supplierPartNumber);
+      expect(row.title).not.toBe(row.manufacturerPartNumber);
+      expect(row.title).not.toMatch(/Tillv\. Artikelnr/i);
+    }
+  });
+
   it("fails closed when a detected Mouser invoice has no recognizable item anchors", () => {
     const parsed = parseMouserInvoicePages([
       {
@@ -321,6 +760,9 @@ describe("staff inventory import safety", () => {
       detected: true,
       lineItems: [],
       unresolvedLines: 1,
+      detectedLineNumbers: [],
+      detectedSupplierSkus: [],
+      positionSource: "text",
     });
   });
 
@@ -393,6 +835,14 @@ describe("staff inventory import safety", () => {
               .join("\n").length
         ),
         meaningfulText: true,
+        selectedExtractor: "primary",
+        extractorAttempts: [
+          expect.objectContaining({
+            extractor: "primary",
+            meaningfulText: true,
+            status: "readable",
+          }),
+        ],
         detectedVendorParser: "mouser",
       })
     );
@@ -401,6 +851,37 @@ describe("staff inventory import safety", () => {
         event: "ioio_staff_import_pdf_analysis_selected",
         detectedVendorParser: "mouser",
         genericClaudeFallbackInvoked: false,
+      })
+    );
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_mouser_line_reconstructed",
+        lineNumber: 1,
+        supplierSku: "713-100000001",
+        mpnPresent: true,
+        descriptionCharCount: 19,
+        ordered: 5,
+        shipped: 3,
+        pending: 2,
+      })
+    );
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_mouser_parse_summary",
+        detectedLineNumbers: [1, 2, 3, 4, 5, 6, 7, 8],
+        detectedSupplierSkus: [
+          "713-100000001",
+          "713-100000002",
+          "713-100000003",
+          "713-100000004",
+          "713-100000005",
+          "713-100000006",
+          "713-100000007",
+          "713-100000008",
+        ],
+        reconstructedRowCount: 6,
+        unresolvedLines: 2,
+        positionSource: "text",
       })
     );
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
@@ -503,7 +984,14 @@ describe("staff inventory import safety", () => {
       },
       createdAt: new Date().toISOString(),
       categoryOptions: useExistingCategory
-        ? [{ id: "category-electronics", name: "Electronics", archived: false }]
+        ? [
+            {
+              id: "category-electronics",
+              name: "Electronics",
+              color: "#2878b8",
+              archived: false,
+            },
+          ]
         : [],
       locationOptions: selectedLocationId
         ? [
@@ -548,7 +1036,13 @@ describe("staff inventory import safety", () => {
     }
     mockGetCategories.mockResolvedValue(
       useExistingCategory
-        ? [{ id: "category-electronics", name: "Electronics" }]
+        ? [
+            {
+              id: "category-electronics",
+              name: "Electronics",
+              color: "#2878b8",
+            },
+          ]
         : []
     );
     if (approveNewCategory) {
@@ -819,7 +1313,13 @@ describe("staff inventory import safety", () => {
         REJECT: 0,
       },
       createdAt: new Date().toISOString(),
-      categoryOptions: [{ id: "category-electronics", name: "Electronics" }],
+      categoryOptions: [
+        {
+          id: "category-electronics",
+          name: "Electronics",
+          color: "#2878b8",
+        },
+      ],
       locationOptions: [
         {
           id: "location-a",
@@ -852,7 +1352,11 @@ describe("staff inventory import safety", () => {
       userId: "staff-1",
     });
     mockGetCategories.mockResolvedValue([
-      { id: "category-electronics", name: "Electronics" },
+      {
+        id: "category-electronics",
+        name: "Electronics",
+        color: "#2878b8",
+      },
     ]);
     database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
       where.id === operationId ? operation : null
@@ -1538,6 +2042,14 @@ describe("staff inventory import safety", () => {
         extractedCharsPerPage: [pageText.length],
         totalExtractedChars: pageText.length,
         meaningfulText: true,
+        selectedExtractor: "primary",
+        extractorAttempts: [
+          expect.objectContaining({
+            extractor: "primary",
+            meaningfulText: true,
+            status: "readable",
+          }),
+        ],
         detectedVendorParser: null,
       })
     );
@@ -1590,6 +2102,205 @@ describe("staff inventory import safety", () => {
       "AA rechargeable batteries",
     ]);
     expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
+    expect(mockOcrPdfPages).not.toHaveBeenCalled();
+  });
+
+  it("uses PDF.js ToUnicode mappings and positioned items before generic Claude", async () => {
+    preparePdfImportMocks("operation-pdfjs-fallback");
+    const expectedPageText = "ACME WIDGET";
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: expectedPageText,
+        items: [
+          {
+            productName: "Acme widget",
+            quantity: 1,
+            evidenceText: expectedPageText,
+          },
+        ],
+      })
+    );
+    // why: capture per-extractor diagnostics while keeping the real PDF.js
+    // implementation and semantic helper routing in the test.
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makeToUnicodePdf(expectedPageText)], "acme.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
+    expect(mockOcrPdfPages).not.toHaveBeenCalled();
+    const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
+    expect(helperRequest.document.pages).toEqual([
+      { sourceRef: "pdf-page-1", page: 1, text: expectedPageText },
+    ]);
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_text_extracted",
+        pageCount: 1,
+        extractedCharsPerPage: [expectedPageText.length],
+        totalExtractedChars: expectedPageText.length,
+        meaningfulText: true,
+        selectedExtractor: "pdfjs",
+        extractorAttempts: [
+          expect.objectContaining({
+            extractor: "primary",
+            meaningfulText: false,
+            status: "empty",
+          }),
+          expect.objectContaining({
+            extractor: "pdfjs",
+            meaningfulText: true,
+            status: "readable",
+          }),
+        ],
+        detectedVendorParser: null,
+      })
+    );
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_analysis_selected",
+        genericClaudeFallbackInvoked: true,
+      })
+    );
+  });
+
+  it("routes OCR-recovered unknown-supplier text to generic Claude", async () => {
+    preparePdfImportMocks("operation-ocr-generic");
+    const recoveredText =
+      "Nordic Parts invoice\nUSB-C cable, supplier SKU NP-44, delivered 4";
+    mockOcrPdfPages.mockResolvedValueOnce({
+      pages: [{ sourceRef: "pdf-page-1", page: 1, text: recoveredText }],
+      pageCount: 1,
+      ocrPagesAttempted: 1,
+      ocrPagesSuccessful: 1,
+    });
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: recoveredText,
+        items: [
+          {
+            productName: "USB-C cable",
+            quantity: 4,
+            evidenceText: "USB-C cable, supplier SKU NP-44, delivered 4",
+          },
+        ],
+      })
+    );
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makeImageOnlyPdf()], "nordic-parts.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    expect(mockOcrPdfPages).toHaveBeenCalledTimes(1);
+    const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
+    expect(helperRequest.document.pages).toEqual([
+      { sourceRef: "pdf-page-1", page: 1, text: recoveredText },
+    ]);
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_text_extracted",
+        selectedExtractor: "ocr",
+        extractedCharsPerPage: [recoveredText.length],
+        ocrPagesAttempted: 1,
+        ocrPagesSuccessful: 1,
+        extractorAttempts: [
+          expect.objectContaining({ extractor: "primary", status: "empty" }),
+          expect.objectContaining({ extractor: "pdfjs", status: "empty" }),
+          expect.objectContaining({ extractor: "ocr", status: "readable" }),
+        ],
+      })
+    );
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_analysis_selected",
+        genericClaudeFallbackInvoked: true,
+      })
+    );
+  });
+
+  it("preserves Mouser parsing for OCR-recovered invoice pages", async () => {
+    preparePdfImportMocks("operation-ocr-mouser");
+    mockOcrPdfPages.mockResolvedValueOnce({
+      pages: [
+        {
+          sourceRef: "pdf-page-1",
+          page: 1,
+          text: MOUSER_FRAGMENTED_PAGE_TEXT,
+        },
+      ],
+      pageCount: 1,
+      ocrPagesAttempted: 1,
+      ocrPagesSuccessful: 1,
+    });
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "manual",
+      reason: "not-configured",
+    });
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makeImageOnlyPdf()], "mouser-invoice.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows).toHaveLength(2);
+    expect(prepared.proposal.rows.map((row) => row.supplierPartNumber)).toEqual(
+      ["713-114993388", "713-101010001"]
+    );
+    expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_analysis_selected",
+        detectedVendorParser: "mouser",
+        genericClaudeFallbackInvoked: false,
+        mouserEnrichmentInvoked: true,
+      })
+    );
+  });
+
+  it("returns a readable-text recovery error when OCR yields no useful text", async () => {
+    mockOcrPdfPages.mockResolvedValueOnce({
+      pages: [{ sourceRef: "pdf-page-1", page: 1, text: "***" }],
+      pageCount: 1,
+      ocrPagesAttempted: 1,
+      ocrPagesSuccessful: 0,
+    });
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+
+    await expect(
+      parseStaffImportFile({
+        filename: "unreadable-scan.pdf",
+        contentType: "application/pdf",
+        buffer: makeImageOnlyPdf(),
+      })
+    ).rejects.toThrow("Readable text could not be recovered from this PDF.");
+    expect(mockOcrPdfPages).toHaveBeenCalledTimes(1);
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_text_extracted",
+        classification: "ocr-no-readable-text",
+        selectedExtractor: null,
+        ocrPagesAttempted: 1,
+        ocrPagesSuccessful: 0,
+      })
+    );
   });
 
   it("returns a concise unresolved result when Claude finds no inventory items", async () => {
@@ -1722,26 +2433,19 @@ describe("staff inventory import safety", () => {
         contentType: "application/pdf",
         buffer: pdf,
       })
-    ).rejects.toThrow(
-      "This PDF contains a text layer, but readable text could not be extracted. Re-export it as a text-searchable PDF and try again."
-    );
+    ).rejects.toThrow("This PDF requires OCR before it can be analyzed.");
   });
 
-  it("shows the scanned-PDF message only when the PDF has no extracted text", async () => {
-    // why: assert the scanned state is tied to page-level extraction evidence.
+  it("reports the OCR-required state when OCR is not installed", async () => {
+    // why: the unit-test runtime has no system OCR binary or language packs.
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     await expect(
       parseStaffImportFile({
         filename: "inventory.pdf",
         contentType: "application/pdf",
-        buffer: Buffer.from(
-          "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n%%EOF",
-          "latin1"
-        ),
+        buffer: makeImageOnlyPdf(),
       })
-    ).rejects.toThrow(
-      "This PDF appears to be scanned. Scanned-PDF OCR is not supported yet."
-    );
+    ).rejects.toThrow("This PDF requires OCR before it can be analyzed.");
     expect(loggerInfo).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "ioio_staff_import_pdf_text_extracted",
@@ -1749,8 +2453,52 @@ describe("staff inventory import safety", () => {
         extractedCharsPerPage: [0],
         totalExtractedChars: 0,
         meaningfulText: false,
+        selectedExtractor: null,
+        extractorAttempts: [
+          expect.objectContaining({
+            extractor: "primary",
+            extractedCharsPerPage: [0],
+            meaningfulText: false,
+          }),
+          expect.objectContaining({
+            extractor: "pdfjs",
+            meaningfulText: false,
+            status: "empty",
+          }),
+          expect.objectContaining({ extractor: "ocr", status: "unavailable" }),
+        ],
+        ocrPagesAttempted: 0,
+        ocrPagesSuccessful: 0,
         genericClaudeFallbackInvoked: false,
-        classification: "scanned-or-no-readable-text",
+        classification: "ocr-unavailable",
+      })
+    );
+  });
+
+  it("keeps PDF.js failures distinct from missing OCR capability", async () => {
+    // why: malformed page structure and missing OCR are separate failure states.
+    const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
+
+    await expect(
+      parseStaffImportFile({
+        filename: "unreadable-page.pdf",
+        contentType: "application/pdf",
+        buffer: Buffer.from(
+          "%PDF-1.4\n1 0 obj\n<< /Type /Page >>\nendobj\n%%EOF",
+          "latin1"
+        ),
+      })
+    ).rejects.toThrow("This PDF requires OCR before it can be analyzed.");
+    expect(loggerInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_pdf_text_extracted",
+        selectedExtractor: null,
+        extractorAttempts: [
+          expect.objectContaining({ extractor: "primary", status: "empty" }),
+          expect.objectContaining({ extractor: "pdfjs", status: "error" }),
+          expect.objectContaining({ extractor: "ocr", status: "unavailable" }),
+        ],
+        classification: "ocr-unavailable",
       })
     );
   });
@@ -1812,7 +2560,7 @@ describe("staff inventory import safety", () => {
     database.ioioImportItem.createMany.mockResolvedValue({ count: 2 });
     database.ioioImportItem.findMany.mockResolvedValue([]);
     mockGetCategories.mockResolvedValue([
-      { id: "cat-electronics", name: "Electronics" },
+      { id: "cat-electronics", name: "Electronics", color: "#2878b8" },
     ]);
 
     const prepared = await prepareStaffInventoryImport({
@@ -1872,7 +2620,7 @@ describe("staff inventory import safety", () => {
     mockGetBrokenSection.mockResolvedValue({ id: "broken" });
     mockGetReturnArea.mockResolvedValue("IOIO Lab – B477 · Return Section");
     mockGetCategories.mockResolvedValue([
-      { id: "cat-electronics", name: "Electronics" },
+      { id: "cat-electronics", name: "Electronics", color: "#2878b8" },
     ]);
     database.ioioWriteOperation.findUnique.mockResolvedValue(null);
     database.ioioWriteOperation.findFirst.mockResolvedValue({
@@ -1920,7 +2668,14 @@ describe("staff inventory import safety", () => {
       activeCategories: [{ id: "cat-electronics", name: "Electronics" }],
     });
     expect(helperRequest).not.toHaveProperty("document.pages");
-    expect(helperRequest).not.toHaveProperty("relevantLocations");
+    expect(helperRequest.relevantLocations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "loc-shelf",
+          pathLabel: expect.stringContaining("Container A1-1.1"),
+        }),
+      ])
+    );
     expect(helperRequest).not.toHaveProperty("allowedTrackingModes");
     expect(helperRequest.document.sha256).toBe(
       createHash("sha256").update(pdf).digest("hex")
@@ -1945,6 +2700,11 @@ describe("staff inventory import safety", () => {
       "mouser-deterministic+claude-enrichment:v2"
     );
     expect(prepared.proposal.rows).toHaveLength(2);
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      locationId: "loc-shelf",
+      locationLabel: "IOIO Lab – B477 · Container A1-1.1",
+      categoryId: "cat-electronics",
+    });
     expect(
       prepared.proposal.rows.map((row) => ({
         supplierProductNumber: row.supplierPartNumber,
@@ -1970,8 +2730,8 @@ describe("staff inventory import safety", () => {
       {
         supplierProductNumber: "713-101010001",
         mpn: "101010001",
-        title:
-          "Seeed Studio 24GHz mmWave Sensor / Avståndssensormoduler – öppen ram",
+        title: "Seeed Studio 24GHz mmWave Sensor",
+        // The useful full invoice description remains available separately.
         quantity: 4,
         receivedQuantity: 4,
         categoryId: null,

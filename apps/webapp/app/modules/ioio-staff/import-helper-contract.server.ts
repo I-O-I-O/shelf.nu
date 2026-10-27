@@ -21,13 +21,21 @@ const documentPageSchema = z
   .strict();
 
 const categoryAllowlistEntrySchema = z
-  .object({ id: identifierSchema, name: z.string().trim().min(1).max(300) })
+  .object({
+    id: identifierSchema,
+    name: z.string().trim().min(1).max(300),
+    description: z.string().trim().max(500).nullable().optional(),
+  })
   .strict();
 
 const locationAllowlistEntrySchema = z
   .object({
     id: identifierSchema,
+    name: z.string().trim().min(1).max(300).optional(),
     pathLabel: z.string().trim().min(1).max(1_000),
+    description: z.string().trim().max(500).nullable().optional(),
+    parentId: identifierSchema.nullable().optional(),
+    hasChildren: z.boolean().optional(),
     occupancy: z
       .object({
         currentUnits: z.number().int().nonnegative(),
@@ -36,6 +44,17 @@ const locationAllowlistEntrySchema = z
         context: z.string().max(1_000).nullable(),
       })
       .strict(),
+  })
+  .strict();
+
+const mouserLocationAllowlistEntrySchema = z
+  .object({
+    id: identifierSchema,
+    name: z.string().trim().min(1).max(300),
+    pathLabel: z.string().trim().min(1).max(1_000),
+    description: z.string().trim().max(500).nullable(),
+    parentId: identifierSchema.nullable(),
+    hasChildren: z.boolean(),
   })
   .strict();
 
@@ -164,6 +183,10 @@ const mouserEnrichmentRequestSchema = z
       .min(1)
       .max(MOUSER_ENRICHMENT_BATCH_SIZE),
     activeCategories: z.array(categoryAllowlistEntrySchema).max(500),
+    relevantLocations: z
+      .array(mouserLocationAllowlistEntrySchema)
+      .max(1_000)
+      .optional(),
   })
   .strict()
   .superRefine((request, context) => {
@@ -181,6 +204,14 @@ const mouserEnrichmentRequestSchema = z
         code: "custom",
         message: "Duplicate category ID",
         path: ["activeCategories"],
+      });
+    }
+    const locationIds = (request.relevantLocations ?? []).map(({ id }) => id);
+    if (new Set(locationIds).size !== locationIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Duplicate location ID",
+        path: ["relevantLocations"],
       });
     }
   });
@@ -296,6 +327,9 @@ const mouserEnrichmentRowSchema = z
     description: z.string().trim().min(1).max(5_000).nullable(),
     quantity: z.number().int().positive().max(1_000_000),
     categoryId: identifierSchema.nullable(),
+    categoryConfidence: confidenceSchema.optional(),
+    locationId: identifierSchema.nullable().optional(),
+    locationConfidence: confidenceSchema.optional(),
     confidence: confidenceSchema,
   })
   .strict();
@@ -367,10 +401,12 @@ export function createMouserEnrichmentRequest({
   fileSha256,
   lineItems,
   activeCategories,
+  relevantLocations = [],
 }: {
   fileSha256: string;
   lineItems: MouserLineItemInput[];
   activeCategories: MouserEnrichmentRequest["activeCategories"];
+  relevantLocations?: NonNullable<MouserEnrichmentRequest["relevantLocations"]>;
 }): MouserEnrichmentRequest {
   const parsed = mouserEnrichmentRequestSchema.safeParse({
     mode: "MOUSER_LINE_ITEM_ENRICHMENT",
@@ -378,6 +414,7 @@ export function createMouserEnrichmentRequest({
     document: { sha256: fileSha256 },
     lineItems,
     activeCategories,
+    relevantLocations,
   });
   if (!parsed.success) {
     throw new ImportHelperValidationError(
@@ -551,6 +588,9 @@ export function validateImportHelperResponse(
       request.lineItems.map((lineItem) => [lineItem.sourceRef, lineItem])
     );
     const categoryIds = new Set(request.activeCategories.map(({ id }) => id));
+    const locationIds = new Set(
+      (request.relevantLocations ?? []).map(({ id }) => id)
+    );
     if (parsedResult.rows.length !== request.lineItems.length) {
       throw new ImportHelperValidationError(
         "The helper must return exactly one enriched row for each grouped Mouser line item."
@@ -575,9 +615,12 @@ export function validateImportHelperResponse(
         );
       }
       if (row.categoryId && !categoryIds.has(row.categoryId)) {
-        throw new ImportHelperValidationError(
-          `Helper response references a category outside Shelf's allowlist at rows.${rowIndex}.categoryId.`
-        );
+        row.categoryId = null;
+        row.categoryConfidence = 0;
+      }
+      if (row.locationId && !locationIds.has(row.locationId)) {
+        row.locationId = null;
+        row.locationConfidence = 0;
       }
     });
     return parsedResult;
@@ -657,20 +700,12 @@ export function validateImportHelperResponse(
       row.categorySuggestion.categoryId &&
       !categoryIds.has(row.categorySuggestion.categoryId)
     ) {
-      invalid("references a category outside Shelf's allowlist", [
-        "categorySuggestion",
-        "categoryId",
-      ]);
+      row.categorySuggestion.categoryId = null;
+      row.categorySuggestion.confidence = 0;
     }
-    for (const [index, suggestion] of row.locationSuggestions.entries()) {
-      if (!locationIds.has(suggestion.locationId)) {
-        invalid("references a location outside Shelf's allowlist", [
-          "locationSuggestions",
-          index,
-          "locationId",
-        ]);
-      }
-    }
+    row.locationSuggestions = row.locationSuggestions.filter((suggestion) =>
+      locationIds.has(suggestion.locationId)
+    );
     for (const [index, suggestion] of row.settingsSuggestions.entries()) {
       const rule = settingRules.get(suggestion.key);
       if (!rule) {
