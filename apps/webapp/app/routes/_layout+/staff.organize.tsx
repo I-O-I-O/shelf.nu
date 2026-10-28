@@ -298,34 +298,66 @@ export default function StaffOrganizePage() {
                       )?.path ?? structureProposal.parentName
                     : "Top level"}
                 </p>
-                <p className="mt-1 text-sm text-gray-600">
-                  {
-                    structureProposal.nodes.filter(
-                      (node) =>
-                        /^section\b/i.test(node.name) ||
-                        /\bsection$/i.test(node.name)
-                    ).length
-                  }{" "}
-                  sections ·{" "}
-                  {
-                    structureProposal.nodes.filter((node) =>
-                      /^shelf\b/i.test(node.name)
-                    ).length
-                  }{" "}
-                  shelves ·{" "}
-                  {
-                    structureProposal.nodes.filter(
-                      (node) => node.status === "CREATE"
-                    ).length
-                  }{" "}
-                  locations to create ·{" "}
-                  {
-                    structureProposal.nodes.filter(
-                      (node) => node.status === "EXISTS"
-                    ).length
-                  }{" "}
-                  already exist
-                </p>
+                {structureProposal.bulkSummary ? (
+                  <div className="mt-1 text-sm text-gray-600">
+                    <p>
+                      Sections scanned:{" "}
+                      {structureProposal.bulkSummary.sectionsScanned} · Shelves
+                      scanned: {structureProposal.bulkSummary.shelvesScanned} ·
+                      Existing target{" "}
+                      {structureProposal.bulkSummary.targetLabel} reused:{" "}
+                      {structureProposal.bulkSummary.existingTargetCount} · New{" "}
+                      {structureProposal.bulkSummary.targetLabel} to create:{" "}
+                      {structureProposal.bulkSummary.newTargetCount} · Sections
+                      with no shelves:{" "}
+                      {structureProposal.bulkSummary.emptySections.length}
+                    </p>
+                    {structureProposal.bulkSummary.emptySections.length > 0 && (
+                      <p className="mt-1">
+                        No shelves found — nothing to create:{" "}
+                        {structureProposal.bulkSummary.emptySections.join(", ")}
+                      </p>
+                    )}
+                    {structureProposal.bulkSummary.alreadyCompleteShelves
+                      .length > 0 && (
+                      <p className="mt-1">
+                        Already complete:{" "}
+                        {structureProposal.bulkSummary.alreadyCompleteShelves.join(
+                          ", "
+                        )}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-sm text-gray-600">
+                    {
+                      structureProposal.nodes.filter(
+                        (node) =>
+                          /^section\b/i.test(node.name) ||
+                          /\bsection$/i.test(node.name)
+                      ).length
+                    }{" "}
+                    sections ·{" "}
+                    {
+                      structureProposal.nodes.filter((node) =>
+                        /^shelf\b/i.test(node.name)
+                      ).length
+                    }{" "}
+                    shelves ·{" "}
+                    {
+                      structureProposal.nodes.filter(
+                        (node) => node.status === "CREATE"
+                      ).length
+                    }{" "}
+                    locations to create ·{" "}
+                    {
+                      structureProposal.nodes.filter(
+                        (node) => node.status === "EXISTS"
+                      ).length
+                    }{" "}
+                    already exist
+                  </p>
+                )}
                 <ul className="mt-4 space-y-1 font-mono text-sm">
                   {structureProposal.nodes.map((node) => {
                     let depth = 1;
@@ -345,6 +377,11 @@ export default function StaffOrganizePage() {
                         {node.status === "EXISTS" ? "✓ " : "├── "}
                         {node.name}
                         {node.status === "EXISTS" ? " (exists)" : ""}
+                        {node.reviewNote && (
+                          <span className="ml-2 font-sans text-gray-600">
+                            — {node.reviewNote}
+                          </span>
+                        )}
                         {node.status === "POSSIBLE_DUPLICATE" && (
                           <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 font-sans">
                             <p className="font-medium">

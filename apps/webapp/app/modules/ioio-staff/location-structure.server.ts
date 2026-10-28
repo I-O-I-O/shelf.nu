@@ -6,6 +6,7 @@ import {
   type AnyImportHelperRequest,
 } from "~/modules/ioio-staff/import-helper-contract.server";
 import { createLocation } from "~/modules/location/service.server";
+import { Logger } from "~/utils/logger";
 
 export type OrganizationLocation = {
   id: string;
@@ -46,6 +47,17 @@ export type StructureNode = {
   possibleExistingMatches?: Array<{ id: string; name: string; path: string }>;
   possibleMatchKind?: "TYPO" | "AMBIGUOUS_EXACT";
   canCreateDespitePossibleMatch?: boolean;
+  reviewNote?: string;
+};
+
+export type BulkStructureSummary = {
+  sectionsScanned: number;
+  shelvesScanned: number;
+  existingTargetCount: number;
+  newTargetCount: number;
+  targetLabel: "containers" | "drawers";
+  emptySections: string[];
+  alreadyCompleteShelves: string[];
 };
 
 export type LocationStructureProposal = {
@@ -63,6 +75,7 @@ export type LocationStructureProposal = {
     | "UNRESOLVED";
   createMissingParent: boolean;
   nodes: StructureNode[];
+  bulkSummary?: BulkStructureSummary;
   source: "DETERMINISTIC" | "AI";
 };
 
@@ -110,6 +123,73 @@ type ParsedStructure = {
     description: string | null;
   }>;
 };
+
+export type ParsedBulkLocationStructure = {
+  parentName: string;
+  sectionsThenShelves: boolean;
+  count: number;
+  itemType: "container" | "drawer";
+};
+
+export function parseDeterministicBulkLocationStructure(
+  instruction: string
+): ParsedBulkLocationStructure | null {
+  const text = instruction.trim();
+  const number = "(\\d+|[a-z]+)";
+  const item = "(containers?|drawers?)";
+  const sectionShelf = new RegExp(
+    `\\bfor\\s+(?:each|every)\\s+section\\s+in\\s+(?:the\\s+)?(.+?)\\s*,?\\s+for\\s+(?:each|every)\\s+shelf\\s+(?:create|add|make|build)\\s+${number}\\s+${item}\\b`,
+    "i"
+  ).exec(text);
+  if (sectionShelf) {
+    const count = parseCount(sectionShelf[2]!);
+    if (!count) return null;
+    return {
+      parentName: sectionShelf[1]!.trim().replace(/[.!?]+$/, ""),
+      sectionsThenShelves: true,
+      count,
+      itemType: sectionShelf[3]!.toLowerCase().startsWith("drawer")
+        ? "drawer"
+        : "container",
+    };
+  }
+
+  const shelfFirst = new RegExp(
+    `\\b(?:for\\s+)?(?:each|every)\\s+shelf\\s+in\\s+(?:the\\s+)?(.+?)\\s*,?\\s+(?:create|add|make|build)\\s+${number}\\s+${item}\\b`,
+    "i"
+  ).exec(text);
+  if (shelfFirst) {
+    const count = parseCount(shelfFirst[2]!);
+    if (!count) return null;
+    return {
+      parentName: shelfFirst[1]!.trim().replace(/[.!?]+$/, ""),
+      sectionsThenShelves: false,
+      count,
+      itemType: shelfFirst[3]!.toLowerCase().startsWith("drawer")
+        ? "drawer"
+        : "container",
+    };
+  }
+
+  const itemFirst = new RegExp(
+    `\\b(?:create|add|make|build)\\s+${number}\\s+${item}\\s+(?:under|to|for)\\s+(?:each|every)\\s+shelf\\s+in\\s+(?:the\\s+)?(.+?)\\s*$`,
+    "i"
+  ).exec(text);
+  if (itemFirst) {
+    const count = parseCount(itemFirst[1]!);
+    if (!count) return null;
+    return {
+      parentName: itemFirst[3]!.trim().replace(/[.!?]+$/, ""),
+      sectionsThenShelves: false,
+      count,
+      itemType: itemFirst[2]!.toLowerCase().startsWith("drawer")
+        ? "drawer"
+        : "container",
+    };
+  }
+
+  return null;
+}
 
 export function parseDeterministicLocationStructure(
   instruction: string
@@ -505,6 +585,207 @@ function resolveDuplicates(
   return nodes;
 }
 
+function locationChildren(locations: OrganizationLocation[]) {
+  const children = new Map<string, OrganizationLocation[]>();
+  for (const location of locations) {
+    if (!location.parentId) continue;
+    const siblings = children.get(location.parentId) ?? [];
+    siblings.push(location);
+    children.set(location.parentId, siblings);
+  }
+  for (const siblings of children.values())
+    siblings.sort((a, b) => a.name.localeCompare(b.name));
+  return children;
+}
+
+function isSectionLocation(location: OrganizationLocation) {
+  return /^sec(?:tion|iton)\b/i.test(location.name);
+}
+
+function isShelfLocation(location: OrganizationLocation) {
+  return /^shelf\b/i.test(location.name);
+}
+
+function expandBulkStructure(
+  locations: OrganizationLocation[],
+  parent: OrganizationLocation,
+  parsed: ParsedBulkLocationStructure,
+  path: (id: string) => string
+) {
+  const children = locationChildren(locations);
+  const sectionsThenShelves = parsed.sectionsThenShelves;
+  const parentIsSection = isSectionLocation(parent);
+  const sections = parentIsSection
+    ? [parent]
+    : (children.get(parent.id) ?? []).filter(isSectionLocation);
+  const shelvesBySection = new Map<string, OrganizationLocation[]>();
+  for (const section of sections) {
+    shelvesBySection.set(
+      section.id,
+      (children.get(section.id) ?? []).filter(isShelfLocation)
+    );
+  }
+
+  // If the request says "every shelf in <room>", inspect all direct shelf
+  // children of each direct section, but never leave the resolved parent tree.
+  // A selected section is treated as the sole section scope.
+  const scopedSections = sectionsThenShelves
+    ? sections
+    : sections.length
+    ? sections
+    : parentIsSection
+    ? [parent]
+    : [];
+  const nodes: StructureNode[] = [];
+  const emptySections: string[] = [];
+  const alreadyCompleteShelves: string[] = [];
+  let shelvesScanned = 0;
+  let existingTargetCount = 0;
+  let newTargetCount = 0;
+  const itemTitle = parsed.itemType === "drawer" ? "Drawer" : "Container";
+  const targetNamesForShelf = (shelf: OrganizationLocation) => {
+    const suffix = shelf.name.match(
+      /^shelf\s+([a-z0-9]+(?:[-.][a-z0-9]+)*)$/i
+    )?.[1];
+    return {
+      names: Array.from(
+        { length: parsed.count },
+        (_, index) =>
+          `${itemTitle} ${suffix ? `${suffix}-` : `${shelf.name.trim()}-`}${
+            index + 1
+          }`
+      ),
+      reviewNote: suffix
+        ? undefined
+        : `Could not identify a numbered shelf suffix; review these names based on ${shelf.name}.`,
+    };
+  };
+  const addExistingNode = (
+    location: OrganizationLocation,
+    parentLocationId: string | null,
+    parentTemporaryId: string | null,
+    reviewNote?: string
+  ) => {
+    nodes.push({
+      temporaryId: `existing-${location.id}`,
+      parentLocationId,
+      parentTemporaryId,
+      name: location.name,
+      description: location.description,
+      status: "EXISTS",
+      existingLocationId: location.id,
+      ...(reviewNote ? { reviewNote } : {}),
+    });
+  };
+
+  for (const section of scopedSections) {
+    const sectionIsProposalRoot = section.id === parent.id;
+    const sectionTemporaryId = `existing-${section.id}`;
+    if (!sectionIsProposalRoot) {
+      addExistingNode(
+        section,
+        section.parentId,
+        null,
+        (shelvesBySection.get(section.id) ?? []).length === 0
+          ? "No shelves found — nothing to create."
+          : undefined
+      );
+    }
+    const shelves = shelvesBySection.get(section.id) ?? [];
+    if (!shelves.length) {
+      emptySections.push(section.name);
+      continue;
+    }
+    for (const shelf of shelves) {
+      shelvesScanned++;
+      const shelfTemporaryId = `existing-${shelf.id}`;
+      addExistingNode(
+        shelf,
+        sectionIsProposalRoot ? section.id : null,
+        sectionIsProposalRoot ? null : sectionTemporaryId
+      );
+      const { names, reviewNote } = targetNamesForShelf(shelf);
+      const existingChildren = children.get(shelf.id) ?? [];
+      const handledIds = new Set<string>();
+      let missingForShelf = 0;
+      for (const [index, name] of names.entries()) {
+        const matches = existingChildren.filter(
+          (candidate) => comparableName(candidate.name) === comparableName(name)
+        );
+        const uniqueMatch = matches.length === 1 ? matches[0] : null;
+        if (uniqueMatch) {
+          handledIds.add(uniqueMatch.id);
+          existingTargetCount++;
+        } else if (!matches.length) {
+          newTargetCount++;
+          missingForShelf++;
+        }
+        nodes.push({
+          temporaryId: `bulk-${shelf.id}-${parsed.itemType}-${index + 1}`,
+          parentLocationId: null,
+          parentTemporaryId: shelfTemporaryId,
+          name,
+          description: `${itemTitle} ${index + 1} under ${shelf.name}.`,
+          status:
+            matches.length > 1
+              ? "POSSIBLE_DUPLICATE"
+              : uniqueMatch
+              ? "EXISTS"
+              : "CREATE",
+          existingLocationId: uniqueMatch?.id ?? null,
+          ...(matches.length > 1
+            ? {
+                possibleMatchKind: "AMBIGUOUS_EXACT" as const,
+                canCreateDespitePossibleMatch: false,
+                possibleExistingMatches: matches.map((match) => ({
+                  id: match.id,
+                  name: match.name,
+                  path: path(match.id),
+                })),
+              }
+            : {}),
+          ...(reviewNote ? { reviewNote } : {}),
+        });
+      }
+      if (missingForShelf === 0) alreadyCompleteShelves.push(path(shelf.id));
+      // Preserve unusual numbered siblings in the preview without letting
+      // them satisfy a missing target such as Container A1-2.
+      for (const child of existingChildren) {
+        if (
+          new RegExp(`^${itemTitle}\\b`, "i").test(child.name) &&
+          !handledIds.has(child.id) &&
+          !names.some(
+            (name) => comparableName(name) === comparableName(child.name)
+          )
+        ) {
+          addExistingNode(
+            child,
+            null,
+            shelfTemporaryId,
+            "Existing sibling; it does not satisfy a numbered target."
+          );
+        }
+      }
+    }
+  }
+
+  return {
+    nodes,
+    bulkSummary: {
+      sectionsScanned: sections.length,
+      shelvesScanned,
+      existingTargetCount,
+      newTargetCount,
+      targetLabel:
+        parsed.itemType === "drawer"
+          ? ("drawers" as const)
+          : ("containers" as const),
+      emptySections,
+      alreadyCompleteShelves,
+    } satisfies BulkStructureSummary,
+  };
+}
+
 export async function buildLocationStructureProposal(input: {
   organizationId: string;
   instruction: string;
@@ -514,6 +795,74 @@ export async function buildLocationStructureProposal(input: {
     where: { organizationId: input.organizationId },
     select: { id: true, name: true, parentId: true, description: true },
   });
+  const parsedBulk = parseDeterministicBulkLocationStructure(input.instruction);
+  if (parsedBulk) {
+    const { path, byId } = makePaths(locations);
+    const parent = resolveParent(
+      locations,
+      parsedBulk.parentName,
+      input.selectedParentId
+    );
+    const resolvedParent = parent.id ? byId.get(parent.id) : undefined;
+    if (resolvedParent && !parent.unresolved) {
+      const expanded = expandBulkStructure(
+        locations,
+        resolvedParent,
+        parsedBulk,
+        path
+      );
+      return {
+        mode: "LOCATION_STRUCTURE" as const,
+        instruction: input.instruction,
+        parentName: parsedBulk.parentName,
+        parentLocationId: resolvedParent.id,
+        parentCandidates: parent.candidates,
+        unresolvedParent: false,
+        parentResolution: "MATCHED" as const,
+        createMissingParent: false,
+        ...expanded,
+        source: "DETERMINISTIC" as const,
+      };
+    }
+    const roots = locations.filter((location) => location.parentId === null);
+    const choices =
+      parent.candidates.length > 0
+        ? parent.candidates
+        : (roots.length > 0 ? roots : locations)
+            .slice(0, 20)
+            .map((location) => ({
+              id: location.id,
+              name: location.name,
+              path: path(location.id),
+            }));
+    return {
+      mode: "LOCATION_STRUCTURE" as const,
+      instruction: input.instruction,
+      parentName: parsedBulk.parentName,
+      parentLocationId: null,
+      parentCandidates: choices,
+      unresolvedParent: true,
+      parentResolution:
+        parent.resolution === "AMBIGUOUS_MATCH"
+          ? ("AMBIGUOUS_MATCH" as const)
+          : roots.length > 1
+          ? ("AMBIGUOUS_ROOT" as const)
+          : ("UNRESOLVED" as const),
+      createMissingParent: false,
+      nodes: [],
+      bulkSummary: {
+        sectionsScanned: 0,
+        shelvesScanned: 0,
+        existingTargetCount: 0,
+        newTargetCount: 0,
+        targetLabel:
+          parsedBulk.itemType === "drawer" ? "drawers" : "containers",
+        emptySections: [],
+        alreadyCompleteShelves: [],
+      },
+      source: "DETERMINISTIC" as const,
+    };
+  }
   const parsed = parseDeterministicLocationStructure(input.instruction);
   if (parsed) {
     const { path } = makePaths(locations);
@@ -648,20 +997,39 @@ export async function buildLocationStructureProposal(input: {
   const result = await requestImportHelperProposal(
     request as AnyImportHelperRequest
   );
-  if (result.status !== "ready" || !("operations" in result.proposal))
+  if (result.status !== "ready" || !("operations" in result.proposal)) {
+    const roots = locations.filter((location) => location.parentId === null);
+    const fallbackLocations = (roots.length ? roots : locations).slice(0, 20);
+    const fallbackCandidates = fallbackLocations.map((location) => ({
+      id: location.id,
+      name: location.name,
+      path: path(location.id),
+    }));
+    Logger.warn({
+      event: "ioio_location_structure_helper_fallback",
+      locationCandidateCount: fallbackCandidates.length,
+      resolvedRootCount: roots.length,
+      structureMode: "LOCATION_STRUCTURE",
+      deterministicMatchAttempted: true,
+      helperProposalReady: false,
+    });
     return {
       mode: "LOCATION_STRUCTURE" as const,
       instruction: input.instruction,
       parentName: null,
       parentLocationId: null,
-      parentCandidates: [],
+      parentCandidates: fallbackCandidates,
       unresolvedParent: true,
-      parentResolution: "UNRESOLVED" as const,
+      parentResolution:
+        roots.length > 1
+          ? ("AMBIGUOUS_ROOT" as const)
+          : ("UNRESOLVED" as const),
       createMissingParent: false,
       nodes: [],
       source: "AI" as const,
       helperUnavailable: true,
     };
+  }
   const proposals = result.proposal.operations.map((operation) => ({
     temporaryId: operation.temporaryId,
     name: operation.name,
@@ -710,6 +1078,17 @@ export async function buildLocationStructureProposal(input: {
     : rootId
     ? resolveParent(locations, null, rootId)
     : { id: null, candidates: [], unresolved: unresolvedRoot };
+  if (parent.unresolved && parent.candidates.length === 0) {
+    Logger.warn({
+      event: "ioio_location_structure_empty_parent_candidates",
+      locationCandidateCount: relevant.length,
+      resolvedRootCount: locations.filter(
+        (location) => location.parentId === null
+      ).length,
+      structureMode: "LOCATION_STRUCTURE",
+      deterministicMatchAttempted: true,
+    });
+  }
   const nodes = resolveDuplicates(locations, proposals, parent.id, path);
   return {
     mode: "LOCATION_STRUCTURE" as const,
