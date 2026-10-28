@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { inflateRawSync, inflateSync } from "node:zlib";
 import { AssetType, ConsumptionType, type Prisma } from "@prisma/client";
-import { parse as parseCsv } from "csv-parse/sync";
 import JSZip from "jszip";
 import { db } from "~/database/db.server";
 import {
@@ -81,6 +80,14 @@ import {
 } from "./import-review";
 import { PDF_OCR_MAX_PAGES, PdfOcrError, ocrPdfPages } from "./pdf-ocr.server";
 import { pdfjsResourceUrl } from "./pdfjs-runtime.server";
+import {
+  detectSpreadsheetHeader,
+  isSpreadsheetNonProduct,
+  MISSING_FORMULA_VALUE,
+  normalizeSpreadsheetHeader,
+  readSpreadsheetCsv,
+  SPREADSHEET_BATCH_SIZE,
+} from "./spreadsheet-normalization.server";
 
 export const STAFF_IMPORT_OPERATION = "INVENTORY_IMPORT";
 export const STAFF_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
@@ -134,6 +141,8 @@ export type ProcurementQuantityStatus =
 
 export type StaffImportRow = {
   rowNumber: number;
+  sourceSheet?: string;
+  sourceRow?: number;
   title: string;
   quantity: number | null;
   category: string | null;
@@ -586,6 +595,38 @@ async function isReviewedImportLocationCurrent({
 }
 
 const HEADER_ALIASES: Record<string, keyof StaffImportRow> = {
+  model: "title",
+  "model name": "title",
+  product: "title",
+  "product name": "title",
+  article: "title",
+  artikel: "title",
+  "item description": "sourceDescription",
+  brand: "manufacturer",
+  vendor: "manufacturer",
+  maker: "manufacturer",
+  tillverkare: "manufacturer",
+  sku: "supplierPartNumber",
+  "supplier sku": "supplierPartNumber",
+  "article number": "supplierPartNumber",
+  artikelnummer: "supplierPartNumber",
+  "part number": "supplierPartNumber",
+  "item number": "supplierPartNumber",
+  "mfr part no": "manufacturerPartNumber",
+  "manufacturer pn": "manufacturerPartNumber",
+  stock: "quantity",
+  antal: "quantity",
+  received: "receivedQuantity",
+  shipped: "receivedQuantity",
+  delivered: "receivedQuantity",
+  ordered: "orderedQuantity",
+  group: "category",
+  class: "category",
+  storage: "location",
+  bin: "location",
+  shelf: "location",
+  container: "location",
+  room: "location",
   title: "title",
   name: "title",
   item: "title",
@@ -695,15 +736,10 @@ function columnIndex(reference: string) {
 }
 
 function parseSheetXml(xml: string, sharedStrings: string[]) {
-  if (/<f(?:\s|>)/i.test(xml)) {
-    throw importError(
-      "Formula cells are not accepted. Export the file as values and try again."
-    );
-  }
   const rows: string[][] = [];
-  for (const rowMatch of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/gi)) {
+  for (const rowMatch of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/gi)) {
     const cells: string[] = [];
-    for (const cellMatch of rowMatch[1].matchAll(
+    for (const cellMatch of rowMatch[2].matchAll(
       /<c\b([^>]*)>([\s\S]*?)<\/c>/gi
     )) {
       const attributes = cellMatch[1];
@@ -718,9 +754,22 @@ function parseSheetXml(xml: string, sharedStrings: string[]) {
               .map((match) => decodeXml(match[1]))
               .join("")
           : decodeXml(body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? "");
-      const value = type === "s" ? sharedStrings[Number(raw)] ?? "" : raw;
+      const value =
+        /<f(?:\s|>)/i.test(body) && !/<v\b/i.test(body)
+          ? MISSING_FORMULA_VALUE
+          : type === "s"
+          ? sharedStrings[Number(raw)] ?? ""
+          : raw;
       cells[index] = value;
     }
+    const rowIndex =
+      Number(rowMatch[1].match(/\br="(\d+)"/)?.[1] ?? rows.length + 1) - 1;
+    if (rowIndex > STAFF_IMPORT_MAX_ROWS + 40) {
+      if (cells.some((cell) => cell.trim()))
+        throw importError("Workbook data range exceeds the import row limit.");
+      continue;
+    }
+    while (rows.length < rowIndex) rows.push([]);
     rows.push(cells.map((cell) => cell ?? ""));
   }
   return rows;
@@ -2398,27 +2447,28 @@ async function parseXlsx(buffer: Buffer) {
     : [];
 
   const workbook = await zip.file("xl/workbook.xml")?.async("string");
-  const firstSheetId = workbook?.match(/<sheet\b[^>]*r:id="([^"]+)"/i)?.[1];
   const relationships = await zip
     .file("xl/_rels/workbook.xml.rels")
     ?.async("string");
-  const target = firstSheetId
-    ? relationships?.match(
-        new RegExp(
-          `<Relationship\\b[^>]*Id="${firstSheetId}"[^>]*Target="([^"]+)"`,
-          "i"
-        )
-      )?.[1]
-    : null;
-  const sheetPath = target
-    ? target.startsWith("/")
+  const sheets: Array<{ name: string; matrix: string[][] }> = [];
+  for (const match of workbook?.matchAll(/<sheet\b([^>]+)>/gi) ?? []) {
+    const attrs = match[1];
+    const name = decodeXml(attrs.match(/\bname="([^"]+)"/)?.[1] ?? "Sheet");
+    const relationId = attrs.match(/\br:id="([^"]+)"/)?.[1];
+    const relation = [
+      ...(relationships?.matchAll(/<Relationship\b([^>]+)>/gi) ?? []),
+    ].find((entry) => entry[1].match(/\bId="([^"]+)"/)?.[1] === relationId);
+    const target = relation?.[1].match(/\bTarget="([^"]+)"/)?.[1];
+    if (!target || target.includes("..")) continue;
+    const path = target.startsWith("/")
       ? target.slice(1)
-      : `xl/${target.replace(/^\.\//, "")}`
-    : "xl/worksheets/sheet1.xml";
-  const sheetXml = await zip.file(sheetPath)?.async("string");
-  if (!sheetXml)
-    throw importError("The XLSX workbook has no readable first worksheet.");
-  return parseSheetXml(sheetXml, sharedStrings);
+      : `xl/${target.replace(/^\.\//, "")}`;
+    const xml = await zip.file(path)?.async("string");
+    if (xml) sheets.push({ name, matrix: parseSheetXml(xml, sharedStrings) });
+  }
+  if (!sheets.length)
+    throw importError("workbook_unreadable: No readable worksheets.");
+  return sheets;
 }
 
 function headerMap(
@@ -2452,7 +2502,9 @@ function headerMap(
   });
   if (
     ![...map.values()].includes("title") &&
-    ![...map.values()].includes("sourceDescription")
+    ![...map.values()].includes("sourceDescription") &&
+    ![...map.values()].includes("manufacturerPartNumber") &&
+    ![...map.values()].includes("supplierPartNumber")
   ) {
     throw importError("The file must include a Name, Item, or Title column.");
   }
@@ -2480,7 +2532,16 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
     });
     const uncertainFields: string[] = [];
     const sourceDescription = values.sourceDescription?.trim() || null;
-    const title = values.title?.trim() || sourceDescription || "";
+    const title =
+      values.title?.trim() ||
+      sourceDescription ||
+      [
+        values.manufacturer,
+        values.manufacturerPartNumber || values.supplierPartNumber,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
     if (!title) {
       if (!options.allowMissingTitle) {
         throw importError(`Row ${rowIndex + 2} has no item name.`);
@@ -2582,7 +2643,11 @@ async function parseStaffImportFileWithSummary({
   filename,
   contentType,
   buffer,
+  spreadsheetSheet,
+  spreadsheetHeaderRow,
 }: {
+  spreadsheetSheet?: string;
+  spreadsheetHeaderRow?: number;
   filename: string;
   contentType?: string | null;
   buffer: Buffer;
@@ -2689,18 +2754,235 @@ async function parseStaffImportFileWithSummary({
       ...(mouserInvoice.detected ? { mouserInvoice } : {}),
     };
   }
-  const matrix =
-    extension === "csv"
-      ? (parseCsv(buffer.toString("utf8"), {
-          bom: true,
-          skip_empty_lines: true,
-          relax_column_count: false,
-        }) as string[][])
-      : await parseXlsx(buffer);
-  return { rows: parseRows(matrix) } satisfies StaffImportParseResult;
+  let sheets: Array<{ name: string; matrix: string[][] }>;
+  try {
+    sheets =
+      extension === "csv"
+        ? [{ name: "CSV", matrix: readSpreadsheetCsv(buffer) }]
+        : await parseXlsx(buffer);
+  } catch (cause) {
+    throw importError(
+      `${extension === "csv" ? "csv_parse_failed" : "workbook_unreadable"}: ${
+        cause instanceof Error ? cause.message : "Cannot read file"
+      }`
+    );
+  }
+  const rows: StaffImportRow[] = [];
+  const diagnostics = {
+    fileType: extension,
+    sheetCount: sheets.length,
+    tables: 0,
+    rowsParsed: 0,
+    rowsAccepted: 0,
+    rowsRejected: 0,
+  };
+  if (
+    spreadsheetSheet &&
+    !sheets.some((sheet) => sheet.name === spreadsheetSheet)
+  )
+    throw importError(
+      "no_inventory_table_found: Selected sheet does not exist."
+    );
+  if (
+    spreadsheetHeaderRow != null &&
+    (!Number.isInteger(spreadsheetHeaderRow) ||
+      spreadsheetHeaderRow < 1 ||
+      spreadsheetHeaderRow > 1000)
+  )
+    throw importError(
+      "header_not_found: Header row must be between 1 and 1000."
+    );
+  for (const sheet of sheets) {
+    if (spreadsheetSheet && sheet.name !== spreadsheetSheet) continue;
+    if (
+      !spreadsheetSheet &&
+      /^(notes?|instructions?|read\s*me|information)$/i.test(sheet.name.trim())
+    )
+      continue;
+    if (
+      sheet.matrix
+        .slice(0, 40)
+        .some(
+          (cells) =>
+            cells.some((cell) =>
+              ["title", "sourceDescription"].includes(
+                HEADER_ALIASES[normalizeSpreadsheetHeader(cell)]
+              )
+            ) && cells.some((cell) => PRIVATE_HEADER.test(cell))
+        )
+    )
+      throw importError(
+        "Personal borrower or account columns are not accepted."
+      );
+    const header = spreadsheetHeaderRow
+      ? { index: spreadsheetHeaderRow - 1, ambiguous: false }
+      : detectSpreadsheetHeader(sheet.matrix, HEADER_ALIASES);
+    if (!header) continue;
+    diagnostics.tables++;
+    const headers = sheet.matrix[header.index];
+    if (!headers)
+      throw importError("header_not_found: Selected row does not exist.");
+    try {
+      headerMap(headers, { ignoreUnsupportedColumns: true });
+    } catch {
+      rows.push({
+        rowNumber: rows.length + 2,
+        title: `Sheet ${sheet.name} needs column review`,
+        quantity: null,
+        category: null,
+        location: null,
+        type: null,
+        reviewRequired: true,
+        uncertainFields: ["Spreadsheet row"],
+        sourceNotes: `unsupported_column_layout: sheet ${
+          sheet.name
+        }, header row ${
+          header.index + 1
+        }. Export a table with one column per concept.`,
+      });
+      diagnostics.rowsRejected++;
+      continue;
+    }
+    Logger.info({
+      event: "ioio_spreadsheet_table_detected",
+      selectedSheet: sheet.name.slice(0, 100),
+      detectedHeaderRow: header.index + 1,
+      headerAmbiguous: header.ambiguous,
+    });
+    const identityColumn = headers.findIndex((cell) =>
+      [
+        "title",
+        "sourceDescription",
+        "manufacturerPartNumber",
+        "supplierPartNumber",
+      ].includes(HEADER_ALIASES[normalizeSpreadsheetHeader(cell)])
+    );
+    for (let index = header.index + 1; index < sheet.matrix.length; index++) {
+      const cells = sheet.matrix[index];
+      if (isSpreadsheetNonProduct(cells, cells[identityColumn] ?? "")) continue;
+      if (++diagnostics.rowsParsed > STAFF_IMPORT_MAX_ROWS)
+        throw importError(
+          `The file contains more than ${STAFF_IMPORT_MAX_ROWS} data rows.`
+        );
+      let row: StaffImportRow;
+      try {
+        if (header.ambiguous)
+          throw new Error("ambiguous header mapping; select/export one table");
+        if (
+          cells.some(
+            (value, column) =>
+              value === MISSING_FORMULA_VALUE &&
+              Boolean(
+                HEADER_ALIASES[
+                  normalizeSpreadsheetHeader(headers[column] ?? "")
+                ]
+              )
+          )
+        )
+          throw new Error("Formula has no stored value; export as values");
+        const normalizedCells = cells.map((value, column) =>
+          /quantity/i.test(
+            HEADER_ALIASES[normalizeSpreadsheetHeader(headers[column] ?? "")] ??
+              ""
+          )
+            ? value.replace(/^(\d+),0+$/, "$1")
+            : value
+        );
+        const effectiveHeaders = headers.map((name, column) =>
+          normalizeSpreadsheetHeader(name) === "type" &&
+          !["INDIVIDUAL", "QUANTITY_TRACKED"].includes(
+            (cells[column] ?? "").trim().toUpperCase()
+          )
+            ? headers.some(
+                (cell) =>
+                  HEADER_ALIASES[normalizeSpreadsheetHeader(cell)] ===
+                  "category"
+              )
+              ? "source class"
+              : "category"
+            : name
+        );
+        row = parseRows([effectiveHeaders, normalizedCells], {
+          ignoreUnsupportedColumns: true,
+        })[0];
+        if (row.receivedQuantity != null) {
+          row.quantity = row.receivedQuantity;
+          row.quantityStatus = "RECEIVED";
+        }
+        if (row.orderedQuantity != null && row.receivedQuantity == null) {
+          row.quantity = null;
+          row.quantityStatus = "ORDERED";
+        }
+        diagnostics.rowsAccepted++;
+      } catch (cause) {
+        diagnostics.rowsRejected++;
+        row = {
+          rowNumber: 0,
+          title: (cells[identityColumn] || "Unresolved spreadsheet row").slice(
+            0,
+            200
+          ),
+          quantity: null,
+          category: null,
+          location: null,
+          type: null,
+          reviewRequired: true,
+          uncertainFields: ["Spreadsheet row"],
+          sourceNotes: `row_validation_failed: ${
+            cause instanceof Error ? cause.message : "Unsupported row"
+          }`,
+        };
+      }
+      row.rowNumber = rows.length + 2;
+      row.sourceSheet = sheet.name;
+      row.sourceRow = index + 1;
+      row.sourceNotes = [
+        row.sourceNotes,
+        `Source sheet: ${sheet.name}; source row: ${index + 1}; header row: ${
+          header.index + 1
+        }`,
+      ]
+        .filter(Boolean)
+        .join("; ");
+      rows.push(row);
+    }
+  }
+  const identities = new Map<string, StaffImportRow[]>();
+  for (const row of rows) {
+    const key = row.manufacturerPartNumber
+      ? `mpn:${row.manufacturer ?? ""}:${row.manufacturerPartNumber}`
+      : row.supplierPartNumber
+      ? `sku:${row.supplierPartNumber}`
+      : null;
+    if (!key) continue;
+    const identity = key.toLowerCase().replace(/\s+/g, " ").trim();
+    identities.set(identity, [...(identities.get(identity) ?? []), row]);
+  }
+  for (const group of identities.values())
+    if (group.length > 1)
+      for (const row of group) {
+        row.reviewRequired = true;
+        row.uncertainFields = [
+          ...(row.uncertainFields ?? []),
+          "Duplicate spreadsheet identity",
+        ];
+      }
+  Logger.info({ event: "ioio_spreadsheet_parsed", ...diagnostics });
+  if (!diagnostics.tables)
+    throw importError(
+      "no_inventory_table_found: header_not_found. Export an inventory sheet with product and quantity headers."
+    );
+  if (!rows.length)
+    throw importError("zero_valid_rows: No product rows found.");
+  return {
+    rows,
+    provider: "spreadsheet-normalized:v1",
+  } satisfies StaffImportParseResult;
 }
 
 export async function parseStaffImportFile(args: {
+  spreadsheetSheet?: string;
+  spreadsheetHeaderRow?: number;
   filename: string;
   contentType?: string | null;
   buffer: Buffer;
@@ -3049,6 +3331,19 @@ function classifyRow(
       reason: "The extraction marked this line as non-inventory document data.",
     };
   }
+  if (row.uncertainFields?.includes("Spreadsheet row"))
+    return {
+      ...base,
+      action: "REJECT",
+      reason: row.sourceNotes ?? "row_validation_failed",
+    };
+  if (row.uncertainFields?.includes("Duplicate spreadsheet identity"))
+    return {
+      ...base,
+      action: "POSSIBLE_DUPLICATE",
+      reason:
+        "This product identity occurs more than once in the file. Review variants and quantities before approving.",
+    };
   if (row.pdfClassification === "PARTIAL" || !row.title.trim()) {
     return {
       ...base,
@@ -3636,8 +3931,12 @@ export async function prepareStaffInventoryImport({
   context,
   request,
   file,
+  spreadsheetSheet,
+  spreadsheetHeaderRow,
 }: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
   file: File;
+  spreadsheetSheet?: string;
+  spreadsheetHeaderRow?: number;
 }): Promise<StaffInventoryImportPreparation> {
   const { organizationId, userId } = await requireIoioStaffAccess({
     context,
@@ -3649,6 +3948,8 @@ export async function prepareStaffInventoryImport({
     filename: file.name,
     contentType: file.type,
     buffer,
+    spreadsheetSheet,
+    spreadsheetHeaderRow,
   });
   const fileSha256 = sha256(buffer);
   const archivedCategoryIds = await getIoioArchivedCategoryIds({
@@ -3823,7 +4124,8 @@ export async function prepareStaffInventoryImport({
       genericClaudeFallbackInvoked: true,
       genericClaudeResult:
         helperResult.status === "ready"
-          ? helperResult.proposal.rows.length > 0
+          ? "rows" in helperResult.proposal &&
+            helperResult.proposal.rows.length > 0
             ? "line-items-found"
             : "no-line-items"
           : helperResult.reason,
@@ -3898,6 +4200,161 @@ export async function prepareStaffInventoryImport({
         throw importError(PDF_AI_ANALYSIS_REQUIRED_MESSAGE);
       }
     }
+  }
+  if (getStaffImportFormat(file.name) !== "PDF") {
+    const normalized: StaffImportRow[] = [];
+    for (
+      let offset = 0;
+      offset < rows.length;
+      offset += SPREADSHEET_BATCH_SIZE
+    ) {
+      const batch = rows.slice(offset, offset + SPREADSHEET_BATCH_SIZE);
+      const valid = batch.filter(
+        (row) => !row.uncertainFields?.includes("Spreadsheet row")
+      );
+      const pages = valid.map((row) => ({
+        sourceRef: `spreadsheet-row-${row.rowNumber}`,
+        page: row.rowNumber,
+        text: JSON.stringify({
+          productName: row.title,
+          manufacturer: row.manufacturer,
+          description: row.sourceDescription,
+          mpn: row.manufacturerPartNumber,
+          supplierSku: row.supplierPartNumber,
+          quantity: row.quantity,
+          category: row.category,
+          location: row.location,
+        }),
+      }));
+      const result = pages.length
+        ? await requestImportHelperProposal(
+            buildStaffImportHelperRequest({
+              pdfPages: pages,
+              fileSha256,
+              assets,
+              productModels: [],
+              categories,
+              locations,
+            })
+          )
+        : null;
+      const candidates =
+        result?.status === "ready" && !("mode" in result.proposal)
+          ? result.proposal.rows
+          : [];
+      for (const original of batch) {
+        const matches = candidates.filter(
+          (candidate) =>
+            candidate.sourceRef === `spreadsheet-row-${original.rowNumber}`
+        );
+        if (matches.length === 1) {
+          const enriched = mapHelperProposalToRows({
+            candidates: matches,
+            pdfPages: pages,
+            categories,
+            locations,
+          }).rows[0];
+          normalized.push({
+            ...original,
+            title: enriched.title || original.title,
+            sourceDescription: original.sourceDescription || original.title,
+            category: enriched.category || original.category,
+            location: enriched.location || original.location,
+            manufacturer: enriched.manufacturer || original.manufacturer,
+            supplierPartNumber:
+              original.supplierPartNumber || enriched.supplierPartNumber,
+            manufacturerPartNumber:
+              original.manufacturerPartNumber ||
+              enriched.manufacturerPartNumber,
+            suggestedCategoryId: enriched.suggestedCategoryId,
+            categorySuggestionConfidence: enriched.categorySuggestionConfidence,
+            suggestedLocationId: enriched.suggestedLocationId,
+            locationSuggestionConfidence: enriched.locationSuggestionConfidence,
+            categorySuggestionMethod: enriched.categorySuggestionMethod,
+            locationSuggestionMethod: enriched.locationSuggestionMethod,
+            helperCandidate: enriched.helperCandidate,
+            reviewRequired: true,
+          });
+        } else {
+          const evidence = {
+            productName: original.title,
+            manufacturer: original.manufacturer,
+            mpn: original.manufacturerPartNumber,
+            description: [
+              original.sourceDescription,
+              original.category,
+              original.location,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          };
+          const categoryChoice = resolveImportCategorySuggestion({
+            claudeCategoryId: null,
+            claudeConfidence: 0,
+            evidence,
+            categories,
+          });
+          const locationChoice = resolveImportLocationSuggestion({
+            claudeLocationId: null,
+            claudeConfidence: 0,
+            evidence,
+            category: categoryChoice.category,
+            locations,
+          });
+          normalized.push({
+            ...original,
+            category:
+              original.category || categoryChoice.category?.name || null,
+            location:
+              original.location || locationChoice.location?.name || null,
+            suggestedCategoryId: categoryChoice.category?.id ?? null,
+            suggestedLocationId: locationChoice.location?.id ?? null,
+            reviewRequired: true,
+            sourceNotes: [
+              original.sourceNotes,
+              result?.status === "ready"
+                ? "helper_invalid_response: no unique source-row correspondence"
+                : "helper_unavailable: deterministic row retained for review",
+            ]
+              .filter(Boolean)
+              .join("; "),
+          });
+        }
+      }
+      Logger.info({
+        event: "ioio_spreadsheet_semantic_batch",
+        rows: batch.length,
+        acceptedResponses: candidates.length,
+        status: result?.status ?? "no_valid_rows",
+      });
+    }
+    rows = normalized.map((row, index) => {
+      if (row.uncertainFields?.includes("Spreadsheet row")) return row;
+      const original = parsed.rows[index];
+      const selection = resolveImportCategorySuggestion({
+        claudeCategoryId: row.helperCandidate?.categorySuggestion.categoryId,
+        claudeConfidence: row.helperCandidate?.categorySuggestion.confidence,
+        evidence: {
+          productName: row.title,
+          rawDescription: original.sourceDescription,
+          manufacturer: row.manufacturer,
+          mpn: row.manufacturerPartNumber,
+          categoryText: original.category,
+        },
+        categories,
+      });
+      Logger.info({
+        event: "ioio_import_category_resolved",
+        rowNumber: row.rowNumber,
+        ...selection.diagnostics,
+      });
+      return {
+        ...row,
+        category: selection.category?.name ?? null,
+        suggestedCategoryId: selection.category?.id ?? null,
+        categorySuggestionMethod: selection.method,
+      };
+    });
   }
   const classifiedRows = classifyStaffImportRows({
     rows,

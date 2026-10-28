@@ -15,6 +15,8 @@ import {
   deleteApprovedStructureContainers,
   getOrganizationLocationChoices,
 } from "~/modules/ioio-staff/location-structure.server";
+import { MAX_ORGANIZE_SELECTED_MODELS } from "~/modules/ioio-staff/organize-selection";
+import { shelfTaskPlanSchema } from "~/modules/ioio-staff/shelf-task-plan.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -27,10 +29,19 @@ import { requirePermission } from "~/utils/roles.server";
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const { organizationId } = await requireIoioStaffAccess({ context, request });
   const choices = await getOrganizationLocationChoices(organizationId);
+  const selectedModelIds = [
+    ...new Set(
+      new URL(request.url).searchParams
+        .getAll("selectedModelId")
+        .map((id) => id.trim())
+        .filter(Boolean)
+    ),
+  ];
   return payload({
     header: { title: "Organize" },
     categories: choices.categories,
     locations: choices.locations,
+    selectedModelIds,
   });
 }
 
@@ -91,12 +102,35 @@ export async function action({ context, request }: ActionFunctionArgs) {
       throw new Error(
         "Describe what you want to organize (up to 2,000 characters)."
       );
-    const classification = classifyOrganizationRequest(instruction);
-    const asksForAnalysis =
-      /^\s*(what|which|where|how|show|list|compare|summarize|tell)\b/i.test(
-        instruction
+    const selectedModelEntries = form.getAll("selectedModelId");
+    if (
+      selectedModelEntries.length > MAX_ORGANIZE_SELECTED_MODELS ||
+      selectedModelEntries.some((entry) => typeof entry !== "string")
+    )
+      throw new Error(
+        `Select no more than ${MAX_ORGANIZE_SELECTED_MODELS} products at a time.`
       );
-    if (classification !== "INVENTORY_REORGANIZATION" || asksForAnalysis) {
+    const selectedModelIds = [
+      ...new Set(
+        selectedModelEntries
+          .map((entry) => String(entry).trim())
+          .filter(Boolean)
+      ),
+    ];
+    const rawReferences = form.get("inventoryRefs");
+    if (typeof rawReferences === "string" && rawReferences.length > 100_000)
+      throw new Error("Reload and review product references again.");
+    const inventoryRefs =
+      typeof rawReferences === "string"
+        ? shelfTaskPlanSchema.shape.inventoryRefs.parse(
+            JSON.parse(rawReferences)
+          )
+        : undefined;
+    const classification = classifyOrganizationRequest(instruction);
+    if (
+      classification !== "INVENTORY_REORGANIZATION" &&
+      classification !== "UNSUPPORTED"
+    ) {
       return payload({
         kind: "structure-proposal" as const,
         proposal: await buildLocationStructureProposal({
@@ -112,6 +146,17 @@ export async function action({ context, request }: ActionFunctionArgs) {
       ...(await generateInventoryOrganizationProposal({
         organizationId,
         instruction,
+        selectedModelIds,
+        inventoryRefs,
+        referenceChoices: Object.fromEntries(
+          [...form.entries()]
+            .filter(
+              ([key, value]) =>
+                key.startsWith("referenceChoice:") && typeof value === "string"
+            )
+            .slice(0, 100)
+            .map(([key, value]) => [key.slice(16), String(value)])
+        ),
       })),
     });
   } catch (cause) {
@@ -126,12 +171,16 @@ export const handle = {
 };
 
 export default function StaffOrganizePage() {
-  const { categories, locations } = useLoaderData<typeof loader>();
+  const { categories, locations, selectedModelIds } =
+    useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const [reviewState, setReviewState] = useState<
     Record<string, "kept" | "ignored">
   >({});
   const [dismissed, setDismissed] = useState(false);
+  const [selectedDestinations, setSelectedDestinations] = useState<
+    Record<string, string>
+  >({});
   const [structureNodeDecisions, setStructureNodeDecisions] = useState<
     Record<string, { action: "CREATE" } | { action: "EXISTS"; id: string }>
   >({});
@@ -191,6 +240,23 @@ export default function StaffOrganizePage() {
           method="post"
           className="mt-6 space-y-4 rounded-xl border border-gray-200 bg-white p-5"
         >
+          {selectedModelIds.map((modelId) => (
+            <input
+              key={modelId}
+              type="hidden"
+              name="selectedModelId"
+              value={modelId}
+            />
+          ))}
+          {selectedModelIds.length > 0 && (
+            <p
+              role="status"
+              className="rounded bg-blue-50 p-3 text-sm text-blue-900"
+            >
+              {selectedModelIds.length} selected product
+              {selectedModelIds.length === 1 ? "" : "s"} will be analyzed.
+            </p>
+          )}
           <label className="block text-sm font-medium">
             What should we organize?
             <textarea
@@ -734,18 +800,100 @@ export default function StaffOrganizePage() {
           <section className="mt-8" aria-labelledby="proposal-title">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 id="proposal-title" className="text-xl font-semibold">
-                Reorganization proposal
+                {proposal.diagnostics.placementPressure === "USER_REPORTED_HIGH"
+                  ? "Inventory placement proposal"
+                  : "Reorganization proposal"}
               </h2>
               <span className="rounded-full bg-amber-50 px-3 py-1 text-sm font-medium text-amber-800">
                 Preview only · no changes made
               </span>
             </div>
             <p className="mt-1 text-sm text-gray-600">
-              {proposal.proposalItems.length} suggested changes ·{" "}
-              {proposal.diagnostics.modelsConsidered} models considered ·{" "}
-              {proposal.diagnostics.modelsSentToClaude} sent across{" "}
+              {proposal.diagnostics.recommendedCount} recommended ·{" "}
+              {proposal.diagnostics.suggestedCount} possible suggestions ·{" "}
+              {proposal.diagnostics.keepCount} keep current ·{" "}
+              {proposal.diagnostics.unresolvedCount} unresolved ·{" "}
+              {proposal.diagnostics.modelsConsidered} models considered
+              {proposal.diagnostics.selectedModelCount > 0
+                ? ` · ${proposal.diagnostics.selectedModelCount} selected`
+                : ""}{" "}
+              · {proposal.diagnostics.modelsSentToClaude} sent across{" "}
               {proposal.diagnostics.batches} batches
             </p>
+            {"grounding" in proposal && proposal.grounding ? (
+              <div className="mt-3 text-sm">
+                {proposal.grounding.inventorySelectionMode ===
+                "EXPLICIT_PRODUCTS" ? (
+                  <p>
+                    Requested products:{" "}
+                    {proposal.grounding.explicitInventoryRefCount} · Resolved:{" "}
+                    {proposal.grounding.resolvedInventoryRefCount} · Unresolved:{" "}
+                    {proposal.grounding.unresolvedInventoryRefCount}
+                  </p>
+                ) : (
+                  <p>
+                    {proposal.grounding.selectedInventoryIdCount
+                      ? `${proposal.grounding.selectedInventoryIdCount} staff-selected products`
+                      : "Inventory from the requested scope"}
+                  </p>
+                )}
+                {proposal.grounding.unresolvedInventoryRefCount > 0 ? (
+                  <Form method="post" className="my-3 space-y-2">
+                    <input
+                      type="hidden"
+                      name="inventoryRefs"
+                      value={JSON.stringify(
+                        proposal.grounding.references.map(
+                          ({ reference }) => reference
+                        )
+                      )}
+                    />
+
+                    <input
+                      type="hidden"
+                      name="instruction"
+                      value={
+                        "taskPlan" in proposal ? proposal.taskPlan?.goal : ""
+                      }
+                    />
+                    {proposal.grounding.references
+                      .filter((reference) => !reference.modelId)
+                      .map((reference) => (
+                        <label key={reference.reference.name} className="block">
+                          Could not uniquely resolve: {reference.reference.name}
+                          <select
+                            name={`referenceChoice:${reference.reference.name}`}
+                            className="ml-2 rounded border p-1"
+                          >
+                            <option value="">Choose product</option>
+                            {reference.candidates.map((candidate) => (
+                              <option key={candidate.id} value={candidate.id}>
+                                {candidate.name}
+                              </option>
+                            ))}
+                          </select>
+                          {reference.candidates.length === 0 ? (
+                            <span>
+                              {" "}
+                              No matching product. Nothing substituted.
+                            </span>
+                          ) : null}
+                        </label>
+                      ))}
+                    <button type="submit" className="rounded border px-3 py-1">
+                      Analyze chosen products
+                    </button>
+                  </Form>
+                ) : null}
+                {proposal.grounding.currentLocations.map((location, index) => (
+                  <p key={index}>
+                    Current context: {location.reference.name} →{" "}
+                    {locations.find((candidate) => candidate.id === location.id)
+                      ?.path ?? "Needs review"}
+                  </p>
+                ))}
+              </div>
+            ) : null}
             <p className="mt-1 text-sm text-gray-600">
               Analyzed:{" "}
               {proposal.diagnostics.analysisScope ??
@@ -759,10 +907,14 @@ export default function StaffOrganizePage() {
                     <tr>
                       {[
                         "Product",
-                        "Current category",
-                        "Suggested category",
                         "Current location",
-                        "Suggested location",
+                        "Proposed location",
+                        "Strength",
+                        ...(proposal.proposalItems.some(
+                          (item) => item.categoryId
+                        )
+                          ? ["Current category", "Suggested category"]
+                          : []),
                         "Review",
                       ].map((heading) => (
                         <th key={heading} className="p-3 font-semibold">
@@ -781,29 +933,79 @@ export default function StaffOrganizePage() {
                           </p>
                         </td>
                         <td className="p-3">
-                          {categories.find(
-                            (entry) => entry.id === item.currentCategoryId
-                          )?.name ?? "Unassigned"}
-                        </td>
-                        <td className="p-3">
-                          {item.categoryId
-                            ? categories.find(
-                                (entry) => entry.id === item.categoryId
-                              )?.name ?? "Unresolved"
-                            : "—"}
-                        </td>
-                        <td className="p-3">
                           {locations.find(
                             (entry) => entry.id === item.currentLocationId
                           )?.path ?? "Unassigned"}
                         </td>
                         <td className="p-3">
-                          {item.locationId
-                            ? locations.find(
-                                (entry) => entry.id === item.locationId
-                              )?.path ?? "Unresolved"
-                            : "—"}
+                          {(item.alternatives ?? []).length > 0 ? (
+                            <select
+                              aria-label={`Destination for ${item.productName}`}
+                              value={
+                                selectedDestinations[item.modelId] ??
+                                item.locationId ??
+                                ""
+                              }
+                              onChange={(event) =>
+                                setSelectedDestinations((current) => ({
+                                  ...current,
+                                  [item.modelId]: event.target.value,
+                                }))
+                              }
+                              className="max-w-sm rounded border border-gray-300 p-2"
+                            >
+                              <option value="">Keep current</option>
+                              {(item.alternatives ?? []).map((alternative) => (
+                                <option
+                                  key={alternative.locationId}
+                                  value={alternative.locationId}
+                                >
+                                  {locations.find(
+                                    (entry) =>
+                                      entry.id === alternative.locationId
+                                  )?.path ?? "Unavailable location"}
+                                </option>
+                              ))}
+                            </select>
+                          ) : item.locationId ? (
+                            locations.find(
+                              (entry) => entry.id === item.locationId
+                            )?.path ?? "Unresolved"
+                          ) : (
+                            "—"
+                          )}
                         </td>
+                        <td className="p-3">
+                          {selectedDestinations[item.modelId]
+                            ? "Staff selected"
+                            : item.strength === "RECOMMENDED"
+                            ? "Recommended"
+                            : item.strength === "SUGGESTED"
+                            ? "Suggested"
+                            : item.strength === "POSSIBLE"
+                            ? "Possible option"
+                            : item.strength === "KEEP_CURRENT"
+                            ? "Keep current"
+                            : "Needs review"}
+                        </td>
+                        {proposal.proposalItems.some(
+                          (entry) => entry.categoryId
+                        ) && (
+                          <>
+                            <td className="p-3">
+                              {categories.find(
+                                (entry) => entry.id === item.currentCategoryId
+                              )?.name ?? "Unassigned"}
+                            </td>
+                            <td className="p-3">
+                              {item.categoryId
+                                ? categories.find(
+                                    (entry) => entry.id === item.categoryId
+                                  )?.name ?? "Unresolved"
+                                : "—"}
+                            </td>
+                          </>
+                        )}
                         <td className="p-3">
                           <button
                             type="button"
@@ -841,9 +1043,13 @@ export default function StaffOrganizePage() {
               </div>
             ) : (
               <p className="mt-4 rounded-lg bg-gray-50 p-4 text-sm text-gray-600">
-                {proposal.diagnostics.helperFailures > 0
+                {proposal.diagnostics.requiresSelection
+                  ? "Select products from Inventory first, or name a category or location to analyze a defined scope. No products were analyzed."
+                  : proposal.diagnostics.helperFailures > 0
                   ? "AI analysis could not complete for one or more batches. Check helper availability and try again."
-                  : "No sufficiently confident changes were suggested."}
+                  : proposal.diagnostics.unresolvedCount > 0
+                  ? "No valid alternative locations were found for these products. Current locations remain unchanged."
+                  : "No products matched the requested scope."}
               </p>
             )}
           </section>

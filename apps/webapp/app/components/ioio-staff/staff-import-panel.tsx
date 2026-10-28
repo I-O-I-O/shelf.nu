@@ -294,6 +294,35 @@ export function StaffImportPanel({
         className="mt-4 flex flex-wrap items-center gap-3"
       >
         <input type="hidden" name="intent" value="analyze-file" />
+        {format !== "pdf" ? (
+          <details className="w-full text-sm text-gray-600">
+            <summary>Spreadsheet options</summary>
+            <p className="my-2">
+              Leave blank to detect inventory tables automatically. If a table
+              needs review, choose its sheet and header row here, then upload
+              the file again.
+            </p>
+            <label>
+              Sheet name{" "}
+              <input
+                name="spreadsheetSheet"
+                type="text"
+                maxLength={100}
+                className="mx-2 rounded border px-2 py-1"
+              />
+            </label>
+            <label>
+              Header row{" "}
+              <input
+                name="spreadsheetHeaderRow"
+                type="number"
+                min={1}
+                max={1000}
+                className="mx-2 w-24 rounded border px-2 py-1"
+              />
+            </label>
+          </details>
+        ) : null}
         <label className="inline-flex cursor-pointer items-center rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white transition focus-within:ring-2 focus-within:ring-red-700 focus-within:ring-offset-2 hover:bg-red-800">
           Choose {copy.label} file
           <input
@@ -929,11 +958,14 @@ function StaffImportProposalView({
               const selectedCategoryOption =
                 proposal.categoryOptions?.find(
                   (category) =>
-                    category.id === (decision?.categoryId ?? row.categoryId)
+                    category.id ===
+                    (decision ? decision.categoryId : row.categoryId)
                 ) ??
                 proposal.categoryOptions?.find(
                   (category) =>
-                    rowCategoryLabel && category.name === rowCategoryLabel
+                    (!decision || decision.categoryId) &&
+                    rowCategoryLabel &&
+                    category.name === rowCategoryLabel
                 );
               const selectedCategoryBadge = selectedCategoryOption?.color
                 ? {
@@ -1515,6 +1547,8 @@ function StaffImportProposalView({
                       <label className="relative inline-flex items-center rounded-md focus-within:ring-2 focus-within:ring-red-200">
                         {selectedCategoryBadge ? (
                           <CategoryBadge category={selectedCategoryBadge} />
+                        ) : selectedCategoryOption ? (
+                          <span>{selectedCategoryOption.name}</span>
                         ) : suggestedCategory &&
                           (row.categorySuggestionConfidence ?? 0) >= 0.5 ? (
                           <span className="text-amber-700">
@@ -1530,7 +1564,10 @@ function StaffImportProposalView({
                         </span>
                         <select
                           aria-label={`Category for ${row.title}`}
-                          value={decision?.categoryId ?? row.categoryId ?? ""}
+                          value={
+                            (decision ? decision.categoryId : row.categoryId) ??
+                            ""
+                          }
                           onChange={(event) =>
                             updateDecision(row.rowNumber, {
                               categoryId: event.currentTarget.value || null,
@@ -1556,16 +1593,60 @@ function StaffImportProposalView({
                       <CategoryBadge category={selectedCategoryBadge} />
                     )}
                   </td>
-                  <td className="max-w-48 p-2 text-gray-700">
-                    <span className="line-clamp-2 break-words">
-                      {selectedLocation?.pathLabel ??
-                        (row.locationId ? row.locationLabel : null) ??
-                        (row.locationId ? row.location : null) ??
-                        (suggestedLocation &&
-                        (row.locationSuggestionConfidence ?? 0) >= 0.5
-                          ? `Suggested: ${suggestedLocation.pathLabel} · choose`
-                          : "Choose location")}
-                    </span>
+                  <td className="max-w-64 p-2 text-gray-700">
+                    <label className="relative inline-flex items-center rounded-md focus-within:ring-2 focus-within:ring-red-200">
+                      <span className="line-clamp-2 break-words">
+                        {selectedLocation?.pathLabel ??
+                          (decision?.locationId === null
+                            ? suggestedLocation &&
+                              (row.locationSuggestionConfidence ?? 0) >= 0.5
+                              ? `Suggested: ${suggestedLocation.pathLabel} · choose`
+                              : "Choose location"
+                            : row.locationLabel && row.locationId
+                            ? row.locationLabel
+                            : "Choose location")}
+                      </span>
+                      <span aria-hidden="true" className="px-1 text-gray-500">
+                        ▾
+                      </span>
+                      <select
+                        aria-label={`Location for ${row.title}`}
+                        value={decision?.locationId ?? ""}
+                        onChange={(event) =>
+                          updateDecision(row.rowNumber, {
+                            locationId: event.currentTarget.value || null,
+                          })
+                        }
+                        className="absolute inset-0 size-full cursor-pointer opacity-0"
+                      >
+                        <option value="">Choose location</option>
+                        {suggestedLocation && !suggestedLocation.operational ? (
+                          <optgroup label="Suggested">
+                            <option value={suggestedLocation.id}>
+                              {suggestedLocation.pathLabel ??
+                                suggestedLocation.name}
+                            </option>
+                          </optgroup>
+                        ) : null}
+                        <optgroup label="All locations">
+                          {proposal.locationOptions
+                            ?.filter(
+                              (location) =>
+                                location.id !==
+                                (suggestedLocation &&
+                                !suggestedLocation.operational
+                                  ? suggestedLocation.id
+                                  : null)
+                            )
+                            .map((location) => (
+                              <option key={location.id} value={location.id}>
+                                {location.pathLabel ?? location.name}
+                                {location.operational ? " (operational)" : ""}
+                              </option>
+                            ))}
+                        </optgroup>
+                      </select>
+                    </label>
                   </td>
                   <td className="p-2">
                     <div className="flex flex-wrap gap-1.5">

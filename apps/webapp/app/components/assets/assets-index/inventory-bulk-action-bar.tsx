@@ -14,6 +14,8 @@ export function InventoryBulkActionBar({
   onHide,
   onUnhide,
   onPrintLabels,
+  canOrganizeSelected,
+  onOrganizeSelected,
 }: {
   selectedCount: number;
   canUpdate: boolean;
@@ -28,6 +30,8 @@ export function InventoryBulkActionBar({
   onHide: () => void;
   onUnhide: () => void;
   onPrintLabels: () => void;
+  canOrganizeSelected?: boolean;
+  onOrganizeSelected?: () => void;
 }) {
   return (
     <div
@@ -70,6 +74,21 @@ export function InventoryBulkActionBar({
               Change location
             </Button>
           </>
+        ) : null}
+        {onOrganizeSelected ? (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={!canOrganizeSelected}
+            onClick={onOrganizeSelected}
+            title={
+              canOrganizeSelected
+                ? "Analyze the selected products in Organize"
+                : "Select only inventory rows linked to an AssetModel"
+            }
+          >
+            Organize selected
+          </Button>
         ) : null}
         {canDelete ? (
           <>

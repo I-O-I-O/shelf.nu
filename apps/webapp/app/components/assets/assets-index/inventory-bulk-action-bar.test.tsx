@@ -96,4 +96,30 @@ describe("InventoryBulkActionBar", () => {
       screen.queryByRole("button", { name: /mark available/i })
     ).toBeNull();
   });
+
+  it("offers an explicit Organize handoff for a valid selected model set", () => {
+    const onOrganizeSelected = vi.fn();
+    render(
+      <InventoryBulkActionBar
+        selectedCount={4}
+        canUpdate
+        canDelete={false}
+        canPrintLabels={false}
+        canHide={false}
+        canUnhide={false}
+        canOrganizeSelected
+        onOrganizeSelected={onOrganizeSelected}
+        onChangeCategory={vi.fn()}
+        onChangeLocation={vi.fn()}
+        onArchive={vi.fn()}
+        onTrash={vi.fn()}
+        onHide={vi.fn()}
+        onUnhide={vi.fn()}
+        onPrintLabels={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Organize selected" }));
+    expect(onOrganizeSelected).toHaveBeenCalledOnce();
+  });
 });

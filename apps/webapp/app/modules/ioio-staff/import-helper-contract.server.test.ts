@@ -439,6 +439,44 @@ describe("import helper contract", () => {
       },
     };
     expect(validateImportHelperResponse(response, request)).toEqual(response);
+    const placementRequest = importHelperRequestSchema.parse({
+      mode: "SHELF_TASK_PLAN",
+      schemaVersion: 1,
+      instruction: "These selected items are overflowing; suggest locations.",
+      availableSources: [
+        { type: "SHELF_INVENTORY" },
+        { type: "SHELF_LOCATIONS" },
+      ],
+      locationContext: [],
+    });
+    const placementResponse = {
+      mode: "SHELF_TASK_PLAN",
+      schemaVersion: 1,
+      taskPlan: {
+        taskType: "INVENTORY_PLACEMENT",
+        goal: "Redistribute selected products",
+        sources: [{ type: "SHELF_INVENTORY" }, { type: "SHELF_LOCATIONS" }],
+        steps: [
+          {
+            id: "models",
+            capability: "SELECT_MODELS",
+            selection: "STAFF_SELECTED",
+          },
+          {
+            id: "placement",
+            capability: "PROPOSE_LOCATION_CHANGE",
+            selection: "models",
+            placementPressure: "USER_REPORTED_HIGH",
+          },
+        ],
+        writesRequested: true,
+        mutationPolicy: "PROPOSAL_ONLY",
+        expectedOutput: "INVENTORY_PROPOSAL",
+      },
+    };
+    expect(
+      validateImportHelperResponse(placementResponse, placementRequest)
+    ).toEqual(placementResponse);
     expect(() =>
       validateImportHelperResponse(
         {

@@ -291,7 +291,7 @@ describe("deterministic category and location suggestions", () => {
       rawDescription: "Unknown replacement component",
     };
     const category = resolveImportCategorySuggestion({ evidence, categories });
-    expect(category).toEqual({ category: null, method: "unresolved" });
+    expect(category).toMatchObject({ category: null, method: "unresolved" });
     expect(
       resolveImportLocationSuggestion({
         evidence,
@@ -717,5 +717,60 @@ describe("deterministic category and location suggestions", () => {
           "Electronics Lab · Cabinet B · Development Boards Drawer",
       }),
     ]);
+  });
+});
+
+describe("category fallback with current Shelf taxonomy", () => {
+  const categories = [
+    { id: "cables", name: "Cables & adapters" },
+    { id: "electronics", name: "Electronics" },
+    { id: "tools", name: "Tools & machinery" },
+  ];
+  it.each([
+    ["USB-C Cable", "cables"],
+    ["Arduino Nano", "electronics"],
+    ["Motor", "electronics"],
+    ["Wera Screwdriver Set", "tools"],
+  ])(
+    "assigns an obvious existing category for %s without Claude",
+    (productName, id) => {
+      const result = resolveImportCategorySuggestion({
+        evidence: { productName },
+        categories,
+        claudeCategoryId: null,
+      });
+      expect(result.category?.id).toBe(id);
+      expect(result.diagnostics).toMatchObject({
+        categoryFallbackUsed: true,
+        categoryFinalSource: "DETERMINISTIC",
+        categoryClaudeResult: "NULL",
+      });
+    }
+  );
+  it("uses source category text as evidence and rejects invented IDs", () => {
+    const result = resolveImportCategorySuggestion({
+      evidence: { productName: "Part 42", categoryText: "Cables" },
+      categories,
+      claudeCategoryId: "foreign",
+      claudeConfidence: 0.99,
+    });
+    expect(result.category?.id).toBe("cables");
+    expect(result.diagnostics?.categoryClaudeResult).toBe("INVALID_ID");
+  });
+  it("records exact source matches and leaves equal candidates unresolved", () => {
+    expect(
+      resolveImportCategorySuggestion({
+        evidence: { categoryText: "Electronics" },
+        categories,
+      }).diagnostics?.categoryFinalSource
+    ).toBe("SPREADSHEET_EXACT_MATCH");
+    const result = resolveImportCategorySuggestion({
+      evidence: { productName: "Cable" },
+      categories: [
+        { id: "a", name: "Cables" },
+        { id: "b", name: "Cable supplies" },
+      ],
+    });
+    expect(result.category).toBeNull();
   });
 });

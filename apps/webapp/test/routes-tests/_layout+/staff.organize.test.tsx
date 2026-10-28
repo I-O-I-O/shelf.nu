@@ -17,26 +17,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("~/modules/ioio-staff/access.server", () => ({
   requireIoioStaffAccess: mocks.requireIoioStaffAccess,
 }));
-vi.mock("~/modules/ioio-staff/location-structure.server", () => ({
+vi.mock("~/modules/ioio-staff/location-structure.server", async () => ({
   buildLocationStructureProposal: mocks.buildLocationStructureProposal,
   createLocationStructure: mocks.createLocationStructure,
   getOrganizationLocationChoices: mocks.getOrganizationLocationChoices,
-  classifyOrganizationRequest: (instruction: string) =>
-    /\b(create|add|make|build|ensure|remove|delete|clear|rename|merge|split|restructure)\b/i.test(
-      instruction
-    ) &&
-    /\b(room|section|shelves?|drawers?|containers?|cabinets?|storage area)\b/i.test(
-      instruction
-    )
-      ? "LOCATION_STRUCTURE"
-      : /\b(find|review|suggest|move|relocate|better places?)\b/i.test(
-          instruction
-        ) &&
-        /\b(assets?|inventory|products?|boards?|sensors?|cables?|electronics|items?)\b/i.test(
-          instruction
-        )
-      ? "INVENTORY_REORGANIZATION"
-      : "UNSUPPORTED",
+  classifyOrganizationRequest: (
+    await import("~/modules/ioio-staff/organize-classification")
+  ).classifyOrganizationRequest,
 }));
 vi.mock("~/modules/ioio-staff/location-intelligence.server", () => ({
   generateInventoryOrganizationProposal:
@@ -52,7 +39,7 @@ import StaffOrganizePage, {
   loader,
 } from "~/routes/_layout+/staff.organize";
 
-function renderOrganizePage() {
+function renderOrganizePage(initialEntry = "/staff/organize") {
   const router = createMemoryRouter(
     [
       {
@@ -62,7 +49,7 @@ function renderOrganizePage() {
         action,
       },
     ],
-    { initialEntries: ["/staff/organize"] }
+    { initialEntries: [initialEntry] }
   );
   return render(<RouterProvider router={router} />);
 }
@@ -551,6 +538,101 @@ describe("staff organize experience", () => {
     expect(mocks.buildLocationStructureProposal).not.toHaveBeenCalled();
   });
 
+  it("preserves repeated selected model IDs into the inventory placement task", async () => {
+    mocks.generateInventoryOrganizationProposal.mockResolvedValue({
+      proposalItems: [],
+      diagnostics: {
+        selectedModelCount: 4,
+        modelsConsidered: 4,
+        modelsSentToClaude: 4,
+        categoriesSent: 3,
+        locationsSent: 10,
+        candidateLocationCountBeforeRanking: 30,
+        candidateLocationCountAfterRanking: 10,
+        locationsSentToClaude: 10,
+        placementPressure: "USER_REPORTED_HIGH",
+        recommendedCount: 2,
+        suggestedCount: 2,
+        keepCount: 0,
+        unresolvedCount: 0,
+        reasonCounts: {},
+        helperFailures: 0,
+        validationRejectedCount: 0,
+        requestBytes: 900,
+        requiresSelection: false,
+        analysisScope: "Exactly 4 selected product models",
+        durationMs: 10,
+      },
+      previewOnly: true,
+    });
+    renderOrganizePage(
+      "/staff/organize?selectedModelId=usb&selectedModelId=arduino&selectedModelId=motor&selectedModelId=smalaa"
+    );
+    expect(
+      await screen.findByText("4 selected products will be analyzed.")
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByDisplayValue(/usb|arduino|motor|smalaa/)
+    ).toHaveLength(4);
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("textbox"),
+      "These items are overflowing. Find better locations."
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    await waitFor(() =>
+      expect(mocks.generateInventoryOrganizationProposal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedModelIds: ["usb", "arduino", "motor", "smalaa"],
+        })
+      )
+    );
+  });
+
+  it("routes 'Where else could this go?' through inventory placement when a model is selected", async () => {
+    mocks.generateInventoryOrganizationProposal.mockResolvedValue({
+      proposalItems: [],
+      diagnostics: {
+        selectedModelCount: 1,
+        modelsConsidered: 1,
+        modelsSentToClaude: 1,
+        categoriesSent: 1,
+        locationsSent: 1,
+        candidateLocationCountBeforeRanking: 8,
+        candidateLocationCountAfterRanking: 1,
+        locationsSentToClaude: 1,
+        placementPressure: "NORMAL",
+        recommendedCount: 0,
+        suggestedCount: 0,
+        keepCount: 1,
+        unresolvedCount: 0,
+        reasonCounts: {},
+        helperFailures: 0,
+        validationRejectedCount: 0,
+        requestBytes: 400,
+        batches: 1,
+        requiresSelection: false,
+        analysisScope: "Exactly 1 selected product model",
+        durationMs: 10,
+      },
+      previewOnly: true,
+    });
+    renderOrganizePage("/staff/organize?selectedModelId=usb");
+    const user = userEvent.setup();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Where else could this go?"
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+
+    await waitFor(() =>
+      expect(mocks.generateInventoryOrganizationProposal).toHaveBeenCalledWith(
+        expect.objectContaining({ selectedModelIds: ["usb"] })
+      )
+    );
+    expect(mocks.buildLocationStructureProposal).not.toHaveBeenCalled();
+  });
+
   it("keeps Create all behind an explicit action and location-create permission", async () => {
     mocks.createLocationStructure.mockResolvedValue({
       createdCount: 1,
@@ -589,4 +671,72 @@ describe("staff organize experience", () => {
     );
     expect(result).toMatchObject({ kind: "structure-created" });
   });
+});
+
+it("keeps unresolved named products visible and submits only a canonical clarification choice", async () => {
+  mocks.generateInventoryOrganizationProposal.mockResolvedValue({
+    previewOnly: true,
+    proposalItems: [],
+    diagnostics: {
+      recommendedCount: 0,
+      suggestedCount: 0,
+      keepCount: 0,
+      unresolvedCount: 0,
+      modelsConsidered: 0,
+      modelsSentToClaude: 0,
+      selectedModelCount: 0,
+      batches: 0,
+      placementPressure: "NORMAL",
+      analysisScope: "No product uniquely resolved",
+    },
+    taskPlan: { goal: "Find a better place for Motor." },
+    grounding: {
+      inventorySelectionMode: "EXPLICIT_PRODUCTS",
+      explicitInventoryRefCount: 1,
+      resolvedInventoryRefCount: 0,
+      unresolvedInventoryRefCount: 1,
+      selectedInventoryIdCount: 0,
+      currentLocations: [],
+      references: [
+        {
+          reference: { name: "Motor" },
+          status: "AMBIGUOUS",
+          modelId: null,
+          candidates: [
+            { id: "motor-a", name: "Motor A" },
+            { id: "motor-b", name: "Motor B" },
+          ],
+        },
+      ],
+    },
+  });
+  renderOrganizePage();
+  const user = userEvent.setup();
+  await user.type(
+    await screen.findByRole("textbox"),
+    "Find a better place for Motor."
+  );
+  await user.click(screen.getByRole("button", { name: "Analyze" }));
+  expect(await screen.findByText(/Requested products:/)).toHaveTextContent(
+    "Resolved: 0"
+  );
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: /Could not uniquely resolve: Motor/ }),
+    "motor-b"
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Analyze chosen products" })
+  );
+  await waitFor(() =>
+    expect(
+      mocks.generateInventoryOrganizationProposal
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        instruction: "Find a better place for Motor.",
+        inventoryRefs: [{ name: "Motor" }],
+        referenceChoices: { Motor: "motor-b" },
+      })
+    )
+  );
+  expect(mocks.createLocationStructure).not.toHaveBeenCalled();
 });

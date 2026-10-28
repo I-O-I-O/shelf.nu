@@ -913,6 +913,7 @@ describe("staff inventory import safety", () => {
     denyCategoryPermission = false,
     categoryArchivedAfterReview = false,
     selectedLocationId,
+    submittedLocationId,
     categoryAppearedAfterReview = false,
     ambiguousLocation = false,
     decisionType,
@@ -938,6 +939,7 @@ describe("staff inventory import safety", () => {
     denyCategoryPermission?: boolean;
     categoryArchivedAfterReview?: boolean;
     selectedLocationId?: string;
+    submittedLocationId?: string;
     categoryAppearedAfterReview?: boolean;
     ambiguousLocation?: boolean;
     decisionType?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
@@ -1223,7 +1225,8 @@ describe("staff inventory import safety", () => {
                     categoryId: useExistingCategory ? row.categoryId : null,
                     newCategoryName: newCategoryName ?? null,
                     approveNewCategory,
-                    locationId: selectedLocationId ?? null,
+                    locationId:
+                      submittedLocationId ?? selectedLocationId ?? null,
                     quantity,
                     type: decisionType === undefined ? type : decisionType,
                     minQuantity,
@@ -1607,6 +1610,13 @@ describe("staff inventory import safety", () => {
     });
   });
 
+  it("rejects a client location ID outside the organization proposal options", async () => {
+    await expect(
+      applyNewImport({ quantity: 1, submittedLocationId: "foreign-location" })
+    ).rejects.toThrow();
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+
   it("allows an explicit manual choice of a valid operational location", async () => {
     const { result, assetRows } = await applyNewImport({
       quantity: 1,
@@ -1909,7 +1919,7 @@ describe("staff inventory import safety", () => {
       ),
     });
 
-    expect(rows).toEqual([
+    expect(rows).toMatchObject([
       {
         rowNumber: 2,
         title: "Arduino Nano",
@@ -3468,4 +3478,382 @@ describe("staff inventory import safety", () => {
     expect(ordered.action).toBe("NEEDS_REVIEW");
     expect(ordered.proposedQuantity).toBe(8);
   });
+});
+
+describe("normalized spreadsheet import", () => {
+  const parse = (text: string) =>
+    parseStaffImportFile({ filename: "stock.csv", buffer: Buffer.from(text) });
+  it.each([",", ";", "\t"])(
+    "reads quoted fields, BOM and %s delimiters",
+    async (delimiter) => {
+      const rows = await parse(
+        "\uFEFFProduct name" +
+          delimiter +
+          "Antal" +
+          delimiter +
+          "Description\nBoard" +
+          delimiter +
+          "3" +
+          delimiter +
+          '"Small, useful board"\n'
+      );
+      expect(rows[0]).toMatchObject({
+        title: "Board",
+        quantity: 3,
+        sourceDescription: "Small, useful board",
+      });
+    }
+  );
+  it("detects metadata before headers, ignores noise, and retains rejected rows", async () => {
+    const rows = await parse(
+      "Supplier: Example\nExport date: today\n\nProduct;Received;Ordered;Brand;MPN;Unrelated\nBoard;2;5;Maker;ABC;ignored\nMotor;-1;4;Maker;XYZ;ignored\nTotal;20;;;;\nVAT 25%;4;;;;\nFreight;1;;;;\n"
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      title: "Board",
+      quantity: 2,
+      orderedQuantity: 5,
+      manufacturer: "Maker",
+      manufacturerPartNumber: "ABC",
+    });
+    expect(rows[1].uncertainFields).toContain("Spreadsheet row");
+    expect(rows[0].sourceNotes).toContain("source row: 5");
+  });
+  it("preserves duplicate identities for explicit review without combining variants", async () => {
+    const rows = await parse(
+      "Name,Qty,MPN,Brand\nBoard,2,A,Maker\nBoard variant,3,B,Maker\nBoard,4,A,Maker\n"
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0].uncertainFields).toContain("Duplicate spreadsheet identity");
+    expect(rows[1].uncertainFields).toBeUndefined();
+    expect(rows[2].quantity).toBe(4);
+  });
+  it("does not use ordered-only quantities as received inventory", async () => {
+    const rows = await parse("Name,Ordered\nBoard,5\n");
+    expect(rows[0]).toMatchObject({
+      quantity: null,
+      orderedQuantity: 5,
+      quantityStatus: "ORDERED",
+    });
+  });
+  it("produces equivalent 20-product rows from multiple-sheet XLSX and CSV", async () => {
+    const matrix = [
+      ["Product name", "Received", "Brand", "MPN"],
+      ...[
+        "Arduino Nano",
+        "ESP32 DevKit",
+        "Raspberry Pi Pico",
+        "XIAO ESP32-S3 Sense",
+        "USB-C Cable",
+        "HDMI Adapter",
+        "JST Connector",
+        "NEMA 17 Motor",
+        "Micro Servo",
+        "Motor Driver",
+        "Temperature Sensor",
+        "Distance Sensor",
+        "IMU Module",
+        "Pressure Sensor",
+        "Breadboard",
+        "Resistor Kit",
+        "LED Strip",
+        "Bench Power Supply",
+        "Digital Multimeter",
+        "Soldering Iron",
+      ].map((name, index) => [name, `${index + 1}`, "Maker", `PN-${index}`]),
+    ];
+    const csv = await parse(matrix.map((row) => row.join(";")).join("\n"));
+    const workbook = new JSZip();
+    workbook.file(
+      "xl/workbook.xml",
+      '<workbook><sheets><sheet name="Notes" r:id="n"/><sheet name="Inventory" r:id="i"/></sheets></workbook>'
+    );
+    workbook.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Target="worksheets/notes.xml" Id="n"/><Relationship Target="worksheets/items.xml" Id="i"/></Relationships>'
+    );
+    const xml = (rows: string[][]) =>
+      "<worksheet><sheetData>" +
+      rows
+        .map(
+          (row, index) =>
+            '<row r="' +
+            (index + 1) +
+            '">' +
+            row
+              .map(
+                (cell, col) =>
+                  '<c r="' +
+                  String.fromCharCode(65 + col) +
+                  (index + 1) +
+                  '" t="inlineStr"><is><t>' +
+                  cell +
+                  "</t></is></c>"
+              )
+              .join("") +
+            "</row>"
+        )
+        .join("") +
+      "</sheetData></worksheet>";
+    workbook.file(
+      "xl/worksheets/notes.xml",
+      xml([["Notes"], ["Do not import this sheet"]])
+    );
+    workbook.file(
+      "xl/worksheets/items.xml",
+      xml([["Supplier: Example"], [], ...matrix])
+    );
+    const xlsx = await parseStaffImportFile({
+      filename: "stock.xlsx",
+      buffer: await workbook.generateAsync({ type: "nodebuffer" }),
+    });
+    const identity = (rows: typeof csv) =>
+      rows.map(
+        ({
+          title,
+          quantity,
+          receivedQuantity,
+          manufacturer,
+          manufacturerPartNumber,
+        }) => ({
+          title,
+          quantity: receivedQuantity ?? quantity,
+          manufacturer,
+          manufacturerPartNumber,
+        })
+      );
+    expect(xlsx).toHaveLength(20);
+    expect(identity(xlsx)).toEqual(identity(csv));
+    const pdf = await parseStaffImportFile({
+      filename: "stock.pdf",
+      buffer: makePdfFromPages([
+        { text: matrix.map((row) => row.join("|")).join("\n") },
+      ]),
+    });
+    expect(identity(pdf)).toEqual(identity(csv));
+  });
+});
+
+describe("spreadsheet proposal enrichment", () => {
+  it("batches 65 rows and retains them safely when the helper is unavailable", async () => {
+    // why: external persistence and helper transport are replaced to inspect the proposal boundary.
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    database.asset.findMany.mockResolvedValue([]);
+    database.location.findMany.mockResolvedValue([]);
+    mockGetCategories.mockResolvedValue([{ id: "boards", name: "Boards" }]);
+    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
+    database.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "spreadsheet-operation",
+    });
+    database.ioioImportItem.createMany.mockResolvedValue({ count: 65 });
+    database.ioioImportItem.findMany.mockResolvedValue([]);
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "manual",
+      reason: "helper_not_configured",
+    });
+    const text =
+      "Name,Quantity,Category\n" +
+      Array.from({ length: 65 }, (_, index) => `Board ${index},2,Boards`).join(
+        "\n"
+      );
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([text], "inventory.csv", { type: "text/csv" }),
+    });
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows).toHaveLength(65);
+    expect(
+      mockRequestImportHelperProposal.mock.calls.map(
+        ([request]) => request.document.pages.length
+      )
+    ).toEqual([30, 30, 5]);
+    expect(prepared.proposal.rows[0].sourceNotes).toContain(
+      "helper_unavailable"
+    );
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+  it("joins semantic cleanup by source identity while preserving received quantities", async () => {
+    // why: isolate helper transport and database persistence while exercising shared proposal resolution.
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    database.asset.findMany.mockResolvedValue([]);
+    database.location.findMany.mockResolvedValue([
+      { id: "boards-shelf", name: "Board Shelf", parentId: null },
+    ]);
+    mockGetCategories.mockResolvedValue([{ id: "boards", name: "Boards" }]);
+    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
+    database.ioioWriteOperation.findFirst.mockResolvedValue({
+      id: "semantic-sheet",
+    });
+    database.ioioImportItem.createMany.mockResolvedValue({ count: 1 });
+    database.ioioImportItem.findMany.mockResolvedValue([]);
+    const response = makeGenericHelperReadyResult({
+      pageText: "",
+      items: [
+        {
+          productName: "Seeed Studio XIAO ESP32-S3 Sense",
+          quantity: 99,
+          evidenceText: "development tool",
+        },
+      ],
+    });
+    response.proposal.rows[0].sourceRef = "spreadsheet-row-2";
+    response.proposal.rows[0].evidence[0].sourceRef = "spreadsheet-row-2";
+    response.proposal.rows[0].categorySuggestion = {
+      categoryId: "boards",
+      proposedName: null,
+      confidence: 0.95,
+    } as never;
+    mockRequestImportHelperProposal.mockResolvedValue(response);
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        ["Name,Received,MPN\ndevelopment tool,2,ESP32-S3\n"],
+        "inventory.csv",
+        { type: "text/csv" }
+      ),
+    });
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      title: "Seeed Studio XIAO ESP32-S3 Sense",
+      quantity: 2,
+      manufacturerPartNumber: "ESP32-S3",
+      category: "Boards",
+    });
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+  it("uses formula cached values and rejects only cells without cached values", async () => {
+    const zip = new JSZip();
+    zip.file(
+      "xl/workbook.xml",
+      '<workbook><sheet name="Inventory" r:id="i"/></workbook>'
+    );
+    zip.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="i" Target="worksheets/data.xml"/></Relationships>'
+    );
+    zip.file(
+      "xl/worksheets/data.xml",
+      '<worksheet><row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="B1" t="inlineStr"><is><t>Qty</t></is></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Board</t></is></c><c r="B3"><f>1+2</f><v>3</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>Motor</t></is></c><c r="B4"><f>EXTERNAL()</f></c></row></worksheet>'
+    );
+    const rows = await parseStaffImportFile({
+      filename: "stock.xlsx",
+      buffer: await zip.generateAsync({ type: "nodebuffer" }),
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      title: "Board",
+      quantity: 3,
+      sourceRow: 3,
+    });
+    expect(rows[1].uncertainFields).toContain("Spreadsheet row");
+  });
+});
+
+describe("spreadsheet manual table selection", () => {
+  it("accepts an explicit header row and preserves partial rejection", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "stock.csv",
+      spreadsheetHeaderRow: 3,
+      buffer: Buffer.from("Notes\nExample\nName,Qty\nBoard,3\nMotor,1.5\n"),
+    });
+    expect(rows[0]).toMatchObject({
+      title: "Board",
+      quantity: 3,
+      sourceRow: 4,
+    });
+    expect(rows[1].uncertainFields).toContain("Spreadsheet row");
+  });
+});
+
+describe("spreadsheet canonical category fallback", () => {
+  it.each(["csv", "xlsx"])(
+    "assigns obvious and source-hinted categories for %s when Claude returns null",
+    async (format) => {
+      // why: database and helper transport are external boundaries; actual parsers/resolvers build the proposal.
+      vi.clearAllMocks();
+      mockStaffAccess.mockResolvedValue({
+        organizationId: "org-1",
+        userId: "staff-1",
+      });
+      database.asset.findMany.mockResolvedValue([]);
+      database.location.findMany.mockResolvedValue([]);
+      mockGetCategories.mockResolvedValue([
+        { id: "cables", name: "Cables & adapters" },
+        { id: "electronics", name: "Electronics" },
+      ]);
+      database.ioioWriteOperation.findUnique.mockResolvedValue(null);
+      database.ioioWriteOperation.findFirst.mockResolvedValue({
+        id: "category-fallback",
+      });
+      database.ioioImportItem.createMany.mockResolvedValue({ count: 3 });
+      database.ioioImportItem.findMany.mockResolvedValue([]);
+      mockRequestImportHelperProposal.mockResolvedValue({
+        status: "manual",
+        reason: "helper_not_configured",
+      });
+      const matrix = [
+        ["Name", "Quantity", "Category"],
+        ["USB-C Cable", "20", ""],
+        ["Arduino Nano", "5", ""],
+        ["Part 42", "2", "Cables"],
+      ];
+      let buffer = Buffer.from(matrix.map((row) => row.join(",")).join("\n"));
+      if (format === "xlsx") {
+        const zip = new JSZip();
+        zip.file(
+          "xl/workbook.xml",
+          '<workbook><sheet name="Inventory" r:id="i"/></workbook>'
+        );
+        zip.file(
+          "xl/_rels/workbook.xml.rels",
+          '<Relationships><Relationship Id="i" Target="worksheets/data.xml"/></Relationships>'
+        );
+        zip.file(
+          "xl/worksheets/data.xml",
+          "<worksheet>" +
+            matrix
+              .map(
+                (row, index) =>
+                  "<row>" +
+                  row
+                    .map(
+                      (value, col) =>
+                        `<c r="${String.fromCharCode(65 + col)}${
+                          index + 1
+                        }" t="inlineStr"><is><t>${value}</t></is></c>`
+                    )
+                    .join("") +
+                  "</row>"
+              )
+              .join("") +
+            "</worksheet>"
+        );
+        buffer = await zip.generateAsync({ type: "nodebuffer" });
+      }
+      const prepared = await prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File([buffer], `stock.${format}`),
+      });
+      if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+      expect(prepared.proposal.rows.map((row) => row.categoryId)).toEqual([
+        "cables",
+        "electronics",
+        "cables",
+      ]);
+      expect(mockCreateAsset).not.toHaveBeenCalled();
+    }
+  );
 });

@@ -110,6 +110,10 @@ import type {
 } from "~/modules/ioio-staff/bulk-undo";
 import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
 import {
+  getSelectedAssetModelIds,
+  MAX_ORGANIZE_SELECTED_MODELS,
+} from "~/modules/ioio-staff/organize-selection";
+import {
   getIoioKitDisplayName,
   getIoioPhysicalUnitDisplayName,
 } from "~/modules/kit/ioio-kit-presentation";
@@ -204,6 +208,10 @@ export function StaffInventoryList({
 
   const hasItems = rows.length > 0;
   const selectedItems = useAtomValue(selectedBulkItemsAtom);
+  const selectedAssetModelIds = useMemo(
+    () => getSelectedAssetModelIds(selectedItems),
+    [selectedItems]
+  );
   const setSelectedItems = useSetAtom(setSelectedBulkItemsAtom);
   const removeSelectedItems = useSetAtom(removeSelectedBulkItemsAtom);
   const openBulkDialog = useSetAtom(openBulkDialogAtom);
@@ -385,6 +393,25 @@ export function StaffInventoryList({
             canPrintLabels={canPrintLabels}
             canHide={canHideSelected}
             canUnhide={canUnhideSelected}
+            canOrganizeSelected={Boolean(
+              canBulkUpdate &&
+                selectedAssetModelIds &&
+                selectedAssetModelIds.length > 0 &&
+                selectedAssetModelIds.length <= MAX_ORGANIZE_SELECTED_MODELS
+            )}
+            onOrganizeSelected={() => {
+              if (
+                !selectedAssetModelIds ||
+                selectedAssetModelIds.length === 0 ||
+                selectedAssetModelIds.length > MAX_ORGANIZE_SELECTED_MODELS
+              )
+                return;
+              const params = new URLSearchParams();
+              selectedAssetModelIds.forEach((id) =>
+                params.append("selectedModelId", id)
+              );
+              void navigate(`/staff/organize?${params.toString()}`);
+            }}
             onChangeCategory={() => openBulkDialog("category")}
             onChangeLocation={() => openBulkDialog("location")}
             onArchive={() => openBulkDialog("archive")}

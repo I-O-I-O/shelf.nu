@@ -102,6 +102,17 @@ describe("location structure planning", () => {
         "Find better places for the electronics currently in Section A."
       )
     ).toBe("INVENTORY_REORGANIZATION");
+    expect(
+      classifyOrganizationRequest(
+        "These items are overflowing; look at them and propose better locations."
+      )
+    ).toBe("INVENTORY_REORGANIZATION");
+    expect(classifyOrganizationRequest("Spread these out.")).toBe(
+      "INVENTORY_REORGANIZATION"
+    );
+    expect(classifyOrganizationRequest("Where else could this go?")).toBe(
+      "INVENTORY_REORGANIZATION"
+    );
   });
 
   it("keeps container deletion language in the location-structure domain", () => {

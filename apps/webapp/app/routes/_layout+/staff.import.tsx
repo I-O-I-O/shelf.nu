@@ -96,6 +96,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
         context,
         request,
         file,
+        spreadsheetSheet:
+          String(formData.get("spreadsheetSheet") ?? "").trim() || undefined,
+        spreadsheetHeaderRow: formData.get("spreadsheetHeaderRow")
+          ? Number(formData.get("spreadsheetHeaderRow"))
+          : undefined,
       });
       return prepared.status !== "PREPARED"
         ? payload({ kind: "import-result" as const, result: prepared.result })

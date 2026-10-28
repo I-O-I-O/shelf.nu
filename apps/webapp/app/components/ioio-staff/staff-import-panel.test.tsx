@@ -108,7 +108,9 @@ describe("StaffImportPanel review gate", () => {
     );
 
     expect(screen.getByText("Choose category")).toBeTruthy();
-    expect(screen.getByText("Choose location")).toBeTruthy();
+    expect(
+      screen.getByRole("combobox", { name: "Location for Arduino Nano" })
+    ).toHaveValue("");
     expect(screen.getByLabelText("Category for Arduino Nano")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(screen.getByLabelText("Location")).toBeTruthy();
@@ -367,7 +369,7 @@ describe("StaffImportPanel review gate", () => {
     expect(
       screen.getAllByText("IOIO Lab – B477 · Shelf A1 · Container A1-1.1")
         .length
-    ).toBe(2);
+    ).toBeGreaterThanOrEqual(2);
     expect(
       screen.getByText(
         "Location capacity context: 18 current units; 20 proposed units; capacity not configured."
@@ -586,4 +588,53 @@ describe("StaffImportPanel review gate", () => {
 
     await waitFor(() => expect(cancelAction).toHaveBeenCalledOnce());
   });
+});
+
+it("edits location inline using full organization paths without submitting", () => {
+  const action = vi.fn(); // why: observe the external route submission boundary.
+  renderPanel(
+    { locationId: "a", locationLabel: "Storage / Section A / Container 1" },
+    true,
+    {
+      locationOptions: [
+        {
+          id: "a",
+          name: "Container 1",
+          pathLabel: "Storage / Section A / Container 1",
+          parentId: null,
+        },
+        {
+          id: "b",
+          name: "Container 1",
+          pathLabel: "Storage / Section B / Container 1",
+          parentId: null,
+        },
+      ],
+    } as never,
+    action
+  );
+  const selector = screen.getByRole("combobox", {
+    name: "Location for Arduino Nano",
+  });
+  expect(selector).toHaveValue("a");
+  expect(
+    screen.getByRole("option", { name: "Storage / Section B / Container 1" })
+  ).toBeInTheDocument();
+  fireEvent.change(selector, { target: { value: "b" } });
+  expect(selector).toHaveValue("b");
+  expect(
+    screen.getByRole("combobox", { name: "Category for Arduino Nano" })
+  ).toBeInTheDocument();
+  expect(action).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(selector).toBeInTheDocument();
+});
+it("offers Choose location for unresolved rows", () => {
+  renderPanel({ locationId: null });
+  expect(
+    screen.getByRole("combobox", { name: "Location for Arduino Nano" })
+  ).toHaveValue("");
+  expect(
+    screen.getByRole("option", { name: "Choose location" })
+  ).toBeInTheDocument();
 });

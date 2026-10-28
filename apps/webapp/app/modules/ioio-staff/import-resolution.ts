@@ -34,6 +34,7 @@ export type ImportProductEvidence = {
   description?: string | null;
   mpn?: string | null;
   supplierDescription?: string | null;
+  categoryText?: string | null;
 };
 
 const PRODUCT_CONCEPTS = [
@@ -84,6 +85,8 @@ const PRODUCT_CONCEPTS = [
 
 const CROSS_CONCEPT_AFFINITY: Record<string, string[]> = {
   power: ["electronics"],
+  "development-board": ["electronics"],
+  motor: ["electronics"],
   camera: ["sensor"],
 };
 
@@ -140,6 +143,7 @@ function evidenceText(evidence: ImportProductEvidence) {
     evidence.description,
     evidence.supplierDescription,
     evidence.mpn,
+    evidence.categoryText,
   ]
     .filter(Boolean)
     .join(" ");
@@ -221,6 +225,11 @@ export function suggestImportCategory({
           productText,
           `${category.pathLabel ?? category.name} ${category.description ?? ""}`
         ) +
+        (evidence.categoryText &&
+        normalizeMatchText(evidence.categoryText) ===
+          normalizeMatchText(category.name)
+          ? 30
+          : 0) +
         Math.min(hierarchyDepth(category.pathLabel), 5) * 2.5,
     }));
   const category = pickUniqueStrongest(candidates, 9, 3);
@@ -246,15 +255,51 @@ export function resolveImportCategorySuggestion({
 }): {
   category: ImportCategoryCandidate | null;
   method: ImportSuggestionMethod | "unresolved";
+  diagnostics?: {
+    categoryCandidateCount: number;
+    categoryClaudeResult: string;
+    categoryClaudeConfidence: number;
+    categoryFallbackUsed: boolean;
+    categoryFinalSource: string;
+  };
 } {
   const claudeCategory = categories.find(
     (category) => category.id === claudeCategoryId && !category.archived
   );
   const deterministic = suggestImportCategory({ evidence, categories });
+  const finish = (
+    category: ImportCategoryCandidate | null,
+    method: ImportSuggestionMethod | "unresolved"
+  ) => ({
+    category,
+    method,
+    diagnostics: {
+      categoryCandidateCount: categories.filter((entry) => !entry.archived)
+        .length,
+      categoryClaudeResult: !claudeCategoryId
+        ? "NULL"
+        : !claudeCategory
+        ? "INVALID_ID"
+        : (claudeConfidence ?? 0) < 0.8
+        ? "LOW_CONFIDENCE"
+        : "VALID",
+      categoryClaudeConfidence: claudeConfidence ?? 0,
+      categoryFallbackUsed: method === "deterministic-fallback",
+      categoryFinalSource: !category
+        ? "UNRESOLVED"
+        : method === "claude"
+        ? "CLAUDE"
+        : evidence.categoryText &&
+          normalizeMatchText(evidence.categoryText) ===
+            normalizeMatchText(category.name)
+        ? "SPREADSHEET_EXACT_MATCH"
+        : "DETERMINISTIC",
+    },
+  });
   if (!claudeCategory || (claudeConfidence ?? 0) < 0.8) {
     return deterministic
-      ? { category: deterministic.category, method: "deterministic-fallback" }
-      : { category: null, method: "unresolved" };
+      ? finish(deterministic.category, "deterministic-fallback")
+      : finish(null, "unresolved");
   }
   if (
     deterministic &&
@@ -271,13 +316,10 @@ export function resolveImportCategorySuggestion({
             }`
           );
     if (deterministic.score >= claudeScore + 2) {
-      return {
-        category: deterministic.category,
-        method: "deterministic-fallback",
-      };
+      return finish(deterministic.category, "deterministic-fallback");
     }
   }
-  return { category: claudeCategory, method: "claude" };
+  return finish(claudeCategory, "claude");
 }
 
 export function suggestImportLocation({

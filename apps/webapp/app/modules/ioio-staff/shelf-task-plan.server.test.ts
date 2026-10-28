@@ -41,6 +41,49 @@ const deletionPlan = (): ShelfTaskPlan => ({
 });
 
 describe("Shelf task authority boundary", () => {
+  it("models selected inventory redistribution as a proposal-only task", () => {
+    const plan = validateShelfTaskPlan({
+      taskType: "INVENTORY_PLACEMENT",
+      goal: "These items are overflowing. Find better locations.",
+      sources: [{ type: "SHELF_INVENTORY" }, { type: "SHELF_LOCATIONS" }],
+      steps: [
+        {
+          id: "selection",
+          capability: "SELECT_MODELS",
+          selection: "STAFF_SELECTED",
+        },
+        {
+          id: "proposal",
+          capability: "PROPOSE_LOCATION_CHANGE",
+          selection: "selection",
+          placementPressure: "USER_REPORTED_HIGH",
+        },
+      ],
+      writesRequested: true,
+      mutationPolicy: "PROPOSAL_ONLY",
+      expectedOutput: "INVENTORY_PROPOSAL",
+    });
+    expect(plan.taskType).toBe("INVENTORY_PLACEMENT");
+    expect(plan.steps.at(-1)).toMatchObject({
+      capability: "PROPOSE_LOCATION_CHANGE",
+      placementPressure: "USER_REPORTED_HIGH",
+    });
+    expect(() =>
+      validateShelfTaskPlan({
+        ...plan,
+        steps: [
+          plan.steps[0],
+          {
+            id: "bad-proposal",
+            capability: "PROPOSE_LOCATION_CHANGE",
+            selection: "missing",
+            placementPressure: "NORMAL",
+          },
+        ],
+      })
+    ).toThrow(/selected model set/);
+  });
+
   it("resolves nested and step-based references to the same canonical location", () => {
     const nested = resolveTaskSteps(deletionPlan(), locations);
     const steps = deletionPlan();

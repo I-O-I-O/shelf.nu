@@ -78,9 +78,28 @@ const stepSchema = z.union([
   z
     .object({
       id: key,
+      capability: z.literal("SELECT_MODELS"),
+      selection: z.enum([
+        "STAFF_SELECTED",
+        "INSTRUCTION_SCOPE",
+        "EXPLICIT_PRODUCTS",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      id: key,
       capability: z.literal("PROPOSE_DELETE_LOCATIONS"),
       selection: key,
       quantity,
+    })
+    .strict(),
+  z
+    .object({
+      id: key,
+      capability: z.literal("PROPOSE_LOCATION_CHANGE"),
+      selection: key,
+      placementPressure: z.enum(["NORMAL", "USER_REPORTED_HIGH"]),
     })
     .strict(),
   z
@@ -95,13 +114,34 @@ const stepSchema = z.union([
 ]);
 export const shelfTaskPlanSchema = z
   .object({
-    taskType: z.enum(["STRUCTURE_CHANGE", "ANALYSIS"]),
+    taskType: z.enum(["STRUCTURE_CHANGE", "INVENTORY_PLACEMENT", "ANALYSIS"]),
     goal: z.string().min(1).max(2000),
+    inventorySelectionMode: z
+      .enum(["EXPLICIT_PRODUCTS", "SELECTED_PRODUCTS", "SCOPED_QUERY"])
+      .optional(),
+    inventoryRefs: z
+      .array(
+        z
+          .object({
+            name,
+            contextualQuantity: z.number().nonnegative().optional(),
+            currentLocationRef: locationRef.optional(),
+          })
+          .strict()
+      )
+      .max(100)
+      .optional(),
+    locationRefs: z.array(locationRef).max(100).optional(),
+    candidateDestinationScope: locationRef.optional(),
     sources: z.array(shelfTaskSourceSchema).min(1).max(5),
     steps: z.array(stepSchema).min(1).max(100),
     writesRequested: z.boolean(),
     mutationPolicy: z.literal("PROPOSAL_ONLY"),
-    expectedOutput: z.enum(["LOCATION_PROPOSAL", "LOCATION_SUMMARY"]),
+    expectedOutput: z.enum([
+      "LOCATION_PROPOSAL",
+      "INVENTORY_PROPOSAL",
+      "LOCATION_SUMMARY",
+    ]),
   })
   .strict();
 export type ShelfTaskPlan = z.infer<typeof shelfTaskPlanSchema>;
@@ -109,9 +149,32 @@ export type ShelfTaskPlan = z.infer<typeof shelfTaskPlanSchema>;
 /** Separate authority boundary. A syntactically valid helper plan is not executable yet. */
 export function validateShelfTaskPlan(input: unknown): ShelfTaskPlan {
   const plan = shelfTaskPlanSchema.parse(input);
+  if (
+    plan.steps.some(
+      (step) =>
+        step.capability === "SELECT_MODELS" &&
+        step.selection === "EXPLICIT_PRODUCTS"
+    ) &&
+    !plan.inventoryRefs?.length
+  )
+    throw new Error(
+      "Explicit product selection requires inventory references."
+    );
   const steps = new Map<string, ShelfTaskPlan["steps"][number]>();
   let mutations = false;
-  if (!plan.sources.some(({ type }) => type === "SHELF_LOCATIONS"))
+  if (
+    plan.steps.some((step) =>
+      [
+        "RESOLVE_LOCATION",
+        "SELECT_LOCATIONS",
+        "READ_LOCATION_TREE",
+        "PROPOSE_CREATE_LOCATION",
+        "PROPOSE_DELETE_LOCATIONS",
+        "PROPOSE_LOCATION_CHANGE",
+      ].includes(step.capability)
+    ) &&
+    !plan.sources.some(({ type }) => type === "SHELF_LOCATIONS")
+  )
     throw new Error("Location capabilities require Shelf locations.");
   // File sources are representable, but this executor cannot read arbitrary uploads.
   if (plan.sources.some(({ type }) => type === "UPLOADED_FILE"))
@@ -145,6 +208,10 @@ export function validateShelfTaskPlan(input: unknown): ShelfTaskPlan {
       !plan.sources.some(({ type }) => type === "SHELF_INVENTORY")
     )
       throw new Error("Inventory summary requires an inventory source.");
+    if (step.capability === "SELECT_MODELS") {
+      if (!plan.sources.some(({ type }) => type === "SHELF_INVENTORY"))
+        throw new Error("Model selection requires a Shelf inventory source.");
+    }
     if (step.capability === "PROPOSE_DELETE_LOCATIONS") {
       const selection = steps.get(step.selection);
       if (
@@ -163,6 +230,16 @@ export function validateShelfTaskPlan(input: unknown): ShelfTaskPlan {
       mutations = true;
     }
     if (step.capability === "PROPOSE_CREATE_LOCATION") mutations = true;
+    if (step.capability === "PROPOSE_LOCATION_CHANGE") {
+      const selection = steps.get(step.selection);
+      if (selection?.capability !== "SELECT_MODELS")
+        throw new Error("Location changes require a selected model set.");
+      if (!plan.sources.some(({ type }) => type === "SHELF_INVENTORY"))
+        throw new Error("Location changes require a Shelf inventory source.");
+      if (!plan.sources.some(({ type }) => type === "SHELF_LOCATIONS"))
+        throw new Error("Location changes require a Shelf location source.");
+      mutations = true;
+    }
     steps.set(step.id, step);
   }
   if (
@@ -177,7 +254,21 @@ export function validateShelfTaskPlan(input: unknown): ShelfTaskPlan {
   if (
     mutations !== plan.writesRequested ||
     (plan.taskType === "ANALYSIS") === mutations ||
-    (plan.expectedOutput === "LOCATION_PROPOSAL") !== mutations
+    (plan.taskType === "INVENTORY_PLACEMENT") !==
+      plan.steps.some(
+        (step) => step.capability === "PROPOSE_LOCATION_CHANGE"
+      ) ||
+    (plan.expectedOutput === "LOCATION_SUMMARY") === mutations ||
+    (plan.expectedOutput === "INVENTORY_PROPOSAL") !==
+      plan.steps.some(
+        (step) => step.capability === "PROPOSE_LOCATION_CHANGE"
+      ) ||
+    (plan.expectedOutput === "LOCATION_PROPOSAL") !==
+      plan.steps.some(
+        (step) =>
+          step.capability === "PROPOSE_CREATE_LOCATION" ||
+          step.capability === "PROPOSE_DELETE_LOCATIONS"
+      )
   )
     throw new Error("Task mutation/output policy is inconsistent.");
   if (
@@ -320,70 +411,124 @@ export const SHELF_TASK_RESPONSE_JSON_SCHEMA = {
   ...object({
     mode: { const: "SHELF_TASK_PLAN" },
     schemaVersion: { const: 1 },
-    taskPlan: object({
-      taskType: { enum: ["STRUCTURE_CHANGE", "ANALYSIS"] },
-      goal: { type: "string", minLength: 1, maxLength: 2000 },
-      sources: {
-        type: "array",
-        minItems: 1,
-        maxItems: 5,
-        items: {
-          oneOf: [
-            object({ type: { const: "SHELF_LOCATIONS" } }),
-            object({ type: { const: "SHELF_INVENTORY" } }),
-            object({
-              type: { const: "UPLOADED_FILE" },
-              fileType: { enum: ["PDF", "CSV", "XLSX"] },
-              sourceRef: id,
-            }),
-          ],
+    taskPlan: object(
+      {
+        taskType: {
+          enum: ["STRUCTURE_CHANGE", "INVENTORY_PLACEMENT", "ANALYSIS"],
         },
-      },
-      steps: {
-        type: "array",
-        minItems: 1,
-        maxItems: 100,
-        items: {
-          oneOf: [
-            withStep("RESOLVE_LOCATION", { ref, within: id }, ["ref"]),
-            withStep("SELECT_LOCATIONS", { within: id, role }),
-            withStep("READ_LOCATION_TREE", { within: id }),
-            withStep("READ_INVENTORY_SUMMARY", { within: id }),
-            withStep("PROPOSE_DELETE_LOCATIONS", {
-              selection: id,
-              quantity: {
-                oneOf: [
-                  object({ mode: { const: "ALL" } }),
-                  object({
-                    mode: { const: "COUNT" },
-                    count: { type: "integer", minimum: 1, maximum: 100 },
-                  }),
-                  object({
-                    mode: { const: "FRACTION" },
-                    numerator: { type: "integer", minimum: 1, maximum: 100 },
-                    denominator: { type: "integer", minimum: 1, maximum: 100 },
-                  }),
-                ],
-              },
-            }),
-            withStep(
-              "PROPOSE_CREATE_LOCATION",
-              {
-                within: id,
-                name: string,
-                description: {
-                  anyOf: [{ type: "string", maxLength: 500 }, { type: "null" }],
+        goal: { type: "string", minLength: 1, maxLength: 2000 },
+        inventorySelectionMode: {
+          enum: ["EXPLICIT_PRODUCTS", "SELECTED_PRODUCTS", "SCOPED_QUERY"],
+        },
+        inventoryRefs: {
+          type: "array",
+          maxItems: 100,
+          items: object(
+            {
+              name: string,
+              contextualQuantity: { type: "number", minimum: 0 },
+              currentLocationRef: ref,
+            },
+            ["name"]
+          ),
+        },
+        locationRefs: { type: "array", maxItems: 100, items: ref },
+        candidateDestinationScope: ref,
+        sources: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: {
+            oneOf: [
+              object({ type: { const: "SHELF_LOCATIONS" } }),
+              object({ type: { const: "SHELF_INVENTORY" } }),
+              object({
+                type: { const: "UPLOADED_FILE" },
+                fileType: { enum: ["PDF", "CSV", "XLSX"] },
+                sourceRef: id,
+              }),
+            ],
+          },
+        },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            oneOf: [
+              withStep("RESOLVE_LOCATION", { ref, within: id }, ["ref"]),
+              withStep("SELECT_LOCATIONS", { within: id, role }),
+              withStep("READ_LOCATION_TREE", { within: id }),
+              withStep("READ_INVENTORY_SUMMARY", { within: id }),
+              withStep("SELECT_MODELS", {
+                selection: {
+                  enum: [
+                    "STAFF_SELECTED",
+                    "INSTRUCTION_SCOPE",
+                    "EXPLICIT_PRODUCTS",
+                  ],
                 },
-              },
-              ["name", "description"]
-            ),
-          ],
+              }),
+              withStep("PROPOSE_DELETE_LOCATIONS", {
+                selection: id,
+                quantity: {
+                  oneOf: [
+                    object({ mode: { const: "ALL" } }),
+                    object({
+                      mode: { const: "COUNT" },
+                      count: { type: "integer", minimum: 1, maximum: 100 },
+                    }),
+                    object({
+                      mode: { const: "FRACTION" },
+                      numerator: { type: "integer", minimum: 1, maximum: 100 },
+                      denominator: {
+                        type: "integer",
+                        minimum: 1,
+                        maximum: 100,
+                      },
+                    }),
+                  ],
+                },
+              }),
+              withStep("PROPOSE_LOCATION_CHANGE", {
+                selection: id,
+                placementPressure: {
+                  enum: ["NORMAL", "USER_REPORTED_HIGH"],
+                },
+              }),
+              withStep(
+                "PROPOSE_CREATE_LOCATION",
+                {
+                  within: id,
+                  name: string,
+                  description: {
+                    anyOf: [
+                      { type: "string", maxLength: 500 },
+                      { type: "null" },
+                    ],
+                  },
+                },
+                ["name", "description"]
+              ),
+            ],
+          },
+        },
+        writesRequested: { type: "boolean" },
+        mutationPolicy: { const: "PROPOSAL_ONLY" },
+        expectedOutput: {
+          enum: ["LOCATION_PROPOSAL", "INVENTORY_PROPOSAL", "LOCATION_SUMMARY"],
         },
       },
-      writesRequested: { type: "boolean" },
-      mutationPolicy: { const: "PROPOSAL_ONLY" },
-      expectedOutput: { enum: ["LOCATION_PROPOSAL", "LOCATION_SUMMARY"] },
-    }),
+      [
+        "taskType",
+        "goal",
+        "sources",
+        "steps",
+        "writesRequested",
+        "mutationPolicy",
+        "expectedOutput",
+      ]
+    ),
   }),
   $defs: {
     locationRef: object({ name: string, role, withinRef: ref }, ["name"]),
