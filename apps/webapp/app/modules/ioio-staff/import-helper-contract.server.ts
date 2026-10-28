@@ -8,6 +8,7 @@ export const IMPORT_HELPER_SCHEMA_VERSION = 1 as const;
 export const MOUSER_ENRICHMENT_SCHEMA_VERSION = 2 as const;
 export const INVENTORY_REORGANIZATION_SCHEMA_VERSION = 1 as const;
 export const LOCATION_STRUCTURE_SCHEMA_VERSION = 1 as const;
+export const ORGANIZATION_PLAN_SCHEMA_VERSION = 1 as const;
 export const MAX_REORGANIZATION_MODELS_PER_BATCH = 40;
 export const MAX_REORGANIZATION_CATEGORIES = 20;
 export const MAX_REORGANIZATION_LOCATIONS = 20;
@@ -298,11 +299,144 @@ const locationStructureRequestSchema = z
   })
   .strict();
 
+const organizationPlanLocationSchema = z
+  .object({
+    name: z.string().trim().min(1).max(300),
+    path: z.string().trim().min(1).max(1_000),
+    childSummary: z.string().max(500),
+  })
+  .strict();
+
+const semanticLocationRefSchema = z
+  .object({
+    name: z.string().trim().min(1).max(300),
+    ancestorName: z.string().trim().min(1).max(300).optional(),
+  })
+  .strict();
+
+const organizationQuantitySchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("ALL") }).strict(),
+  z
+    .object({
+      mode: z.literal("COUNT"),
+      count: z.number().int().positive().max(100),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("FRACTION"),
+      numerator: z.number().int().positive().max(100),
+      denominator: z.number().int().positive().max(100),
+    })
+    .strict(),
+]);
+
+const organizationOperationSchema = z.union([
+  z
+    .object({
+      operation: z.literal("CREATE_LOCATION"),
+      temporaryId: identifierSchema,
+      parentRef: semanticLocationRefSchema.optional(),
+      parentTemporaryId: identifierSchema.optional(),
+      name: z.string().trim().min(1).max(300),
+      description: z.string().trim().max(500).nullable(),
+    })
+    .strict()
+    .refine(
+      (operation) =>
+        Boolean(operation.parentRef) !== Boolean(operation.parentTemporaryId)
+    ),
+  z
+    .object({
+      operation: z.literal("DELETE_LOCATION"),
+      targetRef: semanticLocationRefSchema,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("DELETE_CHILDREN"),
+      targetRef: semanticLocationRefSchema,
+      childTypeHint: z.enum([
+        "room",
+        "section",
+        "shelf",
+        "container",
+        "drawer",
+        "cabinet",
+      ]),
+      quantity: organizationQuantitySchema,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("RENAME_LOCATION"),
+      targetRef: semanticLocationRefSchema,
+      newName: z.string().trim().min(1).max(300),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("MOVE_LOCATION"),
+      targetRef: semanticLocationRefSchema,
+      destinationRef: semanticLocationRefSchema,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("ENSURE_CHILD_COUNT"),
+      targetRef: semanticLocationRefSchema,
+      childTypeHint: z.enum([
+        "room",
+        "section",
+        "shelf",
+        "container",
+        "drawer",
+        "cabinet",
+      ]),
+      count: z.number().int().nonnegative().max(100),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("CREATE_CHILDREN"),
+      targetRef: semanticLocationRefSchema,
+      childTypeHint: z.enum([
+        "room",
+        "section",
+        "shelf",
+        "container",
+        "drawer",
+        "cabinet",
+      ]),
+      count: z.number().int().positive().max(100),
+    })
+    .strict(),
+]);
+
+const organizationPlanRequestSchema = z
+  .object({
+    mode: z.literal("ORGANIZATION_PLAN"),
+    schemaVersion: z.literal(ORGANIZATION_PLAN_SCHEMA_VERSION),
+    instruction: z.string().trim().min(1).max(2_000),
+    locationContext: z.array(organizationPlanLocationSchema).max(250),
+  })
+  .strict();
+
+const organizationPlanResponseSchema = z
+  .object({
+    mode: z.literal("ORGANIZATION_PLAN"),
+    schemaVersion: z.literal(ORGANIZATION_PLAN_SCHEMA_VERSION),
+    domain: z.enum(["LOCATION_STRUCTURE", "MIXED_OR_ADVISORY", "UNSUPPORTED"]),
+    operations: z.array(organizationOperationSchema).max(100),
+  })
+  .strict();
+
 export const importHelperRequestSchema = z.union([
   genericImportHelperRequestSchema,
   mouserEnrichmentRequestSchema,
   reorganizationRequestSchema,
   locationStructureRequestSchema,
+  organizationPlanRequestSchema,
 ]);
 
 const reorganizationResponseSchema = z
@@ -346,6 +480,8 @@ const locationStructureResponseSchema = z
       .max(100),
   })
   .strict();
+
+const organizationPlanResponseStrictSchema = organizationPlanResponseSchema;
 
 const candidateProposalRowSchema = z
   .object({
@@ -484,7 +620,8 @@ export type AnyImportHelperResponse =
   | ImportHelperResponse
   | MouserEnrichmentResponse
   | z.infer<typeof reorganizationResponseSchema>
-  | z.infer<typeof locationStructureResponseSchema>;
+  | z.infer<typeof locationStructureResponseSchema>
+  | z.infer<typeof organizationPlanResponseStrictSchema>;
 export type ImportHelperCandidateRow = ImportHelperResponse["rows"][number];
 export type MouserEnrichmentRow = MouserEnrichmentResponse["rows"][number];
 
@@ -705,6 +842,70 @@ export function validateImportHelperResponse(
   }
   const request = requestResult.data;
   if ("mode" in request) {
+    if (request.mode === "ORGANIZATION_PLAN") {
+      const parsed = organizationPlanResponseStrictSchema.safeParse(response);
+      if (!parsed.success)
+        throw new ImportHelperValidationError(
+          "The helper returned a malformed organization plan."
+        );
+      const names = new Set(
+        request.locationContext.map(({ name }) => name.toLocaleLowerCase())
+      );
+      const temporaryIds = new Set<string>();
+      for (const operation of parsed.data.operations) {
+        const refs =
+          "targetRef" in operation
+            ? [
+                operation.targetRef,
+                ...(operation.operation === "MOVE_LOCATION"
+                  ? [operation.destinationRef]
+                  : []),
+              ]
+            : operation.operation === "CREATE_LOCATION"
+            ? operation.parentRef
+              ? [operation.parentRef]
+              : []
+            : [];
+        if (operation.operation === "CREATE_LOCATION") {
+          if (temporaryIds.has(operation.temporaryId))
+            throw new ImportHelperValidationError(
+              "The helper returned duplicate temporary location IDs."
+            );
+          if (
+            operation.parentTemporaryId &&
+            !temporaryIds.has(operation.parentTemporaryId)
+          )
+            throw new ImportHelperValidationError(
+              "The helper returned a child before its proposed parent."
+            );
+          temporaryIds.add(operation.temporaryId);
+        }
+        if (
+          refs.some(
+            (ref) =>
+              !names.has(ref.name.toLocaleLowerCase()) ||
+              (ref.ancestorName &&
+                !request.locationContext.some((location) =>
+                  location.path
+                    .toLocaleLowerCase()
+                    .includes(ref.ancestorName!.toLocaleLowerCase())
+                ))
+          )
+        )
+          throw new ImportHelperValidationError(
+            "The helper referenced a location outside the supplied organization context."
+          );
+        if (
+          operation.operation === "DELETE_CHILDREN" &&
+          operation.quantity.mode === "FRACTION" &&
+          operation.quantity.numerator > operation.quantity.denominator
+        )
+          throw new ImportHelperValidationError(
+            "The helper returned an invalid fraction."
+          );
+      }
+      return parsed.data;
+    }
     if (request.mode === "LOCATION_STRUCTURE") {
       const parsed = locationStructureResponseSchema.safeParse(response);
       if (!parsed.success)

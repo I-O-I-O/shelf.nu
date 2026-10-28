@@ -12,6 +12,7 @@ import {
   buildLocationStructureProposal,
   classifyOrganizationRequest,
   createLocationStructure,
+  deleteApprovedStructureContainers,
   getOrganizationLocationChoices,
 } from "~/modules/ioio-staff/location-structure.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -68,6 +69,28 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
       return payload({ kind: "structure-created" as const, result });
     }
+    if (intent === "delete-structure-containers") {
+      await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.location,
+        action: PermissionAction.delete,
+      });
+      const rawIds = form.get("locationIds");
+      if (typeof rawIds !== "string" || rawIds.length > 20_000)
+        throw new Error("Reload the deletion proposal and review it again.");
+      const ids: unknown = JSON.parse(rawIds);
+      if (
+        !Array.isArray(ids) ||
+        ids.some((id) => typeof id !== "string" || id.length > 200)
+      )
+        throw new Error("The selected locations are invalid.");
+      const results = await deleteApprovedStructureContainers({
+        organizationId,
+        locationIds: ids,
+      });
+      return payload({ kind: "structure-deleted" as const, results });
+    }
     const instruction = String(form.get("instruction") ?? "").trim();
     if (!instruction || instruction.length > 2_000)
       throw new Error(
@@ -83,6 +106,15 @@ export async function action({ context, request }: ActionFunctionArgs) {
           selectedParentId:
             String(form.get("parentLocationId") ?? "") || undefined,
         }),
+      });
+    }
+    if (classification !== "INVENTORY_REORGANIZATION") {
+      return payload({
+        kind: "safe-review" as const,
+        message:
+          classification === "MIXED_OR_ADVISORY"
+            ? "This request combines storage changes and inventory advice. Split it into one structure request or one inventory placement request so each can be reviewed safely."
+            : "Could not identify a supported organization request. No inventory analysis was performed.",
       });
     }
     return payload({
@@ -122,6 +154,14 @@ export default function StaffOrganizePage() {
   const structureCreated =
     result && "kind" in result && result.kind === "structure-created"
       ? result.result
+      : null;
+  const structureDeleted =
+    result && "kind" in result && result.kind === "structure-deleted"
+      ? result.results
+      : null;
+  const safeReview =
+    result && "kind" in result && result.kind === "safe-review"
+      ? result.message
       : null;
   const structureApplyPayload = structureProposal
     ? {
@@ -200,13 +240,18 @@ export default function StaffOrganizePage() {
             <p className="mt-1 text-sm">
               {structureCreated.createdCount} created ·{" "}
               {structureCreated.existingCount} already existed ·{" "}
-              {structureCreated.failedCount} failed
+              {structureCreated.failedCount} failed ·{" "}
+              {structureCreated.blockedCount} blocked by a failed parent
             </p>
             <ul className="mt-4 space-y-2 text-sm">
               {structureCreated.results.map((item, index) => (
                 <li
                   key={`${item.name}-${index}`}
-                  className={item.status === "FAILED" ? "text-red-700" : ""}
+                  className={
+                    item.status === "CREATED" || item.status === "EXISTS"
+                      ? ""
+                      : "text-red-700"
+                  }
                 >
                   {item.status}: {item.path}
                   {item.error ? ` — ${item.error}` : ""}
@@ -214,6 +259,30 @@ export default function StaffOrganizePage() {
               ))}
             </ul>
           </section>
+        )}
+        {structureDeleted && (
+          <section
+            className="mt-8 rounded-xl border p-5"
+            aria-label="Location deletion results"
+          >
+            <h2 className="text-xl font-semibold">Storage structure results</h2>
+            <ul className="mt-3 space-y-1 text-sm">
+              {structureDeleted.map((item) => (
+                <li key={item.id}>
+                  {item.status}
+                  {item.error ? ` — ${item.error}` : ""}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {safeReview && (
+          <p
+            role="status"
+            className="mt-8 rounded-xl border border-amber-300 bg-amber-50 p-5 text-sm"
+          >
+            {safeReview}
+          </p>
         )}
         {structureProposal && !dismissed && (
           <section
@@ -237,8 +306,13 @@ export default function StaffOrganizePage() {
                 request or check helper availability.
               </p>
             )}
-            {structureProposal.unresolvedParent &&
-            structureProposal.parentCandidates.length > 0 ? (
+            {structureProposal.planError && (
+              <p role="status" className="mt-4 rounded bg-amber-50 p-3 text-sm">
+                {structureProposal.planError}
+              </p>
+            )}
+            {structureProposal.planError ? null : structureProposal.unresolvedParent &&
+              structureProposal.parentCandidates.length > 0 ? (
               <div className="mt-4 rounded bg-amber-50 p-4">
                 <p className="font-medium">
                   {structureProposal.parentResolution === "AMBIGUOUS_MATCH"
@@ -278,6 +352,73 @@ export default function StaffOrganizePage() {
                 No existing parent locations are available. Add a location in
                 Shelf, then analyze this request again.
               </p>
+            ) : structureProposal.deletionReview ? (
+              <>
+                <p className="mt-4 text-sm">
+                  <strong>Parent:</strong>{" "}
+                  {structureProposal.deletionReview.parentPath ??
+                    "Resolved from current Shelf hierarchy"}
+                </p>
+                <p className="mt-2 text-sm text-gray-600">
+                  Preview only ·{" "}
+                  {structureProposal.deletionReview.totalSelected} empty
+                  locations selected. Occupied locations are blocked. For
+                  “half”, Shelf selects floor(N/2), preferring empty locations
+                  and then natural name order.
+                </p>
+                {structureProposal.deletionReview.sections.map((section) => (
+                  <div
+                    key={section.sectionName}
+                    className="mt-4 rounded border p-3"
+                  >
+                    <h3 className="font-semibold">
+                      {section.sectionName} · {section.total} containers found ·{" "}
+                      {section.selected.length} selected ·{" "}
+                      {section.blocked.length} blocked
+                    </h3>
+                    {section.selected.length > 0 && (
+                      <ul className="mt-2 text-sm">
+                        {section.selected.map((item) => (
+                          <li key={item.id}>
+                            {item.path} — {item.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {section.blocked.length > 0 && (
+                      <ul className="mt-2 text-sm text-amber-800">
+                        {section.blocked.map((item) => (
+                          <li key={item.id}>
+                            {item.path} — {item.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+                <Form method="post" className="mt-5">
+                  <input
+                    type="hidden"
+                    name="intent"
+                    value="delete-structure-containers"
+                  />
+                  <input
+                    type="hidden"
+                    name="locationIds"
+                    value={JSON.stringify(
+                      structureProposal.deletionReview.sections.flatMap(
+                        (section) => section.selected.map(({ id }) => id)
+                      )
+                    )}
+                  />
+                  <button
+                    disabled={!structureProposal.deletionReview.totalSelected}
+                    className="rounded bg-red-700 px-4 py-2 text-sm font-semibold text-white"
+                  >
+                    Apply approved changes
+                  </button>
+                </Form>
+              </>
             ) : (
               <>
                 {structureProposal.createMissingParent && (
@@ -304,6 +445,7 @@ export default function StaffOrganizePage() {
                       Sections scanned:{" "}
                       {structureProposal.bulkSummary.sectionsScanned} · Shelves
                       scanned: {structureProposal.bulkSummary.shelvesScanned} ·
+                      New shelves: {structureProposal.bulkSummary.newShelves} ·
                       Existing target{" "}
                       {structureProposal.bulkSummary.targetLabel} reused:{" "}
                       {structureProposal.bulkSummary.existingTargetCount} · New{" "}
@@ -311,6 +453,15 @@ export default function StaffOrganizePage() {
                       {structureProposal.bulkSummary.newTargetCount} · Sections
                       with no shelves:{" "}
                       {structureProposal.bulkSummary.emptySections.length}
+                    </p>
+                    <p className="mt-1">
+                      New targets under existing shelves:{" "}
+                      {
+                        structureProposal.bulkSummary
+                          .newTargetsUnderExistingShelves
+                      }{" "}
+                      · Total new locations:{" "}
+                      {structureProposal.bulkSummary.totalNewLocations}
                     </p>
                     {structureProposal.bulkSummary.emptySections.length > 0 && (
                       <p className="mt-1">

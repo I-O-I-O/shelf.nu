@@ -310,6 +310,62 @@ describe("import helper contract", () => {
     ).toThrow();
   });
 
+  it("validates semantic structure references against bounded live location context", () => {
+    const request = importHelperRequestSchema.parse({
+      mode: "ORGANIZATION_PLAN",
+      schemaVersion: 1,
+      instruction: "remove all containers in Section A",
+      locationContext: [
+        {
+          name: "Storage Room",
+          path: "Storage Room",
+          childSummary: "1 direct children",
+        },
+        {
+          name: "Section A",
+          path: "Storage Room / Section A",
+          childSummary: "2 direct children",
+        },
+      ],
+    });
+    const response = {
+      mode: "ORGANIZATION_PLAN",
+      schemaVersion: 1,
+      domain: "LOCATION_STRUCTURE",
+      operations: [
+        {
+          operation: "DELETE_CHILDREN",
+          targetRef: { name: "Section A", ancestorName: "Storage Room" },
+          childTypeHint: "container",
+          quantity: { mode: "ALL" },
+        },
+      ],
+    };
+    expect(validateImportHelperResponse(response, request)).toMatchObject({
+      domain: "LOCATION_STRUCTURE",
+    });
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          ...response,
+          operations: [
+            {
+              ...response.operations[0],
+              targetRef: { name: "Section A", ancestorName: "Other Room" },
+            },
+          ],
+        },
+        request
+      )
+    ).toThrow(/outside the supplied organization context/);
+    expect(() =>
+      validateImportHelperResponse(
+        { ...response, operations: [{ operation: "RUN_SQL" }] },
+        request
+      )
+    ).toThrow(/malformed organization plan/);
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps both request modes compatible with the strict helper schema at 2c17389d", () => {

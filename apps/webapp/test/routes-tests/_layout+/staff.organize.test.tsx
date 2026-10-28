@@ -22,12 +22,21 @@ vi.mock("~/modules/ioio-staff/location-structure.server", () => ({
   createLocationStructure: mocks.createLocationStructure,
   getOrganizationLocationChoices: mocks.getOrganizationLocationChoices,
   classifyOrganizationRequest: (instruction: string) =>
-    /\b(create|add|make|build)\b/i.test(instruction) &&
+    /\b(create|add|make|build|ensure|remove|delete|clear|rename|merge|split|restructure)\b/i.test(
+      instruction
+    ) &&
     /\b(room|section|shelves?|drawers?|containers?|cabinets?|storage area)\b/i.test(
       instruction
     )
       ? "LOCATION_STRUCTURE"
-      : "INVENTORY_REORGANIZATION",
+      : /\b(find|review|suggest|move|relocate|better places?)\b/i.test(
+          instruction
+        ) &&
+        /\b(assets?|inventory|products?|boards?|sensors?|cables?|electronics|items?)\b/i.test(
+          instruction
+        )
+      ? "INVENTORY_REORGANIZATION"
+      : "UNSUPPORTED",
 }));
 vi.mock("~/modules/ioio-staff/location-intelligence.server", () => ({
   generateInventoryOrganizationProposal:
@@ -141,6 +150,37 @@ describe("staff organize experience", () => {
     expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
   });
 
+  it("routes container removal to structure review and never retrieves inventory", async () => {
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction:
+        "in storage room in section A remove all containers and in section B remove only half of them",
+      parentName: null,
+      parentLocationId: null,
+      parentCandidates: [],
+      unresolvedParent: false,
+      nodes: [],
+      deletionReview: { sections: [], totalSelected: 0 },
+      source: "AI",
+    });
+    const form = new FormData();
+    form.set(
+      "instruction",
+      "in storage room in section A remove all containers and in section B remove only half of them"
+    );
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/staff/organize", {
+          method: "POST",
+          body: form,
+        }),
+      }) as never
+    );
+    expect(result).toMatchObject({ kind: "structure-proposal" });
+    expect(mocks.buildLocationStructureProposal).toHaveBeenCalled();
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
   it("renders reused sections and fourteen new shelves beneath the resolved room", async () => {
     const user = userEvent.setup();
     mocks.getOrganizationLocationChoices.mockResolvedValue({
@@ -241,6 +281,78 @@ describe("staff organize experience", () => {
       screen.queryByText(/Which location did you mean/)
     ).not.toBeInTheDocument();
     expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
+  it("renders proposed shelves with their dependent containers nested beneath them", async () => {
+    const user = userEvent.setup();
+    const instruction =
+      "For each section in the storage room for each shelf create 3 containers. IF Section C doesn't have any shelves create 5 and for each one create 3 containers.";
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction,
+      parentName: "storage room",
+      parentLocationId: "storage",
+      parentCandidates: [],
+      unresolvedParent: false,
+      parentResolution: "MATCHED",
+      createMissingParent: false,
+      nodes: [
+        {
+          temporaryId: "section-c",
+          parentLocationId: "storage",
+          parentTemporaryId: null,
+          name: "Section C",
+          description: null,
+          status: "EXISTS",
+          existingLocationId: "section-c",
+        },
+        {
+          temporaryId: "shelf-c1",
+          parentLocationId: null,
+          parentTemporaryId: "section-c",
+          name: "Shelf C1",
+          description: null,
+          status: "CREATE",
+          existingLocationId: null,
+        },
+        {
+          temporaryId: "container-c1-1",
+          parentLocationId: null,
+          parentTemporaryId: "shelf-c1",
+          name: "Container C1-1",
+          description: null,
+          status: "CREATE",
+          existingLocationId: null,
+        },
+      ],
+      bulkSummary: {
+        sectionsScanned: 1,
+        shelvesScanned: 0,
+        newShelves: 1,
+        existingTargetCount: 0,
+        newTargetCount: 1,
+        newTargetsUnderExistingShelves: 0,
+        totalNewLocations: 2,
+        targetLabel: "containers",
+        emptySections: [],
+        alreadyCompleteShelves: [],
+      },
+      source: "DETERMINISTIC",
+    });
+    renderOrganizePage();
+    await user.type(await screen.findByRole("textbox"), instruction);
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+
+    expect(await screen.findByText(/Shelf C1/)).toBeInTheDocument();
+    const shelfRow = screen.getByText(/Shelf C1/).closest("li");
+    const containerRow = screen.getByText(/Container C1-1/).closest("li");
+    expect(shelfRow).toHaveAttribute("style", "padding-left: 2.5rem;");
+    expect(containerRow).toHaveAttribute("style", "padding-left: 3.75rem;");
+    expect(screen.getByText(/New shelves: 1/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all" })).toBeEnabled();
+    expect(
+      screen.queryByRole("columnheader", { name: "Product" })
+    ).not.toBeInTheDocument();
   });
 
   it("offers an explicit choice for a typo-like existing location before Create all", async () => {
