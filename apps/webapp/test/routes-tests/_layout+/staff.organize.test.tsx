@@ -1,0 +1,378 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { createMemoryRouter, RouterProvider } from "react-router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createActionArgs } from "@mocks/remix";
+
+const mocks = vi.hoisted(() => ({
+  requireIoioStaffAccess: vi.fn(),
+  getOrganizationLocationChoices: vi.fn(),
+  buildLocationStructureProposal: vi.fn(),
+  createLocationStructure: vi.fn(),
+  generateInventoryOrganizationProposal: vi.fn(),
+  requirePermission: vi.fn(),
+}));
+
+// why: these route dependencies perform permission checks, database retrieval, and helper calls; the tests exercise request routing and the staff-visible UI.
+vi.mock("~/modules/ioio-staff/access.server", () => ({
+  requireIoioStaffAccess: mocks.requireIoioStaffAccess,
+}));
+vi.mock("~/modules/ioio-staff/location-structure.server", () => ({
+  buildLocationStructureProposal: mocks.buildLocationStructureProposal,
+  createLocationStructure: mocks.createLocationStructure,
+  getOrganizationLocationChoices: mocks.getOrganizationLocationChoices,
+  classifyOrganizationRequest: (instruction: string) =>
+    /\b(create|add|make|build)\b/i.test(instruction) &&
+    /\b(room|section|shelves?|drawers?|containers?|cabinets?|storage area)\b/i.test(
+      instruction
+    )
+      ? "LOCATION_STRUCTURE"
+      : "INVENTORY_REORGANIZATION",
+}));
+vi.mock("~/modules/ioio-staff/location-intelligence.server", () => ({
+  generateInventoryOrganizationProposal:
+    mocks.generateInventoryOrganizationProposal,
+}));
+vi.mock("~/utils/roles.server", () => ({
+  requirePermission: mocks.requirePermission,
+}));
+vi.mock("~/components/layout/header", () => ({ default: () => null }));
+
+import StaffOrganizePage, {
+  action,
+  loader,
+} from "~/routes/_layout+/staff.organize";
+
+function renderOrganizePage() {
+  const router = createMemoryRouter(
+    [
+      {
+        path: "/staff/organize",
+        Component: StaffOrganizePage,
+        loader,
+        action,
+      },
+    ],
+    { initialEntries: ["/staff/organize"] }
+  );
+  return render(<RouterProvider router={router} />);
+}
+
+describe("staff organize experience", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.requireIoioStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    mocks.getOrganizationLocationChoices.mockResolvedValue({
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [
+        { id: "storage", name: "Storage Room", path: "Storage Room" },
+      ],
+    });
+  });
+
+  it("shows one general input and one Analyze button without workflow choices", async () => {
+    renderOrganizePage();
+    expect(
+      await screen.findByRole("heading", { name: "Organize" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText(
+        "Describe what you want to organize, create, move, or improve..."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Organize inventory" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Create storage structure" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/LOCATION_STRUCTURE|INVENTORY_REORGANIZATION/)
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Create Section A and B in the Storage Room/)
+    ).toBeInTheDocument();
+  });
+
+  it("routes a storage request to structure review without inventory analysis", async () => {
+    const user = userEvent.setup();
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 7 shelves each.",
+      parentName: "Storage Room",
+      parentLocationId: "storage",
+      parentCandidates: [],
+      unresolvedParent: false,
+      nodes: [
+        {
+          temporaryId: "section-a",
+          parentLocationId: "storage",
+          parentTemporaryId: null,
+          name: "Section A",
+          description: null,
+          status: "CREATE",
+          existingLocationId: null,
+        },
+      ],
+      source: "DETERMINISTIC",
+    });
+    renderOrganizePage();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Create Section A and Section B in the Storage Room with 7 shelves each."
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(
+      await screen.findByRole("heading", { name: "Storage structure proposal" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Product" })
+    ).not.toBeInTheDocument();
+    expect(mocks.buildLocationStructureProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instruction: expect.stringContaining("Section A"),
+      })
+    );
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
+  it("renders reused sections and fourteen new shelves beneath the resolved room", async () => {
+    const user = userEvent.setup();
+    mocks.getOrganizationLocationChoices.mockResolvedValue({
+      categories: [],
+      locations: [
+        {
+          id: "storage",
+          name: "Storage Room - B442",
+          path: "Storage Room - B442",
+        },
+      ],
+    });
+    const nodes = [
+      {
+        temporaryId: "section-a",
+        parentLocationId: "storage",
+        parentTemporaryId: null,
+        name: "Section A",
+        description: null,
+        status: "EXISTS",
+        existingLocationId: "section-a-id",
+      },
+      ...Array.from({ length: 7 }, (_, index) => ({
+        temporaryId: `shelf-a${index + 1}`,
+        parentLocationId: null,
+        parentTemporaryId: "section-a",
+        name: `Shelf A${index + 1}`,
+        description: null,
+        status: "CREATE",
+        existingLocationId: null,
+      })),
+      {
+        temporaryId: "section-b",
+        parentLocationId: "storage",
+        parentTemporaryId: null,
+        name: "Section B",
+        description: null,
+        status: "EXISTS",
+        existingLocationId: "section-b-id",
+      },
+      ...Array.from({ length: 7 }, (_, index) => ({
+        temporaryId: `shelf-b${index + 1}`,
+        parentLocationId: null,
+        parentTemporaryId: "section-b",
+        name: `Shelf B${index + 1}`,
+        description: null,
+        status: "CREATE",
+        existingLocationId: null,
+      })),
+    ];
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 7 shelves each.",
+      parentName: "Storage Room",
+      parentLocationId: "storage",
+      parentCandidates: [
+        {
+          id: "storage",
+          name: "Storage Room - B442",
+          path: "Storage Room - B442",
+        },
+      ],
+      unresolvedParent: false,
+      parentResolution: "MATCHED",
+      createMissingParent: false,
+      nodes,
+      source: "DETERMINISTIC",
+    });
+    renderOrganizePage();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Create Section A and Section B in the Storage Room with 7 shelves each."
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(await screen.findByText("Storage Room - B442")).toBeInTheDocument();
+    expect(
+      screen.getByText(/14 locations to create · 2 already exist/)
+    ).toBeInTheDocument();
+    const proposalRows = screen.getAllByRole("listitem");
+    expect(
+      proposalRows.some(
+        (row) => row.textContent?.includes("Section A (exists)")
+      )
+    ).toBe(true);
+    expect(
+      proposalRows.some(
+        (row) => row.textContent?.includes("Section B (exists)")
+      )
+    ).toBe(true);
+    expect(
+      proposalRows.some((row) => row.textContent?.includes("Shelf A7"))
+    ).toBe(true);
+    expect(
+      proposalRows.some((row) => row.textContent?.includes("Shelf B7"))
+    ).toBe(true);
+    expect(
+      screen.queryByText(/Which location did you mean/)
+    ).not.toBeInTheDocument();
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
+  it("offers an explicit choice for a typo-like existing location before Create all", async () => {
+    const user = userEvent.setup();
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction: "Create Section A in Storage Room with 1 shelf each.",
+      parentName: "Storage Room",
+      parentLocationId: "storage",
+      parentCandidates: [
+        { id: "storage", name: "Storage Room", path: "Storage Room" },
+      ],
+      unresolvedParent: false,
+      parentResolution: "MATCHED",
+      createMissingParent: false,
+      nodes: [
+        {
+          temporaryId: "section-a",
+          parentLocationId: "storage",
+          parentTemporaryId: null,
+          name: "Section A",
+          description: null,
+          status: "POSSIBLE_DUPLICATE",
+          existingLocationId: null,
+          possibleExistingMatches: [
+            { id: "typo", name: "Seciton A", path: "Storage Room / Seciton A" },
+          ],
+          possibleMatchKind: "TYPO",
+          canCreateDespitePossibleMatch: true,
+        },
+      ],
+      source: "DETERMINISTIC",
+    });
+    renderOrganizePage();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Create Section A in Storage Room with 1 shelf each."
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(
+      await screen.findByText(/Possible existing match: Seciton A/)
+    ).toBeInTheDocument();
+    const createAll = screen.getByRole("button", { name: "Create all" });
+    expect(createAll).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Create Section A" }));
+    await waitFor(() => expect(createAll).toBeEnabled());
+  });
+
+  it("routes an inventory request to the current-to-suggested proposal UI", async () => {
+    const user = userEvent.setup();
+    mocks.generateInventoryOrganizationProposal.mockResolvedValue({
+      proposalItems: [
+        {
+          modelId: "model-1",
+          productName: "Development Board",
+          currentCategoryId: "electronics",
+          currentLocationId: "storage",
+          categoryId: null,
+          locationId: "new-location",
+          categoryConfidence: 0.9,
+          locationConfidence: 0.9,
+          reason: "Fits the board area.",
+        },
+      ],
+      diagnostics: {
+        modelsConsidered: 1,
+        modelsSentToClaude: 1,
+        categoriesSent: 1,
+        locationsSent: 1,
+        batches: 1,
+        requestBytes: 500,
+        durationMs: 20,
+        helperFailures: 0,
+      },
+      previewOnly: true,
+    });
+    renderOrganizePage();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Find better places for everything in General Electronics."
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(
+      await screen.findByRole("heading", { name: "Reorganization proposal" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Current location" })
+    ).toBeInTheDocument();
+    expect(mocks.generateInventoryOrganizationProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instruction: expect.stringContaining("General Electronics"),
+      })
+    );
+    expect(mocks.buildLocationStructureProposal).not.toHaveBeenCalled();
+  });
+
+  it("keeps Create all behind an explicit action and location-create permission", async () => {
+    mocks.createLocationStructure.mockResolvedValue({
+      createdCount: 1,
+      existingCount: 0,
+      failedCount: 0,
+      results: [],
+    });
+    const form = new FormData();
+    form.set("intent", "create-structure");
+    form.set(
+      "proposal",
+      JSON.stringify({
+        instruction: "Create Section A",
+        parentLocationId: "storage",
+        nodes: [],
+      })
+    );
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/staff/organize", {
+          method: "POST",
+          body: form,
+        }),
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+    expect(mocks.requirePermission).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "staff-1" })
+    );
+    expect(mocks.createLocationStructure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: "org-1",
+        userId: "staff-1",
+        proposalInput: expect.objectContaining({ mode: "LOCATION_STRUCTURE" }),
+      })
+    );
+    expect(result).toMatchObject({ kind: "structure-created" });
+  });
+});

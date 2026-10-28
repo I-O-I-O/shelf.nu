@@ -196,9 +196,26 @@ export async function generateInventoryOrganizationProposal(input: {
   const snapshot = await buildLocationIntelligenceSnapshot(
     input.organizationId
   );
-  const selectedLocationIds = input.locationIds?.length
-    ? new Set(input.locationIds)
-    : null;
+  const normalizedInstruction = input.instruction.toLocaleLowerCase();
+  const inferredCategoryIds = snapshot.categories
+    .filter((category) =>
+      normalizedInstruction.includes(category.name.toLocaleLowerCase())
+    )
+    .map(({ id }) => id);
+  const inferredLocationIds = snapshot.locations
+    .filter(
+      (location) =>
+        normalizedInstruction.includes(location.name.toLocaleLowerCase()) ||
+        normalizedInstruction.includes(location.path.toLocaleLowerCase())
+    )
+    .map(({ id }) => id);
+  const categoryIds = input.categoryIds?.length
+    ? input.categoryIds
+    : inferredCategoryIds;
+  const locationIds = input.locationIds?.length
+    ? input.locationIds
+    : inferredLocationIds;
+  const selectedLocationIds = locationIds.length ? new Set(locationIds) : null;
   const scopeLocations = selectedLocationIds
     ? new Set(
         snapshot.locations
@@ -216,9 +233,7 @@ export async function generateInventoryOrganizationProposal(input: {
           .map((location) => location.id)
       )
     : null;
-  const scopeCategories = input.categoryIds?.length
-    ? new Set(input.categoryIds)
-    : null;
+  const scopeCategories = categoryIds.length ? new Set(categoryIds) : null;
   const models = await db.assetModel.findMany({
     where: {
       organizationId: input.organizationId,
@@ -316,7 +331,7 @@ export async function generateInventoryOrganizationProposal(input: {
       (a, b) => a.rank - b.rank || a.productName.localeCompare(b.productName)
     );
   const narrowedCandidates = (
-    input.categoryIds?.length || input.locationIds?.length
+    categoryIds.length || locationIds.length
       ? candidates
       : candidates.some((candidate) => candidate.rank === 0)
       ? candidates.filter((candidate) => candidate.rank === 0)
@@ -382,7 +397,7 @@ export async function generateInventoryOrganizationProposal(input: {
       mode: "INVENTORY_REORGANIZATION" as const,
       schemaVersion: 1 as const,
       instruction: input.instruction,
-      scope: { categoryIds: input.categoryIds, locationIds: input.locationIds },
+      scope: { categoryIds, locationIds },
       items: batch.map((item) => ({
         modelId: item.modelId,
         productName: item.productName,
@@ -461,12 +476,25 @@ export async function generateInventoryOrganizationProposal(input: {
   const diagnostics = {
     modelsConsidered: models.length,
     modelsSentToClaude: narrowedCandidates.length,
-    categoriesSent: batches.reduce((sum, batch) => sum + batch.categoriesSent, 0),
+    categoriesSent: batches.reduce(
+      (sum, batch) => sum + batch.categoriesSent,
+      0
+    ),
     locationsSent: batches.reduce((sum, batch) => sum + batch.locationsSent, 0),
     batches: batches.length,
     helperFailures: batches.filter((batch) => batch.result.status === "manual")
       .length,
     requestBytes: batches.reduce((sum, batch) => sum + batch.requestBytes, 0),
+    analysisScope:
+      [
+        ...snapshot.categories
+          .filter((category) => categoryIds.includes(category.id))
+          .map(({ name }) => `Category: ${name}`),
+        ...snapshot.locations
+          .filter((location) => locationIds.includes(location.id))
+          .map(({ path }) => `Location: ${path}`),
+      ].join(" · ") ||
+      "Organization inventory, with likely misplaced groups prioritized",
     durationMs: Date.now() - startedAt,
   };
   Logger.info({

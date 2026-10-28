@@ -192,6 +192,105 @@ describe("location structure planning", () => {
     expect(mocks.requestHelper).not.toHaveBeenCalled();
   });
 
+  it("resolves the live-shaped Storage Room root and reuses only its Section A/B", async () => {
+    const storageRoomId = "cmvf79s5i0009xmzlmbmq9zn8";
+    const storageSectionAId = "cmvf8rbvx0010xmzlf0caamif";
+    const storageSectionBId = "cmvf8riqe0013xmzl4bugjo7a";
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "cmv6f933x0002xm6w0h6d5439",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+      {
+        id: "cmv6muufm001zxm6wcn519116",
+        name: "Seciton A",
+        parentId: "cmv6f933x0002xm6w0h6d5439",
+        description: null,
+      },
+      {
+        id: storageRoomId,
+        name: "Storage Room - B442",
+        parentId: null,
+        description: null,
+      },
+      {
+        id: storageSectionAId,
+        name: "Section A",
+        parentId: storageRoomId,
+        description: null,
+      },
+      {
+        id: storageSectionBId,
+        name: "Section B",
+        parentId: storageRoomId,
+        description: null,
+      },
+      {
+        id: "section-c-storage",
+        name: "Section C",
+        parentId: storageRoomId,
+        description: null,
+      },
+    ]);
+
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 7 shelves each.",
+    });
+
+    expect(proposal.parentLocationId).toBe(storageRoomId);
+    expect(proposal.parentCandidates).toEqual([
+      expect.objectContaining({
+        id: storageRoomId,
+        name: "Storage Room - B442",
+      }),
+    ]);
+    expect(proposal.unresolvedParent).toBe(false);
+    expect(proposal.nodes).toHaveLength(16);
+    expect(
+      proposal.nodes.filter((node) => node.status === "EXISTS")
+    ).toMatchObject([
+      { name: "Section A", existingLocationId: storageSectionAId },
+      { name: "Section B", existingLocationId: storageSectionBId },
+    ]);
+    expect(
+      proposal.nodes
+        .filter((node) => node.status === "CREATE")
+        .map(({ name }) => name)
+    ).toEqual([
+      "Shelf A1",
+      "Shelf A2",
+      "Shelf A3",
+      "Shelf A4",
+      "Shelf A5",
+      "Shelf A6",
+      "Shelf A7",
+      "Shelf B1",
+      "Shelf B2",
+      "Shelf B3",
+      "Shelf B4",
+      "Shelf B5",
+      "Shelf B6",
+      "Shelf B7",
+    ]);
+    expect(
+      proposal.nodes
+        .filter((node) => node.name.startsWith("Shelf A"))
+        .every((node) => node.parentTemporaryId === "section-a")
+    ).toBe(true);
+    expect(
+      proposal.nodes
+        .filter((node) => node.name.startsWith("Shelf B"))
+        .every((node) => node.parentTemporaryId === "section-b")
+    ).toBe(true);
+    expect(mocks.findMany).toHaveBeenCalledTimes(1);
+    expect(mocks.requestHelper).not.toHaveBeenCalled();
+    expect(mocks.createLocation).not.toHaveBeenCalled();
+  });
+
   it("does not guess when a parent name matches more than one location", async () => {
     mocks.findMany.mockResolvedValue([
       ...locationFixture,
@@ -210,6 +309,191 @@ describe("location structure planning", () => {
     expect(proposal.unresolvedParent).toBe(true);
     expect(proposal.parentCandidates).toHaveLength(2);
     expect(proposal.nodes).toHaveLength(0);
+  });
+
+  it("resolves parent names case-insensitively, with punctuation and unique partial matches", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "root",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+      {
+        id: "store",
+        name: "Main Storage",
+        parentId: "root",
+        description: null,
+      },
+    ]);
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and B in the storage room with 1 shelf each.",
+    });
+    expect(proposal.parentLocationId).toBe("store");
+    expect(proposal.parentCandidates[0]?.path).toBe(
+      "IOIO Lab - B477 / Main Storage"
+    );
+    expect(mocks.requestHelper).not.toHaveBeenCalled();
+  });
+
+  it("prefers case-insensitive exact and normalized parent matches", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "lower", name: "storage room", parentId: null, description: null },
+    ]);
+    const caseInsensitive = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 1 shelf each.",
+    });
+    expect(caseInsensitive.parentLocationId).toBe("lower");
+    mocks.findMany.mockResolvedValue([
+      { id: "hyphen", name: "Storage-Room", parentId: null, description: null },
+    ]);
+    const normalized = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 1 shelf each.",
+    });
+    expect(normalized.parentLocationId).toBe("hyphen");
+  });
+
+  it("resolves a full path parent and surfaces ambiguous semantic matches", async () => {
+    const locations = [
+      {
+        id: "root",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+      {
+        id: "storage",
+        name: "Electronics Storage",
+        parentId: "root",
+        description: null,
+      },
+      { id: "other-root", name: "Annex", parentId: null, description: null },
+      {
+        id: "storage2",
+        name: "Workshop Storage",
+        parentId: "other-root",
+        description: null,
+      },
+    ];
+    mocks.findMany.mockResolvedValue(locations);
+    const byPath = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and B in IOIO Lab - B477 / Electronics Storage with 1 shelf each.",
+    });
+    expect(byPath.parentLocationId).toBe("storage");
+    const ambiguous = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and B in the Storage Room with 1 shelf each.",
+    });
+    expect(ambiguous.unresolvedParent).toBe(true);
+    expect(ambiguous.parentCandidates).toHaveLength(2);
+  });
+
+  it("proposes a missing Storage Room beneath the one current root", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "root",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+    ]);
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and Section B in the Storage Room with 7 shelves each.",
+    });
+    expect(proposal.parentResolution).toBe("CREATE_PARENT");
+    expect(proposal.createMissingParent).toBe(true);
+    expect(proposal.parentLocationId).toBe("root");
+    expect(proposal.nodes).toHaveLength(17);
+    expect(proposal.nodes[0]).toMatchObject({
+      name: "Storage Room",
+      status: "CREATE",
+    });
+    expect(proposal.nodes[1]).toMatchObject({
+      name: "Section A",
+      parentTemporaryId: proposal.nodes[0]?.temporaryId,
+    });
+    expect(mocks.requestHelper).not.toHaveBeenCalled();
+  });
+
+  it("asks staff to choose between roots when a requested parent is missing", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "root-a",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+      { id: "root-b", name: "Annex", parentId: null, description: null },
+    ]);
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and B in the Storage Room with 1 shelf each.",
+    });
+    expect(proposal.unresolvedParent).toBe(true);
+    expect(proposal.parentResolution).toBe("AMBIGUOUS_ROOT");
+    expect(proposal.parentCandidates.map(({ id }) => id)).toEqual([
+      "root-a",
+      "root-b",
+    ]);
+    const selected = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction:
+        "Create Section A and B in the Storage Room with 1 shelf each.",
+      selectedParentId: "root-b",
+    });
+    expect(selected.createMissingParent).toBe(true);
+    expect(selected.parentLocationId).toBe("root-b");
+  });
+
+  it("flags typo-equivalent Section A without silently reusing or creating it", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "root",
+        name: "IOIO Lab - B477",
+        parentId: null,
+        description: null,
+      },
+      { id: "storage", name: "Storage", parentId: "root", description: null },
+      { id: "typo", name: "Seciton A", parentId: "storage", description: null },
+    ]);
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org-1",
+      instruction: "Create Section A and B in Storage with 1 shelf each.",
+    });
+    expect(proposal.nodes[0]).toMatchObject({
+      name: "Section A",
+      status: "POSSIBLE_DUPLICATE",
+      possibleMatchKind: "TYPO",
+      canCreateDespitePossibleMatch: true,
+    });
+    expect(proposal.nodes[0]?.possibleExistingMatches?.[0]?.name).toBe(
+      "Seciton A"
+    );
+    await expect(
+      createLocationStructure({
+        organizationId: "org-1",
+        userId: "staff-1",
+        proposalInput: {
+          mode: proposal.mode,
+          instruction: proposal.instruction,
+          parentLocationId: proposal.parentLocationId,
+          nodes: proposal.nodes.map((node) => ({ ...node, status: "REVIEW" })),
+        },
+      })
+    ).rejects.toThrow(/Resolve possible existing location matches/);
+    expect(mocks.createLocation).not.toHaveBeenCalled();
   });
 
   it("requires a valid organization parent before creating anything", async () => {

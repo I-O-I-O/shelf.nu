@@ -41,8 +41,11 @@ export type StructureNode = {
   parentTemporaryId: string | null;
   name: string;
   description: string | null;
-  status: "CREATE" | "EXISTS";
+  status: "CREATE" | "EXISTS" | "POSSIBLE_DUPLICATE";
   existingLocationId: string | null;
+  possibleExistingMatches?: Array<{ id: string; name: string; path: string }>;
+  possibleMatchKind?: "TYPO" | "AMBIGUOUS_EXACT";
+  canCreateDespitePossibleMatch?: boolean;
 };
 
 export type LocationStructureProposal = {
@@ -52,6 +55,13 @@ export type LocationStructureProposal = {
   parentLocationId: string | null;
   parentCandidates: Array<{ id: string; name: string; path: string }>;
   unresolvedParent: boolean;
+  parentResolution:
+    | "MATCHED"
+    | "AMBIGUOUS_MATCH"
+    | "CREATE_PARENT"
+    | "AMBIGUOUS_ROOT"
+    | "UNRESOLVED";
+  createMissingParent: boolean;
   nodes: StructureNode[];
   source: "DETERMINISTIC" | "AI";
 };
@@ -106,7 +116,7 @@ export function parseDeterministicLocationStructure(
 ): ParsedStructure | null {
   const text = instruction.trim();
   const sectionMatch = text.match(
-    /\b(?:create|add|make|build)\s+sections?\s+([A-Z0-9]+)\s+(?:and|&)\s+(?:sections?\s+)?([A-Z0-9]+)\s+in\s+(?:the\s+)?(.+?)\s+with\s+(\d+|[a-z]+)\s+shelves?\s+each\b/i
+    /\b(?:create|add|make|build)\s+sections?\s+([A-Z0-9]+)\s+(?:and|&)\s+(?:sections?\s+)?([A-Z0-9]+)\s+in\s+(?:the\s+)?(.+?)\s+with\s+(\d+|[a-z]+)\s+shel(?:f|ves)\s+each\b/i
   );
   if (sectionMatch) {
     const [, first, second, parentName, countText] = sectionMatch;
@@ -211,8 +221,72 @@ export function parseDeterministicLocationStructure(
   return null;
 }
 
+function comparableName(name: string) {
+  return name
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
 function normalizeName(name: string) {
-  return name.trim().toLocaleLowerCase();
+  return comparableName(name).replace(/\bseciton\b/g, "section");
+}
+
+function tokensNear(left: string, right: string) {
+  if (left === right) return true;
+  if (
+    left.length < 5 ||
+    right.length < 5 ||
+    Math.abs(left.length - right.length) > 1
+  )
+    return false;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  let edits = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    if (left[leftIndex] === right[rightIndex]) {
+      leftIndex++;
+      rightIndex++;
+      continue;
+    }
+    edits++;
+    if (edits > 1) return false;
+    if (left.length > right.length) leftIndex++;
+    else if (right.length > left.length) rightIndex++;
+    else {
+      if (
+        left[leftIndex] === right[rightIndex + 1] &&
+        left[leftIndex + 1] === right[rightIndex]
+      ) {
+        leftIndex += 2;
+        rightIndex += 2;
+      } else {
+        leftIndex++;
+        rightIndex++;
+      }
+    }
+  }
+  if (leftIndex < left.length || rightIndex < right.length) edits++;
+  return edits <= 1;
+}
+
+function semanticAliases(query: string) {
+  const normalized = normalizeName(query);
+  const groups = [
+    ["storage", "storeroom", "storage room", "storage area"],
+    ["electronics", "electronics room", "electronics lab"],
+    ["workshop", "work shop", "fabrication", "maker space", "makerspace"],
+    ["lab", "laboratory", "laboratories"],
+    ["main room", "main lab", "central room", "primary room"],
+  ];
+  return (
+    groups.find((group) =>
+      group.some((alias) => normalized.includes(normalizeName(alias)))
+    ) ?? [query]
+  );
 }
 
 function makePaths(locations: OrganizationLocation[]) {
@@ -237,37 +311,140 @@ function resolveParent(
   selectedParentId?: string
 ) {
   const { path } = makePaths(locations);
-  if (selectedParentId) {
-    const selected = locations.find(({ id }) => id === selectedParentId);
-    return {
-      id: selected?.id ?? null,
-      candidates: selected
-        ? [{ id: selected.id, name: selected.name, path: path(selected.id) }]
-        : [],
-      unresolved: !selected,
-    };
-  }
-  if (!parentName) return { id: null, candidates: [], unresolved: false };
-  const matches = locations.filter(
-    (location) =>
-      normalizeName(location.name) === normalizeName(parentName) ||
-      normalizeName(path(location.id)) === normalizeName(parentName)
-  );
-  return {
-    id: matches.length === 1 ? matches[0]!.id : null,
-    candidates: matches.map((location) => ({
+  const candidates = (matches: OrganizationLocation[]) =>
+    matches.map((location) => ({
       id: location.id,
       name: location.name,
       path: path(location.id),
-    })),
-    unresolved: matches.length !== 1,
+    }));
+  if (!parentName)
+    return {
+      id: null,
+      candidates: [],
+      unresolved: false,
+      resolution: "MATCHED" as const,
+    };
+
+  const pathLike =
+    /[/>›]/.test(parentName) ||
+    /\b(?:room|section|shelf|drawer|container|cabinet)\b.*\b(?:section|shelf|drawer|container|cabinet)\b/i.test(
+      parentName
+    );
+  const exactPaths = () =>
+    locations.filter(
+      (location) =>
+        normalizeName(path(location.id)) === normalizeName(parentName)
+    );
+  const selectMatch = (
+    matches: OrganizationLocation[],
+    allowPathNarrowing: boolean
+  ) => {
+    if (!matches.length) return null;
+    let candidatesForTier = matches;
+    if (allowPathNarrowing && pathLike) {
+      const matchIds = new Set(matches.map(({ id }) => id));
+      const pathMatches = exactPaths().filter(({ id }) => matchIds.has(id));
+      if (pathMatches.length) candidatesForTier = pathMatches;
+    }
+    if (
+      selectedParentId &&
+      candidatesForTier.some(({ id }) => id === selectedParentId)
+    )
+      return {
+        id: selectedParentId,
+        candidates: candidates(candidatesForTier),
+        unresolved: false,
+        resolution: "MATCHED" as const,
+      };
+    return {
+      id: candidatesForTier.length === 1 ? candidatesForTier[0]!.id : null,
+      candidates: candidates(candidatesForTier),
+      unresolved: candidatesForTier.length !== 1,
+      resolution:
+        candidatesForTier.length === 1
+          ? ("MATCHED" as const)
+          : ("AMBIGUOUS_MATCH" as const),
+    };
+  };
+  const ownNameTiers = [
+    locations.filter((location) => location.name.trim() === parentName.trim()),
+    locations.filter(
+      (location) =>
+        location.name.trim().toLocaleLowerCase() ===
+        parentName.trim().toLocaleLowerCase()
+    ),
+    locations.filter(
+      (location) => normalizeName(location.name) === normalizeName(parentName)
+    ),
+  ];
+  for (const matches of ownNameTiers) {
+    const selected = selectMatch(matches, true);
+    if (selected) return selected;
+  }
+
+  // Ancestor path text is not evidence that a descendant's own name matches.
+  // Only compare full paths when the request itself carries hierarchy context.
+  if (pathLike) {
+    const pathMatch = selectMatch(exactPaths(), false);
+    if (pathMatch) return pathMatch;
+  }
+
+  const genericTokens = new Set([
+    "a",
+    "an",
+    "the",
+    "room",
+    "area",
+    "location",
+    "place",
+    "storage",
+  ]);
+  const queryTokens = normalizeName(parentName)
+    .split(" ")
+    .filter((token) => !genericTokens.has(token));
+  const tokenMatches = queryTokens.length
+    ? locations.filter((location) => {
+        const nameTokens = normalizeName(location.name).split(" ");
+        return queryTokens.every((queryToken) =>
+          nameTokens.some((nameToken) => tokensNear(queryToken, nameToken))
+        );
+      })
+    : [];
+  const tokenMatch = selectMatch(tokenMatches, false);
+  if (tokenMatch) return tokenMatch;
+
+  const semanticTerms = semanticAliases(parentName);
+  const semanticMatches = locations.filter((location) => {
+    const searchable = normalizeName(location.name);
+    return semanticTerms.some((term) =>
+      searchable.includes(normalizeName(term))
+    );
+  });
+  const semanticMatch = selectMatch(semanticMatches, false);
+  if (semanticMatch) return semanticMatch;
+
+  const descriptionMatches = locations.filter((location) => {
+    const searchable = normalizeName(location.description ?? "");
+    return semanticTerms.some((term) =>
+      searchable.includes(normalizeName(term))
+    );
+  });
+  const descriptionMatch = selectMatch(descriptionMatches, false);
+  if (descriptionMatch) return descriptionMatch;
+
+  return {
+    id: null,
+    candidates: [],
+    unresolved: true,
+    resolution: "UNRESOLVED" as const,
   };
 }
 
 function resolveDuplicates(
   locations: OrganizationLocation[],
   descriptors: ParsedStructure["descriptors"],
-  rootParentId: string | null
+  rootParentId: string | null,
+  path: (id: string) => string
 ) {
   const existingByTemp = new Map<string, string>();
   const nodes: StructureNode[] = [];
@@ -275,22 +452,54 @@ function resolveDuplicates(
     const parentLocationId = descriptor.parentTemporaryId
       ? existingByTemp.get(descriptor.parentTemporaryId) ?? null
       : rootParentId;
-    const match = locations.find(
+    const exactMatches = locations.filter(
       (location) =>
         location.parentId === parentLocationId &&
-        normalizeName(location.name) === normalizeName(descriptor.name)
+        comparableName(location.name) === comparableName(descriptor.name)
     );
+    const typoMatches = exactMatches.length
+      ? []
+      : locations.filter(
+          (location) =>
+            location.parentId === parentLocationId &&
+            normalizeName(location.name) === normalizeName(descriptor.name)
+        );
+    const match = exactMatches.length === 1 ? exactMatches[0] : null;
     if (match) existingByTemp.set(descriptor.temporaryId, match.id);
     else
       existingByTemp.set(
         descriptor.temporaryId,
         `temporary:${descriptor.temporaryId}`
       );
+    const possibleMatches =
+      exactMatches.length > 1 ? exactMatches : typoMatches;
     nodes.push({
       ...descriptor,
       parentLocationId: descriptor.parentTemporaryId ? null : rootParentId,
-      status: match ? "EXISTS" : "CREATE",
+      status: match
+        ? "EXISTS"
+        : possibleMatches.length
+        ? "POSSIBLE_DUPLICATE"
+        : "CREATE",
       existingLocationId: match?.id ?? null,
+      ...(possibleMatches.length
+        ? {
+            possibleMatchKind:
+              exactMatches.length > 1
+                ? ("AMBIGUOUS_EXACT" as const)
+                : ("TYPO" as const),
+            canCreateDespitePossibleMatch: exactMatches.length === 0,
+          }
+        : {}),
+      ...(possibleMatches.length
+        ? {
+            possibleExistingMatches: possibleMatches.map((possible) => ({
+              id: possible.id,
+              name: possible.name,
+              path: path(possible.id),
+            })),
+          }
+        : {}),
     });
   }
   return nodes;
@@ -307,21 +516,106 @@ export async function buildLocationStructureProposal(input: {
   });
   const parsed = parseDeterministicLocationStructure(input.instruction);
   if (parsed) {
+    const { path } = makePaths(locations);
     const parent = resolveParent(
       locations,
       parsed.parentName,
       input.selectedParentId
     );
+    if (!parent.unresolved) {
+      return {
+        mode: "LOCATION_STRUCTURE" as const,
+        instruction: input.instruction,
+        parentName: parsed.parentName,
+        parentLocationId: parent.id,
+        parentCandidates: parent.candidates,
+        unresolvedParent: false,
+        parentResolution: "MATCHED" as const,
+        createMissingParent: false,
+        nodes: resolveDuplicates(
+          locations,
+          parsed.descriptors,
+          parent.id,
+          path
+        ),
+        source: "DETERMINISTIC" as const,
+      };
+    }
+
+    if (parent.resolution === "AMBIGUOUS_MATCH") {
+      return {
+        mode: "LOCATION_STRUCTURE" as const,
+        instruction: input.instruction,
+        parentName: parsed.parentName,
+        parentLocationId: null,
+        parentCandidates: parent.candidates,
+        unresolvedParent: true,
+        parentResolution: "AMBIGUOUS_MATCH" as const,
+        createMissingParent: false,
+        nodes: [],
+        source: "DETERMINISTIC" as const,
+      };
+    }
+
+    const roots = locations.filter((location) => location.parentId === null);
+    const selectedRoot = input.selectedParentId
+      ? roots.find((root) => root.id === input.selectedParentId) ??
+        (roots.length === 0
+          ? locations.find((location) => location.id === input.selectedParentId)
+          : undefined)
+      : undefined;
+    const createUnder = selectedRoot ?? (roots.length === 1 ? roots[0] : null);
+    if (createUnder && parsed.parentName) {
+      const missingParentId = `requested-parent-${normalizeName(
+        parsed.parentName
+      ).replace(/\s+/g, "-")}`;
+      const descriptors: ParsedStructure["descriptors"] = [
+        {
+          temporaryId: missingParentId,
+          name: parsed.parentName,
+          parentTemporaryId: null,
+          description: `New location created as the requested parent for ${parsed.parentName}.`,
+        },
+        ...parsed.descriptors.map((descriptor) => ({
+          ...descriptor,
+          parentTemporaryId: descriptor.parentTemporaryId ?? missingParentId,
+        })),
+      ];
+      return {
+        mode: "LOCATION_STRUCTURE" as const,
+        instruction: input.instruction,
+        parentName: parsed.parentName,
+        parentLocationId: createUnder.id,
+        parentCandidates: [
+          {
+            id: createUnder.id,
+            name: createUnder.name,
+            path: path(createUnder.id),
+          },
+        ],
+        unresolvedParent: false,
+        parentResolution: "CREATE_PARENT" as const,
+        createMissingParent: true,
+        nodes: resolveDuplicates(locations, descriptors, createUnder.id, path),
+        source: "DETERMINISTIC" as const,
+      };
+    }
+
+    const choices = roots.length ? roots : locations;
     return {
       mode: "LOCATION_STRUCTURE" as const,
       instruction: input.instruction,
       parentName: parsed.parentName,
-      parentLocationId: parent.id,
-      parentCandidates: parent.candidates,
-      unresolvedParent: parent.unresolved,
-      nodes: parent.unresolved
-        ? []
-        : resolveDuplicates(locations, parsed.descriptors, parent.id),
+      parentLocationId: null,
+      parentCandidates: choices.map((location) => ({
+        id: location.id,
+        name: location.name,
+        path: path(location.id),
+      })),
+      unresolvedParent: true,
+      parentResolution: "AMBIGUOUS_ROOT" as const,
+      createMissingParent: true,
+      nodes: [],
       source: "DETERMINISTIC" as const,
     };
   }
@@ -362,6 +656,8 @@ export async function buildLocationStructureProposal(input: {
       parentLocationId: null,
       parentCandidates: [],
       unresolvedParent: true,
+      parentResolution: "UNRESOLVED" as const,
+      createMissingParent: false,
       nodes: [],
       source: "AI" as const,
       helperUnavailable: true,
@@ -384,7 +680,24 @@ export async function buildLocationStructureProposal(input: {
   );
   const rootId = rootIds.length === 1 ? rootIds[0]! : null;
   const parent = input.selectedParentId
-    ? resolveParent(locations, null, input.selectedParentId)
+    ? (() => {
+        const selected = locations.find(
+          ({ id }) => id === input.selectedParentId
+        );
+        return selected && rootIds.includes(selected.id)
+          ? {
+              id: selected.id,
+              candidates: [
+                {
+                  id: selected.id,
+                  name: selected.name,
+                  path: path(selected.id),
+                },
+              ],
+              unresolved: false,
+            }
+          : { id: null, candidates: [], unresolved: true };
+      })()
     : rootIds.length > 1
     ? {
         id: null,
@@ -397,7 +710,7 @@ export async function buildLocationStructureProposal(input: {
     : rootId
     ? resolveParent(locations, null, rootId)
     : { id: null, candidates: [], unresolved: unresolvedRoot };
-  const nodes = resolveDuplicates(locations, proposals, parent.id);
+  const nodes = resolveDuplicates(locations, proposals, parent.id, path);
   return {
     mode: "LOCATION_STRUCTURE" as const,
     instruction: input.instruction,
@@ -405,6 +718,10 @@ export async function buildLocationStructureProposal(input: {
     parentLocationId: parent.id,
     parentCandidates: parent.candidates,
     unresolvedParent: parent.unresolved,
+    parentResolution: parent.unresolved
+      ? ("AMBIGUOUS_ROOT" as const)
+      : ("MATCHED" as const),
+    createMissingParent: false,
     nodes,
     source: "AI" as const,
   };
@@ -424,8 +741,9 @@ const structurePayloadSchema = z
             parentTemporaryId: z.string().nullable(),
             name: z.string().trim().min(1).max(300),
             description: z.string().max(500).nullable(),
-            status: z.enum(["CREATE", "EXISTS"]),
+            status: z.enum(["CREATE", "EXISTS", "REVIEW"]),
             existingLocationId: z.string().nullable(),
+            confirmedPossibleDuplicate: z.boolean().default(false),
           })
           .strict()
       )
@@ -436,6 +754,13 @@ const structurePayloadSchema = z
     const seen = new Set<string>();
     const siblings = new Set<string>();
     for (const [index, node] of proposal.nodes.entries()) {
+      if (node.status === "REVIEW")
+        context.addIssue({
+          code: "custom",
+          message:
+            "Resolve possible existing location matches before creating.",
+          path: ["nodes", index, "status"],
+        });
       if (seen.has(node.temporaryId))
         context.addIssue({
           code: "custom",
@@ -520,7 +845,7 @@ export async function createLocationStructure(input: {
     const duplicate = locations.find(
       (location) =>
         location.parentId === (parentId ?? null) &&
-        normalizeName(location.name) === normalizeName(node.name)
+        comparableName(location.name) === comparableName(node.name)
     );
     if (duplicate) {
       resolved.set(node.temporaryId, duplicate.id);
@@ -530,6 +855,25 @@ export async function createLocationStructure(input: {
           node.name
         }`,
         status: "EXISTS",
+      });
+      continue;
+    }
+    const typoMatches = locations.filter(
+      (location) =>
+        location.parentId === (parentId ?? null) &&
+        normalizeName(location.name) === normalizeName(node.name) &&
+        comparableName(location.name) !== comparableName(node.name)
+    );
+    if (typoMatches.length && !node.confirmedPossibleDuplicate) {
+      results.push({
+        name: node.name,
+        path: `${parentId ? path(parentId) : ""}${parentId ? " / " : ""}${
+          node.name
+        }`,
+        status: "FAILED",
+        error: `Possible existing match: ${typoMatches
+          .map(({ name }) => name)
+          .join(", ")}. Review this match before creating.`,
       });
       continue;
     }
@@ -550,6 +894,14 @@ export async function createLocationStructure(input: {
         });
         continue;
       }
+      results.push({
+        name: node.name,
+        path: node.name,
+        status: "FAILED",
+        error:
+          "The selected existing location is no longer available under this parent.",
+      });
+      continue;
     }
     try {
       const created = await createLocation({

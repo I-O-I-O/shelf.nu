@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   categories: vi.fn(),
   models: vi.fn(),
   placements: vi.fn(),
+  helper: vi.fn(),
 }));
 vi.mock("~/database/db.server", () => ({
   db: {
@@ -14,11 +15,18 @@ vi.mock("~/database/db.server", () => ({
     assetLocation: { findMany: mocks.placements },
   },
 }));
+vi.mock("~/modules/ioio-staff/import-helper-client.server", () => ({
+  requestImportHelperProposal: mocks.helper,
+}));
 
-import { buildLocationIntelligenceSnapshot } from "./location-intelligence.server";
+import {
+  buildLocationIntelligenceSnapshot,
+  generateInventoryOrganizationProposal,
+} from "./location-intelligence.server";
 
 describe("live location intelligence snapshot", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.locations.mockResolvedValue([
       { id: "room", name: "Electronics", parentId: null, description: null },
       {
@@ -48,6 +56,10 @@ describe("live location intelligence snapshot", () => {
         asset: { assetModelId: "model-1", categoryId: "boards" },
       },
     ]);
+    mocks.helper.mockResolvedValue({
+      status: "manual",
+      reason: "helper_not_configured",
+    });
   });
 
   it("reconstructs hierarchy and derives category placement counts from current Shelf rows", async () => {
@@ -72,6 +84,25 @@ describe("live location intelligence snapshot", () => {
     const updated = await buildLocationIntelligenceSnapshot("org-1");
     expect(updated.locations.map((location) => location.path)).toContain(
       "New room name"
+    );
+  });
+
+  it("uses category and location names in the instruction to scope model retrieval", async () => {
+    await generateInventoryOrganizationProposal({
+      organizationId: "org-1",
+      instruction:
+        "Find better locations for Development Boards in Electronics.",
+    });
+    const inventoryQuery = mocks.models.mock.calls[1]?.[0];
+    expect(inventoryQuery.where.assets.some.categoryId.in).toEqual(["boards"]);
+    expect(
+      inventoryQuery.where.assets.some.assetLocations.some.locationId.in
+    ).toEqual(["room", "drawer"]);
+    expect(mocks.helper).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "INVENTORY_REORGANIZATION",
+        scope: { categoryIds: ["boards"], locationIds: ["room"] },
+      })
     );
   });
 });

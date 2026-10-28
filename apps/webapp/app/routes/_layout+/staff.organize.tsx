@@ -27,7 +27,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   const { organizationId } = await requireIoioStaffAccess({ context, request });
   const choices = await getOrganizationLocationChoices(organizationId);
   return payload({
-    header: { title: "Organize inventory" },
+    header: { title: "Organize" },
     categories: choices.categories,
     locations: choices.locations,
   });
@@ -51,29 +51,30 @@ export async function action({ context, request }: ActionFunctionArgs) {
       const rawProposal = form.get("proposal");
       if (typeof rawProposal !== "string" || rawProposal.length > 100_000)
         throw new Error("Reload the structure proposal and review it again.");
+      const submittedProposal: unknown = JSON.parse(rawProposal);
+      if (
+        typeof submittedProposal !== "object" ||
+        submittedProposal === null ||
+        Array.isArray(submittedProposal)
+      )
+        throw new Error("Reload the structure proposal and review it again.");
       const result = await createLocationStructure({
         organizationId,
         userId,
-        proposalInput: JSON.parse(rawProposal),
+        proposalInput: {
+          ...submittedProposal,
+          mode: "LOCATION_STRUCTURE",
+        },
       });
       return payload({ kind: "structure-created" as const, result });
     }
     const instruction = String(form.get("instruction") ?? "").trim();
     if (!instruction || instruction.length > 2_000)
       throw new Error(
-        "Describe how you want to organize inventory (up to 2,000 characters)."
+        "Describe what you want to organize (up to 2,000 characters)."
       );
-    const categoryIds = form.get("categoryId")
-      ? [String(form.get("categoryId"))]
-      : undefined;
-    const locationIds = form.get("locationId")
-      ? [String(form.get("locationId"))]
-      : undefined;
     const classification = classifyOrganizationRequest(instruction);
-    if (
-      classification === "LOCATION_STRUCTURE" ||
-      form.get("workflow") === "LOCATION_STRUCTURE"
-    ) {
+    if (classification === "LOCATION_STRUCTURE") {
       return payload({
         kind: "structure-proposal" as const,
         proposal: await buildLocationStructureProposal({
@@ -89,8 +90,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
       ...(await generateInventoryOrganizationProposal({
         organizationId,
         instruction,
-        categoryIds,
-        locationIds,
       })),
     });
   } catch (cause) {
@@ -99,9 +98,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
   }
 }
 
-export const meta = () => [{ title: appendToMetaTitle("Organize inventory") }];
+export const meta = () => [{ title: appendToMetaTitle("Organize") }];
 export const handle = {
-  breadcrumb: () => <Link to="/staff/organize">Organize inventory</Link>,
+  breadcrumb: () => <Link to="/staff/organize">Organize</Link>,
 };
 
 export default function StaffOrganizePage() {
@@ -111,6 +110,9 @@ export default function StaffOrganizePage() {
     Record<string, "kept" | "ignored">
   >({});
   const [dismissed, setDismissed] = useState(false);
+  const [structureNodeDecisions, setStructureNodeDecisions] = useState<
+    Record<string, { action: "CREATE" } | { action: "EXISTS"; id: string }>
+  >({});
   const proposal =
     result && "kind" in result && result.kind === "proposal" ? result : null;
   const structureProposal =
@@ -123,20 +125,41 @@ export default function StaffOrganizePage() {
       : null;
   const structureApplyPayload = structureProposal
     ? {
-        mode: structureProposal.mode,
+        mode: "LOCATION_STRUCTURE",
         instruction: structureProposal.instruction,
         parentLocationId: structureProposal.parentLocationId,
-        nodes: structureProposal.nodes,
+        nodes: structureProposal.nodes.map((node) => {
+          const decision = structureNodeDecisions[node.temporaryId];
+          return {
+            temporaryId: node.temporaryId,
+            parentLocationId: node.parentLocationId,
+            parentTemporaryId: node.parentTemporaryId,
+            name: node.name,
+            description: node.description,
+            status:
+              node.status === "POSSIBLE_DUPLICATE"
+                ? decision?.action ?? "REVIEW"
+                : node.status,
+            existingLocationId:
+              decision?.action === "EXISTS"
+                ? decision.id
+                : node.existingLocationId,
+            confirmedPossibleDuplicate:
+              node.status === "POSSIBLE_DUPLICATE" &&
+              decision?.action === "CREATE",
+          };
+        }),
       }
     : null;
   return (
     <div>
       <Header hideQuickFind />
       <main className="mx-auto max-w-6xl px-4 py-6">
-        <h1 className="text-2xl font-semibold">Organize inventory</h1>
+        <h1 className="text-2xl font-semibold">Organize</h1>
         <p className="mt-2 text-sm text-gray-600">
-          Choose whether you want to reorganize inventory or plan locations.
-          Storage structure requests never analyze inventory.
+          Describe what you want to change in the lab. You can create storage
+          areas, reorganize shelves, move inventory, or ask for placement
+          suggestions.
         </p>
         <Form
           method="post"
@@ -150,58 +173,23 @@ export default function StaffOrganizePage() {
               name="instruction"
               maxLength={2000}
               rows={4}
-              placeholder="Find better locations for items currently in General Electronics."
+              placeholder="Describe what you want to organize, create, move, or improve..."
               className="mt-2 block w-full rounded-md border border-gray-300 p-3 font-normal"
             />
           </label>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="text-sm">
-              Category scope
-              <select
-                name="categoryId"
-                defaultValue=""
-                className="mt-1 block w-full rounded-md border border-gray-300 p-2"
-              >
-                <option value="">All categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="text-sm">
-              Location scope
-              <select
-                name="locationId"
-                defaultValue=""
-                className="mt-1 block w-full rounded-md border border-gray-300 p-2"
-              >
-                <option value="">All locations</option>
-                {locations.map((location) => (
-                  <option key={location.id} value={location.id}>
-                    {location.path}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <button
-              name="workflow"
-              value="INVENTORY_REORGANIZATION"
-              className="rounded-md bg-red-700 px-4 py-2 text-sm font-semibold text-white"
-            >
-              Organize inventory
-            </button>
-            <button
-              name="workflow"
-              value="LOCATION_STRUCTURE"
-              className="rounded-md border border-red-700 px-4 py-2 text-sm font-semibold text-red-800"
-            >
-              Create storage structure
-            </button>
-          </div>
+          <ul className="space-y-1 text-sm text-gray-500" aria-label="Examples">
+            <li>
+              “Create Section A and B in the Storage Room with 7 shelves each.”
+            </li>
+            <li>“Add 3 containers to Shelf A1.”</li>
+            <li>“Find better locations for items in General Electronics.”</li>
+            <li>
+              “Review our development boards and suggest where they should go.”
+            </li>
+          </ul>
+          <button className="rounded-md bg-red-700 px-4 py-2 text-sm font-semibold text-white">
+            Analyze
+          </button>
         </Form>
         {structureCreated && (
           <section
@@ -250,21 +238,20 @@ export default function StaffOrganizePage() {
               </p>
             )}
             {structureProposal.unresolvedParent &&
-            structureProposal.parentCandidates.length > 1 ? (
+            structureProposal.parentCandidates.length > 0 ? (
               <div className="mt-4 rounded bg-amber-50 p-4">
                 <p className="font-medium">
-                  Choose which “{structureProposal.parentName}” location to use:
+                  {structureProposal.parentResolution === "AMBIGUOUS_MATCH"
+                    ? `Which location did you mean by “${structureProposal.parentName}”?`
+                    : structureProposal.parentName
+                    ? `“${structureProposal.parentName}” does not exist yet. Where should we create it?`
+                    : "Choose the parent location for this structure:"}
                 </p>
                 <Form method="post" className="mt-3 flex flex-wrap gap-2">
                   <input
                     type="hidden"
                     name="instruction"
                     value={structureProposal.instruction}
-                  />
-                  <input
-                    type="hidden"
-                    name="workflow"
-                    value="LOCATION_STRUCTURE"
                   />
                   <select
                     required
@@ -273,7 +260,7 @@ export default function StaffOrganizePage() {
                     className="rounded border p-2"
                   >
                     <option value="" disabled>
-                      Select a parent location
+                      Select a location
                     </option>
                     {structureProposal.parentCandidates.map((candidate) => (
                       <option key={candidate.id} value={candidate.id}>
@@ -288,12 +275,20 @@ export default function StaffOrganizePage() {
               </div>
             ) : structureProposal.unresolvedParent ? (
               <p className="mt-4 rounded bg-amber-50 p-4 text-sm">
-                Parent location “
-                {structureProposal.parentName ?? "(unspecified)"}” could not be
-                resolved. Create it first or make the request more specific.
+                No existing parent locations are available. Add a location in
+                Shelf, then analyze this request again.
               </p>
             ) : (
               <>
+                {structureProposal.createMissingParent && (
+                  <p className="mt-4 rounded bg-amber-50 p-3 text-sm">
+                    {structureProposal.parentName} does not currently exist.
+                    This proposal will create it under{" "}
+                    {structureProposal.parentCandidates[0]?.path ??
+                      "the selected location"}
+                    .
+                  </p>
+                )}
                 <p className="mt-4 text-sm">
                   <strong>Parent:</strong>{" "}
                   {structureProposal.parentLocationId
@@ -350,6 +345,62 @@ export default function StaffOrganizePage() {
                         {node.status === "EXISTS" ? "✓ " : "├── "}
                         {node.name}
                         {node.status === "EXISTS" ? " (exists)" : ""}
+                        {node.status === "POSSIBLE_DUPLICATE" && (
+                          <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-3 font-sans">
+                            <p className="font-medium">
+                              Possible existing match:{" "}
+                              {node.possibleExistingMatches
+                                ?.map((match) => match.name)
+                                .join(", ")}
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {node.possibleExistingMatches?.map((match) => {
+                                const decision =
+                                  structureNodeDecisions[node.temporaryId];
+                                return (
+                                  <button
+                                    key={match.id}
+                                    type="button"
+                                    aria-pressed={
+                                      decision?.action === "EXISTS" &&
+                                      decision.id === match.id
+                                    }
+                                    onClick={() =>
+                                      setStructureNodeDecisions((current) => ({
+                                        ...current,
+                                        [node.temporaryId]: {
+                                          action: "EXISTS",
+                                          id: match.id,
+                                        },
+                                      }))
+                                    }
+                                    className="rounded border px-3 py-1"
+                                  >
+                                    Use existing: {match.path}
+                                  </button>
+                                );
+                              })}
+                              {node.canCreateDespitePossibleMatch && (
+                                <button
+                                  type="button"
+                                  aria-pressed={
+                                    structureNodeDecisions[node.temporaryId]
+                                      ?.action === "CREATE"
+                                  }
+                                  onClick={() =>
+                                    setStructureNodeDecisions((current) => ({
+                                      ...current,
+                                      [node.temporaryId]: { action: "CREATE" },
+                                    }))
+                                  }
+                                  className="rounded border px-3 py-1"
+                                >
+                                  Create {node.name}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
@@ -368,8 +419,18 @@ export default function StaffOrganizePage() {
                     />
                     <button
                       disabled={
+                        structureProposal.unresolvedParent ||
+                        structureProposal.nodes.some(
+                          (node) =>
+                            node.status === "POSSIBLE_DUPLICATE" &&
+                            !structureNodeDecisions[node.temporaryId]
+                        ) ||
                         !structureProposal.nodes.some(
-                          (node) => node.status === "CREATE"
+                          (node) =>
+                            node.status === "CREATE" ||
+                            (node.status === "POSSIBLE_DUPLICATE" &&
+                              structureNodeDecisions[node.temporaryId]
+                                ?.action === "CREATE")
                         )
                       }
                       className="rounded-md bg-red-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
@@ -415,6 +476,12 @@ export default function StaffOrganizePage() {
               {proposal.diagnostics.modelsConsidered} models considered ·{" "}
               {proposal.diagnostics.modelsSentToClaude} sent across{" "}
               {proposal.diagnostics.batches} batches
+            </p>
+            <p className="mt-1 text-sm text-gray-600">
+              Analyzed:{" "}
+              {proposal.diagnostics.analysisScope ??
+                "inventory items in the requested scope"}
+              .
             </p>
             {proposal.proposalItems.length ? (
               <div className="mt-4 overflow-x-auto rounded-lg border">

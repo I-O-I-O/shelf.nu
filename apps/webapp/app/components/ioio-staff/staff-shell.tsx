@@ -42,7 +42,7 @@ const navigation = [
   { to: "/staff/ask", label: "Ask IOIO", Icon: MessageCircle, end: true },
   {
     to: "/staff/organize",
-    label: "Organize inventory",
+    label: "Organize",
     Icon: Boxes,
     end: true,
   },
@@ -94,9 +94,7 @@ export function StaffNavigation({
   const orderedNavigation = navigationOrder
     .map((to) => navigation.find((item) => item.to === to))
     .filter((item): item is NavigationItem => Boolean(item))
-    .filter((item) =>
-      canViewStaffNavigationItem(item.to, canViewLabTasks)
-    );
+    .filter((item) => canViewStaffNavigationItem(item.to, canViewLabTasks));
   const activePath = navigation
     .filter(({ to, end }) => {
       const [pathname, query] = to.split("?");
