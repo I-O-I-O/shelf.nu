@@ -7,6 +7,7 @@ const confidenceSchema = z.number().finite().min(0).max(1);
 export const IMPORT_HELPER_SCHEMA_VERSION = 1 as const;
 export const MOUSER_ENRICHMENT_SCHEMA_VERSION = 2 as const;
 export const INVENTORY_REORGANIZATION_SCHEMA_VERSION = 1 as const;
+export const LOCATION_STRUCTURE_SCHEMA_VERSION = 1 as const;
 export const MAX_REORGANIZATION_MODELS_PER_BATCH = 40;
 export const MAX_REORGANIZATION_CATEGORIES = 20;
 export const MAX_REORGANIZATION_LOCATIONS = 20;
@@ -276,10 +277,32 @@ const reorganizationRequestSchema = z
   })
   .strict();
 
+const locationStructureRequestSchema = z
+  .object({
+    mode: z.literal("LOCATION_STRUCTURE"),
+    schemaVersion: z.literal(LOCATION_STRUCTURE_SCHEMA_VERSION),
+    instruction: z.string().trim().min(1).max(2_000),
+    existingLocations: z
+      .array(
+        z
+          .object({
+            id: identifierSchema,
+            name: z.string().trim().min(1).max(300),
+            parentId: identifierSchema.nullable(),
+            path: z.string().trim().min(1).max(1_000),
+            description: z.string().max(500).nullable(),
+          })
+          .strict()
+      )
+      .max(1_000),
+  })
+  .strict();
+
 export const importHelperRequestSchema = z.union([
   genericImportHelperRequestSchema,
   mouserEnrichmentRequestSchema,
   reorganizationRequestSchema,
+  locationStructureRequestSchema,
 ]);
 
 const reorganizationResponseSchema = z
@@ -300,6 +323,27 @@ const reorganizationResponseSchema = z
           .strict()
       )
       .max(MAX_REORGANIZATION_MODELS_PER_BATCH),
+  })
+  .strict();
+
+const locationStructureResponseSchema = z
+  .object({
+    mode: z.literal("LOCATION_STRUCTURE"),
+    schemaVersion: z.literal(LOCATION_STRUCTURE_SCHEMA_VERSION),
+    operations: z
+      .array(
+        z
+          .object({
+            action: z.literal("CREATE_LOCATION"),
+            temporaryId: identifierSchema,
+            parentLocationId: identifierSchema.nullable(),
+            parentTemporaryId: identifierSchema.nullable(),
+            name: z.string().trim().min(1).max(300),
+            description: z.string().trim().max(500).nullable(),
+          })
+          .strict()
+      )
+      .max(100),
   })
   .strict();
 
@@ -439,7 +483,8 @@ export type MouserEnrichmentResponse = z.infer<
 export type AnyImportHelperResponse =
   | ImportHelperResponse
   | MouserEnrichmentResponse
-  | z.infer<typeof reorganizationResponseSchema>;
+  | z.infer<typeof reorganizationResponseSchema>
+  | z.infer<typeof locationStructureResponseSchema>;
 export type ImportHelperCandidateRow = ImportHelperResponse["rows"][number];
 export type MouserEnrichmentRow = MouserEnrichmentResponse["rows"][number];
 
@@ -660,6 +705,43 @@ export function validateImportHelperResponse(
   }
   const request = requestResult.data;
   if ("mode" in request) {
+    if (request.mode === "LOCATION_STRUCTURE") {
+      const parsed = locationStructureResponseSchema.safeParse(response);
+      if (!parsed.success)
+        throw new ImportHelperValidationError(
+          "The helper returned a malformed location structure proposal."
+        );
+      const locationIds = new Set(
+        request.existingLocations.map(({ id }) => id)
+      );
+      const temporaryIds = new Set<string>();
+      for (const operation of parsed.data.operations) {
+        if (temporaryIds.has(operation.temporaryId))
+          throw new ImportHelperValidationError(
+            "The helper returned duplicate temporary location IDs."
+          );
+        if (
+          operation.parentLocationId &&
+          !locationIds.has(operation.parentLocationId)
+        )
+          throw new ImportHelperValidationError(
+            "The helper referenced a location outside the supplied organization hierarchy."
+          );
+        if (
+          operation.parentTemporaryId &&
+          !temporaryIds.has(operation.parentTemporaryId)
+        )
+          throw new ImportHelperValidationError(
+            "The helper returned a child before its proposed parent."
+          );
+        if (operation.parentLocationId && operation.parentTemporaryId)
+          throw new ImportHelperValidationError(
+            "A location may have only one parent reference."
+          );
+        temporaryIds.add(operation.temporaryId);
+      }
+      return parsed.data;
+    }
     if (request.mode === "INVENTORY_REORGANIZATION") {
       const parsed = reorganizationResponseSchema.safeParse(response);
       if (!parsed.success)

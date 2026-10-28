@@ -172,6 +172,60 @@ function expectDiagnostic(
 }
 
 describe("import helper contract", () => {
+  it("accepts only bounded create-location operations with allowlisted parents", () => {
+    const request = importHelperRequestSchema.parse({
+      mode: "LOCATION_STRUCTURE",
+      schemaVersion: 1,
+      instruction: "Create a section",
+      existingLocations: [
+        {
+          id: "room-1",
+          name: "Storage Room",
+          parentId: null,
+          path: "Storage Room",
+          description: null,
+        },
+      ],
+    });
+    const valid = {
+      mode: "LOCATION_STRUCTURE",
+      schemaVersion: 1,
+      operations: [
+        {
+          action: "CREATE_LOCATION",
+          temporaryId: "section-a",
+          parentLocationId: "room-1",
+          parentTemporaryId: null,
+          name: "Section A",
+          description: null,
+        },
+      ],
+    };
+    expect(validateImportHelperResponse(valid, request)).toMatchObject({
+      operations: [{ action: "CREATE_LOCATION", parentLocationId: "room-1" }],
+    });
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          ...valid,
+          operations: [
+            { ...valid.operations[0], parentLocationId: "other-org-location" },
+          ],
+        },
+        request
+      )
+    ).toThrow(/outside the supplied organization hierarchy/);
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          ...valid,
+          operations: [{ ...valid.operations[0], action: "DELETE_LOCATION" }],
+        },
+        request
+      )
+    ).toThrow();
+  });
+
   it("bounds organization context and rejects model IDs outside the supplied batch", () => {
     const request = {
       mode: "INVENTORY_REORGANIZATION",
