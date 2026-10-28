@@ -412,6 +412,18 @@ export const ORGANIZATION_PLAN_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
                 },
                 ["name"]
               ),
+              childRole: {
+                type: "string",
+                enum: [
+                  "ROOM",
+                  "SECTION",
+                  "SHELF",
+                  "CONTAINER",
+                  "DRAWER",
+                  "CABINET",
+                  "UNKNOWN",
+                ],
+              },
               childTypeHint: {
                 type: "string",
                 enum: [
@@ -448,7 +460,7 @@ export const ORGANIZATION_PLAN_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
                 ],
               },
             },
-            ["operation", "targetRef", "childTypeHint", "quantity"]
+            ["operation", "targetRef", "childRole", "quantity"]
           ),
           strictObject(
             {
@@ -597,7 +609,7 @@ export function buildClaudeImportPrompt(
   if ("mode" in request) {
     if (request.mode === "ORGANIZATION_PLAN") {
       return [
-        "Translate the staff instruction into a small constrained organization plan. You interpret structure language only; do not execute operations and do not invent database IDs. Preserve the instruction's shared ancestor in scope.ancestorRef, such as Storage Room. All target references inherit that scope; do not repeat it on each operation. Use semantic references matching supplied location names, optionally with ancestorName for narrower context. Select only operations supported by the supplied JSON schema. For deletion, describe intent and quantity only; Shelf independently selects exact empty locations and blocks occupied ones. If the instruction is mixed or unsupported, return the corresponding domain and no speculative operations.",
+        "Translate the staff instruction into a small constrained organization plan. You interpret structure language only; do not execute operations and do not invent database IDs. Preserve the instruction's shared ancestor in scope.ancestorRef, such as Storage Room. All target references inherit that scope; do not repeat it on each operation. Use semantic references matching supplied location names, optionally with ancestorName for narrower context. Select only operations supported by the supplied JSON schema. For deletion, childRole is a hard constraint on final targets, separate from targetRef (the scope). Never substitute shelves, sections, parents, or other roles when the requested role is missing. Describe intent and quantity only; Shelf independently selects exact empty locations and blocks occupied ones. If the instruction is mixed or unsupported, return the corresponding domain and no speculative operations.",
         "=== ORGANIZATION PLAN REQUEST AND BOUNDED LOCATION CONTEXT ===",
         JSON.stringify(request),
       ].join("\n\n");

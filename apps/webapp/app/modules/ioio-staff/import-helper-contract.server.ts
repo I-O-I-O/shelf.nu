@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { locationRoleSchema } from "./location-role.server";
 
 const identifierSchema = z.string().trim().min(1).max(200);
 const confidenceSchema = z.number().finite().min(0).max(1);
@@ -356,17 +357,20 @@ const organizationOperationSchema = z.union([
     .object({
       operation: z.literal("DELETE_CHILDREN"),
       targetRef: semanticLocationRefSchema,
-      childTypeHint: z.enum([
-        "room",
-        "section",
-        "shelf",
-        "container",
-        "drawer",
-        "cabinet",
-      ]),
+      childRole: locationRoleSchema.optional(),
+      childTypeHint: z
+        .enum(["room", "section", "shelf", "container", "drawer", "cabinet"])
+        .optional(),
       quantity: organizationQuantitySchema,
     })
-    .strict(),
+    .strict()
+    .refine(
+      (operation) =>
+        Boolean(operation.childRole || operation.childTypeHint) &&
+        (!operation.childRole ||
+          !operation.childTypeHint ||
+          operation.childRole === operation.childTypeHint.toUpperCase())
+    ),
   z
     .object({
       operation: z.literal("RENAME_LOCATION"),

@@ -27,6 +27,7 @@ import {
   buildLocationStructureProposal,
   classifyOrganizationRequest,
   createLocationStructure,
+  deleteApprovedStructureContainers,
   type OrganizationLocation,
   parseDeterministicBulkLocationStructure,
   parseDeterministicLocationStructure,
@@ -204,6 +205,191 @@ describe("location structure planning", () => {
     expect(mocks.deleteLocation).not.toHaveBeenCalled();
   });
 
+  it.each([0, 2, 5])(
+    "never substitutes shelves for %i container targets",
+    async (count) => {
+      const locations: OrganizationLocation[] = [
+        { id: "room", name: "Storage Room", parentId: null, description: null },
+        {
+          id: "section",
+          name: "Section A",
+          parentId: "room",
+          description: null,
+        },
+        {
+          id: "shelf",
+          name: "Shelf A1",
+          parentId: "section",
+          description: null,
+        },
+        {
+          id: "shelf-2",
+          name: "Shelf A2",
+          parentId: "section",
+          description: null,
+        },
+        {
+          id: "unknown",
+          name: "Unlabelled bin",
+          parentId: "shelf",
+          description: "container",
+        },
+        {
+          id: "drawer",
+          name: "Drawer A1-1",
+          parentId: "shelf",
+          description: null,
+        },
+        ...Array.from({ length: count }, (_, n) => ({
+          id: `c${n}`,
+          name: `Container A1-${n + 1}`,
+          parentId: "shelf",
+          description: null,
+        })),
+      ];
+      mocks.findMany.mockResolvedValue(locations);
+      const response = {
+        mode: "ORGANIZATION_PLAN",
+        schemaVersion: 1,
+        domain: "LOCATION_STRUCTURE",
+        scope: { ancestorRef: { name: "Storage Room" } },
+        operations: [
+          {
+            operation: "DELETE_CHILDREN",
+            targetRef: { name: "Section A" },
+            childRole: "CONTAINER",
+            quantity: { mode: "ALL" },
+          },
+        ],
+      };
+      mocks.requestHelper.mockResolvedValue({
+        status: "ready",
+        proposal: response,
+      });
+      const instruction = "remove all containers in Section A";
+      const result = await buildLocationStructureProposal({
+        organizationId: "org",
+        instruction,
+      });
+      expect(result.deletionReview?.sections[0]?.total).toBe(count);
+      expect(result.deletionReview?.totalSelected).toBe(count);
+      expect(
+        result.deletionReview?.sections[0]?.selected.every(
+          ({ name, requestedRole }) =>
+            name.startsWith("Container ") && requestedRole === "CONTAINER"
+        )
+      ).toBe(true);
+      response.operations.push({
+        ...response.operations[0]!,
+        childRole: "DRAWER",
+      });
+      const mixedRoles = await buildLocationStructureProposal({
+        organizationId: "org",
+        instruction: "remove all containers and drawers in Section A",
+      });
+      expect(
+        mixedRoles.deletionReview?.sections.map(({ total }) => total)
+      ).toEqual([count, 1]);
+      response.operations.pop();
+      response.operations[0]!.quantity.mode = "FRACTION";
+      Object.assign(response.operations[0]!.quantity, {
+        numerator: 1,
+        denominator: 2,
+      });
+      const half = await buildLocationStructureProposal({
+        organizationId: "org",
+        instruction: "remove half of the containers in Section A",
+      });
+      expect(half.deletionReview?.totalSelected).toBe(Math.floor(count / 2));
+      for (const role of ["DRAWER", "SHELF", "SECTION", "ROOM", "UNKNOWN"]) {
+        response.operations[0]!.childRole = role;
+        const rejected = await buildLocationStructureProposal({
+          organizationId: "org",
+          instruction,
+        });
+        expect(rejected.deletionReview).toBeUndefined();
+        expect(rejected.nodes).toEqual([]);
+      }
+      response.operations[0]!.childRole = "CONTAINER";
+      response.operations[0]!.targetRef.name = "Shelf A1";
+      const wrongScope = await buildLocationStructureProposal({
+        organizationId: "org",
+        instruction,
+      });
+      expect(wrongScope.unresolvedParent).toBe(true);
+      expect(wrongScope.deletionReview).toBeUndefined();
+      expect(mocks.deleteLocation).not.toHaveBeenCalled();
+    }
+  );
+
+  it("applies only an unchanged reviewed container and blocks a changed scope", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "section", name: "Section A", parentId: null, description: null },
+      { id: "shelf", name: "Shelf A1", parentId: "section", description: null },
+      {
+        id: "target",
+        name: "Container A1-1",
+        parentId: "shelf",
+        description: null,
+      },
+    ]);
+    mocks.deleteLocation.mockResolvedValue({ id: "target" });
+    const target = {
+      id: "target",
+      requestedRole: "CONTAINER",
+      sectionId: "section",
+      shelfId: "shelf",
+      path: "Section A / Shelf A1 / Container A1-1",
+    };
+    expect(
+      await deleteApprovedStructureContainers({
+        organizationId: "org",
+        targets: [target],
+      })
+    ).toEqual([{ id: "target", status: "DELETED" }]);
+    expect(mocks.deleteLocation).toHaveBeenCalledWith({
+      id: "target",
+      organizationId: "org",
+    });
+    mocks.deleteLocation.mockClear();
+    const blocked = await deleteApprovedStructureContainers({
+      organizationId: "org",
+      targets: [{ ...target, sectionId: "another-section" }],
+    });
+    expect(blocked[0]?.status).toBe("FAILED");
+    expect(mocks.deleteLocation).not.toHaveBeenCalled();
+  });
+
+  it.each(["Drawer A1-1", "Shelf A1", "Unlabelled bin"])(
+    "blocks Apply when a container's role changed to %s",
+    async (name) => {
+      mocks.findMany.mockResolvedValue([
+        { id: "section", name: "Section A", parentId: null, description: null },
+        {
+          id: "shelf",
+          name: "Shelf A1",
+          parentId: "section",
+          description: null,
+        },
+        { id: "target", name, parentId: "shelf", description: null },
+      ]);
+      const result = await deleteApprovedStructureContainers({
+        organizationId: "org",
+        targets: [
+          {
+            id: "target",
+            requestedRole: "CONTAINER",
+            sectionId: "section",
+            shelfId: "shelf",
+            path: "Section A / Shelf A1 / Container A1-1",
+          },
+        ],
+      });
+      expect(result[0]?.status).toBe("FAILED");
+      expect(mocks.deleteLocation).not.toHaveBeenCalled();
+    }
+  );
+
   it.each(["PLAN", "FIRST_OPERATION", "INSTRUCTION"])(
     "inherits ancestor scope from %s without matching sections in another root",
     async (source) => {
@@ -286,6 +472,14 @@ describe("location structure planning", () => {
         )
       ).toEqual([3, 1]);
       expect(JSON.stringify(result.deletionReview)).not.toContain("IOIO Lab");
+      expect(
+        result.deletionReview?.sections
+          .flatMap(({ selected }) => selected)
+          .every(
+            ({ name, requestedRole }) =>
+              name.startsWith("Container ") && requestedRole === "CONTAINER"
+          )
+      ).toBe(true);
       expect(mocks.deleteLocation).not.toHaveBeenCalled();
       for (const variant of [
         [

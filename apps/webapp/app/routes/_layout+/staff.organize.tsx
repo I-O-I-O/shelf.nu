@@ -76,18 +76,13 @@ export async function action({ context, request }: ActionFunctionArgs) {
         entity: PermissionEntity.location,
         action: PermissionAction.delete,
       });
-      const rawIds = form.get("locationIds");
+      const rawIds = form.get("targets");
       if (typeof rawIds !== "string" || rawIds.length > 20_000)
         throw new Error("Reload the deletion proposal and review it again.");
-      const ids: unknown = JSON.parse(rawIds);
-      if (
-        !Array.isArray(ids) ||
-        ids.some((id) => typeof id !== "string" || id.length > 200)
-      )
-        throw new Error("The selected locations are invalid.");
+      const targets: unknown = JSON.parse(rawIds);
       const results = await deleteApprovedStructureContainers({
         organizationId,
-        locationIds: ids,
+        targets,
       });
       return payload({ kind: "structure-deleted" as const, results });
     }
@@ -372,10 +367,29 @@ export default function StaffOrganizePage() {
                     className="mt-4 rounded border p-3"
                   >
                     <h3 className="font-semibold">
-                      {section.sectionName} · {section.total} containers found ·{" "}
-                      {section.selected.length} selected ·{" "}
+                      {section.sectionName} · {section.total}{" "}
+                      {section.requestedRole === "DRAWER"
+                        ? "drawers"
+                        : "containers"}{" "}
+                      found · {section.selected.length} selected ·{" "}
                       {section.blocked.length} blocked
                     </h3>
+                    <p className="mt-2 text-sm">
+                      Requested: Remove{" "}
+                      {section.requestedQuantity === "ALL"
+                        ? "all"
+                        : "mode" in section.requestedQuantity
+                        ? section.requestedQuantity.count
+                        : `${section.requestedQuantity.numerator}/${section.requestedQuantity.denominator}`}{" "}
+                      {section.requestedRole === "DRAWER"
+                        ? "drawers"
+                        : "containers"}
+                      . Eligible empty: {section.total - section.blocked.length}
+                      .
+                    </p>
+                    {section.total === 0 && (
+                      <p className="mt-2 text-sm">Nothing to remove.</p>
+                    )}
                     {section.selected.length > 0 && (
                       <ul className="mt-2 text-sm">
                         {section.selected.map((item) => (
@@ -404,10 +418,25 @@ export default function StaffOrganizePage() {
                   />
                   <input
                     type="hidden"
-                    name="locationIds"
+                    name="targets"
                     value={JSON.stringify(
                       structureProposal.deletionReview.sections.flatMap(
-                        (section) => section.selected.map(({ id }) => id)
+                        (section) =>
+                          section.selected.map(
+                            ({
+                              id,
+                              requestedRole,
+                              sectionId,
+                              shelfId,
+                              path,
+                            }) => ({
+                              id,
+                              requestedRole,
+                              sectionId,
+                              shelfId,
+                              path,
+                            })
+                          )
                       )
                     )}
                   />

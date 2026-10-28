@@ -344,6 +344,29 @@ describe("import helper contract", () => {
     expect(validateImportHelperResponse(response, request)).toMatchObject({
       domain: "LOCATION_STRUCTURE",
     });
+    const typedOperation = {
+      operation: "DELETE_CHILDREN",
+      targetRef: { name: "Section A" },
+      childRole: "CONTAINER",
+      quantity: { mode: "ALL" },
+    };
+    expect(
+      validateImportHelperResponse(
+        { ...response, operations: [typedOperation] },
+        request
+      )
+    ).toMatchObject({ operations: [{ childRole: "CONTAINER" }] });
+    for (const operation of [
+      { ...typedOperation, childRole: "STORAGE_BIN" },
+      { ...typedOperation, childTypeHint: "shelf" },
+    ])
+      expect(() =>
+        validateImportHelperResponse(
+          { ...response, operations: [operation] },
+          request
+        )
+      ).toThrow(/malformed organization plan/);
+
     expect(
       validateImportHelperResponse(
         {

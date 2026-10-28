@@ -8,6 +8,7 @@ import {
 import { createLocation } from "~/modules/location/service.server";
 import { deleteLocation } from "~/modules/location/service.server";
 import { Logger } from "~/utils/logger";
+import { inferLocationRole, type LocationRole } from "./location-role.server";
 
 export type OrganizationLocation = {
   id: string;
@@ -85,6 +86,7 @@ export type LocationStructureProposal = {
     parentPath: string | null;
     sections: Array<{
       sectionName: string;
+      requestedRole: LocationRole;
       requestedQuantity:
         | "ALL"
         | { mode: "COUNT"; count: number }
@@ -95,12 +97,18 @@ export type LocationStructureProposal = {
         name: string;
         path: string;
         reason: string;
+        requestedRole: LocationRole;
+        sectionId: string;
+        shelfId: string;
       }>;
       blocked: Array<{
         id: string;
         name: string;
         path: string;
         reason: string;
+        requestedRole: LocationRole;
+        sectionId: string;
+        shelfId: string;
       }>;
     }>;
     totalSelected: number;
@@ -1630,6 +1638,14 @@ export async function buildLocationStructureProposal(input: {
         "Could not interpret the structure request. No inventory analysis was performed.",
     };
   }
+  // Destructive leaf roles must also be explicitly present in the staff request.
+  // A helper cannot turn a container-only request into drawer deletion.
+  const requestedLeafRoles = new Set(
+    [...input.instruction.matchAll(/\b(containers?|drawers?)\b/gi)].map(
+      ([word]) =>
+        word.toLowerCase().startsWith("container") ? "CONTAINER" : "DRAWER"
+    )
+  );
   const allCreateOperations = result.proposal.operations.every(
     (operation) => operation.operation === "CREATE_LOCATION"
   );
@@ -1638,13 +1654,24 @@ export async function buildLocationStructureProposal(input: {
   );
   if (
     !result.proposal.operations.length ||
+    result.proposal.operations.some(
+      (operation) =>
+        operation.operation === "DELETE_CHILDREN" &&
+        !requestedLeafRoles.has(
+          (operation.childRole ?? operation.childTypeHint?.toUpperCase()) as
+            | "CONTAINER"
+            | "DRAWER"
+        )
+    ) ||
     (!allCreateOperations && !allDeleteChildOperations) ||
     (allDeleteChildOperations &&
       result.proposal.operations.some(
         (operation) =>
           operation.operation === "DELETE_CHILDREN" &&
-          operation.childTypeHint !== "container" &&
-          operation.childTypeHint !== "drawer"
+          (operation.childRole ?? operation.childTypeHint?.toUpperCase()) !==
+            "CONTAINER" &&
+          (operation.childRole ?? operation.childTypeHint?.toUpperCase()) !==
+            "DRAWER"
       ))
   ) {
     return {
@@ -1819,7 +1846,8 @@ export async function buildLocationStructureProposal(input: {
       }
       const matching = candidates.filter(
         (location) =>
-          normalizeName(location.name) === normalizeName(op.targetRef.name)
+          normalizeName(location.name) === normalizeName(op.targetRef.name) &&
+          inferLocationRole(location) === "SECTION"
       );
       return { op, matching };
     });
@@ -1832,19 +1860,17 @@ export async function buildLocationStructureProposal(input: {
       (location) =>
         location.parentId &&
         sectionIds.includes(location.parentId) &&
-        /^shelf\b/i.test(location.name)
+        inferLocationRole(location) === "SHELF"
     );
     const shelfIds = shelves.map(({ id }) => id);
     const containers = locations.filter(
       (location) =>
         location.parentId &&
         shelfIds.includes(location.parentId) &&
-        deletionOps.some((op) =>
-          op.childTypeHint === "container"
-            ? /^container\b/i.test(location.name)
-            : op.childTypeHint === "drawer"
-            ? /^drawer\b/i.test(location.name)
-            : false
+        deletionOps.some(
+          (op) =>
+            inferLocationRole(location) ===
+            (op.childRole ?? op.childTypeHint?.toUpperCase())
         )
     );
     const candidateIds = containers.map(({ id }) => id);
@@ -1873,11 +1899,15 @@ export async function buildLocationStructureProposal(input: {
     });
     const sections = resolvedOps.flatMap(({ op, matching }) =>
       matching.map((section) => {
-        const sectionContainers = containers.filter((container) =>
-          shelves.some(
-            (shelf) =>
-              shelf.id === container.parentId && shelf.parentId === section.id
-          )
+        const requestedRole = (op.childRole ??
+          op.childTypeHint!.toUpperCase()) as LocationRole;
+        const sectionContainers = containers.filter(
+          (container) =>
+            inferLocationRole(container) === requestedRole &&
+            shelves.some(
+              (shelf) =>
+                shelf.id === container.parentId && shelf.parentId === section.id
+            )
         );
         const ordered = sectionContainers
           .map((location) => {
@@ -1933,6 +1963,9 @@ export async function buildLocationStructureProposal(input: {
             id: location.id,
             name: location.name,
             path: locationPath(location.id),
+            requestedRole,
+            sectionId: section.id,
+            shelfId: location.parentId!,
             reason,
           }));
         const blocked = ordered
@@ -1941,10 +1974,14 @@ export async function buildLocationStructureProposal(input: {
             id: location.id,
             name: location.name,
             path: locationPath(location.id),
+            requestedRole,
+            sectionId: section.id,
+            shelfId: location.parentId!,
             reason: `BLOCKED — ${reason}`,
           }));
         return {
           sectionName: section.name,
+          requestedRole,
           requestedQuantity: quantity,
           total,
           selected,
@@ -2260,49 +2297,71 @@ export async function createLocationStructure(input: {
   };
 }
 
+const deletionTargetsSchema = z
+  .array(
+    z
+      .object({
+        id: z.string().min(1).max(200),
+        requestedRole: z.enum(["CONTAINER", "DRAWER"]),
+        sectionId: z.string().min(1).max(200),
+        shelfId: z.string().min(1).max(200),
+        path: z.string().min(1).max(2000),
+      })
+      .strict()
+  )
+  .max(100);
+
 export async function deleteApprovedStructureContainers(input: {
   organizationId: string;
-  locationIds: string[];
+  targets: unknown;
 }) {
-  const ids = [...new Set(input.locationIds)];
-  if (ids.length > 100)
-    throw new Error("Review at most 100 locations per action.");
+  const targets = deletionTargetsSchema.parse(input.targets);
+  if (new Set(targets.map(({ id }) => id)).size !== targets.length)
+    throw new Error("Duplicate deletion targets are not allowed.");
+  // Fresh canonical state: role, scope, and reviewed path must still agree.
   const locations = await db.location.findMany({
     where: { organizationId: input.organizationId },
     select: { id: true, name: true, parentId: true, description: true },
   });
-  const byId = new Map(locations.map((location) => [location.id, location]));
-  const eligible = ids.filter((id) => {
-    const container = byId.get(id);
-    const shelf = container?.parentId
-      ? byId.get(container.parentId)
-      : undefined;
-    const section = shelf?.parentId ? byId.get(shelf.parentId) : undefined;
-    return Boolean(
-      container &&
-        /^(container|drawer)\b/i.test(container.name) &&
-        shelf &&
-        /^shelf\b/i.test(shelf.name) &&
-        section &&
-        /^section\b/i.test(section.name)
-    );
-  });
-  if (eligible.length !== ids.length)
-    throw new Error(
-      "One or more selected locations are no longer valid containers in this organization."
-    );
+  const { byId, path } = makePaths(locations);
   const results: Array<{
     id: string;
     status: "DELETED" | "FAILED";
     error?: string;
   }> = [];
-  for (const id of eligible) {
+  for (const target of targets) {
+    const location = byId.get(target.id);
+    const shelf = byId.get(target.shelfId);
+    const section = byId.get(target.sectionId);
+    if (
+      !location ||
+      !shelf ||
+      !section ||
+      inferLocationRole(location) !== target.requestedRole ||
+      inferLocationRole(shelf) !== "SHELF" ||
+      inferLocationRole(section) !== "SECTION" ||
+      location.parentId !== shelf.id ||
+      shelf.parentId !== section.id ||
+      path(location.id) !== target.path
+    ) {
+      results.push({
+        id: target.id,
+        status: "FAILED",
+        error:
+          "Blocked: role, organization, or reviewed scope changed. Analyze again.",
+      });
+      continue;
+    }
     try {
-      await deleteLocation({ id, organizationId: input.organizationId });
-      results.push({ id, status: "DELETED" });
+      // Canonical service locks and refuses assets, kits, or child locations.
+      await deleteLocation({
+        id: target.id,
+        organizationId: input.organizationId,
+      });
+      results.push({ id: target.id, status: "DELETED" });
     } catch (cause) {
       results.push({
-        id,
+        id: target.id,
         status: "FAILED",
         error:
           cause instanceof Error

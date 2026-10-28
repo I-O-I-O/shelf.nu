@@ -150,6 +150,46 @@ describe("staff organize experience", () => {
     expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
   });
 
+  it("shows nothing to remove and disables Apply for a zero-container preview", async () => {
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction: "remove all containers in Section A",
+      parentName: "Storage Room",
+      parentLocationId: null,
+      parentCandidates: [],
+      unresolvedParent: false,
+      nodes: [],
+      source: "AI",
+      deletionReview: {
+        parentPath: "Storage Room",
+        totalSelected: 0,
+        sections: [
+          {
+            sectionName: "Section A",
+            requestedRole: "CONTAINER",
+            requestedQuantity: "ALL",
+            total: 0,
+            selected: [],
+            blocked: [],
+          },
+        ],
+      },
+    });
+    renderOrganizePage();
+    const user = userEvent.setup();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "remove all containers in Section A"
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(await screen.findByText("Nothing to remove.")).toBeInTheDocument();
+    expect(screen.getByText(/0 containers found/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
   it("routes container removal to structure review and never retrieves inventory", async () => {
     mocks.buildLocationStructureProposal.mockResolvedValue({
       mode: "LOCATION_STRUCTURE",
