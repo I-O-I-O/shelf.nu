@@ -842,6 +842,33 @@ function resolveParent(
   };
 }
 
+/** Resolve ancestry by canonical parent links, never by path substring. */
+function scopedLocations(
+  locations: OrganizationLocation[],
+  ancestorId: string
+) {
+  const children = new Map<string, OrganizationLocation[]>();
+  for (const location of locations) {
+    if (location.parentId)
+      children.set(location.parentId, [
+        ...(children.get(location.parentId) ?? []),
+        location,
+      ]);
+  }
+  const descendants: OrganizationLocation[] = [];
+  const pending = [ancestorId];
+  const seen = new Set(pending);
+  while (pending.length) {
+    for (const child of children.get(pending.pop()!) ?? []) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      descendants.push(child);
+      pending.push(child.id);
+    }
+  }
+  return descendants;
+}
+
 function resolveDuplicates(
   locations: OrganizationLocation[],
   descriptors: ParsedStructure["descriptors"],
@@ -1748,15 +1775,51 @@ export async function buildLocationStructureProposal(input: {
         location,
       ]);
     }
+    // Legacy plans may put shared scope only on their first reference. Keep it
+    // for subsequent operations, as well as accepting the explicit plan scope.
+    const mentionedRoots = locations.filter((location) => {
+      if (location.parentId) return false;
+      const name = normalizeName(
+        location.name.replace(/\s*-\s*[a-z]\d+$/i, "")
+      );
+      return ` ${normalizeName(input.instruction)} `.includes(` ${name} `);
+    });
+    const inheritedAncestor =
+      result.proposal.scope?.ancestorRef.name ??
+      deletionOps.find((op) => op.targetRef.ancestorName)?.targetRef
+        .ancestorName ??
+      (mentionedRoots.length === 1 ? mentionedRoots[0]!.name : undefined);
+    const scope = inheritedAncestor
+      ? resolveParent(locations, inheritedAncestor, input.selectedParentId)
+      : null;
+    const scopeTree = scope?.id
+      ? scopedLocations(locations, scope.id)
+      : scope
+      ? []
+      : locations;
     const resolvedOps = deletionOps.map((op) => {
-      const targetName = normalizeName(op.targetRef.name);
-      const matching = locations.filter(
+      let candidates = scopeTree;
+      if (op.targetRef.ancestorName) {
+        const localAncestor = resolveParent(
+          scope?.id
+            ? locations.filter(
+                (location) =>
+                  location.id === scope.id ||
+                  scopeTree.some(({ id }) => id === location.id)
+              )
+            : locations,
+          op.targetRef.ancestorName
+        );
+        const descendantIds = new Set(
+          localAncestor.id
+            ? scopedLocations(locations, localAncestor.id).map(({ id }) => id)
+            : []
+        );
+        candidates = candidates.filter(({ id }) => descendantIds.has(id));
+      }
+      const matching = candidates.filter(
         (location) =>
-          normalizeName(location.name) === targetName &&
-          (!op.targetRef.ancestorName ||
-            normalizeName(path(location.id)).includes(
-              normalizeName(op.targetRef.ancestorName)
-            ))
+          normalizeName(location.name) === normalizeName(op.targetRef.name)
       );
       return { op, matching };
     });
@@ -1899,7 +1962,11 @@ export async function buildLocationStructureProposal(input: {
         parentName: null,
         parentLocationId: null,
         parentCandidates: locations
-          .filter((location) => /section/i.test(location.name))
+          .filter(
+            (location) =>
+              scopeTree.some(({ id }) => id === location.id) &&
+              /section/i.test(location.name)
+          )
           .slice(0, 20)
           .map((location) => ({
             id: location.id,
@@ -1927,16 +1994,7 @@ export async function buildLocationStructureProposal(input: {
       nodes: [],
       source: "AI" as const,
       deletionReview: {
-        parentPath: (() => {
-          const ancestor = deletionOps[0]?.targetRef.ancestorName;
-          const parent = ancestor
-            ? locations.find(
-                (location) =>
-                  normalizeName(location.name) === normalizeName(ancestor)
-              )
-            : undefined;
-          return parent ? locationPath(parent.id) : null;
-        })(),
+        parentPath: scope?.id ? locationPath(scope.id) : null,
         sections,
         totalSelected: sections.reduce(
           (sum, section) => sum + section.selected.length,

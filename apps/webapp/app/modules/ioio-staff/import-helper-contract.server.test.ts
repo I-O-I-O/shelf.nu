@@ -344,6 +344,21 @@ describe("import helper contract", () => {
     expect(validateImportHelperResponse(response, request)).toMatchObject({
       domain: "LOCATION_STRUCTURE",
     });
+    expect(
+      validateImportHelperResponse(
+        {
+          ...response,
+          scope: { ancestorRef: { name: "Storage Room" } },
+          operations: [
+            { ...response.operations[0], targetRef: { name: "Section A" } },
+          ],
+        },
+        request
+      )
+    ).toMatchObject({
+      scope: { ancestorRef: { name: "Storage Room" } },
+      operations: [{ targetRef: { name: "Section A" } }],
+    });
     expect(() =>
       validateImportHelperResponse(
         {

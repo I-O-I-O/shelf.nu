@@ -427,6 +427,10 @@ const organizationPlanResponseSchema = z
     mode: z.literal("ORGANIZATION_PLAN"),
     schemaVersion: z.literal(ORGANIZATION_PLAN_SCHEMA_VERSION),
     domain: z.enum(["LOCATION_STRUCTURE", "MIXED_OR_ADVISORY", "UNSUPPORTED"]),
+    scope: z
+      .object({ ancestorRef: semanticLocationRefSchema })
+      .strict()
+      .optional(),
     operations: z.array(organizationOperationSchema).max(100),
   })
   .strict();
@@ -847,6 +851,19 @@ export function validateImportHelperResponse(
       if (!parsed.success)
         throw new ImportHelperValidationError(
           "The helper returned a malformed organization plan."
+        );
+      if (
+        parsed.data.scope &&
+        !request.locationContext.some(({ name, path }) =>
+          [name, path].some((value) =>
+            value
+              .toLocaleLowerCase()
+              .includes(parsed.data.scope!.ancestorRef.name.toLocaleLowerCase())
+          )
+        )
+      )
+        throw new ImportHelperValidationError(
+          "The helper scope is outside the supplied organization context."
         );
       const names = new Set(
         request.locationContext.map(({ name }) => name.toLocaleLowerCase())

@@ -204,6 +204,116 @@ describe("location structure planning", () => {
     expect(mocks.deleteLocation).not.toHaveBeenCalled();
   });
 
+  it.each(["PLAN", "FIRST_OPERATION", "INSTRUCTION"])(
+    "inherits ancestor scope from %s without matching sections in another root",
+    async (source) => {
+      const locations: OrganizationLocation[] = [
+        {
+          id: "lab",
+          name: "IOIO Lab - B477",
+          parentId: null,
+          description: null,
+        },
+        {
+          id: "storage",
+          name: "Storage Room - B442",
+          parentId: null,
+          description: null,
+        },
+        ...["lab", "storage"].flatMap((root) =>
+          ["A", "B", "C"].map((letter) => ({
+            id: `${root}-${letter}`,
+            name:
+              root === "lab" && letter === "A"
+                ? "Seciton A"
+                : `Section ${letter}`,
+            parentId: root,
+            description: null,
+          }))
+        ),
+        ...["A", "B"].flatMap((letter) => [
+          {
+            id: `shelf-${letter}`,
+            name: `Shelf ${letter}1`,
+            parentId: `storage-${letter}`,
+            description: null,
+          },
+          ...[1, 2, 3].map((n) => ({
+            id: `container-${letter}-${n}`,
+            name: `Container ${letter}1-${n}`,
+            parentId: `shelf-${letter}`,
+            description: null,
+          })),
+        ]),
+      ];
+      mocks.findMany.mockResolvedValue(locations);
+      mocks.requestHelper.mockResolvedValue({
+        status: "ready",
+        proposal: {
+          mode: "ORGANIZATION_PLAN",
+          schemaVersion: 1,
+          domain: "LOCATION_STRUCTURE",
+          ...(source === "PLAN"
+            ? { scope: { ancestorRef: { name: "Storage Room" } } }
+            : {}),
+          operations: ["A", "B"].map((letter) => ({
+            operation: "DELETE_CHILDREN",
+            targetRef: {
+              name: `Section ${letter}`,
+              ...(source === "FIRST_OPERATION" && letter === "A"
+                ? { ancestorName: "Storage Room" }
+                : {}),
+            },
+            childTypeHint: "container",
+            quantity:
+              letter === "A"
+                ? { mode: "ALL" }
+                : { mode: "FRACTION", numerator: 1, denominator: 2 },
+          })),
+        },
+      });
+      const instruction =
+        "in storage room in section A remove all containers and in section B remove only half of them";
+      const result = await buildLocationStructureProposal({
+        organizationId: "org-1",
+        instruction,
+      });
+      expect(result.unresolvedParent).toBe(false);
+      expect(result.deletionReview?.parentPath).toBe("Storage Room - B442");
+      expect(
+        result.deletionReview?.sections.map(
+          (section) => section.selected.length
+        )
+      ).toEqual([3, 1]);
+      expect(JSON.stringify(result.deletionReview)).not.toContain("IOIO Lab");
+      expect(mocks.deleteLocation).not.toHaveBeenCalled();
+      for (const variant of [
+        [
+          ...locations,
+          {
+            id: "duplicate",
+            name: "Section A",
+            parentId: "storage",
+            description: null,
+          },
+        ],
+        locations.filter(({ id }) => id !== "storage-A"),
+      ]) {
+        mocks.findMany.mockResolvedValue(variant);
+        const unresolved = await buildLocationStructureProposal({
+          organizationId: "org-1",
+          instruction,
+        });
+        expect(unresolved.unresolvedParent).toBe(true);
+        expect(
+          unresolved.parentCandidates.every(({ path }) =>
+            path.startsWith("Storage Room - B442")
+          )
+        ).toBe(true);
+      }
+    }
+  );
+
   it.each([
     "remove all containers in Section A",
     "delete every container from Section A",
