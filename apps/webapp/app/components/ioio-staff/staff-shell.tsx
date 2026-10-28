@@ -7,6 +7,7 @@ import {
   GripVertical,
   Home,
   MapPin,
+  Boxes,
   MessageCircle,
   PackageOpen,
   Archive,
@@ -39,6 +40,12 @@ import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 const navigation = [
   { to: "/home", label: "Dashboard", Icon: Home, end: true },
   { to: "/staff/ask", label: "Ask IOIO", Icon: MessageCircle, end: true },
+  {
+    to: "/staff/organize",
+    label: "Organize inventory",
+    Icon: Boxes,
+    end: true,
+  },
   { to: "/handbook", label: "Handbook", Icon: ClipboardList, end: false },
   { to: "/assets", label: "Inventory", Icon: PackageOpen, end: false },
   { to: "/categories", label: "Categories", Icon: Tags, end: false },
@@ -53,6 +60,10 @@ const navigation = [
 
 export const DEFAULT_STAFF_NAVIGATION_ORDER = navigation.map(({ to }) => to);
 type NavigationItem = (typeof navigation)[number];
+
+function canViewStaffNavigationItem(path: string, canViewLabTasks: boolean) {
+  return path !== "/operations/tasks" || canViewLabTasks;
+}
 
 export function StaffNavigation({
   onNavigate,
@@ -83,7 +94,9 @@ export function StaffNavigation({
   const orderedNavigation = navigationOrder
     .map((to) => navigation.find((item) => item.to === to))
     .filter((item): item is NavigationItem => Boolean(item))
-    .filter((item) => item.to !== "/operations/tasks" || canViewLabTasks);
+    .filter((item) =>
+      canViewStaffNavigationItem(item.to, canViewLabTasks)
+    );
   const activePath = navigation
     .filter(({ to, end }) => {
       const [pathname, query] = to.split("?");

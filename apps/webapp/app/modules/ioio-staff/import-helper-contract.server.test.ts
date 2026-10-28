@@ -172,6 +172,90 @@ function expectDiagnostic(
 }
 
 describe("import helper contract", () => {
+  it("bounds organization context and rejects model IDs outside the supplied batch", () => {
+    const request = {
+      mode: "INVENTORY_REORGANIZATION",
+      schemaVersion: 1,
+      instruction: "Find better locations",
+      scope: {},
+      items: [
+        {
+          modelId: "model-1",
+          productName: "XIAO ESP32",
+          manufacturer: null,
+          shortDescription: null,
+          currentCategoryId: "cat-1",
+          currentLocationId: "loc-1",
+          quantity: 2,
+        },
+      ],
+      categories: [
+        { id: "cat-1", name: "Development Boards", description: null },
+      ],
+      locations: [
+        {
+          id: "loc-1",
+          name: "Boards drawer",
+          path: "Electronics / Boards drawer",
+          hierarchyDepth: 1,
+          categoryAffinitySummary: "Development Boards: 12",
+        },
+      ],
+    };
+    const parsed = importHelperRequestSchema.parse(request);
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          mode: "INVENTORY_REORGANIZATION",
+          schemaVersion: 1,
+          proposals: [
+            {
+              modelId: "other-model",
+              suggestedCategoryId: "cat-1",
+              categoryConfidence: 0.9,
+              suggestedLocationId: "loc-1",
+              locationConfidence: 0.9,
+              reason: "Category concentration",
+            },
+          ],
+        },
+        parsed
+      )
+    ).toThrow(/unknown or duplicate model ID/);
+    const validated = validateImportHelperResponse(
+      {
+        mode: "INVENTORY_REORGANIZATION",
+        schemaVersion: 1,
+        proposals: [
+          {
+            modelId: "model-1",
+            suggestedCategoryId: "outside-category",
+            categoryConfidence: 0.9,
+            suggestedLocationId: "outside-location",
+            locationConfidence: 0.9,
+            reason: "Unknown IDs",
+          },
+        ],
+      },
+      parsed
+    );
+    expect("proposals" in validated && validated.proposals[0]).toMatchObject({
+      suggestedCategoryId: null,
+      categoryConfidence: 0,
+      suggestedLocationId: null,
+      locationConfidence: 0,
+    });
+    expect(() =>
+      importHelperRequestSchema.parse({
+        ...request,
+        items: Array.from({ length: 41 }, (_, index) => ({
+          ...request.items[0],
+          modelId: `model-${index}`,
+        })),
+      })
+    ).toThrow();
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps both request modes compatible with the strict helper schema at 2c17389d", () => {
@@ -204,7 +288,11 @@ describe("import helper contract", () => {
     );
 
     expect("mode" in response).toBe(true);
-    if (!("mode" in response)) throw new Error("Expected Mouser response");
+    if (
+      !("mode" in response) ||
+      response.mode !== "MOUSER_LINE_ITEM_ENRICHMENT"
+    )
+      throw new Error("Expected Mouser response");
     expect(response.rows).toEqual([makeMouserResponse().rows[0]]);
   });
 
@@ -228,7 +316,11 @@ describe("import helper contract", () => {
       inventedCategory,
       makeMouserRequest()
     );
-    if (!("mode" in validated)) throw new Error("Expected Mouser response");
+    if (
+      !("mode" in validated) ||
+      validated.mode !== "MOUSER_LINE_ITEM_ENRICHMENT"
+    )
+      throw new Error("Expected Mouser response");
     expect(validated.rows[0]).toMatchObject({
       categoryId: null,
       categoryConfidence: 0,
@@ -249,14 +341,13 @@ describe("import helper contract", () => {
       request
     );
 
-    if ("mode" in response) throw new Error("Expected generic proposal");
-    expect(response.rows[0]?.productMatch.candidateId).toBe("model-nano");
-    expect(response.rows[0]?.categorySuggestion.categoryId).toBe(
-      "category-electronics"
-    );
-    expect(response.rows[0]?.locationSuggestions[0]?.locationId).toBe(
-      "location-storage"
-    );
+    if (!("rows" in response)) throw new Error("Expected generic proposal");
+    const row = response.rows[0];
+    if (!row || !("productMatch" in row))
+      throw new Error("Expected generic proposal row");
+    expect(row.productMatch.candidateId).toBe("model-nano");
+    expect(row.categorySuggestion.categoryId).toBe("category-electronics");
+    expect(row.locationSuggestions[0]?.locationId).toBe("location-storage");
     expect(request.document.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -280,8 +371,11 @@ describe("import helper contract", () => {
       JSON.stringify(response),
       makeRequest()
     );
-    if ("mode" in validated) throw new Error("Expected generic proposal");
-    expect(validated.rows[0]?.categorySuggestion).toMatchObject({
+    if (!("rows" in validated)) throw new Error("Expected generic proposal");
+    const row = validated.rows[0];
+    if (!row || !("categorySuggestion" in row))
+      throw new Error("Expected generic proposal row");
+    expect(row.categorySuggestion).toMatchObject({
       categoryId: null,
       confidence: 0,
     });
@@ -358,6 +452,7 @@ describe("import helper contract", () => {
       makeRequest()
     );
 
+    if (!("rows" in validated)) throw new Error("Expected generic proposal");
     expect(validated.rows).toHaveLength(1);
     expect(validated.rows[0]).toMatchObject({
       productName: "Seeed Studio 24GHz mmWave Sensor",

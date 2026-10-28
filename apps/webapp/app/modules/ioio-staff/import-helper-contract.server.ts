@@ -6,6 +6,10 @@ const confidenceSchema = z.number().finite().min(0).max(1);
 
 export const IMPORT_HELPER_SCHEMA_VERSION = 1 as const;
 export const MOUSER_ENRICHMENT_SCHEMA_VERSION = 2 as const;
+export const INVENTORY_REORGANIZATION_SCHEMA_VERSION = 1 as const;
+export const MAX_REORGANIZATION_MODELS_PER_BATCH = 40;
+export const MAX_REORGANIZATION_CATEGORIES = 20;
+export const MAX_REORGANIZATION_LOCATIONS = 20;
 export const MAX_IMPORT_HELPER_CANDIDATES = 50;
 export const MAX_IMPORT_HELPER_ROWS = 100;
 export const MOUSER_ENRICHMENT_BATCH_SIZE = 50;
@@ -216,10 +220,88 @@ const mouserEnrichmentRequestSchema = z
     }
   });
 
+const reorganizationRequestSchema = z
+  .object({
+    mode: z.literal("INVENTORY_REORGANIZATION"),
+    schemaVersion: z.literal(INVENTORY_REORGANIZATION_SCHEMA_VERSION),
+    instruction: z.string().trim().min(1).max(2_000),
+    scope: z
+      .object({
+        categoryIds: z.array(identifierSchema).max(100).optional(),
+        locationIds: z.array(identifierSchema).max(100).optional(),
+      })
+      .strict(),
+    items: z
+      .array(
+        z
+          .object({
+            modelId: identifierSchema,
+            productName: z.string().trim().min(1).max(500),
+            manufacturer: z.string().max(300).nullable(),
+            shortDescription: z.string().max(500).nullable(),
+            currentCategoryId: identifierSchema.nullable(),
+            currentLocationId: identifierSchema.nullable(),
+            quantity: z.number().int().nonnegative().nullable(),
+          })
+          .strict()
+      )
+      .min(1)
+      .max(MAX_REORGANIZATION_MODELS_PER_BATCH),
+    categories: z
+      .array(
+        z
+          .object({
+            id: identifierSchema,
+            name: z.string().trim().min(1).max(300),
+            path: z.string().max(500).optional(),
+            description: z.string().max(500).nullable().optional(),
+          })
+          .strict()
+      )
+      .max(MAX_REORGANIZATION_CATEGORIES),
+    locations: z
+      .array(
+        z
+          .object({
+            id: identifierSchema,
+            name: z.string().trim().min(1).max(300),
+            path: z.string().trim().min(1).max(1_000),
+            description: z.string().max(500).nullable().optional(),
+            hierarchyDepth: z.number().int().nonnegative(),
+            categoryAffinitySummary: z.string().max(500).optional(),
+          })
+          .strict()
+      )
+      .max(MAX_REORGANIZATION_LOCATIONS),
+  })
+  .strict();
+
 export const importHelperRequestSchema = z.union([
   genericImportHelperRequestSchema,
   mouserEnrichmentRequestSchema,
+  reorganizationRequestSchema,
 ]);
+
+const reorganizationResponseSchema = z
+  .object({
+    mode: z.literal("INVENTORY_REORGANIZATION"),
+    schemaVersion: z.literal(INVENTORY_REORGANIZATION_SCHEMA_VERSION),
+    proposals: z
+      .array(
+        z
+          .object({
+            modelId: identifierSchema,
+            suggestedCategoryId: identifierSchema.nullable(),
+            categoryConfidence: confidenceSchema,
+            suggestedLocationId: identifierSchema.nullable(),
+            locationConfidence: confidenceSchema,
+            reason: z.string().trim().min(1).max(1_000),
+          })
+          .strict()
+      )
+      .max(MAX_REORGANIZATION_MODELS_PER_BATCH),
+  })
+  .strict();
 
 const candidateProposalRowSchema = z
   .object({
@@ -356,7 +438,8 @@ export type MouserEnrichmentResponse = z.infer<
 >;
 export type AnyImportHelperResponse =
   | ImportHelperResponse
-  | MouserEnrichmentResponse;
+  | MouserEnrichmentResponse
+  | z.infer<typeof reorganizationResponseSchema>;
 export type ImportHelperCandidateRow = ImportHelperResponse["rows"][number];
 export type MouserEnrichmentRow = MouserEnrichmentResponse["rows"][number];
 
@@ -577,6 +660,39 @@ export function validateImportHelperResponse(
   }
   const request = requestResult.data;
   if ("mode" in request) {
+    if (request.mode === "INVENTORY_REORGANIZATION") {
+      const parsed = reorganizationResponseSchema.safeParse(response);
+      if (!parsed.success)
+        throw new ImportHelperValidationError(
+          "The helper returned a malformed inventory reorganization response."
+        );
+      const modelIds = new Set(request.items.map(({ modelId }) => modelId));
+      const categoryIds = new Set(request.categories.map(({ id }) => id));
+      const locationIds = new Set(request.locations.map(({ id }) => id));
+      const seen = new Set<string>();
+      for (const proposal of parsed.data.proposals) {
+        if (!modelIds.has(proposal.modelId) || seen.has(proposal.modelId))
+          throw new ImportHelperValidationError(
+            "The helper returned an unknown or duplicate model ID."
+          );
+        seen.add(proposal.modelId);
+        if (
+          proposal.suggestedCategoryId &&
+          !categoryIds.has(proposal.suggestedCategoryId)
+        ) {
+          proposal.suggestedCategoryId = null;
+          proposal.categoryConfidence = 0;
+        }
+        if (
+          proposal.suggestedLocationId &&
+          !locationIds.has(proposal.suggestedLocationId)
+        ) {
+          proposal.suggestedLocationId = null;
+          proposal.locationConfidence = 0;
+        }
+      }
+      return parsed.data;
+    }
     const responseResult = mouserEnrichmentResponseSchema.safeParse(response);
     if (!responseResult.success) {
       throw new ImportHelperValidationError(
