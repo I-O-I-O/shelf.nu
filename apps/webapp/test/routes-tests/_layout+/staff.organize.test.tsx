@@ -190,6 +190,68 @@ describe("staff organize experience", () => {
     expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
   });
 
+  it("renders read-only task analysis without mutation controls or inventory recommendations", async () => {
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction: "what's in section B?",
+      parentCandidates: [],
+      unresolvedParent: false,
+      nodes: [],
+      source: "AI",
+      analysis: {
+        rows: [
+          {
+            id: "section",
+            path: "Storage Room - B442 / Section B",
+            placements: 2,
+            units: 5,
+          },
+        ],
+        locationsConsidered: 1,
+        truncated: false,
+      },
+    });
+    renderOrganizePage();
+    const user = userEvent.setup();
+    await user.type(await screen.findByRole("textbox"), "what's in section B?");
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(
+      await screen.findByRole("heading", { name: "Location analysis" })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/2 asset placements/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Apply approved changes" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Create all" })
+    ).not.toBeInTheDocument();
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed structure interpretation out of inventory analysis", async () => {
+    mocks.buildLocationStructureProposal.mockResolvedValue({
+      mode: "LOCATION_STRUCTURE",
+      instruction: "clear containers in Section B",
+      parentCandidates: [],
+      unresolvedParent: true,
+      nodes: [],
+      source: "AI",
+      planError:
+        "Could not interpret the structure request. No inventory analysis was performed.",
+    });
+    renderOrganizePage();
+    const user = userEvent.setup();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "clear containers in Section B"
+    );
+    await user.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(
+      await screen.findByText(/Could not interpret the structure request/)
+    ).toBeInTheDocument();
+    expect(mocks.generateInventoryOrganizationProposal).not.toHaveBeenCalled();
+  });
+
   it("routes container removal to structure review and never retrieves inventory", async () => {
     mocks.buildLocationStructureProposal.mockResolvedValue({
       mode: "LOCATION_STRUCTURE",

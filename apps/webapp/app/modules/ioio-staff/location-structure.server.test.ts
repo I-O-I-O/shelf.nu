@@ -5,20 +5,27 @@ const mocks = vi.hoisted(() => ({
   createLocation: vi.fn(),
   requestHelper: vi.fn(),
   assetLocationFindMany: vi.fn(),
+  assetLocationGroupBy: vi.fn(),
   kitFindMany: vi.fn(),
   deleteLocation: vi.fn(),
 }));
+// why: replace canonical database I/O so planning tests cannot touch a live organization.
 vi.mock("~/database/db.server", () => ({
   db: {
     location: { findMany: mocks.findMany },
-    assetLocation: { findMany: mocks.assetLocationFindMany },
+    assetLocation: {
+      findMany: mocks.assetLocationFindMany,
+      groupBy: mocks.assetLocationGroupBy,
+    },
     kit: { findMany: mocks.kitFindMany },
   },
 }));
+// why: canonical writes are external database effects; verify they require a separate Apply call.
 vi.mock("~/modules/location/service.server", () => ({
   createLocation: mocks.createLocation,
   deleteLocation: mocks.deleteLocation,
 }));
+// why: Claude is an external service; validate its constrained output with the real resolver and planner.
 vi.mock("~/modules/ioio-staff/import-helper-client.server", () => ({
   requestImportHelperProposal: mocks.requestHelper,
 }));
@@ -73,6 +80,7 @@ describe("location structure planning", () => {
     mocks.requestHelper.mockReset();
     mocks.createLocation.mockReset();
     mocks.assetLocationFindMany.mockResolvedValue([]);
+    mocks.assetLocationGroupBy.mockResolvedValue([]);
     mocks.kitFindMany.mockResolvedValue([]);
     mocks.deleteLocation.mockReset();
   });
@@ -199,9 +207,236 @@ describe("location structure planning", () => {
     expect(proposal.deletionReview?.sections[1]?.selected).toHaveLength(2);
     expect(proposal.deletionReview?.totalSelected).toBe(5);
     expect(mocks.requestHelper).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "ORGANIZATION_PLAN" })
+      expect.objectContaining({ mode: "SHELF_TASK_PLAN" })
     );
     expect(mocks.createLocation).not.toHaveBeenCalled();
+    expect(mocks.deleteLocation).not.toHaveBeenCalled();
+  });
+
+  it("normalizes deterministic and helper creation into compatible task capabilities", async () => {
+    mocks.findMany.mockResolvedValue(locationFixture.slice(0, 3));
+    const fast = await buildLocationStructureProposal({
+      organizationId: "org",
+      instruction: "Add 3 containers to Shelf A1.",
+    });
+    expect(fast.source).toBe("DETERMINISTIC");
+    const taskPlan = fast.taskPlan!;
+    expect(taskPlan.mutationPolicy).toBe("PROPOSAL_ONLY");
+    mocks.requestHelper.mockResolvedValue({
+      status: "ready",
+      proposal: { mode: "SHELF_TASK_PLAN", schemaVersion: 1, taskPlan },
+    });
+    const assisted = await buildLocationStructureProposal({
+      organizationId: "org",
+      instruction: "Plan the same three named containers on our shelf",
+    });
+    expect(assisted.taskPlan).toEqual(taskPlan);
+    expect(assisted.nodes.map(({ name }) => name)).toEqual(
+      fast.nodes.map(({ name }) => name)
+    );
+    expect(mocks.createLocation).not.toHaveBeenCalled();
+  });
+
+  it("does not report unread inventory as empty in a tree-only task", async () => {
+    mocks.findMany.mockResolvedValue([
+      { id: "room", name: "Storage Room", parentId: null, description: null },
+    ]);
+    mocks.assetLocationGroupBy.mockClear();
+    mocks.requestHelper.mockResolvedValue({
+      status: "ready",
+      proposal: {
+        mode: "SHELF_TASK_PLAN",
+        schemaVersion: 1,
+        taskPlan: {
+          taskType: "ANALYSIS",
+          goal: "Show the location tree",
+          sources: [{ type: "SHELF_LOCATIONS" }],
+          steps: [
+            {
+              id: "room",
+              capability: "RESOLVE_LOCATION",
+              ref: { name: "Storage Room" },
+            },
+            { id: "tree", capability: "READ_LOCATION_TREE", within: "room" },
+          ],
+          writesRequested: false,
+          mutationPolicy: "PROPOSAL_ONLY",
+          expectedOutput: "LOCATION_SUMMARY",
+        },
+      },
+    });
+    const result = await buildLocationStructureProposal({
+      organizationId: "org",
+      instruction: "Show the storage room hierarchy",
+    });
+    expect(result.analysis?.rows).toEqual([
+      { id: "room", path: "Storage Room", placements: null, units: null },
+    ]);
+    expect(mocks.assetLocationGroupBy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "remove all containers in section B of the storage room",
+    "clear every container from section B in storage",
+    "storage room section B should have no containers",
+    "delete the containers under section B of the storage room",
+    "get rid of the boxes in section B of storage",
+  ])(
+    "executes equivalent task plans for deletion paraphrase: %s",
+    async (instruction) => {
+      mocks.findMany.mockResolvedValue([
+        {
+          id: "lab",
+          name: "IOIO Lab - B477",
+          parentId: null,
+          description: null,
+        },
+        { id: "lab-b", name: "Section B", parentId: "lab", description: null },
+        {
+          id: "room",
+          name: "Storage Room - B442",
+          parentId: null,
+          description: null,
+        },
+        {
+          id: "section-b",
+          name: "Section B",
+          parentId: "room",
+          description: null,
+        },
+        {
+          id: "shelf-b1",
+          name: "Shelf B1",
+          parentId: "section-b",
+          description: null,
+        },
+        {
+          id: "container-b1",
+          name: "Container B1-1",
+          parentId: "shelf-b1",
+          description: null,
+        },
+      ]);
+      // why: Claude is an external language service; exercise real plan validation,
+      // compositional resolution and proposal safety after its constrained output.
+      mocks.requestHelper.mockResolvedValue({
+        status: "ready",
+        proposal: {
+          mode: "SHELF_TASK_PLAN",
+          schemaVersion: 1,
+          taskPlan: {
+            taskType: "STRUCTURE_CHANGE",
+            goal: "Remove containers from Section B",
+            sources: [{ type: "SHELF_LOCATIONS" }],
+            steps: [
+              {
+                id: "section",
+                capability: "RESOLVE_LOCATION",
+                ref: { name: "Section B", withinRef: { name: "Storage Room" } },
+              },
+              {
+                id: "containers",
+                capability: "SELECT_LOCATIONS",
+                within: "section",
+                role: "CONTAINER",
+              },
+              {
+                id: "delete",
+                capability: "PROPOSE_DELETE_LOCATIONS",
+                selection: "containers",
+                quantity: { mode: "ALL" },
+              },
+            ],
+            writesRequested: true,
+            mutationPolicy: "PROPOSAL_ONLY",
+            expectedOutput: "LOCATION_PROPOSAL",
+          },
+        },
+      });
+      const proposal = await buildLocationStructureProposal({
+        organizationId: "org",
+        instruction,
+      });
+      expect(proposal.unresolvedParent).toBe(false);
+      expect(proposal.deletionReview?.parentPath).toBe("Storage Room - B442");
+      expect(
+        proposal.deletionReview?.sections[0]?.selected.map(({ id }) => id)
+      ).toEqual(["container-b1"]);
+      expect(
+        proposal.taskPlan?.steps.map(({ capability }) => capability)
+      ).toEqual([
+        "RESOLVE_LOCATION",
+        "SELECT_LOCATIONS",
+        "PROPOSE_DELETE_LOCATIONS",
+      ]);
+      const context = mocks.requestHelper.mock.calls[0]![0];
+      expect(context.mode).toBe("SHELF_TASK_PLAN");
+      expect(JSON.stringify(context)).not.toMatch(
+        /DATABASE_URL|SESSION_SECRET|SUPABASE|organizationId/
+      );
+      expect(mocks.deleteLocation).not.toHaveBeenCalled();
+      expect(mocks.createLocation).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    "what's in section B?",
+    "show me what section B contains",
+    "list the contents of storage room section B",
+  ])("keeps location analysis read-only: %s", async (instruction) => {
+    mocks.findMany.mockResolvedValue([
+      {
+        id: "room",
+        name: "Storage Room - B442",
+        parentId: null,
+        description: null,
+      },
+      { id: "section", name: "Section B", parentId: "room", description: null },
+    ]);
+    mocks.assetLocationGroupBy.mockResolvedValue([
+      { locationId: "section", _count: { _all: 2 }, _sum: { quantity: 5 } },
+    ]);
+    mocks.requestHelper.mockResolvedValue({
+      status: "ready",
+      proposal: {
+        mode: "SHELF_TASK_PLAN",
+        schemaVersion: 1,
+        taskPlan: {
+          taskType: "ANALYSIS",
+          goal: "Show Section B contents",
+          sources: [{ type: "SHELF_LOCATIONS" }, { type: "SHELF_INVENTORY" }],
+          steps: [
+            {
+              id: "section",
+              capability: "RESOLVE_LOCATION",
+              ref: { name: "Section B", withinRef: { name: "Storage Room" } },
+            },
+            {
+              id: "contents",
+              capability: "READ_INVENTORY_SUMMARY",
+              within: "section",
+            },
+          ],
+          writesRequested: false,
+          mutationPolicy: "PROPOSAL_ONLY",
+          expectedOutput: "LOCATION_SUMMARY",
+        },
+      },
+    });
+    const proposal = await buildLocationStructureProposal({
+      organizationId: "org",
+      instruction,
+    });
+    expect(proposal.analysis?.rows).toEqual([
+      {
+        id: "section",
+        path: "Storage Room - B442 / Section B",
+        placements: 2,
+        units: 5,
+      },
+    ]);
+    expect(proposal.deletionReview).toBeUndefined();
+    expect(proposal.nodes).toEqual([]);
     expect(mocks.deleteLocation).not.toHaveBeenCalled();
   });
 

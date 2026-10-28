@@ -404,6 +404,79 @@ describe("import helper contract", () => {
     ).toThrow(/malformed organization plan/);
   });
 
+  it("accepts bounded task interpretation and rejects invented IDs or unsupported capabilities", () => {
+    const request = importHelperRequestSchema.parse({
+      mode: "SHELF_TASK_PLAN",
+      schemaVersion: 1,
+      instruction: "what is in Section B?",
+      availableSources: [{ type: "SHELF_LOCATIONS" }],
+      locationContext: [
+        {
+          name: "Section B",
+          path: "Storage Room / Section B",
+          childSummary: "2 direct children",
+        },
+      ],
+    });
+    const response = {
+      mode: "SHELF_TASK_PLAN",
+      schemaVersion: 1,
+      taskPlan: {
+        taskType: "ANALYSIS",
+        goal: "Read location tree",
+        sources: [{ type: "SHELF_LOCATIONS" }],
+        steps: [
+          {
+            id: "section",
+            capability: "RESOLVE_LOCATION",
+            ref: { name: "Section B", withinRef: { name: "Storage Room" } },
+          },
+          { id: "tree", capability: "READ_LOCATION_TREE", within: "section" },
+        ],
+        writesRequested: false,
+        mutationPolicy: "PROPOSAL_ONLY",
+        expectedOutput: "LOCATION_SUMMARY",
+      },
+    };
+    expect(validateImportHelperResponse(response, request)).toEqual(response);
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          ...response,
+          taskPlan: {
+            ...response.taskPlan,
+            steps: [{ id: "sql", capability: "RUN_SQL" }],
+          },
+        },
+        request
+      )
+    ).toThrow();
+    expect(() =>
+      validateImportHelperResponse(
+        {
+          ...response,
+          taskPlan: {
+            ...response.taskPlan,
+            steps: [
+              {
+                id: "section",
+                capability: "RESOLVE_LOCATION",
+                ref: { name: "Section B", id: "invented" },
+              },
+            ],
+          },
+        },
+        request
+      )
+    ).toThrow();
+    expect(() =>
+      importHelperRequestSchema.parse({
+        ...request,
+        DATABASE_URL: "must-not-pass",
+      })
+    ).toThrow();
+  });
+
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps both request modes compatible with the strict helper schema at 2c17389d", () => {

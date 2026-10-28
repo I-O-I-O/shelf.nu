@@ -4,11 +4,19 @@ import { requestImportHelperProposal } from "~/modules/ioio-staff/import-helper-
 import {
   ORGANIZATION_PLAN_SCHEMA_VERSION,
   type AnyImportHelperRequest,
+  type AnyImportHelperResponse,
 } from "~/modules/ioio-staff/import-helper-contract.server";
 import { createLocation } from "~/modules/location/service.server";
 import { deleteLocation } from "~/modules/location/service.server";
 import { Logger } from "~/utils/logger";
 import { inferLocationRole, type LocationRole } from "./location-role.server";
+import {
+  resolveTaskSteps,
+  validateShelfTaskPlan,
+  locationDescendants,
+  type ShelfTaskPlan,
+  type LocationTaskRef,
+} from "./shelf-task-plan.server";
 
 export type OrganizationLocation = {
   id: string;
@@ -114,6 +122,23 @@ export type LocationStructureProposal = {
     totalSelected: number;
   };
   planError?: string;
+  helperUnavailable?: boolean;
+  taskPlan?: ShelfTaskPlan;
+  unresolvedReferences?: Array<{
+    stepId: string;
+    ref: LocationTaskRef;
+    candidateIds: string[];
+  }>;
+  analysis?: {
+    rows: Array<{
+      id: string;
+      path: string;
+      placements: number | null;
+      units: number | null;
+    }>;
+    locationsConsidered: number;
+    truncated: boolean;
+  };
 };
 
 export function classifyOrganizationRequest(
@@ -1336,16 +1361,30 @@ function expandBulkStructure(
   };
 }
 
-export async function buildLocationStructureProposal(input: {
+async function buildLocationStructureProposalInternal(input: {
   organizationId: string;
   instruction: string;
   selectedParentId?: string;
-}) {
-  const locations = await db.location.findMany({
-    where: { organizationId: input.organizationId },
-    select: { id: true, name: true, parentId: true, description: true },
-  });
-  const parsedBulk = parseDeterministicBulkLocationStructure(input.instruction);
+  interpretedPlan?: Extract<
+    AnyImportHelperResponse,
+    { mode: "ORGANIZATION_PLAN" }
+  >;
+  locations?: OrganizationLocation[];
+}): Promise<LocationStructureProposal> {
+  const locations =
+    input.locations ??
+    (await db.location.findMany({
+      where: { organizationId: input.organizationId },
+      select: { id: true, name: true, parentId: true, description: true },
+    }));
+  const allowFastPath =
+    !input.interpretedPlan &&
+    !/\b(remove|delete|clear|rename|move|merge|split)\b/i.test(
+      input.instruction
+    );
+  const parsedBulk = allowFastPath
+    ? parseDeterministicBulkLocationStructure(input.instruction)
+    : null;
   if (parsedBulk) {
     const { path, byId } = makePaths(locations);
     const roots = locations.filter((location) => location.parentId === null);
@@ -1450,7 +1489,9 @@ export async function buildLocationStructureProposal(input: {
       source: "DETERMINISTIC" as const,
     };
   }
-  const parsed = parseDeterministicLocationStructure(input.instruction);
+  const parsed = allowFastPath
+    ? parseDeterministicLocationStructure(input.instruction)
+    : null;
   if (parsed) {
     const { path } = makePaths(locations);
     const parent = resolveParent(
@@ -1573,8 +1614,12 @@ export async function buildLocationStructureProposal(input: {
     .slice(0, 100)
     .map(({ location }) => location);
   const request = {
-    mode: "ORGANIZATION_PLAN" as const,
-    schemaVersion: ORGANIZATION_PLAN_SCHEMA_VERSION,
+    mode: "SHELF_TASK_PLAN" as const,
+    schemaVersion: 1 as const,
+    availableSources: [
+      { type: "SHELF_LOCATIONS" as const },
+      { type: "SHELF_INVENTORY" as const },
+    ],
     instruction: input.instruction,
     locationContext: relevant.map((location) => ({
       name: location.name,
@@ -1584,9 +1629,161 @@ export async function buildLocationStructureProposal(input: {
       } direct children`,
     })),
   };
-  const result = await requestImportHelperProposal(
-    request as AnyImportHelperRequest
-  );
+  const result = input.interpretedPlan
+    ? { status: "ready" as const, proposal: input.interpretedPlan }
+    : await requestImportHelperProposal(request as AnyImportHelperRequest);
+  if (result.status === "ready" && "taskPlan" in result.proposal) {
+    const {
+      plan: taskPlan,
+      resolved,
+      unresolved,
+    } = resolveTaskSteps(
+      result.proposal.taskPlan,
+      locations,
+      input.selectedParentId
+    );
+    const base: LocationStructureProposal = {
+      mode: "LOCATION_STRUCTURE",
+      instruction: input.instruction,
+      parentName: null,
+      parentLocationId: null,
+      parentCandidates: [],
+      unresolvedParent: false,
+      parentResolution: "MATCHED",
+      createMissingParent: false,
+      nodes: [],
+      source: "AI",
+      taskPlan,
+    };
+    if (unresolved.length)
+      return {
+        ...base,
+        unresolvedParent: true,
+        unresolvedReferences: unresolved,
+        parentResolution: "AMBIGUOUS_MATCH",
+        parentCandidates: unresolved.flatMap(({ candidateIds }) =>
+          candidateIds.map((id) => ({
+            id,
+            name: locations.find((location) => location.id === id)!.name,
+            path: path(id),
+          }))
+        ),
+        planError:
+          "A location reference is missing or ambiguous within its requested scope. Review the reference before continuing.",
+      };
+    if (taskPlan.taskType === "ANALYSIS") {
+      const ids = new Set<string>();
+      const summaryIds = new Set<string>();
+      for (const step of taskPlan.steps)
+        if (
+          (step.capability === "READ_LOCATION_TREE" ||
+            step.capability === "READ_INVENTORY_SUMMARY") &&
+          resolved.has(step.within)
+        ) {
+          const root = resolved.get(step.within)!;
+          const branch = [
+            root,
+            ...locationDescendants(locations, root).map(({ id }) => id),
+          ];
+          for (const id of branch) {
+            ids.add(id);
+            if (step.capability === "READ_INVENTORY_SUMMARY")
+              summaryIds.add(id);
+          }
+        }
+      const displayedIds = [...ids].slice(0, 100);
+      const summaryQueryIds = displayedIds.filter((id) => summaryIds.has(id));
+      const counts = summaryQueryIds.length
+        ? await db.assetLocation.groupBy({
+            by: ["locationId"],
+            where: {
+              organizationId: input.organizationId,
+              locationId: { in: summaryQueryIds },
+            },
+            _count: { _all: true },
+            _sum: { quantity: true },
+          })
+        : [];
+      return {
+        ...base,
+        analysis: {
+          rows: displayedIds.map((id) => ({
+            id,
+            path: path(id),
+            placements: summaryIds.has(id)
+              ? counts.find((row) => row.locationId === id)?._count._all ?? 0
+              : null,
+            units: summaryIds.has(id)
+              ? counts.find((row) => row.locationId === id)?._sum.quantity ?? 0
+              : null,
+          })),
+          locationsConsidered: ids.size,
+          truncated: ids.size > 100,
+        },
+      };
+    }
+    const operations: Extract<
+      AnyImportHelperResponse,
+      { mode: "ORGANIZATION_PLAN" }
+    >["operations"] = [];
+    for (const step of taskPlan.steps) {
+      if (step.capability === "PROPOSE_DELETE_LOCATIONS") {
+        const selection = taskPlan.steps.find(
+          (candidate) => candidate.id === step.selection
+        );
+        if (selection?.capability !== "SELECT_LOCATIONS")
+          throw new Error("Invalid deletion dependency.");
+        const location = locations.find(
+          ({ id }) => id === resolved.get(selection.within)
+        )!;
+        operations.push({
+          operation: "DELETE_CHILDREN",
+          targetRef: {
+            name: location.name,
+            ...(location.parentId
+              ? { ancestorName: path(location.parentId) }
+              : {}),
+          },
+          childRole: selection.role,
+          quantity: step.quantity,
+        });
+      }
+      if (step.capability === "PROPOSE_CREATE_LOCATION") {
+        const parentId = step.within ? resolved.get(step.within) : undefined;
+        const parent = locations.find(({ id }) => id === parentId);
+        if (!parent && !step.within)
+          throw new Error("Select an existing parent for planned creation.");
+        operations.push({
+          operation: "CREATE_LOCATION",
+          temporaryId: step.id,
+          ...(parent
+            ? {
+                parentRef: {
+                  name: parent.name,
+                  ...(parent.parentId
+                    ? { ancestorName: path(parent.parentId) }
+                    : {}),
+                },
+              }
+            : { parentTemporaryId: step.within! }),
+          name: step.name,
+          description: step.description,
+        });
+      }
+    }
+    const proposal = await buildLocationStructureProposalInternal({
+      ...input,
+      locations,
+      interpretedPlan: {
+        mode: "ORGANIZATION_PLAN",
+        schemaVersion: ORGANIZATION_PLAN_SCHEMA_VERSION,
+        domain: "LOCATION_STRUCTURE",
+        operations,
+      },
+    });
+    return { ...proposal, taskPlan };
+  }
+
   if (result.status !== "ready" || !("domain" in result.proposal)) {
     const roots = locations.filter((location) => location.parentId === null);
     const fallbackLocations = (roots.length ? roots : locations).slice(0, 20);
@@ -1638,8 +1835,8 @@ export async function buildLocationStructureProposal(input: {
         "Could not interpret the structure request. No inventory analysis was performed.",
     };
   }
-  // Destructive leaf roles must also be explicitly present in the staff request.
-  // A helper cannot turn a container-only request into drawer deletion.
+  // Explicit role words are a safety veto, not the language interpreter.
+  // Otherwise the validated typed selection supplies the role (including synonyms).
   const requestedLeafRoles = new Set(
     [...input.instruction.matchAll(/\b(containers?|drawers?)\b/gi)].map(
       ([word]) =>
@@ -1657,6 +1854,7 @@ export async function buildLocationStructureProposal(input: {
     result.proposal.operations.some(
       (operation) =>
         operation.operation === "DELETE_CHILDREN" &&
+        requestedLeafRoles.size > 0 &&
         !requestedLeafRoles.has(
           (operation.childRole ?? operation.childTypeHint?.toUpperCase()) as
             | "CONTAINER"
@@ -2054,6 +2252,112 @@ export async function buildLocationStructureProposal(input: {
     planError:
       "This structure operation is not available in the current review flow. No changes were made.",
   };
+}
+
+/** Both interpreters expose the same validated task representation. */
+export async function buildLocationStructureProposal(input: {
+  organizationId: string;
+  instruction: string;
+  selectedParentId?: string;
+}): Promise<LocationStructureProposal> {
+  const started = Date.now();
+  const proposal = await buildLocationStructureProposalInternal(input);
+  if (
+    !proposal.taskPlan &&
+    !proposal.unresolvedParent &&
+    proposal.nodes.length &&
+    !proposal.nodes.some(({ status }) => status === "POSSIBLE_DUPLICATE")
+  ) {
+    const steps: ShelfTaskPlan["steps"] = [];
+    const rootPath = proposal.parentCandidates.find(
+      ({ id }) => id === proposal.parentLocationId
+    )?.path;
+    if (rootPath) {
+      let ref: LocationTaskRef | undefined;
+      for (const name of rootPath.split(" / "))
+        ref = { name, ...(ref ? { withinRef: ref } : {}) };
+      steps.push({ id: "parent", capability: "RESOLVE_LOCATION", ref: ref! });
+    }
+    const keys = new Map(
+      proposal.nodes.map((node, index) => [node.temporaryId, `node${index}`])
+    );
+    for (const node of proposal.nodes) {
+      const within = node.parentTemporaryId
+        ? keys.get(node.parentTemporaryId)
+        : rootPath
+        ? "parent"
+        : undefined;
+      steps.push(
+        node.status === "EXISTS"
+          ? {
+              id: keys.get(node.temporaryId)!,
+              capability: "RESOLVE_LOCATION",
+              ref: { name: node.name },
+              ...(within ? { within } : {}),
+            }
+          : {
+              id: keys.get(node.temporaryId)!,
+              capability: "PROPOSE_CREATE_LOCATION",
+              ...(within ? { within } : {}),
+              name: node.name,
+              description: node.description,
+            }
+      );
+    }
+    const writesRequested = steps.some(
+      ({ capability }) => capability === "PROPOSE_CREATE_LOCATION"
+    );
+    if (!writesRequested) {
+      const readScope = steps.find(
+        ({ capability }) => capability === "RESOLVE_LOCATION"
+      );
+      if (readScope)
+        steps.push({
+          id: "completedStructure",
+          capability: "READ_LOCATION_TREE",
+          within: readScope.id,
+        });
+    }
+    proposal.taskPlan = validateShelfTaskPlan({
+      taskType: writesRequested ? "STRUCTURE_CHANGE" : "ANALYSIS",
+      goal: input.instruction,
+      sources: [{ type: "SHELF_LOCATIONS" }],
+      steps,
+      writesRequested,
+      mutationPolicy: "PROPOSAL_ONLY",
+      expectedOutput: writesRequested
+        ? "LOCATION_PROPOSAL"
+        : "LOCATION_SUMMARY",
+    });
+  }
+  Logger.info({
+    event: "ioio_shelf_task_completed",
+    taskType: proposal.taskPlan?.taskType ?? "UNRESOLVED",
+    plannerUsed: proposal.source === "AI",
+    fastPathUsed: proposal.source === "DETERMINISTIC",
+    capabilitiesRequested: [
+      ...new Set(
+        proposal.taskPlan?.steps.map(({ capability }) => capability) ?? []
+      ),
+    ],
+    referencesResolved: Math.max(
+      0,
+      (proposal.taskPlan?.steps.filter(
+        ({ capability }) => capability === "RESOLVE_LOCATION"
+      ).length ?? 0) - (proposal.unresolvedReferences?.length ?? 0)
+    ),
+    referencesUnresolved:
+      proposal.unresolvedReferences?.length ??
+      (proposal.unresolvedParent ? 1 : 0),
+    sourcesUsed: proposal.taskPlan?.sources.map(({ type }) => type) ?? [
+      "SHELF_LOCATIONS",
+    ],
+    proposalOperationCount:
+      proposal.deletionReview?.totalSelected ??
+      proposal.nodes.filter(({ status }) => status === "CREATE").length,
+    duration: Date.now() - started,
+  });
+  return proposal;
 }
 
 const structurePayloadSchema = z

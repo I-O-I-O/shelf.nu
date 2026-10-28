@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { locationRoleSchema } from "./location-role.server";
+import {
+  shelfTaskPlanSchema,
+  shelfTaskSourceSchema,
+  validateShelfTaskPlan,
+} from "./shelf-task-plan.server";
 
 const identifierSchema = z.string().trim().min(1).max(200);
 const confidenceSchema = z.number().finite().min(0).max(1);
@@ -439,12 +444,30 @@ const organizationPlanResponseSchema = z
   })
   .strict();
 
+const shelfTaskRequestSchema = z
+  .object({
+    mode: z.literal("SHELF_TASK_PLAN"),
+    schemaVersion: z.literal(1),
+    instruction: z.string().trim().min(1).max(2000),
+    locationContext: z.array(organizationPlanLocationSchema).max(100),
+    availableSources: z.array(shelfTaskSourceSchema).min(1).max(5).optional(),
+  })
+  .strict();
+const shelfTaskResponseSchema = z
+  .object({
+    mode: z.literal("SHELF_TASK_PLAN"),
+    schemaVersion: z.literal(1),
+    taskPlan: shelfTaskPlanSchema,
+  })
+  .strict();
+
 export const importHelperRequestSchema = z.union([
   genericImportHelperRequestSchema,
   mouserEnrichmentRequestSchema,
   reorganizationRequestSchema,
   locationStructureRequestSchema,
   organizationPlanRequestSchema,
+  shelfTaskRequestSchema,
 ]);
 
 const reorganizationResponseSchema = z
@@ -629,7 +652,8 @@ export type AnyImportHelperResponse =
   | MouserEnrichmentResponse
   | z.infer<typeof reorganizationResponseSchema>
   | z.infer<typeof locationStructureResponseSchema>
-  | z.infer<typeof organizationPlanResponseStrictSchema>;
+  | z.infer<typeof organizationPlanResponseStrictSchema>
+  | z.infer<typeof shelfTaskResponseSchema>;
 export type ImportHelperCandidateRow = ImportHelperResponse["rows"][number];
 export type MouserEnrichmentRow = MouserEnrichmentResponse["rows"][number];
 
@@ -850,6 +874,26 @@ export function validateImportHelperResponse(
   }
   const request = requestResult.data;
   if ("mode" in request) {
+    if (request.mode === "SHELF_TASK_PLAN") {
+      const parsed = shelfTaskResponseSchema.safeParse(response);
+      if (!parsed.success)
+        throw new ImportHelperValidationError("Malformed Shelf task plan.");
+      validateShelfTaskPlan(parsed.data.taskPlan);
+      if (
+        request.availableSources &&
+        parsed.data.taskPlan.sources.some(
+          (source) =>
+            !request.availableSources!.some(
+              (available) =>
+                JSON.stringify(available) === JSON.stringify(source)
+            )
+        )
+      )
+        throw new ImportHelperValidationError(
+          "Task plan referenced an unavailable source."
+        );
+      return parsed.data;
+    }
     if (request.mode === "ORGANIZATION_PLAN") {
       const parsed = organizationPlanResponseStrictSchema.safeParse(response);
       if (!parsed.success)

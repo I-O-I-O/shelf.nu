@@ -92,7 +92,11 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "Describe what you want to organize (up to 2,000 characters)."
       );
     const classification = classifyOrganizationRequest(instruction);
-    if (classification === "LOCATION_STRUCTURE") {
+    const asksForAnalysis =
+      /^\s*(what|which|where|how|show|list|compare|summarize|tell)\b/i.test(
+        instruction
+      );
+    if (classification !== "INVENTORY_REORGANIZATION" || asksForAnalysis) {
       return payload({
         kind: "structure-proposal" as const,
         proposal: await buildLocationStructureProposal({
@@ -101,15 +105,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
           selectedParentId:
             String(form.get("parentLocationId") ?? "") || undefined,
         }),
-      });
-    }
-    if (classification !== "INVENTORY_REORGANIZATION") {
-      return payload({
-        kind: "safe-review" as const,
-        message:
-          classification === "MIXED_OR_ADVISORY"
-            ? "This request combines storage changes and inventory advice. Split it into one structure request or one inventory placement request so each can be reviewed safely."
-            : "Could not identify a supported organization request. No inventory analysis was performed.",
       });
     }
     return payload({
@@ -153,10 +148,6 @@ export default function StaffOrganizePage() {
   const structureDeleted =
     result && "kind" in result && result.kind === "structure-deleted"
       ? result.results
-      : null;
-  const safeReview =
-    result && "kind" in result && result.kind === "safe-review"
-      ? result.message
       : null;
   const structureApplyPayload = structureProposal
     ? {
@@ -271,14 +262,6 @@ export default function StaffOrganizePage() {
             </ul>
           </section>
         )}
-        {safeReview && (
-          <p
-            role="status"
-            className="mt-8 rounded-xl border border-amber-300 bg-amber-50 p-5 text-sm"
-          >
-            {safeReview}
-          </p>
-        )}
         {structureProposal && !dismissed && (
           <section
             className="mt-8 rounded-xl border p-5"
@@ -289,7 +272,9 @@ export default function StaffOrganizePage() {
                 id="structure-proposal-title"
                 className="text-xl font-semibold"
               >
-                Storage structure proposal
+                {structureProposal.analysis
+                  ? "Location analysis"
+                  : "Storage structure proposal"}
               </h2>
               <span className="rounded-full bg-amber-50 px-3 py-1 text-sm font-medium text-amber-800">
                 Preview only · no changes made
@@ -297,8 +282,8 @@ export default function StaffOrganizePage() {
             </div>
             {structureProposal.helperUnavailable && (
               <p className="mt-4 text-sm text-red-700">
-                The structure assistant could not complete. Try a more explicit
-                request or check helper availability.
+                The task planner could not complete. Check helper availability
+                and try again.
               </p>
             )}
             {structureProposal.planError && (
@@ -306,6 +291,47 @@ export default function StaffOrganizePage() {
                 {structureProposal.planError}
               </p>
             )}
+            {structureProposal.unresolvedReferences?.map((reference) => (
+              <div
+                key={reference.stepId}
+                className="mt-3 rounded border border-amber-300 p-3 text-sm"
+              >
+                <p>
+                  Review location: {reference.ref.name}.{" "}
+                  {reference.candidateIds.length
+                    ? "Choose a matching location within the requested scope."
+                    : "No location matched within the requested scope. Update the request to continue."}
+                </p>
+                {reference.candidateIds.length > 0 && (
+                  <Form method="post" className="mt-2 flex gap-2">
+                    <input
+                      type="hidden"
+                      name="instruction"
+                      value={structureProposal.instruction}
+                    />
+                    <select
+                      required
+                      name="parentLocationId"
+                      defaultValue=""
+                      className="rounded border p-2"
+                    >
+                      <option value="" disabled>
+                        Select a location
+                      </option>
+                      {reference.candidateIds.map((id) => (
+                        <option key={id} value={id}>
+                          {locations.find((location) => location.id === id)
+                            ?.path ?? "Location unavailable"}
+                        </option>
+                      ))}
+                    </select>
+                    <button className="rounded bg-red-700 px-3 py-2 text-white">
+                      Use this location
+                    </button>
+                  </Form>
+                )}
+              </div>
+            ))}
             {structureProposal.planError ? null : structureProposal.unresolvedParent &&
               structureProposal.parentCandidates.length > 0 ? (
               <div className="mt-4 rounded bg-amber-50 p-4">
@@ -347,6 +373,32 @@ export default function StaffOrganizePage() {
                 No existing parent locations are available. Add a location in
                 Shelf, then analyze this request again.
               </p>
+            ) : structureProposal.analysis ? (
+              <div className="mt-4 text-sm">
+                <p>
+                  Read-only location hierarchy and asset-placement counts from
+                  current Shelf data. No movement or category recommendations
+                  were generated.
+                </p>
+                <p className="mt-2">
+                  {structureProposal.analysis.locationsConsidered} locations in
+                  scope
+                  {structureProposal.analysis.truncated
+                    ? " · first 100 shown"
+                    : ""}
+                  .
+                </p>
+                <ul className="mt-3 space-y-2">
+                  {structureProposal.analysis.rows.map((row) => (
+                    <li key={row.id}>
+                      {row.path} —{" "}
+                      {row.placements === null
+                        ? "Inventory counts not requested"
+                        : `${row.placements} asset placements · ${row.units} units`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ) : structureProposal.deletionReview ? (
               <>
                 <p className="mt-4 text-sm">
