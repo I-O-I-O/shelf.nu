@@ -107,6 +107,7 @@ export const IMPORT_HELPER_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
           manufacturer: nullableString(300),
           mpn: nullableString(300),
           description: nullableString(5_000),
+          assetModelDescription: nullableString(600),
           productMatch: strictObject(
             {
               matchType: { enum: ["EXISTING", "NEW", "UNCERTAIN"] },
@@ -225,6 +226,7 @@ export const MOUSER_ENRICHMENT_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
           productName: { type: "string", minLength: 1, maxLength: 500 },
           manufacturer: nullableString(300),
           description: nullableString(5_000),
+          assetModelDescription: nullableString(600),
           quantity: {
             type: "integer",
             minimum: 1,
@@ -584,6 +586,8 @@ Reconstruct a line item even when PDF extraction places each field on a separate
 
 For invoice and fulfilment quantities, prefer shipped, received, or delivered quantity. Never use Pending. Never interpret a price, line total, tax, freight, tariff, row number, or page number as quantity. Use Ordered quantity only when the document clearly indicates the order was supplied; otherwise return quantity null, set quantityStatus to ORDERED or UNKNOWN, and ask at most one essential question for that row.
 
+When product identity is clear, optionally provide assetModelDescription: a practical one-to-three sentence description of what the product is and its general use. Use only verified manufacturer/model/MPN and source evidence. Prefer trustworthy structured product information; omit pricing, marketing, import context, and unsupported specifications. Return null when identity or use is ambiguous.
+
 Do not return headers, repeated headers, footers, totals, prices, tax, VAT, shipping, legal text, addresses, order metadata, page labels, table headings, Continued/Fortsätter, customs fields (TARIC, HTS, ECCN, COO), labels such as “Tillv. Artikelnr”, partial words, isolated numeric fragments, or table coordinates as products. If you are uncertain whether text belongs to a product, omit it rather than creating a garbage candidate.
 
 Suggest the most specific fitting category from the existing Shelf category allowlist, using its name and description; otherwise categoryId must be null and proposedName must be null. Never invent a category. Suggest an existing assignable Shelf location from the location allowlist using product identity, category, and location name/path/description/hierarchy. Prefer category placement counts supplied in location occupancy context when they show a clear historical preference; they are compact evidence, not capacity rules. Prefer a specifically relevant child over a general parent. Leave locationSuggestions empty if no good match. Choose a tracking mode only when reasonably confident: QUANTITY_TRACKED for clearly interchangeable stock, INDIVIDUAL for obvious equipment/dev boards/sensors where individual tracking may be useful. Otherwise set mode to null. Do not ask routine standalone-versus-kit questions; mark a kit only when the source clearly identifies one.
@@ -601,6 +605,8 @@ Return one structured object matching the supplied JSON schema. Use exact suppli
 export const MOUSER_ENRICHMENT_TRUSTED_INSTRUCTIONS = `You enrich already-grouped Mouser invoice line items. Deterministic parsing has already identified the commercial rows. Do not reconstruct, split, merge, add, or remove rows.
 
 Return exactly one output row for every supplied line item. Preserve sourceRef, supplierProductNumber, mpn, and quantity exactly. Do not infer or change quantity. Clean the human-facing productName and description from rawDescription. Produce a concise canonical inventory name that preserves the manufacturer, product family, exact model or chip identifier, and meaningful variant when supported by the source. Keep names recognizable to staff identifying a physical item. Preserve distinctive tokens such as XIAO, nRF52840, ESP32-S3/ESP32S3, MR60BHA2, MR60FDA2, 24GHz, 60GHz, Sense, Human Presence, Breathing, Heartbeat, and Fall Detection whenever they appear in the source. Keep a supported manufacturer such as Seeed Studio at the start of productName. Remove repeated manufacturer words and procurement or translated-description noise. DO NOT summarize away identifying tokens. DO NOT translate a specific model into a generic product class or use a procurement category as productName. For example, “Seeed Studio Seeed Studio XIAO ESP32-S3 / Utvecklingsverktyg för multiprotokoll” should become “Seeed Studio XIAO ESP32-S3”, not “XIAO ES Multiprotocol Development Tool”. “Seeed Studio XIAO nRF52840 Sense (Pre-Soldered)” should retain “Seeed Studio XIAO nRF52840 Sense”; keep “Pre-Soldered” only if it usefully distinguishes an inventory variant. Never invent model precision that is not present in rawDescription. Keep productName separate from the useful original invoice description.
+
+When manufacturer, productName, or MPN identify a product clearly, optionally return assetModelDescription: one to three concise practical sentences describing what it is and its general use. Use only supported product identity and rawDescription evidence. Do not add specifications, dimensions, marketing claims, prices, or import-specific language. Return null when uncertain.
 
 Use every supplied product evidence field for matching: manufacturer, the proposed/canonical productName, rawDescription, MPN, and supplierDescription. A shortened or imperfect productName must never override more specific model or use evidence in the original description. First select the best fitting existing activeCategories entry, then use that selected category together with product evidence to select an assignable relevantLocations entry. Use category placement counts included with a location description as compact historical evidence; do not treat them as capacity rules. Prefer the most specific category and the deepest clearly relevant location based on names, descriptions, paths, hierarchy, and strong historical placement. Use the organization's actual allowlist values; never assume a category or location name that is not present. Return null for either ID when no good fit exists. Never invent category or location IDs. Report categoryConfidence and locationConfidence separately from overall enrichment confidence, each from 0 to 1; use 0 when the corresponding ID is null.
 

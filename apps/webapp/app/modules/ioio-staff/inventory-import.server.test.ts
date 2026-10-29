@@ -33,6 +33,9 @@ const mockGetCategories = vi.hoisted(() => vi.fn());
 const mockCreateAsset = vi.hoisted(() => vi.fn());
 const mockUpdateAsset = vi.hoisted(() => vi.fn());
 const mockCreateAssetModel = vi.hoisted(() => vi.fn());
+const mockUpdateAssetMainImage = vi.hoisted(() => vi.fn());
+const mockUpdateAssetModelDescriptionIfUnchanged = vi.hoisted(() => vi.fn());
+const mockUpdateAssetModelImage = vi.hoisted(() => vi.fn());
 const mockCreateCategory = vi.hoisted(() => vi.fn());
 const mockRequirePermission = vi.hoisted(() => vi.fn());
 const mockGetBrokenSection = vi.hoisted(() => vi.fn());
@@ -40,6 +43,7 @@ const mockGetReturnArea = vi.hoisted(() => vi.fn());
 const mockGetArchivedCategoryIds = vi.hoisted(() => vi.fn());
 const mockRequestImportHelperProposal = vi.hoisted(() => vi.fn());
 const mockOcrPdfPages = vi.hoisted(() => vi.fn());
+const mockEnrichImportProductRows = vi.hoisted(() => vi.fn());
 
 // why: the tests exercise the pure file parsing and row classification logic;
 // database and Shelf mutation services must not be initialized for those tests.
@@ -52,6 +56,7 @@ vi.mock("~/database/db.server", () => ({
 vi.mock("~/modules/asset/service.server", () => ({
   BULK_CREATE_MAX: 100,
   createAsset: mockCreateAsset,
+  updateAssetMainImage: mockUpdateAssetMainImage,
   updateAsset: mockUpdateAsset,
 }));
 
@@ -59,6 +64,19 @@ vi.mock("~/modules/asset/service.server", () => ({
 // to Shelf's model tables or invoking model side effects.
 vi.mock("~/modules/asset-model/service.server", () => ({
   createAssetModel: mockCreateAssetModel,
+  updateAssetModelDescriptionIfUnchanged:
+    mockUpdateAssetModelDescriptionIfUnchanged,
+  updateAssetModelImage: mockUpdateAssetModelImage,
+}));
+
+// why: importer preparation tests must stay offline; bounded external lookup and image validation are exercised in product-enrichment.server.test.ts.
+vi.mock("./product-enrichment.server", () => ({
+  enrichImportProductRows: mockEnrichImportProductRows,
+}));
+
+// why: preparation only needs public image URL resolution; Supabase storage access is covered by the existing storage-service tests.
+vi.mock("~/utils/storage.server", () => ({
+  resolveStorageImageUrl: vi.fn(({ legacyUrl }) => legacyUrl ?? null),
 }));
 
 // why: access is only exercised by the request-level prepare/apply functions,
@@ -128,6 +146,7 @@ import {
   type StaffImportResult,
 } from "./inventory-import.server";
 import { PdfOcrError } from "./pdf-ocr.server";
+import type { ImportProductEnrichmentRow } from "./product-enrichment.server";
 import {
   MOUSER_FRAGMENTED_EXPECTED_ROWS,
   MOUSER_FRAGMENTED_PAGE_TEXT,
@@ -307,38 +326,41 @@ function makeGenericHelperReadyResult({
     productName: string;
     quantity: number;
     evidenceText: string;
+    quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
   }>;
 }) {
   return {
     status: "ready" as const,
     proposal: {
       schemaVersion: 1 as const,
-      rows: items.map(({ productName, quantity, evidenceText }) => ({
-        sourceRef: "pdf-page-1",
-        productName,
-        supplierProductNumber: null,
-        quantity,
-        quantityStatus: "RECEIVED" as const,
-        manufacturer: null,
-        mpn: null,
-        description: productName,
-        productMatch: {
-          matchType: "NEW" as const,
-          candidateId: null,
-          confidence: 0.8,
-        },
-        categorySuggestion: {
-          categoryId: null,
-          proposedName: null,
-          confidence: 0.4,
-        },
-        trackingSuggestion: { mode: null, confidence: 0.4 },
-        kitHint: { isKit: false, name: null, confidence: 0.9 },
-        settingsSuggestions: [],
-        locationSuggestions: [],
-        questions: [],
-        evidence: [{ sourceRef: "pdf-page-1", text: evidenceText }],
-      })),
+      rows: items.map(
+        ({ productName, quantity, evidenceText, quantityStatus }) => ({
+          sourceRef: "pdf-page-1",
+          productName,
+          supplierProductNumber: null,
+          quantity,
+          quantityStatus: quantityStatus ?? ("RECEIVED" as const),
+          manufacturer: null,
+          mpn: null,
+          description: productName,
+          productMatch: {
+            matchType: "NEW" as const,
+            candidateId: null,
+            confidence: 0.8,
+          },
+          categorySuggestion: {
+            categoryId: null,
+            proposedName: null,
+            confidence: 0.4,
+          },
+          trackingSuggestion: { mode: null, confidence: 0.4 },
+          kitHint: { isKit: false, name: null, confidence: 0.9 },
+          settingsSuggestions: [],
+          locationSuggestions: [],
+          questions: [],
+          evidence: [{ sourceRef: "pdf-page-1", text: evidenceText }],
+        })
+      ),
       questions: [],
       pageText,
     },
@@ -378,6 +400,7 @@ function makeMouserHelperResponse() {
 beforeEach(() => {
   mockOcrPdfPages.mockReset().mockRejectedValue(new PdfOcrError("unavailable"));
   database.category.findMany.mockResolvedValue([]);
+  database.assetModel.findMany.mockResolvedValue([]);
   database.location.findMany.mockResolvedValue([]);
   mockCreateCategory.mockImplementation(({ name }) => ({
     id: "category-created",
@@ -387,6 +410,30 @@ beforeEach(() => {
   mockGetBrokenSection.mockResolvedValue(null);
   mockGetReturnArea.mockResolvedValue(null);
   mockGetArchivedCategoryIds.mockResolvedValue([]);
+  mockUpdateAssetModelDescriptionIfUnchanged.mockResolvedValue(true);
+  mockUpdateAssetModelImage.mockResolvedValue("https://shelf.test/image.webp");
+  mockUpdateAssetMainImage.mockResolvedValue(true);
+  mockEnrichImportProductRows.mockImplementation((rows) => ({
+    rows: rows.map((row: ImportProductEnrichmentRow) => ({
+      ...row,
+      assetModelDescription: row.sourceDescription ?? null,
+      assetModelDescriptionSource: row.sourceDescription ? "SOURCE" : "NONE",
+      productImageProposal: { status: "IMAGE_NOT_FOUND" },
+    })),
+    diagnostics: {
+      imageLookupAttempted: 0,
+      imageCandidatesConsidered: 0,
+      imageAccepted: 0,
+      imageRejectedReason: {},
+      descriptionGenerated: 0,
+      descriptionSource: {
+        SOURCE: 0,
+        SHELF_EXISTING: 0,
+        GENERATED: 0,
+        NONE: rows.length,
+      },
+    },
+  }));
 });
 
 afterEach(() => {
@@ -394,11 +441,250 @@ afterEach(() => {
 });
 
 describe("staff inventory import safety", () => {
+  it("extracts one clear quantity from a PDF table", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "single-quantity.pdf",
+      buffer: makePdfFromPages([
+        { text: "Product | Quantity\nUSB-C Cable | 4" },
+      ]),
+    });
+
+    expect(rows[0]).toMatchObject({
+      title: "USB-C Cable",
+      quantity: 4,
+      quantityStatus: "RECEIVED",
+      diagnosticReasonCodes: ["QUANTITY_EXTRACTED"],
+    });
+  });
+
+  it("normalizes grouped integer quantities without treating currency as quantity", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "grouped-quantity.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Quantity\nCable ties | 1,000\nAdapters | $1,000\nCable clips | 1,000,001",
+        },
+      ]),
+    });
+
+    expect(
+      rows.map(({ quantity, diagnosticReasonCodes }) => [
+        quantity,
+        diagnosticReasonCodes?.[0],
+      ])
+    ).toEqual([
+      [1_000, "QUANTITY_EXTRACTED"],
+      [null, "QUANTITY_INVALID"],
+      [null, "QUANTITY_INVALID"],
+    ]);
+  });
+
+  it("uses shipped quantity instead of ordered quantity in a PDF table", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "shipment.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Ordered | Shipped | Price\nUSB-C Cable | 20 | 15 | 52.50",
+        },
+      ]),
+    });
+
+    expect(rows[0]).toMatchObject({
+      quantity: 15,
+      orderedQuantity: 20,
+      receivedQuantity: 15,
+      quantityStatus: "SHIPPED",
+    });
+  });
+
+  it("prefers received over delivered and shipped quantities while retaining the order context", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "multiple-quantity-concepts.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Ordered | Shipped | Delivered | Received | Backordered\nESP32 Board | 20 | 15 | 15 | 14 | 5",
+        },
+      ]),
+    });
+
+    expect(rows[0]).toMatchObject({
+      quantity: 14,
+      orderedQuantity: 20,
+      receivedQuantity: 14,
+      quantityStatus: "RECEIVED",
+      diagnosticReasonCodes: ["QUANTITY_EXTRACTED"],
+    });
+  });
+
+  it("keeps unit price and line total out of PDF quantity", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "price-near-quantity.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Qty | Unit Price | Line Total\nUSB-C Cable | 3 | 15.00 | 45.00",
+        },
+      ]),
+    });
+
+    expect(rows[0]?.quantity).toBe(3);
+    expect(rows[0]?.quantity).not.toBe(15);
+    expect(rows[0]?.quantity).not.toBe(45);
+  });
+
+  it("leaves ordered-only PDF quantities blank for staff review", async () => {
+    const rows = await parseStaffImportFile({
+      filename: "ordered-only.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Ordered | Backordered\nESP32 Board | 20 | 5",
+        },
+      ]),
+    });
+
+    expect(rows[0]).toMatchObject({
+      quantity: null,
+      orderedQuantity: 20,
+      quantityStatus: "ORDERED",
+      diagnosticReasonCodes: ["QUANTITY_AMBIGUOUS"],
+      pdfClassification: "PARTIAL",
+    });
+  });
+
+  it.each(["0", "-2"])(
+    "rejects non-positive PDF quantity %s without coercing it",
+    async (quantity) => {
+      const rows = await parseStaffImportFile({
+        filename: "invalid-quantity.pdf",
+        buffer: makePdfFromPages([
+          { text: `Product | Quantity\nMotor Driver | ${quantity}` },
+        ]),
+      });
+
+      expect(rows[0]).toMatchObject({
+        quantity: null,
+        diagnosticReasonCodes: ["QUANTITY_INVALID"],
+        pdfClassification: "PARTIAL",
+      });
+    }
+  );
+
+  it("uses structured PDF table quantities when Claude returns a conflicting value", async () => {
+    preparePdfImportMocks("operation-structured-quantity");
+    const text =
+      "Product | Ordered | Shipped | Unit Price | Total\nUSB-C Cable | 20 | 15 | 3.00 | 45.00";
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: text,
+        items: [
+          {
+            productName: "USB-C Cable",
+            quantity: 20,
+            evidenceText: "USB-C Cable",
+          },
+        ],
+      })
+    );
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makePdfFromPages([{ text }])], "shipment.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      quantity: 15,
+      orderedQuantity: 20,
+      receivedQuantity: 15,
+      quantityStatus: "SHIPPED",
+      diagnosticReasonCodes: expect.arrayContaining(["QUANTITY_EXTRACTED"]),
+    });
+  });
+
+  it("keeps suggested description and image proposal-only until Apply", async () => {
+    preparePdfImportMocks("operation-review-only-product-image");
+    const imageDataBase64 = Buffer.from(
+      "RIFF\u0004\u0000\u0000\u0000WEBP"
+    ).toString("base64");
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: "Arduino Nano A000005 shipped 1",
+        items: [
+          {
+            productName: "Arduino Nano",
+            quantity: 1,
+            evidenceText: "Arduino Nano A000005 shipped 1",
+          },
+        ],
+      })
+    );
+    mockEnrichImportProductRows.mockImplementationOnce((rows) => ({
+      rows: rows.map((row: ImportProductEnrichmentRow) => ({
+        ...row,
+        assetModelDescription:
+          "A compact microcontroller board for electronics prototyping.",
+        assetModelDescriptionSource: "GENERATED",
+        productImageProposal: {
+          status: "IMAGE_FOUND",
+          mimeType: "image/webp",
+          dataBase64: imageDataBase64,
+          sourceName: "Arduino Nano image",
+          sourceUrl: "https://openverse.org/image/1",
+          license: "cc0",
+        },
+      })),
+      diagnostics: {
+        imageLookupAttempted: 1,
+        imageCandidatesConsidered: 1,
+        imageAccepted: 1,
+        imageRejectedReason: {},
+        descriptionGenerated: 1,
+        descriptionSource: {
+          SOURCE: 0,
+          SHELF_EXISTING: 0,
+          GENERATED: 1,
+          NONE: 0,
+        },
+      },
+    }));
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: "Arduino Nano A000005 shipped 1" }])],
+        "arduino-invoice.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      assetModelDescription:
+        "A compact microcontroller board for electronics prototyping.",
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        dataBase64: imageDataBase64,
+      },
+    });
+    expect(mockUpdateAssetModelImage).not.toHaveBeenCalled();
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
   it("reconstructs six Mouser lines across wrapped text and continuation pages", () => {
     const parsed = parseMouserInvoicePages(MOUSER_SIX_LINE_PAGES);
 
     expect(parsed.detected).toBe(true);
     expect(parsed.lineItems).toHaveLength(6);
+    expect(
+      parsed.lineItems.filter((lineItem) =>
+        Number.isSafeInteger(lineItem.quantity)
+      )
+    ).toHaveLength(6);
     expect(
       parsed.lineItems.map(
         ({
@@ -921,6 +1207,10 @@ describe("staff inventory import safety", () => {
     unitOfMeasure,
     consumptionType,
     skipDecision = false,
+    assetModelDescription,
+    productImageProposal,
+    acceptSuggestedImage = false,
+    sourceRow,
   }: {
     quantity: number;
     type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
@@ -947,18 +1237,40 @@ describe("staff inventory import safety", () => {
     unitOfMeasure?: string | null;
     consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
     skipDecision?: boolean;
+    assetModelDescription?: string | null;
+    productImageProposal?: {
+      status: "IMAGE_FOUND";
+      mimeType: "image/webp";
+      dataBase64: string;
+      sourceName?: string;
+      sourceUrl?: string;
+      license?: string;
+    };
+    acceptSuggestedImage?: boolean;
+    sourceRow?: {
+      title: string;
+      quantity: number | null;
+      receivedQuantity?: number | null;
+      orderedQuantity?: number | null;
+      quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
+    };
   }) {
     vi.clearAllMocks();
     const operationId = `operation-${type}-${quantity}`;
     const row = {
       rowNumber: 2,
-      title: "Arduino Nano",
+      title: sourceRow?.title ?? "Arduino Nano",
       action: "CREATE" as const,
       assetId: null,
       type,
-      quantity,
-      receivedQuantity: quantity,
-      quantityStatus: "RECEIVED" as const,
+      quantity: sourceRow ? sourceRow.quantity : quantity,
+      receivedQuantity: sourceRow
+        ? sourceRow.receivedQuantity ?? null
+        : quantity,
+      ...(sourceRow?.orderedQuantity !== undefined
+        ? { orderedQuantity: sourceRow.orderedQuantity }
+        : {}),
+      quantityStatus: sourceRow?.quantityStatus ?? ("RECEIVED" as const),
       category: useExistingCategory ? "Electronics" : null,
       categoryId: useExistingCategory ? "category-electronics" : null,
       location: null,
@@ -970,6 +1282,12 @@ describe("staff inventory import safety", () => {
       currentCategoryId: null,
       currentLocationId: null,
       reason: "New item",
+      assetModelDescription: assetModelDescription ?? null,
+      existingAssetModelDescription: null,
+      productImageProposal: productImageProposal ?? {
+        status: "IMAGE_NOT_FOUND" as const,
+      },
+      acceptSuggestedImage,
     };
     const proposalContent = {
       version: 1 as const,
@@ -1232,6 +1550,8 @@ describe("staff inventory import safety", () => {
                     minQuantity,
                     unitOfMeasure,
                     consumptionType,
+                    assetModelDescription: assetModelDescription ?? null,
+                    acceptSuggestedImage,
                   },
             ]),
           }
@@ -1464,6 +1784,37 @@ describe("staff inventory import safety", () => {
     expect(
       database.ioioWriteOperation.updateMany.mock.calls.at(-1)?.[0].data.status
     ).toBe("SUCCEEDED");
+  });
+
+  it("applies the received shipment quantity parsed from a PDF through the existing Shelf path", async () => {
+    const [sourceRow] = await parseStaffImportFile({
+      filename: "shipment.pdf",
+      buffer: makePdfFromPages([
+        {
+          text: "Product | Ordered | Shipped | Category\nArduino Nano | 5 | 4 | Electronics",
+        },
+      ]),
+    });
+    expect(sourceRow).toMatchObject({
+      quantity: 4,
+      receivedQuantity: 4,
+      orderedQuantity: 5,
+      quantityStatus: "SHIPPED",
+    });
+
+    const { assetRows, result } = await applyNewImport({
+      quantity: 4,
+      type: "QUANTITY_TRACKED",
+      sourceRow,
+    });
+
+    expect(assetRows).toHaveLength(1);
+    expect(assetRows[0]).toMatchObject({
+      title: "Arduino Nano",
+      type: "QUANTITY_TRACKED",
+      quantity: 4,
+    });
+    expect(result).toMatchObject({ totalRows: 1, succeededRows: 1 });
   });
 
   it("creates a proposed category only after explicit approval and Shelf permission", async () => {
@@ -1865,6 +2216,7 @@ describe("staff inventory import safety", () => {
       type: "QUANTITY_TRACKED",
       quantity: 5,
     });
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
     expect(assetRows[0]).not.toHaveProperty("assetModelId");
     expect(ledgerRows.filter((item) => item.unitIndex !== null)).toHaveLength(
       0
@@ -1872,6 +2224,99 @@ describe("staff inventory import safety", () => {
     expect(modelId).toBeNull();
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
     expect(result).toMatchObject({ totalRows: 1, succeededRows: 1 });
+  });
+
+  it("stores an accepted image through Shelf image service during Apply", async () => {
+    const imageDataBase64 = Buffer.from(
+      "RIFF\u0004\u0000\u0000\u0000WEBP"
+    ).toString("base64");
+    const { assetRows, modelId } = await applyNewImport({
+      quantity: 1,
+      type: "INDIVIDUAL",
+      assetModelDescription:
+        "A compact microcontroller board for electronics prototyping.",
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        dataBase64: imageDataBase64,
+        sourceName: "Arduino Nano image",
+        sourceUrl: "https://openverse.org/image/1",
+        license: "cc0",
+      },
+      acceptSuggestedImage: true,
+    });
+
+    expect(assetRows[0].assetModelId).toBe(modelId);
+    expect(mockUpdateAssetMainImage).not.toHaveBeenCalled();
+    expect(mockUpdateAssetModelImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetModelId: modelId,
+        organizationId: "org-1",
+        onlyIfMissing: true,
+        request: expect.any(Request),
+      })
+    );
+    const formData =
+      await mockUpdateAssetModelImage.mock.calls[0][0].request.formData();
+    expect(formData.get("image")).toMatchObject({
+      type: "image/webp",
+      name: "product-image.webp",
+    });
+  });
+
+  it("enriches quantity-tracked inventory without attaching an AssetModel", async () => {
+    const imageDataBase64 = Buffer.from(
+      "RIFF\u0004\u0000\u0000\u0000WEBP"
+    ).toString("base64");
+    const { assetRows, modelId } = await applyNewImport({
+      quantity: 5,
+      type: "QUANTITY_TRACKED",
+      assetModelDescription:
+        "A compact microcontroller board for electronics prototyping.",
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        dataBase64: imageDataBase64,
+      },
+      acceptSuggestedImage: true,
+    });
+
+    expect(assetRows[0]).toMatchObject({
+      type: "QUANTITY_TRACKED",
+      quantity: 5,
+      description:
+        "A compact microcontroller board for electronics prototyping.",
+    });
+    expect(assetRows[0]).not.toHaveProperty("assetModelId");
+    expect(modelId).toBeNull();
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
+    expect(mockUpdateAssetModelImage).not.toHaveBeenCalled();
+    expect(mockUpdateAssetMainImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetId: assetRows[0].id,
+        userId: "staff-1",
+        organizationId: "org-1",
+        isNewAsset: true,
+        request: expect.any(Request),
+      })
+    );
+  });
+
+  it("does not upload a suggested image when staff leaves it unchecked", async () => {
+    await applyNewImport({
+      quantity: 1,
+      type: "INDIVIDUAL",
+      assetModelDescription: "A compact microcontroller board.",
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        dataBase64: Buffer.from("RIFF\u0004\u0000\u0000\u0000WEBP").toString(
+          "base64"
+        ),
+      },
+      acceptSuggestedImage: false,
+    });
+    expect(mockUpdateAssetModelImage).not.toHaveBeenCalled();
   });
 
   it("enforces named individual-unit limits without affecting quantity-tracked rows", () => {
@@ -2204,6 +2649,56 @@ describe("staff inventory import safety", () => {
     ]);
     expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
     expect(mockOcrPdfPages).not.toHaveBeenCalled();
+    expect(
+      prepared.status === "PREPARED" && prepared.proposal.diagnostics
+    ).toMatchObject({
+      rowsParsed: 2,
+      rowsWithQuantity: 2,
+      quantityNeedsReview: 0,
+      rowsWithSuggestedLocation: 0,
+      locationUnresolved: 2,
+    });
+  });
+
+  it("does not keep a tentative helper quantity when the quantity status is unknown", async () => {
+    preparePdfImportMocks("operation-ambiguous-quantity");
+    const text =
+      "Supplier invoice\nUSB-C cable, qty could be ordered or shipped";
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: text,
+        items: [
+          {
+            productName: "USB-C cable",
+            quantity: 1,
+            quantityStatus: "UNKNOWN",
+            evidenceText: "USB-C cable, qty could be ordered or shipped",
+          },
+        ],
+      })
+    );
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makePdfFromPages([{ text }])], "ambiguous.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      quantity: null,
+      quantityStatus: "UNKNOWN",
+      action: "NEEDS_REVIEW",
+      diagnosticReasonCodes: expect.arrayContaining(["QUANTITY_AMBIGUOUS"]),
+    });
+    expect(prepared.proposal.diagnostics).toMatchObject({
+      rowsParsed: 1,
+      rowsWithQuantity: 0,
+      quantityNeedsReview: 1,
+    });
   });
 
   it("uses PDF.js ToUnicode mappings and positioned items before generic Claude", async () => {
@@ -2304,6 +2799,13 @@ describe("staff inventory import safety", () => {
     });
 
     expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      quantity: 4,
+      receivedQuantity: 4,
+      quantityStatus: "RECEIVED",
+      diagnosticReasonCodes: expect.arrayContaining(["QUANTITY_EXTRACTED"]),
+    });
     expect(mockOcrPdfPages).toHaveBeenCalledTimes(1);
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
     expect(helperRequest.document.pages).toEqual([
@@ -3809,7 +4311,9 @@ describe("spreadsheet canonical category fallback", () => {
         ["Arduino Nano", "5", ""],
         ["Part 42", "2", "Cables"],
       ];
-      let buffer = Buffer.from(matrix.map((row) => row.join(",")).join("\n"));
+      let buffer: Buffer<ArrayBufferLike> = Buffer.from(
+        matrix.map((row) => row.join(",")).join("\n")
+      );
       if (format === "xlsx") {
         const zip = new JSZip();
         zip.file(
@@ -3845,7 +4349,7 @@ describe("spreadsheet canonical category fallback", () => {
       const prepared = await prepareStaffInventoryImport({
         context: { getSession: () => ({ userId: "staff-1" }) } as never,
         request: new Request("http://localhost/staff/import"),
-        file: new File([buffer], `stock.${format}`),
+        file: new File([Uint8Array.from(buffer).buffer], `stock.${format}`),
       });
       if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
       expect(prepared.proposal.rows.map((row) => row.categoryId)).toEqual([

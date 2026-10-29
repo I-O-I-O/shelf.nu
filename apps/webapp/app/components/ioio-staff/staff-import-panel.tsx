@@ -76,6 +76,8 @@ type ReviewDecision = {
   minQuantity: number | null;
   unitOfMeasure: string | null;
   consumptionType: "ONE_WAY" | "TWO_WAY" | null;
+  assetModelDescription: string | null;
+  acceptSuggestedImage: boolean;
 };
 
 function isSafeReviewAction(row: StaffImportProposalRow) {
@@ -464,6 +466,8 @@ function StaffImportProposalView({
               (setting) => setting.key === "consumptionType"
             )?.value as "ONE_WAY" | "TWO_WAY" | undefined) ??
             (row.type === "QUANTITY_TRACKED" ? "TWO_WAY" : null),
+          assetModelDescription: row.assetModelDescription ?? null,
+          acceptSuggestedImage: false,
         },
       ])
     )
@@ -589,6 +593,8 @@ function StaffImportProposalView({
           minQuantity: decision?.minQuantity,
           unitOfMeasure: decision?.unitOfMeasure,
           consumptionType: decision?.consumptionType,
+          assetModelDescription: decision?.assetModelDescription,
+          acceptSuggestedImage: decision?.acceptSuggestedImage,
         };
       })
       .filter((decision) => decision.decision)
@@ -1045,6 +1051,31 @@ function StaffImportProposalView({
                             {row.sourceDescription}
                           </p>
                         ) : null}
+                        {row.assetModelDescription ? (
+                          <p>
+                            <span className="font-semibold">
+                              AssetModel description:
+                            </span>{" "}
+                            {row.assetModelDescription}
+                          </p>
+                        ) : null}
+                        {row.productImageProposal?.status === "IMAGE_FOUND" &&
+                        row.productImageProposal.dataBase64 ? (
+                          <img
+                            src={`data:image/webp;base64,${row.productImageProposal.dataBase64}`}
+                            alt={`Suggested product for ${row.title}`}
+                            className="size-16 rounded border border-gray-200 bg-white object-contain"
+                          />
+                        ) : row.existingAssetModelImageUrl ? (
+                          <img
+                            src={
+                              row.existingAssetModelThumbnailUrl ??
+                              row.existingAssetModelImageUrl
+                            }
+                            alt={`Shelf model for ${row.title}`}
+                            className="size-16 rounded border border-gray-200 bg-white object-contain"
+                          />
+                        ) : null}
                         {row.unitDescription ? (
                           <p>
                             <span className="font-semibold">Unit:</span>{" "}
@@ -1438,6 +1469,112 @@ function StaffImportProposalView({
                             </label>
                           </fieldset>
                         ) : null}
+                        <section className="space-y-2 rounded border border-gray-200 p-2">
+                          <label className="block font-semibold">
+                            AssetModel description
+                            <textarea
+                              value={
+                                reviewDecisions[row.rowNumber]
+                                  ?.assetModelDescription ?? ""
+                              }
+                              maxLength={600}
+                              rows={3}
+                              onChange={(event) =>
+                                updateDecision(row.rowNumber, {
+                                  assetModelDescription:
+                                    event.target.value || null,
+                                })
+                              }
+                              className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1 font-normal"
+                            />
+                          </label>
+                          {row.assetModelDescriptionSource ? (
+                            <p className="text-gray-500">
+                              Description source:{" "}
+                              {actionLabel(row.assetModelDescriptionSource)}
+                            </p>
+                          ) : null}
+                          {row.existingAssetModelImageUrl ? (
+                            <div>
+                              <p className="mb-1 font-semibold">
+                                Existing Shelf image
+                              </p>
+                              <img
+                                src={
+                                  row.existingAssetModelThumbnailUrl ??
+                                  row.existingAssetModelImageUrl
+                                }
+                                alt={`Existing Shelf model for ${row.title}`}
+                                className="size-20 rounded border border-gray-200 object-contain"
+                              />
+                              <p className="mt-1 text-gray-500">
+                                The existing model image will be kept.
+                              </p>
+                            </div>
+                          ) : row.productImageProposal?.status ===
+                              "IMAGE_FOUND" &&
+                            row.productImageProposal.dataBase64 ? (
+                            <div>
+                              <p className="mb-1 font-semibold">
+                                Suggested product image
+                              </p>
+                              <img
+                                src={`data:image/webp;base64,${row.productImageProposal.dataBase64}`}
+                                alt={`Suggested product for ${row.title}`}
+                                className="size-20 rounded border border-gray-200 object-contain"
+                              />
+                              <p className="mt-1 text-gray-600">
+                                {row.productImageProposal.sourceName ??
+                                  "Openverse image"}
+                                {row.productImageProposal.license
+                                  ? ` · ${row.productImageProposal.license}`
+                                  : ""}
+                                {row.productImageProposal.sourceUrl &&
+                                /^https?:\/\//i.test(
+                                  row.productImageProposal.sourceUrl
+                                ) ? (
+                                  <>
+                                    {" · "}
+                                    <a
+                                      href={row.productImageProposal.sourceUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="underline"
+                                    >
+                                      source
+                                    </a>
+                                  </>
+                                ) : null}
+                              </p>
+                              <label className="mt-2 flex items-start gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={
+                                    reviewDecisions[row.rowNumber]
+                                      ?.acceptSuggestedImage ?? false
+                                  }
+                                  onChange={(event) =>
+                                    updateDecision(row.rowNumber, {
+                                      acceptSuggestedImage:
+                                        event.target.checked,
+                                    })
+                                  }
+                                />
+                                <span>
+                                  Use this image for the Shelf product
+                                </span>
+                              </label>
+                            </div>
+                          ) : (
+                            <p className="text-gray-500">
+                              Product image:{" "}
+                              {actionLabel(
+                                row.productImageProposal?.status ??
+                                  "IMAGE_NOT_FOUND"
+                              )}
+                            </p>
+                          )}
+                        </section>
                         {proposal.categoryOptions?.length ? (
                           <label className="block">
                             Category
@@ -1599,8 +1736,13 @@ function StaffImportProposalView({
                         {selectedLocation?.pathLabel ??
                           (decision?.locationId === null
                             ? suggestedLocation &&
-                              (row.locationSuggestionConfidence ?? 0) >= 0.5
-                              ? `Suggested: ${suggestedLocation.pathLabel} · choose`
+                              row.locationSuggestionStatus !== "UNRESOLVED"
+                              ? (row.locationSuggestionStatus ===
+                                "WEAK_SUGGESTION"
+                                  ? "Possible location: "
+                                  : "Suggested: ") +
+                                suggestedLocation.pathLabel +
+                                " · choose"
                               : "Choose location"
                             : row.locationLabel && row.locationId
                             ? row.locationLabel

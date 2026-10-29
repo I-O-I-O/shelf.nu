@@ -17,6 +17,7 @@ import { ErrorContent } from "~/components/errors";
 import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customizer";
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
 import { StaffImportPanel } from "~/components/ioio-staff/staff-import-panel";
+import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
 import { db } from "~/database/db.server";
 import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
 import {
@@ -554,14 +555,19 @@ export default function HomePage() {
         </form>
 
         {isStaff ? (
-          <div className="mt-6 space-y-6">
-            {dashboardPreferences.order.map(
-              (widgetId: StaffDashboardWidgetId) =>
-                hiddenWidgets.has(widgetId) ? null : (
-                  <div key={widgetId}>{widgets[widgetId]}</div>
-                )
-            )}
-          </div>
+          <>
+            <div className="mt-6">
+              <StaffInventoryTools />
+            </div>
+            <div className="mt-6 space-y-6">
+              {dashboardPreferences.order.map(
+                (widgetId: StaffDashboardWidgetId) =>
+                  hiddenWidgets.has(widgetId) ? null : (
+                    <div key={widgetId}>{widgets[widgetId]}</div>
+                  )
+              )}
+            </div>
+          </>
         ) : null}
       </div>
     </div>

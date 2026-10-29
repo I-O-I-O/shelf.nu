@@ -1,3 +1,6 @@
+import { createElement } from "react";
+import { render, screen } from "@testing-library/react";
+import { createRoutesStub } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 
@@ -20,6 +23,13 @@ vi.mock("~/database/db.server", () => ({
 // why: route error components import scanner animation code that touches
 // canvas APIs unavailable in happy-dom at module initialization.
 vi.mock("lottie-react", () => ({ default: () => null }));
+// why: render the Home route's dashboard structure without mounting its independent dialogs and import workflow.
+vi.mock("~/components/ioio-staff/dashboard-customizer", () => ({
+  DashboardCustomizer: () => null,
+}));
+vi.mock("~/components/ioio-staff/staff-import-panel", () => ({
+  StaffImportPanel: () => null,
+}));
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: mocks.requirePermission,
 }));
@@ -41,7 +51,7 @@ vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   prepareStaffInventoryImport: vi.fn(),
 }));
 
-import { action, loader } from "~/routes/_layout+/home";
+import HomePage, { action, loader } from "~/routes/_layout+/home";
 
 describe("IOIO staff dashboard loader", () => {
   beforeEach(() => {
@@ -152,5 +162,38 @@ describe("IOIO staff dashboard loader", () => {
       kind: "import-result",
       result: resultData,
     });
+  });
+});
+
+describe("IOIO staff dashboard inventory tools", () => {
+  it("shows the inventory-tools section on the staff home route", async () => {
+    const Stub = createRoutesStub([
+      {
+        path: "/home",
+        Component: HomePage,
+        HydrateFallback: () => createElement("div", null, "Loading dashboard"),
+        loader: () => ({
+          isStaff: true,
+          dashboardPreferences: { order: ["inventory_import"], hidden: [] },
+          importNotice: null,
+          importProposal: null,
+          labTasks: null,
+          purchasing: null,
+          taHours: null,
+        }),
+      },
+    ]);
+
+    render(createElement(Stub, { initialEntries: ["/home"] }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Inventory tools", level: 2 })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Import inventory" })
+    ).toHaveAttribute("href", "/staff/import");
+    expect(
+      screen.getByRole("link", { name: "Organize inventory" })
+    ).toHaveAttribute("href", "/staff/organize");
   });
 });

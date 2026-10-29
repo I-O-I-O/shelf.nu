@@ -275,6 +275,29 @@ export async function updateAssetModel({
   }
 }
 
+/** Sets a proposed description only while the reviewed prior value is current. */
+export async function updateAssetModelDescriptionIfUnchanged({
+  assetModelId,
+  organizationId,
+  expectedDescription,
+  description,
+}: {
+  assetModelId: AssetModel["id"];
+  organizationId: Organization["id"];
+  expectedDescription: string | null;
+  description: string;
+}) {
+  const result = await db.assetModel.updateMany({
+    where: {
+      id: assetModelId,
+      organizationId,
+      description: expectedDescription,
+    },
+    data: { description },
+  });
+  return result.count === 1;
+}
+
 /**
  * Uploads (or replaces) an asset model's cover image.
  *
@@ -299,15 +322,39 @@ export async function updateAssetModelImage({
   request,
   assetModelId,
   organizationId,
+  onlyIfMissing = false,
 }: {
   request: Request;
   assetModelId: AssetModel["id"];
   organizationId: Organization["id"];
+  /** Preserve an image that already exists, including a concurrent write. */
+  onlyIfMissing?: boolean;
 }): Promise<string | null> {
   let uploadedImagePaths: string[] = [];
   let imageSaved = false;
 
   try {
+    if (onlyIfMissing) {
+      const current = await db.assetModel.findFirst({
+        where: { id: assetModelId, organizationId },
+        select: {
+          image: true,
+          thumbnailImage: true,
+          imageStoragePath: true,
+          thumbnailImageStoragePath: true,
+        },
+      });
+      if (!current) throw new Error("AssetModel is unavailable.");
+      if (
+        current.image ||
+        current.thumbnailImage ||
+        current.imageStoragePath ||
+        current.thumbnailImageStoragePath
+      ) {
+        return null;
+      }
+    }
+
     const fileData = await parseFileFormData({
       request,
       bucketName: PUBLIC_BUCKET,
@@ -371,15 +418,39 @@ export async function updateAssetModelImage({
      * belonging to another workspace matches zero rows instead of being
      * overwritten.
      */
-    await db.assetModel.update({
-      where: { id: assetModelId, organizationId },
-      data: {
-        image,
-        thumbnailImage,
-        imageStoragePath: imagePath,
-        thumbnailImageStoragePath: thumbnailPath,
-      },
-    });
+    const imageData = {
+      image,
+      thumbnailImage,
+      imageStoragePath: imagePath,
+      thumbnailImageStoragePath: thumbnailPath,
+    };
+    if (onlyIfMissing) {
+      const saved = await db.assetModel.updateMany({
+        where: {
+          id: assetModelId,
+          organizationId,
+          image: null,
+          thumbnailImage: null,
+          imageStoragePath: null,
+          thumbnailImageStoragePath: null,
+        },
+        data: imageData,
+      });
+      if (saved.count !== 1) {
+        await Promise.all(
+          uploadedImagePaths.map((objectPath) =>
+            removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+          )
+        );
+        uploadedImagePaths = [];
+        return null;
+      }
+    } else {
+      await db.assetModel.update({
+        where: { id: assetModelId, organizationId },
+        data: imageData,
+      });
+    }
     imageSaved = true;
 
     const previousPaths = [

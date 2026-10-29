@@ -6,8 +6,13 @@ import { db } from "~/database/db.server";
 import {
   BULK_CREATE_MAX,
   createAsset,
+  updateAssetMainImage,
   updateAsset,
 } from "~/modules/asset/service.server";
+import {
+  updateAssetModelDescriptionIfUnchanged,
+  updateAssetModelImage,
+} from "~/modules/asset-model/service.server";
 import {
   createCategory,
   getActiveCategoriesForOrganization,
@@ -17,17 +22,21 @@ import { getIoioArchivedCategoryIds } from "~/modules/ioio-staff/archive.server"
 import { PICKUP_ZONE_NAME } from "~/modules/ioio-staff/pickup-zone.server";
 import { getConfiguredReportReturnArea } from "~/modules/ioio-student/report-return-location.server";
 import { getLocations } from "~/modules/location/service.server";
+import { PUBLIC_BUCKET } from "~/utils/constants";
 import { ShelfError } from "~/utils/error";
 import { getRandomColor } from "~/utils/get-random-color";
 import { id } from "~/utils/id/id.server";
+import { detectImageFormat } from "~/utils/image-format.server";
 import { Logger } from "~/utils/logger";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
+import { resolveStorageImageUrl } from "~/utils/storage.server";
 import { requireIoioStaffAccess } from "./access.server";
 import {
+  getImportAssetModelIdentity,
   ImportAssetModelConflictError,
   resolveImportAssetModel,
 } from "./import-asset-model.server";
@@ -64,6 +73,7 @@ import {
 } from "./import-planner";
 import {
   buildImportLocationAffinities,
+  buildImportLocationRepresentativeProducts,
   getImportLocationPath,
   getOperationalImportLocationIds,
   matchesReviewedImportLocationPath,
@@ -72,6 +82,10 @@ import {
   resolveImportCategorySuggestion,
   resolveImportLocation,
   resolveImportLocationSuggestion,
+  selectImportLocationCandidates,
+  type ImportLocationDiagnosticReason,
+  type ImportLocationSuggestionStatus,
+  type ImportProductEvidence,
   type ImportSuggestionMethod,
 } from "./import-resolution";
 import {
@@ -80,6 +94,13 @@ import {
 } from "./import-review";
 import { PDF_OCR_MAX_PAGES, PdfOcrError, ocrPdfPages } from "./pdf-ocr.server";
 import { pdfjsResourceUrl } from "./pdfjs-runtime.server";
+import {
+  enrichImportProductRows,
+  type ExistingImportAssetModel,
+  type ImportProductDescriptionSource,
+  type ImportProductImageProposal,
+  type ProductEnrichmentDiagnostics,
+} from "./product-enrichment.server";
 import {
   detectSpreadsheetHeader,
   isSpreadsheetNonProduct,
@@ -139,6 +160,27 @@ export type ProcurementQuantityStatus =
   | "ORDERED"
   | "UNKNOWN";
 
+export type ImportRowDiagnosticReasonCode =
+  | "QUANTITY_EXTRACTED"
+  | "QUANTITY_AMBIGUOUS"
+  | "QUANTITY_INVALID"
+  | ImportLocationDiagnosticReason;
+
+export type StaffImportDiagnostics = {
+  rowsParsed: number;
+  rowsWithQuantity: number;
+  quantityNeedsReview: number;
+  rowsWithSuggestedLocation: number;
+  locationFallbackUsed: number;
+  locationUnresolved: number;
+  imageLookupAttempted?: number;
+  imageCandidatesConsidered?: number;
+  imageAccepted?: number;
+  imageRejectedReason?: Record<string, number>;
+  descriptionGenerated?: number;
+  descriptionSource?: Record<ImportProductDescriptionSource, number>;
+};
+
 export type StaffImportRow = {
   rowNumber: number;
   sourceSheet?: string;
@@ -158,12 +200,22 @@ export type StaffImportRow = {
   receivedQuantity?: number | null;
   quantityStatus?: ProcurementQuantityStatus;
   enrichmentConfidence?: number;
+  assetModelDescription?: string | null;
+  existingAssetModelDescription?: string | null;
+  existingAssetModelId?: string | null;
+  existingAssetModelImageUrl?: string | null;
+  existingAssetModelThumbnailUrl?: string | null;
+  assetModelDescriptionSource?: ImportProductDescriptionSource;
+  productImageProposal?: ImportProductImageProposal;
+  acceptSuggestedImage?: boolean;
   suggestedCategoryId?: string | null;
   categorySuggestionConfidence?: number;
   suggestedLocationId?: string | null;
   locationSuggestionConfidence?: number;
   categorySuggestionMethod?: ImportSuggestionMethod | "unresolved";
   locationSuggestionMethod?: ImportSuggestionMethod | "unresolved";
+  locationSuggestionStatus?: ImportLocationSuggestionStatus;
+  diagnosticReasonCodes?: ImportRowDiagnosticReasonCode[];
   categoryConfidence?: "High" | "Medium" | "Low";
   categoryReason?: string;
   reviewRequired?: boolean;
@@ -253,6 +305,7 @@ export type StaffImportProposal = {
   categoryOptions?: Array<NamedRecord & { color?: string; archived?: boolean }>;
   locationOptions?: ImportLocationOption[];
   pdfSummary?: StaffImportPdfSummary;
+  diagnostics?: StaffImportDiagnostics;
 };
 
 export type StaffImportResult = {
@@ -467,6 +520,7 @@ type ImportLocationOption = NamedRecord & {
     assetCount: number;
     units: number;
   }>;
+  representativeProducts?: string[];
 };
 
 function formatLocationPlacementContext(
@@ -485,12 +539,44 @@ function formatLocationPlacementContext(
     : null;
 }
 
-function getLocationHelperDescription(location: ImportLocationOption) {
+function getLocationHelperDescription(
+  location: Pick<
+    ImportLocationOption,
+    "description" | "categoryAffinities" | "representativeProducts"
+  >
+) {
   const context = formatLocationPlacementContext(location.categoryAffinities);
-  if (!context) return location.description?.slice(0, 500) ?? null;
-  const descriptionBudget = Math.max(0, 500 - context.length - 3);
-  const description = location.description?.slice(0, descriptionBudget);
-  return [description, context].filter(Boolean).join(" | ").slice(0, 500);
+  const representativeProducts = location.representativeProducts?.length
+    ? `Similar stored products: ${location.representativeProducts
+        .slice(0, 4)
+        .join("; ")}`
+    : null;
+  return (
+    [location.description, context, representativeProducts]
+      .filter(Boolean)
+      .join(" | ")
+      .slice(0, 500) || null
+  );
+}
+
+function getImportLocationCandidatesForEvidence({
+  evidence,
+  locations,
+  limit = 20,
+}: {
+  evidence: {
+    evidence: ImportProductEvidence;
+    category?: NamedRecord | null;
+  }[];
+  locations: ImportLocationOption[];
+  limit?: number;
+}) {
+  return selectImportLocationCandidates({
+    products: evidence,
+    locations,
+    limit,
+    perProductLimit: 5,
+  });
 }
 
 function getImportCandidateDiagnostics(
@@ -594,7 +680,13 @@ async function isReviewedImportLocationCurrent({
   });
 }
 
-const HEADER_ALIASES: Record<string, keyof StaffImportRow> = {
+type StaffImportInputField =
+  | keyof StaffImportRow
+  | "shippedQuantityInput"
+  | "deliveredQuantityInput"
+  | "backorderedQuantityInput";
+
+const HEADER_ALIASES: Record<string, StaffImportInputField> = {
   model: "title",
   "model name": "title",
   product: "title",
@@ -617,8 +709,11 @@ const HEADER_ALIASES: Record<string, keyof StaffImportRow> = {
   stock: "quantity",
   antal: "quantity",
   received: "receivedQuantity",
-  shipped: "receivedQuantity",
-  delivered: "receivedQuantity",
+  shipped: "shippedQuantityInput",
+  delivered: "deliveredQuantityInput",
+  backordered: "backorderedQuantityInput",
+  backorder: "backorderedQuantityInput",
+  "back order": "backorderedQuantityInput",
   ordered: "orderedQuantity",
   group: "category",
   class: "category",
@@ -652,11 +747,20 @@ const HEADER_ALIASES: Record<string, keyof StaffImportRow> = {
   "quantity ordered": "orderedQuantity",
   "ordered quantity": "orderedQuantity",
   "qty ordered": "orderedQuantity",
-  "quantity shipped": "receivedQuantity",
-  "shipped quantity": "receivedQuantity",
+  "quantity shipped": "shippedQuantityInput",
+  "shipped quantity": "shippedQuantityInput",
+  "qty shipped": "shippedQuantityInput",
+  "quantity delivered": "deliveredQuantityInput",
+  "delivered quantity": "deliveredQuantityInput",
+  "qty delivered": "deliveredQuantityInput",
+  "delivery quantity": "deliveredQuantityInput",
+  "quantity backordered": "backorderedQuantityInput",
+  "backordered quantity": "backorderedQuantityInput",
+  "qty backordered": "backorderedQuantityInput",
+  "back order quantity": "backorderedQuantityInput",
   "quantity received": "receivedQuantity",
   "received quantity": "receivedQuantity",
-  "delivered quantity": "receivedQuantity",
+  "qty received": "receivedQuantity",
   notes: "sourceNotes",
   "line notes": "sourceNotes",
 };
@@ -1519,10 +1623,12 @@ function isMouserNoiseFragment(value: string) {
 }
 
 function parseMouserQuantity(fragment: string) {
-  const match = /^\s*(\d{1,7})\s*$/.exec(fragment);
-  if (!match) return null;
-  const quantity = Number(match[1]);
-  return Number.isSafeInteger(quantity) ? quantity : null;
+  const text = fragment.trim();
+  if (!/^(?:\d{1,7}|\d{1,3}(?:,\d{3})+)$/.test(text)) return null;
+  const quantity = Number(text.replace(/,/g, ""));
+  return Number.isSafeInteger(quantity) && quantity <= 1_000_000
+    ? quantity
+    : null;
 }
 
 function findMouserQuantityTriple(lines: string[]) {
@@ -1535,15 +1641,19 @@ function findMouserQuantityTriple(lines: string[]) {
     }
   }
   for (let index = 1; index < lines.length; index += 1) {
-    const match = /^\s*(\d{1,7})\s+(\d{1,7})\s+(\d{1,7})\s*$/.exec(
-      lines[index] ?? ""
-    );
-    if (match) {
+    const quantities = (lines[index] ?? "")
+      .trim()
+      .split(/\s+/)
+      .map(parseMouserQuantity);
+    if (
+      quantities.length === 3 &&
+      quantities.every((value) => value !== null)
+    ) {
       return {
         index,
-        ordered: Number(match[1]),
-        shipped: Number(match[2]),
-        pending: Number(match[3]),
+        ordered: quantities[0]!,
+        shipped: quantities[1]!,
+        pending: quantities[2]!,
       };
     }
   }
@@ -1982,7 +2092,8 @@ function collectMouserPositionedAnchors(pages: readonly PositionedPdfPage[]) {
 
 function extractMouserPositionedQuantities(
   region: readonly MouserPositionedLine[],
-  centers: MouserHeaderCenters
+  centers: MouserHeaderCenters,
+  anchorY: number
 ) {
   if (
     centers.ordered === null ||
@@ -1991,41 +2102,63 @@ function extractMouserPositionedQuantities(
   ) {
     return null;
   }
+  const orderedCenter = centers.ordered;
+  const shippedCenter = centers.shipped;
+  const pendingCenter = centers.pending;
+  if (
+    orderedCenter === null ||
+    shippedCenter === null ||
+    pendingCenter === null
+  ) {
+    return null;
+  }
   const pageLeft = centers.supplier ?? centers.lineNumber ?? 0;
-  const orderedLower = (pageLeft + centers.ordered) / 2;
+  const orderedLower = (pageLeft + orderedCenter) / 2;
   const orderedRange: [number, number] = [
     orderedLower,
-    (centers.ordered + centers.shipped) / 2,
+    (orderedCenter + shippedCenter) / 2,
   ];
   const shippedRange: [number, number] = [
     orderedRange[1],
-    (centers.shipped + centers.pending) / 2,
+    (shippedCenter + pendingCenter) / 2,
   ];
   const pendingRange: [number, number] = [
     shippedRange[1],
     centers.price === null
-      ? centers.pending + (centers.pending - centers.shipped) / 2
-      : (centers.pending + centers.price) / 2,
+      ? pendingCenter + (pendingCenter - shippedCenter) / 2
+      : (pendingCenter + centers.price) / 2,
   ];
-  const valueInColumn = (range: [number, number], center: number) => {
-    const candidates = region.flatMap((line) =>
-      line.items.flatMap((item) => {
-        const quantity = parseMouserQuantity(item.text);
-        const x = positionedItemCenter(item);
-        if (quantity === null || x < range[0] || x >= range[1]) {
-          return [];
-        }
-        return [{ quantity, distance: Math.abs(x - center), y: line.y }];
-      })
-    );
-    return (
-      candidates.sort((left, right) => left.distance - right.distance)[0]
-        ?.quantity ?? null
-    );
-  };
-  const ordered = valueInColumn(orderedRange, centers.ordered);
-  const shipped = valueInColumn(shippedRange, centers.shipped);
-  const pending = valueInColumn(pendingRange, centers.pending);
+  const rows = region
+    .map((line) => {
+      const valueInColumn = (range: [number, number], center: number) =>
+        line.items
+          .flatMap((item) => {
+            const quantity = parseMouserQuantity(item.text);
+            const x = positionedItemCenter(item);
+            if (quantity === null || x < range[0] || x >= range[1]) return [];
+            return [{ quantity, distance: Math.abs(x - center) }];
+          })
+          .sort((left, right) => left.distance - right.distance)[0]?.quantity ??
+        null;
+      const ordered = valueInColumn(orderedRange, orderedCenter);
+      const shipped = valueInColumn(shippedRange, shippedCenter);
+      const pending = valueInColumn(pendingRange, pendingCenter);
+      return {
+        ordered,
+        shipped,
+        pending,
+        valuesPresent: [ordered, shipped, pending].filter(
+          (value) => value !== null
+        ).length,
+        distanceFromAnchor: Math.abs(line.y - anchorY),
+      };
+    })
+    .filter(({ valuesPresent }) => valuesPresent === 3)
+    .sort((left, right) => left.distanceFromAnchor - right.distanceFromAnchor);
+  const selected = rows[0];
+  const ordered = selected?.ordered ?? null;
+  const shipped = selected?.shipped ?? null;
+  const pending = selected?.pending ?? null;
   return ordered === null || shipped === null || pending === null
     ? null
     : { ordered, shipped, pending };
@@ -2078,7 +2211,8 @@ function parseMouserPositionedRows(
       );
       const quantity = extractMouserPositionedQuantities(
         orderedRegion,
-        headerCenters
+        headerCenters,
+        anchorY
       );
       if (!quantity || quantity.shipped <= 0) return;
 
@@ -2248,8 +2382,16 @@ function isPdfHeaderRow(cells: string[]) {
   const text = normalized.join(" ");
   const hasNameHeader =
     normalized.some((cell) =>
-      ["name", "item", "item name", "title", "asset"].includes(cell)
-    ) || /\b(?:item|name|asset|inventory)\b/.test(text);
+      [
+        "name",
+        "item",
+        "item name",
+        "title",
+        "asset",
+        "product",
+        "product name",
+      ].includes(cell)
+    ) || /\b(?:item|name|asset|inventory|product)\b/.test(text);
   const hasInventoryHeader =
     normalized.some((cell) =>
       [
@@ -2262,6 +2404,10 @@ function isPdfHeaderRow(cells: string[]) {
         "shipped quantity",
         "quantity received",
         "received quantity",
+        "quantity delivered",
+        "delivered quantity",
+        "quantity backordered",
+        "backordered quantity",
         "category",
         "location",
         "tracking type",
@@ -2273,7 +2419,7 @@ function isPdfHeaderRow(cells: string[]) {
         "supplier part number",
       ].includes(cell)
     ) ||
-    /\b(?:quantity|qty|count|ordered|shipped|received|category|location|description|manufacturer|part number)\b/.test(
+    /\b(?:quantity|qty|count|ordered|shipped|delivered|received|backordered|category|location|description|manufacturer|part number)\b/.test(
       text
     );
   return hasNameHeader && hasInventoryHeader;
@@ -2351,6 +2497,7 @@ function parsePdfRowsFromText(text: string) {
   const rows = parsedRows.map((row) => {
     const uncertainFields = [
       ...(row.uncertainFields ?? []),
+      row.quantity === null ? "Quantity" : null,
       row.category === null ? "Category" : null,
       row.location === null ? "Location" : null,
     ].filter((field): field is string => Boolean(field));
@@ -2475,7 +2622,7 @@ function headerMap(
   headers: string[],
   options: { ignoreUnsupportedColumns?: boolean } = {}
 ) {
-  const map = new Map<number, keyof StaffImportRow>();
+  const map = new Map<number, StaffImportInputField>();
   const seen = new Set<string>();
   headers.forEach((rawHeader, index) => {
     const header = safeCell(rawHeader, "Column name")
@@ -2517,6 +2664,21 @@ type ParseRowsOptions = {
   tolerateInvalidValues?: boolean;
 };
 
+function parseImportQuantity(value: string | undefined) {
+  const text = value?.trim();
+  if (!text) return { value: null, invalid: false };
+  // Accept only an unadorned whole number. Prices, formatted currency,
+  // fractions, and unsafe integers must be reviewed instead of coerced.
+  if (!/^(?:\d{1,7}|\d{1,3}(?:,\d{3})+)$/.test(text)) {
+    return { value: null, invalid: true };
+  }
+  const quantity = Number(text.replace(/,/g, ""));
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1_000_000) {
+    return { value: null, invalid: true };
+  }
+  return { value: quantity, invalid: false };
+}
+
 function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
   if (matrix.length < 2) throw importError("The file has no data rows.");
   if (matrix.length - 1 > STAFF_IMPORT_MAX_ROWS) {
@@ -2526,7 +2688,7 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
   }
   const mapping = headerMap(matrix[0], options);
   return matrix.slice(1).map((cells, rowIndex) => {
-    const values: Partial<Record<keyof StaffImportRow, string>> = {};
+    const values: Partial<Record<StaffImportInputField, string>> = {};
     mapping.forEach((field, index) => {
       values[field] = safeCell(cells[index], field);
     });
@@ -2548,9 +2710,9 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
       }
       uncertainFields.push("Item name");
     }
-    const quantityText = values.quantity?.trim();
-    let quantity = quantityText ? Number(quantityText) : null;
-    if (quantity !== null && (!Number.isInteger(quantity) || quantity <= 0)) {
+    const parsedQuantity = parseImportQuantity(values.quantity);
+    let quantity = parsedQuantity.value;
+    if (parsedQuantity.invalid) {
       if (!options.tolerateInvalidValues) {
         throw importError(`Row ${rowIndex + 2} has an invalid quantity.`);
       }
@@ -2562,24 +2724,74 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
       field: string
     ) => {
       if (!value?.trim()) return null;
-      const parsed = Number(value.trim());
-      if (!Number.isInteger(parsed) || parsed <= 0) {
+      const parsed = parseImportQuantity(value);
+      if (parsed.invalid || parsed.value === null) {
         if (!options.tolerateInvalidValues) {
           throw importError(`Row ${rowIndex + 2} has an invalid ${field}.`);
         }
         uncertainFields.push(field);
         return null;
       }
-      return parsed;
+      return parsed.value;
     };
     const orderedQuantity = parseOptionalQuantity(
       values.orderedQuantity,
       "ordered quantity"
     );
-    const receivedQuantity = parseOptionalQuantity(
+    const receivedQuantityInput = parseOptionalQuantity(
       values.receivedQuantity,
       "received quantity"
     );
+    const deliveredQuantity = parseOptionalQuantity(
+      values.deliveredQuantityInput,
+      "delivered quantity"
+    );
+    const shippedQuantity = parseOptionalQuantity(
+      values.shippedQuantityInput,
+      "shipped quantity"
+    );
+    const backorderedQuantity = parseOptionalQuantity(
+      values.backorderedQuantityInput,
+      "backordered quantity"
+    );
+    const invalidQuantityConcept = uncertainFields.some((field) =>
+      [
+        "received quantity",
+        "delivered quantity",
+        "shipped quantity",
+        "ordered quantity",
+        "backordered quantity",
+      ].includes(field)
+    );
+    const invalidOrderedQuantity = uncertainFields.includes("ordered quantity");
+    const actualQuantityInput = [
+      {
+        raw: values.receivedQuantity,
+        value: receivedQuantityInput,
+        status: "RECEIVED" as const,
+      },
+      {
+        raw: values.deliveredQuantityInput,
+        value: deliveredQuantity,
+        status: "RECEIVED" as const,
+      },
+      {
+        raw: values.shippedQuantityInput,
+        value: shippedQuantity,
+        status: "SHIPPED" as const,
+      },
+    ].find(({ raw }) => Boolean(raw?.trim()));
+    const actualQuantity = actualQuantityInput?.value ?? null;
+    const hasActualQuantityEvidence = Boolean(actualQuantityInput);
+    const orderedOnly = orderedQuantity !== null && !hasActualQuantityEvidence;
+    if (actualQuantity !== null) quantity = actualQuantity;
+    else if (
+      orderedOnly ||
+      backorderedQuantity !== null ||
+      invalidQuantityConcept
+    ) {
+      quantity = null;
+    }
     const type = values.type?.trim().toUpperCase() as StaffImportRow["type"];
     let normalizedType = type || null;
     if (
@@ -2617,12 +2829,33 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
         ? { sourceNotes: values.sourceNotes.trim() }
         : {}),
       ...(orderedQuantity !== null ? { orderedQuantity } : {}),
-      ...(receivedQuantity !== null ? { receivedQuantity } : {}),
-      ...(receivedQuantity !== null
-        ? { quantityStatus: "RECEIVED" as const }
-        : orderedQuantity !== null
+      ...(actualQuantity !== null ? { receivedQuantity: actualQuantity } : {}),
+      ...(actualQuantity !== null
+        ? {
+            quantityStatus:
+              actualQuantityInput?.status ?? ("RECEIVED" as const),
+          }
+        : orderedOnly
         ? { quantityStatus: "ORDERED" as const }
+        : quantity !== null
+        ? { quantityStatus: "RECEIVED" as const }
+        : invalidQuantityConcept || invalidOrderedQuantity
+        ? { quantityStatus: "UNKNOWN" as const }
         : {}),
+      ...(parsedQuantity.invalid ||
+      uncertainFields.some((field) =>
+        [
+          "ordered quantity",
+          "received quantity",
+          "delivered quantity",
+          "shipped quantity",
+          "backordered quantity",
+        ].includes(field)
+      )
+        ? { diagnosticReasonCodes: ["QUANTITY_INVALID"] as const }
+        : quantity !== null
+        ? { diagnosticReasonCodes: ["QUANTITY_EXTRACTED"] as const }
+        : { diagnosticReasonCodes: ["QUANTITY_AMBIGUOUS"] as const }),
       ...(uncertainFields.length > 0 ? { uncertainFields } : {}),
     } satisfies StaffImportRow;
     return row;
@@ -2634,6 +2867,7 @@ type StaffImportParseResult = {
   pdfSummary?: StaffImportPdfSummary;
   provider?: string;
   pdfPages?: ImportHelperRequest["document"]["pages"];
+  positionedPdfPages?: PositionedPdfPage[];
   pdfDiagnostics?: PdfTextDiagnostics;
   mouserInvoice?: MouserInvoiceParseResult;
   pdfParseError?: string;
@@ -2750,6 +2984,7 @@ async function parseStaffImportFileWithSummary({
     return {
       rows: [],
       pdfPages,
+      positionedPdfPages: positionedPages,
       pdfDiagnostics: diagnostics,
       ...(mouserInvoice.detected ? { mouserInvoice } : {}),
     };
@@ -3551,6 +3786,93 @@ export function classifyStaffImportRows({
   return rows.map((row) => classifyRow(row, assets, categories, locations));
 }
 
+function resolvePdfRowLocations({
+  rows,
+  categories,
+  locations,
+}: {
+  rows: StaffImportRow[];
+  categories: NamedRecord[];
+  locations: ImportLocationOption[];
+}) {
+  return rows.map((row) => {
+    if (!row.title.trim()) return row;
+    const evidence = {
+      productName: row.title,
+      manufacturer: row.manufacturer,
+      mpn: row.manufacturerPartNumber,
+      rawDescription: row.sourceDescription,
+      description: row.sourceDescription,
+      supplierDescription: row.supplierPartNumber,
+      categoryText: row.category,
+    };
+    const category =
+      categories.find(({ id }) => id === row.suggestedCategoryId) ??
+      resolveImportCategorySuggestion({
+        claudeCategoryId: null,
+        claudeConfidence: 0,
+        evidence,
+        categories,
+      }).category;
+    const canonicalLocations = locations.map((location) => ({
+      ...location,
+      pathLabel: location.pathLabel || location.name,
+    }));
+    const explicitLocation = resolveImportLocation(
+      row.location,
+      canonicalLocations
+    );
+    const existingSuggestion = row.suggestedLocationId
+      ? locations.find(
+          (location) =>
+            location.id === row.suggestedLocationId && !location.operational
+        )
+      : null;
+    const trustedExplicitLocation =
+      explicitLocation.status === "MATCH" ? explicitLocation.location : null;
+    const locationSelection =
+      existingSuggestion || trustedExplicitLocation
+        ? {
+            location: existingSuggestion ?? trustedExplicitLocation,
+            method: existingSuggestion
+              ? row.locationSuggestionMethod
+              : "claude",
+            status: row.locationSuggestionStatus ?? "SUGGESTED",
+            reasonCodes: (row.diagnosticReasonCodes ?? []).filter((code) =>
+              code.startsWith("LOCATION_")
+            ) as ImportLocationDiagnosticReason[],
+          }
+        : resolveImportLocationSuggestion({
+            claudeLocationId: null,
+            claudeConfidence: 0,
+            evidence,
+            category,
+            locations,
+          });
+    const selectedLocation = locationSelection.location;
+    return {
+      ...row,
+      location: selectedLocation?.pathLabel ?? row.location,
+      suggestedLocationId: selectedLocation?.id ?? null,
+      locationSuggestionConfidence: selectedLocation
+        ? locationSelection.method === "claude"
+          ? row.locationSuggestionConfidence ?? 1
+          : locationSelection.status === "SUGGESTED"
+          ? 0.9
+          : 0.4
+        : 0,
+      locationSuggestionMethod: locationSelection.method,
+      locationSuggestionStatus: locationSelection.status,
+      diagnosticReasonCodes: [
+        ...(row.diagnosticReasonCodes ?? []).filter(
+          (code) => !code.startsWith("LOCATION_")
+        ),
+        ...locationSelection.reasonCodes,
+      ],
+    };
+  });
+}
+
 function countActions(rows: StaffImportProposalRow[]) {
   return rows.reduce(
     (counts, row) => ({
@@ -3612,29 +3934,41 @@ function buildStaffImportHelperRequest({
         name,
         description: description?.slice(0, 500) ?? null,
       })),
-    relevantLocations: locations
-      .filter((location) => !location.operational)
-      .slice(0, 1_000)
-      .map((location) => {
-        const { id, name, pathLabel, parentId, description, currentUnits } =
-          location;
-        return {
-          id,
-          name,
-          pathLabel,
-          parentId,
-          description: description?.slice(0, 500) ?? null,
-          hasChildren: locations.some((location) => location.parentId === id),
-          occupancy: {
-            currentUnits: currentUnits || occupancyByLocation.get(id) || 0,
-            proposedUnits: 0,
-            capacity: null,
-            context: formatLocationPlacementContext(
-              location.categoryAffinities
-            ),
-          },
-        };
-      }),
+    relevantLocations: getImportLocationCandidatesForEvidence({
+      evidence: pdfPages
+        .flatMap(({ text }) => text.split(/\r?\n/))
+        .map((line) => line.trim())
+        .filter((line) => line.length >= 4)
+        .slice(0, 100)
+        .map((line) => {
+          const evidence = { productName: line, rawDescription: line };
+          return {
+            evidence,
+            category: resolveImportCategorySuggestion({
+              evidence,
+              categories,
+            }).category,
+          };
+        }),
+      locations,
+      limit: 20,
+    }).map((location) => {
+      const { id, name, pathLabel, parentId, currentUnits } = location;
+      return {
+        id,
+        name,
+        pathLabel,
+        parentId,
+        description: getLocationHelperDescription(location),
+        hasChildren: locations.some((location) => location.parentId === id),
+        occupancy: {
+          currentUnits: currentUnits || occupancyByLocation.get(id) || 0,
+          proposedUnits: 0,
+          capacity: null,
+          context: getLocationHelperDescription(location),
+        },
+      };
+    }),
     productCandidates: productModels.slice(0, 50).map(({ id, name }) => ({
       id,
       name,
@@ -3647,19 +3981,68 @@ function buildStaffImportHelperRequest({
   });
 }
 
+function matchPdfTableRow(
+  candidate: ImportHelperCandidateRow,
+  tableRows: StaffImportRow[]
+) {
+  const identifiers = [candidate.supplierProductNumber, candidate.mpn]
+    .filter(Boolean)
+    .map((value) => normalizedProductText(value));
+  const identifierMatches = tableRows.filter((row) =>
+    [row.supplierPartNumber, row.manufacturerPartNumber]
+      .filter(Boolean)
+      .some((value) => identifiers.includes(normalizedProductText(value)))
+  );
+  if (identifierMatches.length === 1) return identifierMatches[0];
+  if (identifierMatches.length > 1) return undefined;
+
+  const candidateName = normalizedProductText(candidate.productName);
+  const nameMatches = tableRows.filter((row) =>
+    [row.title, row.sourceDescription]
+      .filter(Boolean)
+      .some((value) => normalizedProductText(value) === candidateName)
+  );
+  return nameMatches.length === 1 ? nameMatches[0] : undefined;
+}
+
 function mapHelperProposalToRows({
   candidates,
   pdfPages,
   categories,
   locations,
+  allowedLocationIds,
+  sourceTableRows,
 }: {
   candidates: ImportHelperCandidateRow[];
   pdfPages: NonNullable<StaffImportParseResult["pdfPages"]>;
   categories: NamedRecord[];
   locations: ImportLocationOption[];
+  allowedLocationIds?: Set<string>;
+  sourceTableRows?: StaffImportRow[];
 }): { rows: StaffImportRow[]; pdfSummary: StaffImportPdfSummary } {
   const pagesByRef = new Map(pdfPages.map((page) => [page.sourceRef, page]));
   const rows = candidates.map((candidate, index): StaffImportRow => {
+    const tableRow = sourceTableRows
+      ? matchPdfTableRow(candidate, sourceTableRows)
+      : undefined;
+    const quantity = sourceTableRows
+      ? tableRow?.quantity ?? null
+      : candidate.quantityStatus === "RECEIVED" ||
+        candidate.quantityStatus === "SHIPPED"
+      ? candidate.quantity
+      : null;
+    const quantityStatus = sourceTableRows
+      ? tableRow?.quantityStatus ?? "UNKNOWN"
+      : candidate.quantityStatus;
+    const quantityReasonCode = sourceTableRows
+      ? tableRow?.diagnosticReasonCodes?.find((code) =>
+          code.startsWith("QUANTITY_")
+        ) ?? "QUANTITY_AMBIGUOUS"
+      : candidate.quantity !== null &&
+        (candidate.quantityStatus === "RECEIVED" ||
+          candidate.quantityStatus === "SHIPPED")
+      ? "QUANTITY_EXTRACTED"
+      : "QUANTITY_AMBIGUOUS";
     const evidence = {
       manufacturer: candidate.manufacturer,
       productName: candidate.productName,
@@ -3677,7 +4060,12 @@ function mapHelperProposalToRows({
     const category = categorySelection.category;
     const firstLocationSuggestion = candidate.locationSuggestions[0];
     const locationSelection = resolveImportLocationSuggestion({
-      claudeLocationId: firstLocationSuggestion?.locationId,
+      claudeLocationId:
+        firstLocationSuggestion &&
+        (!allowedLocationIds ||
+          allowedLocationIds.has(firstLocationSuggestion.locationId))
+          ? firstLocationSuggestion.locationId
+          : null,
       claudeConfidence: firstLocationSuggestion?.confidence,
       evidence,
       category,
@@ -3699,7 +4087,7 @@ function mapHelperProposalToRows({
     return {
       rowNumber: index + 2,
       title: candidate.productName,
-      quantity: candidate.quantity,
+      quantity,
       category: category?.name ?? null,
       location: selectedLocation?.pathLabel ?? null,
       suggestedCategoryId: category?.id ?? null,
@@ -3714,21 +4102,40 @@ function mapHelperProposalToRows({
         locationSelection.method === "claude"
           ? firstLocationSuggestion?.confidence ?? 0
           : selectedLocation
-          ? 0.9
+          ? locationSelection.status === "SUGGESTED"
+            ? 0.9
+            : 0.4
           : 0,
       categorySuggestionMethod: categorySelection.method,
       locationSuggestionMethod: locationSelection.method,
+      locationSuggestionStatus: locationSelection.status,
+      diagnosticReasonCodes: [
+        quantityReasonCode,
+        ...locationSelection.reasonCodes,
+      ],
       type: candidate.trackingSuggestion.mode,
       supplierPartNumber: candidate.supplierProductNumber,
       sourceDescription: candidate.description,
       manufacturer: candidate.manufacturer,
       manufacturerPartNumber: candidate.mpn,
+      assetModelDescription: candidate.assetModelDescription ?? null,
+      enrichmentConfidence:
+        candidate.productMatch.matchType === "UNCERTAIN"
+          ? 0
+          : candidate.productMatch.confidence,
       receivedQuantity:
-        candidate.quantityStatus === "RECEIVED" ||
-        candidate.quantityStatus === "SHIPPED"
-          ? candidate.quantity
+        quantityStatus === "RECEIVED" || quantityStatus === "SHIPPED"
+          ? quantity
           : null,
-      quantityStatus: candidate.quantityStatus,
+      quantityStatus,
+      ...((tableRow?.orderedQuantity ??
+        (quantityStatus === "ORDERED" ? candidate.quantity : null)) !== null
+        ? {
+            orderedQuantity:
+              tableRow?.orderedQuantity ??
+              (quantityStatus === "ORDERED" ? candidate.quantity : null),
+          }
+        : {}),
       reviewRequired: true,
       pdfClassification: "PARTIAL",
       // Every helper candidate must receive an explicit staff review, even if
@@ -3736,9 +4143,9 @@ function mapHelperProposalToRows({
       // an authenticated staff decision is reapplied for Apply.
       uncertainFields: [
         "Helper proposal",
-        ...(candidate.quantity === null ||
-        candidate.quantityStatus === "ORDERED" ||
-        candidate.quantityStatus === "UNKNOWN"
+        ...(quantity === null ||
+        quantityStatus === "ORDERED" ||
+        quantityStatus === "UNKNOWN"
           ? ["Quantity"]
           : []),
         ...(candidate.trackingSuggestion.mode ? [] : ["Tracking mode"]),
@@ -3762,11 +4169,13 @@ function mapMouserInvoiceRows({
   enrichedRows,
   categories,
   locations,
+  allowedLocationIds,
 }: {
   lineItems: MouserInvoiceLineItem[];
   enrichedRows: MouserEnrichmentResponse["rows"] | null;
   categories: NamedRecord[];
   locations: ImportLocationOption[];
+  allowedLocationIds?: Set<string>;
 }): StaffImportRow[] {
   const enrichedBySourceRef = new Map(
     (enrichedRows ?? []).map((row) => [row.sourceRef, row])
@@ -3807,7 +4216,11 @@ function mapMouserInvoiceRows({
     });
     const category = categorySelection.category;
     const locationSelection = resolveImportLocationSuggestion({
-      claudeLocationId: enriched?.locationId,
+      claudeLocationId:
+        enriched?.locationId &&
+        (!allowedLocationIds || allowedLocationIds.has(enriched.locationId))
+          ? enriched.locationId
+          : null,
       claudeConfidence: enriched?.locationConfidence,
       evidence,
       category,
@@ -3832,16 +4245,24 @@ function mapMouserInvoiceRows({
         locationSelection.method === "claude"
           ? enriched?.locationConfidence ?? 0
           : selectedLocation
-          ? 0.9
+          ? locationSelection.status === "SUGGESTED"
+            ? 0.9
+            : 0.4
           : 0,
       categorySuggestionMethod: categorySelection.method,
       locationSuggestionMethod: locationSelection.method,
+      locationSuggestionStatus: locationSelection.status,
+      diagnosticReasonCodes: [
+        "QUANTITY_EXTRACTED",
+        ...locationSelection.reasonCodes,
+      ],
       // Shelf resolves the default tracking type at Apply (quantity tracked
       // above one unit; individual for one unit). Staff can override in Edit.
       type: null,
       sourceDescription: lineItem.rawDescription,
       manufacturer,
       manufacturerPartNumber: lineItem.mpn,
+      assetModelDescription: enriched?.assetModelDescription ?? null,
       supplierPartNumber: lineItem.supplierProductNumber,
       orderedQuantity: lineItem.orderedQuantity,
       receivedQuantity: lineItem.shippedQuantity,
@@ -3869,7 +4290,10 @@ async function enrichMouserLineItems({
   lineItems: MouserInvoiceLineItem[];
   categories: NamedRecord[];
   locations: ImportLocationOption[];
-}): Promise<MouserEnrichmentResponse["rows"] | null> {
+}): Promise<{
+  rows: MouserEnrichmentResponse["rows"];
+  allowedLocationIds: Set<string>;
+} | null> {
   const enrichedRows: MouserEnrichmentResponse["rows"] = [];
   const activeCategories = categories
     .slice(0, 500)
@@ -3878,19 +4302,33 @@ async function enrichMouserLineItems({
       name,
       description: description?.slice(0, 500) ?? null,
     }));
-  const relevantLocations = locations
-    .filter((location) => !location.operational)
-    .slice(0, 1_000)
-    .map((location) => ({
-      id: location.id,
-      name: location.name,
-      pathLabel: location.pathLabel,
-      parentId: location.parentId,
-      description: getLocationHelperDescription(location),
-      hasChildren: locations.some(
-        (candidate) => candidate.parentId === location.id
-      ),
-    }));
+  const relevantLocations = getImportLocationCandidatesForEvidence({
+    evidence: lineItems.map((lineItem) => {
+      const evidence = {
+        productName: lineItem.rawDescription,
+        rawDescription: lineItem.rawDescription,
+        mpn: lineItem.mpn,
+      };
+      return {
+        evidence,
+        category: resolveImportCategorySuggestion({
+          evidence,
+          categories,
+        }).category,
+      };
+    }),
+    locations,
+    limit: 20,
+  }).map((location) => ({
+    id: location.id,
+    name: location.name,
+    pathLabel: location.pathLabel,
+    parentId: location.parentId,
+    description: getLocationHelperDescription(location),
+    hasChildren: locations.some(
+      (candidate) => candidate.parentId === location.id
+    ),
+  }));
   for (
     let start = 0;
     start < lineItems.length;
@@ -3924,7 +4362,10 @@ async function enrichMouserLineItems({
     }
     enrichedRows.push(...helperResult.proposal.rows);
   }
-  return enrichedRows;
+  return {
+    rows: enrichedRows,
+    allowedLocationIds: new Set(relevantLocations.map(({ id }) => id)),
+  };
 }
 
 export async function prepareStaffInventoryImport({
@@ -3973,7 +4414,7 @@ export async function prepareStaffInventoryImport({
         description: true,
         categoryId: true,
         assetModelId: true,
-        assetModel: { select: { defaultCategoryId: true } },
+        assetModel: { select: { name: true, defaultCategoryId: true } },
         assetLocations: {
           select: { locationId: true, quantity: true, assetKitId: true },
         },
@@ -4022,9 +4463,19 @@ export async function prepareStaffInventoryImport({
     categories,
     locations: locationsWithoutAffinity,
   });
+  const representativeProductsByLocation =
+    buildImportLocationRepresentativeProducts({
+      assets: assets.map((asset) => ({
+        ...asset,
+        modelName: asset.assetModel?.name,
+      })),
+      locations: locationsWithoutAffinity,
+    });
   const locations = locationsWithoutAffinity.map((location) => ({
     ...location,
     categoryAffinities: categoryAffinitiesByLocation.get(location.id) ?? [],
+    representativeProducts:
+      representativeProductsByLocation.get(location.id) ?? [],
   }));
   const archivedCategoryCandidates = archivedCategories.map((category) => ({
     ...category,
@@ -4038,7 +4489,7 @@ export async function prepareStaffInventoryImport({
   let pdfSummary = parsed.pdfSummary;
   let extractionProvider = parsed.provider ?? "deterministic";
   if (parsed.mouserInvoice) {
-    const enrichedRows = parsed.mouserInvoice.lineItems.length
+    const enrichment = parsed.mouserInvoice.lineItems.length
       ? await enrichMouserLineItems({
           fileSha256,
           lineItems: parsed.mouserInvoice.lineItems,
@@ -4052,11 +4503,12 @@ export async function prepareStaffInventoryImport({
       detectedVendorParser: "mouser",
       genericClaudeFallbackInvoked: false,
       mouserEnrichmentInvoked: parsed.mouserInvoice.lineItems.length > 0,
-      enrichmentAvailable: enrichedRows !== null,
+      enrichmentAvailable: enrichment !== null,
     });
     rows = mapMouserInvoiceRows({
       lineItems: parsed.mouserInvoice.lineItems,
-      enrichedRows,
+      enrichedRows: enrichment?.rows ?? null,
+      allowedLocationIds: enrichment?.allowedLocationIds,
       categories,
       locations,
     });
@@ -4064,7 +4516,7 @@ export async function prepareStaffInventoryImport({
       event: "ioio_staff_import_mouser_suggestion_resolution",
       ...getImportCandidateDiagnostics(categories, locations),
       rows: rows.map((row, index) => {
-        const claudeRow = enrichedRows?.[index];
+        const claudeRow = enrichment?.rows[index];
         return {
           rowNumber: row.rowNumber,
           claudeCategoryIdPresent: Boolean(claudeRow?.categoryId),
@@ -4097,10 +4549,18 @@ export async function prepareStaffInventoryImport({
       ignoredRows: 0,
       unresolvedLines: parsed.mouserInvoice.unresolvedLines,
     };
-    extractionProvider = enrichedRows
+    extractionProvider = enrichment
       ? "mouser-deterministic+claude-enrichment:v2"
       : "mouser-deterministic:v1";
   } else if (parsed.pdfPages) {
+    let fallbackPdfTable: ReturnType<typeof parsePdfTablePages> | null = null;
+    try {
+      fallbackPdfTable = parsePdfTablePages(parsed.pdfPages);
+    } catch {
+      // A readable PDF may not contain a simple delimited table. Claude remains
+      // the line item extractor, with quantities marked for review when its
+      // row cannot be joined safely to structured table evidence.
+    }
     const productModels =
       (await db.assetModel.findMany({
         where: { organizationId },
@@ -4116,6 +4576,9 @@ export async function prepareStaffInventoryImport({
       categories,
       locations,
     });
+    const allowedLocationIds = new Set(
+      helperRequest.relevantLocations.map(({ id }) => id)
+    );
     const helperResult = await requestImportHelperProposal(helperRequest);
     Logger.info({
       event: "ioio_staff_import_pdf_analysis_selected",
@@ -4141,6 +4604,8 @@ export async function prepareStaffInventoryImport({
         pdfPages: parsed.pdfPages,
         categories,
         locations,
+        allowedLocationIds,
+        sourceTableRows: fallbackPdfTable?.rows,
       });
       Logger.info({
         event: "ioio_staff_import_generic_suggestion_resolution",
@@ -4192,11 +4657,10 @@ export async function prepareStaffInventoryImport({
         "Claude could not confidently identify product line items in this document."
       );
     } else {
-      try {
-        const fallback = parsePdfTablePages(parsed.pdfPages);
-        rows = fallback.rows;
-        pdfSummary = fallback.pdfSummary;
-      } catch {
+      if (fallbackPdfTable) {
+        rows = fallbackPdfTable.rows;
+        pdfSummary = fallbackPdfTable.pdfSummary;
+      } else {
         throw importError(PDF_AI_ANALYSIS_REQUIRED_MESSAGE);
       }
     }
@@ -4226,17 +4690,21 @@ export async function prepareStaffInventoryImport({
           location: row.location,
         }),
       }));
-      const result = pages.length
-        ? await requestImportHelperProposal(
-            buildStaffImportHelperRequest({
-              pdfPages: pages,
-              fileSha256,
-              assets,
-              productModels: [],
-              categories,
-              locations,
-            })
-          )
+      const helperRequest = pages.length
+        ? buildStaffImportHelperRequest({
+            pdfPages: pages,
+            fileSha256,
+            assets,
+            productModels: [],
+            categories,
+            locations,
+          })
+        : null;
+      const allowedLocationIds = new Set(
+        helperRequest?.relevantLocations.map(({ id }) => id) ?? []
+      );
+      const result = helperRequest
+        ? await requestImportHelperProposal(helperRequest)
         : null;
       const candidates =
         result?.status === "ready" && !("mode" in result.proposal)
@@ -4253,6 +4721,7 @@ export async function prepareStaffInventoryImport({
             pdfPages: pages,
             categories,
             locations,
+            allowedLocationIds,
           }).rows[0];
           normalized.push({
             ...original,
@@ -4272,6 +4741,13 @@ export async function prepareStaffInventoryImport({
             locationSuggestionConfidence: enriched.locationSuggestionConfidence,
             categorySuggestionMethod: enriched.categorySuggestionMethod,
             locationSuggestionMethod: enriched.locationSuggestionMethod,
+            locationSuggestionStatus: enriched.locationSuggestionStatus,
+            diagnosticReasonCodes: [
+              ...(original.diagnosticReasonCodes ?? []),
+              ...(enriched.diagnosticReasonCodes ?? []).filter((code) =>
+                code.startsWith("LOCATION_")
+              ),
+            ],
             helperCandidate: enriched.helperCandidate,
             reviewRequired: true,
           });
@@ -4309,6 +4785,12 @@ export async function prepareStaffInventoryImport({
               original.location || locationChoice.location?.name || null,
             suggestedCategoryId: categoryChoice.category?.id ?? null,
             suggestedLocationId: locationChoice.location?.id ?? null,
+            locationSuggestionMethod: locationChoice.method,
+            locationSuggestionStatus: locationChoice.status,
+            diagnosticReasonCodes: [
+              ...(original.diagnosticReasonCodes ?? []),
+              ...locationChoice.reasonCodes,
+            ],
             reviewRequired: true,
             sourceNotes: [
               original.sourceNotes,
@@ -4356,13 +4838,16 @@ export async function prepareStaffInventoryImport({
       };
     });
   }
+  if (getStaffImportFormat(file.name) === "PDF") {
+    rows = resolvePdfRowLocations({ rows, categories, locations });
+  }
   const classifiedRows = classifyStaffImportRows({
     rows,
     assets,
     categories,
     locations,
   });
-  const proposalRows = classifiedRows.map((classifiedRow) => {
+  const normalizedProposalRows = classifiedRows.map((classifiedRow) => {
     const categoryName =
       classifiedRow.category ?? classifiedRow.suggestedCategory ?? null;
     const categoryResolution = resolveImportCategory(
@@ -4399,7 +4884,181 @@ export async function prepareStaffInventoryImport({
           };
     return row;
   });
+  const existingModelNames = [
+    ...new Set(
+      normalizedProposalRows.map((row) => row.title.trim()).filter(Boolean)
+    ),
+  ].slice(0, 200);
+  const existingModelIdentityKeys = [
+    ...new Set(
+      normalizedProposalRows.map(
+        (row) =>
+          getImportAssetModelIdentity({
+            name: row.title,
+            manufacturer: row.manufacturer,
+            manufacturerPartNumber: row.manufacturerPartNumber,
+          }).key
+      )
+    ),
+  ];
+  const attachedModelIds = [
+    ...new Set(
+      assets
+        .map((asset) => asset.assetModelId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    ),
+  ];
+  const existingModelOr: Prisma.AssetModelWhereInput[] = [
+    ...existingModelNames.map(
+      (name): Prisma.AssetModelWhereInput => ({
+        name: { equals: name, mode: "insensitive" },
+      })
+    ),
+    ...(existingModelIdentityKeys.length
+      ? [{ importIdentityKey: { in: existingModelIdentityKeys } }]
+      : []),
+    ...(attachedModelIds.length ? [{ id: { in: attachedModelIds } }] : []),
+  ];
+  const existingModels =
+    existingModelNames.length ||
+    existingModelIdentityKeys.length ||
+    attachedModelIds.length
+      ? await db.assetModel.findMany({
+          where: {
+            organizationId,
+            OR: existingModelOr,
+          },
+          take: 500,
+          select: {
+            id: true,
+            name: true,
+            description: true,
+            image: true,
+            thumbnailImage: true,
+            imageStoragePath: true,
+            thumbnailImageStoragePath: true,
+            importIdentityKey: true,
+          },
+        })
+      : [];
+  const existingImportModels: ExistingImportAssetModel[] = await Promise.all(
+    existingModels.map(async (model) => {
+      const [imageUrl, thumbnailUrl] = await Promise.all([
+        resolveStorageImageUrl({
+          bucketName: PUBLIC_BUCKET,
+          objectPath: model.imageStoragePath,
+          legacyUrl: model.image,
+          isPublic: true,
+        }),
+        resolveStorageImageUrl({
+          bucketName: PUBLIC_BUCKET,
+          objectPath: model.thumbnailImageStoragePath,
+          legacyUrl: model.thumbnailImage,
+          isPublic: true,
+        }),
+      ]);
+      return {
+        id: model.id,
+        name: model.name,
+        description: model.description,
+        imageUrl,
+        thumbnailUrl,
+        importIdentityKey: model.importIdentityKey,
+      };
+    })
+  );
+  let productEnrichment: {
+    rows: typeof normalizedProposalRows;
+    diagnostics: ProductEnrichmentDiagnostics;
+  };
+  try {
+    productEnrichment = await enrichImportProductRows(
+      normalizedProposalRows,
+      existingImportModels,
+      (row) =>
+        getImportAssetModelIdentity({
+          name: row.title,
+          manufacturer: row.manufacturer,
+          manufacturerPartNumber: row.manufacturerPartNumber,
+        }).key
+    );
+  } catch (cause) {
+    Logger.info({
+      event: "ioio_staff_import_product_enrichment_failed",
+      rowCount: normalizedProposalRows.length,
+      errorType: cause instanceof Error ? cause.name : "unknown",
+    });
+    productEnrichment = {
+      rows: normalizedProposalRows.map((row) => ({
+        ...row,
+        assetModelDescription: row.sourceDescription ?? null,
+        assetModelDescriptionSource: row.sourceDescription ? "SOURCE" : "NONE",
+        productImageProposal: { status: "IMAGE_FETCH_FAILED" as const },
+      })),
+      diagnostics: {
+        imageLookupAttempted: 0,
+        imageCandidatesConsidered: 0,
+        imageAccepted: 0,
+        imageRejectedReason: {
+          IMAGE_FETCH_FAILED: normalizedProposalRows.length,
+        },
+        descriptionGenerated: 0,
+        descriptionSource: {
+          SOURCE: normalizedProposalRows.filter((row) => row.sourceDescription)
+            .length,
+          SHELF_EXISTING: 0,
+          GENERATED: 0,
+          NONE: normalizedProposalRows.filter((row) => !row.sourceDescription)
+            .length,
+        },
+      },
+    };
+  }
+  const proposalRows = productEnrichment.rows;
   const operationId = randomUUID();
+  const diagnostics: StaffImportDiagnostics = {
+    rowsParsed: proposalRows.length,
+    rowsWithQuantity: proposalRows.filter(
+      (row) =>
+        (row.quantityStatus === "RECEIVED" ||
+          row.quantityStatus === "SHIPPED") &&
+        Number.isSafeInteger(row.receivedQuantity ?? row.quantity) &&
+        (row.receivedQuantity ?? row.quantity ?? 0) > 0
+    ).length,
+    quantityNeedsReview: proposalRows.filter(
+      (row) =>
+        row.diagnosticReasonCodes?.some((code) =>
+          ["QUANTITY_AMBIGUOUS", "QUANTITY_INVALID"].includes(code)
+        )
+    ).length,
+    rowsWithSuggestedLocation: proposalRows.filter((row) =>
+      locations.some(
+        (location) =>
+          location.id === row.suggestedLocationId && !location.operational
+      )
+    ).length,
+    locationFallbackUsed: proposalRows.filter(
+      (row) =>
+        row.diagnosticReasonCodes?.includes("LOCATION_DETERMINISTIC_FALLBACK")
+    ).length,
+    locationUnresolved: proposalRows.filter(
+      (row) =>
+        !row.suggestedLocationId ||
+        row.locationSuggestionStatus === "UNRESOLVED"
+    ).length,
+    imageLookupAttempted: productEnrichment.diagnostics.imageLookupAttempted,
+    imageCandidatesConsidered:
+      productEnrichment.diagnostics.imageCandidatesConsidered,
+    imageAccepted: productEnrichment.diagnostics.imageAccepted,
+    imageRejectedReason: productEnrichment.diagnostics.imageRejectedReason,
+    descriptionGenerated: productEnrichment.diagnostics.descriptionGenerated,
+    descriptionSource: productEnrichment.diagnostics.descriptionSource,
+  };
+  Logger.info({
+    event: "ioio_staff_import_diagnostics",
+    format: getStaffImportFormat(file.name),
+    ...diagnostics,
+  });
   const proposalContent: Omit<StaffImportProposal, "proposalHash"> = {
     version: 1,
     operationId,
@@ -4417,6 +5076,7 @@ export async function prepareStaffInventoryImport({
     categoryOptions: allCategoryCandidates,
     locationOptions: locations,
     pdfSummary,
+    diagnostics,
   };
   const proposal: StaffImportProposal = {
     ...proposalContent,
@@ -4667,6 +5327,8 @@ type StaffImportReviewDecision = {
   minQuantity?: number | null;
   unitOfMeasure?: string | null;
   consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
+  assetModelDescription?: string | null;
+  acceptSuggestedImage?: boolean;
 };
 
 function readReviewDecisions(value: string | null | undefined) {
@@ -4783,6 +5445,38 @@ function readReviewDecisions(value: string | null | undefined) {
     ) {
       throw importError("The selected consumption type is not supported.");
     }
+    const rawAssetModelDescription = decision.assetModelDescription;
+    if (
+      rawAssetModelDescription !== undefined &&
+      rawAssetModelDescription !== null &&
+      typeof rawAssetModelDescription !== "string"
+    ) {
+      throw importError(
+        "AssetModel descriptions must be 600 characters or less."
+      );
+    }
+    const assetModelDescription =
+      typeof rawAssetModelDescription === "string"
+        ? [...rawAssetModelDescription]
+            .filter((character) => {
+              const code = character.charCodeAt(0);
+              return code > 31 && code !== 127;
+            })
+            .join("")
+            .trim()
+        : rawAssetModelDescription ?? undefined;
+    if (assetModelDescription && assetModelDescription.length > 600) {
+      throw importError(
+        "AssetModel descriptions must be 600 characters or less."
+      );
+    }
+    const acceptSuggestedImage = decision.acceptSuggestedImage;
+    if (
+      acceptSuggestedImage !== undefined &&
+      typeof acceptSuggestedImage !== "boolean"
+    ) {
+      throw importError("Suggested image approval must be explicit.");
+    }
     return {
       rowNumber,
       decision: action,
@@ -4798,6 +5492,8 @@ function readReviewDecisions(value: string | null | undefined) {
       ...(minQuantity !== undefined ? { minQuantity } : {}),
       ...(unitOfMeasure !== undefined ? { unitOfMeasure } : {}),
       ...(consumptionType !== undefined ? { consumptionType } : {}),
+      ...(assetModelDescription !== undefined ? { assetModelDescription } : {}),
+      ...(acceptSuggestedImage !== undefined ? { acceptSuggestedImage } : {}),
     };
   });
 }
@@ -4828,6 +5524,134 @@ function buildImportedDescription(
     row.sourceNotes ? `Source notes: ${row.sourceNotes}` : null,
   ].filter(Boolean);
   return parts.join(". ").slice(0, 2000);
+}
+
+function makeSuggestedImageRequest(row: StaffImportProposalRow) {
+  const proposal = row.productImageProposal;
+  if (
+    !row.acceptSuggestedImage ||
+    proposal?.status !== "IMAGE_FOUND" ||
+    proposal.mimeType !== "image/webp" ||
+    !proposal.dataBase64 ||
+    proposal.dataBase64.length > 180_000 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(proposal.dataBase64)
+  ) {
+    return null;
+  }
+  const imageBytes = Buffer.from(proposal.dataBase64, "base64");
+  if (
+    imageBytes.byteLength === 0 ||
+    imageBytes.byteLength > 128 * 1024 ||
+    imageBytes.toString("base64") !== proposal.dataBase64 ||
+    detectImageFormat(imageBytes) !== "image/webp"
+  ) {
+    return null;
+  }
+  const formData = new FormData();
+  formData.append(
+    "image",
+    new File([imageBytes], "product-image.webp", { type: "image/webp" })
+  );
+  return new Request("http://shelf.local/import-product-image", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+async function applyImportAssetModelEnrichment({
+  assetModelId,
+  organizationId,
+  row,
+}: {
+  assetModelId: string;
+  organizationId: string;
+  row: StaffImportProposalRow;
+}) {
+  const description = row.assetModelDescription?.trim();
+  if (
+    description &&
+    description !== row.existingAssetModelDescription?.trim()
+  ) {
+    try {
+      await updateAssetModelDescriptionIfUnchanged({
+        assetModelId,
+        organizationId,
+        expectedDescription: row.existingAssetModelDescription ?? null,
+        description,
+      });
+    } catch (cause) {
+      Logger.info({
+        event: "ioio_staff_import_description_save_failed",
+        rowNumber: row.rowNumber,
+        errorType: cause instanceof Error ? cause.name : "unknown",
+      });
+    }
+  }
+
+  if (!row.acceptSuggestedImage) return;
+  const request = makeSuggestedImageRequest(row);
+  if (!request) {
+    Logger.info({
+      event: "ioio_staff_import_image_save_failed",
+      rowNumber: row.rowNumber,
+      status: "IMAGE_INVALID_TYPE",
+    });
+    return;
+  }
+  try {
+    await updateAssetModelImage({
+      request,
+      assetModelId,
+      organizationId,
+      onlyIfMissing: true,
+    });
+  } catch (cause) {
+    Logger.info({
+      event: "ioio_staff_import_image_save_failed",
+      rowNumber: row.rowNumber,
+      status: "IMAGE_FETCH_FAILED",
+      errorType: cause instanceof Error ? cause.name : "unknown",
+    });
+  }
+}
+
+async function applyImportQuantityTrackedAssetImage({
+  assetId,
+  userId,
+  organizationId,
+  row,
+}: {
+  assetId: string;
+  userId: string;
+  organizationId: string;
+  row: StaffImportProposalRow;
+}) {
+  if (!row.acceptSuggestedImage) return;
+  const request = makeSuggestedImageRequest(row);
+  if (!request) {
+    Logger.info({
+      event: "ioio_staff_import_image_save_failed",
+      rowNumber: row.rowNumber,
+      status: "IMAGE_INVALID_TYPE",
+    });
+    return;
+  }
+  try {
+    await updateAssetMainImage({
+      request,
+      assetId,
+      userId,
+      organizationId,
+      isNewAsset: true,
+    });
+  } catch (cause) {
+    Logger.info({
+      event: "ioio_staff_import_image_save_failed",
+      rowNumber: row.rowNumber,
+      status: "IMAGE_FETCH_FAILED",
+      errorType: cause instanceof Error ? cause.name : "unknown",
+    });
+  }
 }
 
 type ImportExecutionPlan = {
@@ -5285,13 +6109,11 @@ async function buildIndividualUnitImportPlan({
   row,
   organizationId,
   userId,
-  filename,
 }: {
   operationId: string;
   row: StaffImportProposalRow;
   organizationId: string;
   userId: string;
-  filename: string;
 }): Promise<IndividualUnitImportPlan> {
   const quantity = requestedIndividualUnitQuantity(row);
   if (quantity === null) {
@@ -5305,7 +6127,7 @@ async function buildIndividualUnitImportPlan({
     name: row.title,
     manufacturer: row.manufacturer,
     manufacturerPartNumber: row.manufacturerPartNumber,
-    description: buildImportedDescription(filename, row),
+    description: row.assetModelDescription ?? null,
     defaultCategoryId: row.categoryId,
     defaultValuation: null,
     preferredModelId: id(),
@@ -5340,13 +6162,13 @@ async function ensureIndividualAssetModel({
   row,
   organizationId,
   userId,
-  filename,
+  applyEnrichment = false,
 }: {
   plan: IndividualUnitImportPlan;
   row: StaffImportProposalRow;
   organizationId: string;
   userId: string;
-  filename: string;
+  applyEnrichment?: boolean;
 }) {
   const resolution = await resolveImportAssetModel({
     organizationId,
@@ -5354,7 +6176,7 @@ async function ensureIndividualAssetModel({
     name: row.title,
     manufacturer: row.manufacturer,
     manufacturerPartNumber: row.manufacturerPartNumber,
-    description: buildImportedDescription(filename, row),
+    description: row.assetModelDescription ?? null,
     defaultCategoryId: row.categoryId,
     defaultValuation: null,
     preferredModelId: plan.assetModelId,
@@ -5370,6 +6192,13 @@ async function ensureIndividualAssetModel({
       "IMPORT_ASSET_MODEL_PLAN_CHANGED",
       "The canonical AssetModel identity changed after this import was prepared."
     );
+  }
+  if (applyEnrichment) {
+    await applyImportAssetModelEnrichment({
+      assetModelId: resolution.assetModelId,
+      organizationId,
+      row,
+    });
   }
   return resolution.assetModelId;
 }
@@ -5731,6 +6560,14 @@ export async function applyStaffInventoryImport({
             : "Ignored by staff during review.",
         };
       }
+      if (
+        decision.acceptSuggestedImage &&
+        row.productImageProposal?.status !== "IMAGE_FOUND"
+      ) {
+        throw importError(
+          "A product image can be accepted only from this proposal's validated suggestion."
+        );
+      }
       const resolvedDecision: StaffImportReviewDecision = {
         ...decision,
         type: decision.type !== undefined ? decision.type : row.type,
@@ -5977,6 +6814,11 @@ export async function applyStaffInventoryImport({
         ...(resolvedDecision.assetId !== undefined
           ? { assetId: resolvedDecision.assetId }
           : {}),
+        assetModelDescription:
+          resolvedDecision.assetModelDescription !== undefined
+            ? resolvedDecision.assetModelDescription
+            : row.assetModelDescription ?? null,
+        acceptSuggestedImage: resolvedDecision.acceptSuggestedImage === true,
         expectedAssetState,
         categoryLabel: selectedCategoryLabel,
         reviewConflictReason,
@@ -6256,6 +7098,7 @@ export async function applyStaffInventoryImport({
   const applicableActions = new Set([
     "CREATE",
     "INCREASE_QUANTITY",
+    "NO_CHANGE",
     "POSSIBLE_DUPLICATE",
     "NEEDS_REVIEW",
     "UPDATE_QUANTITY",
@@ -6427,6 +7270,36 @@ export async function applyStaffInventoryImport({
       continue;
     }
 
+    if (row.action === "NO_CHANGE") {
+      if (row.existingAssetModelId) {
+        await applyImportAssetModelEnrichment({
+          assetModelId: row.existingAssetModelId,
+          organizationId,
+          row,
+        });
+      }
+      const markedDone = await markImportLedgerItemDone({
+        operationId,
+        organizationId,
+        itemId,
+        targetAssetId: row.assetId,
+        writtenState: row.assetId
+          ? { outcome: "reused", assetId: row.assetId }
+          : { outcome: "no_change" },
+      });
+      if (!markedDone) return { status: "IN_PROGRESS", operationId };
+      if (row.assetId) reusedIds.push(row.assetId);
+      continue;
+    }
+
+    if (row.assetId && row.existingAssetModelId) {
+      await applyImportAssetModelEnrichment({
+        assetModelId: row.existingAssetModelId,
+        organizationId,
+        row,
+      });
+    }
+
     let writeStarted = false;
     let recoverySnapshot: ImportAssetRecoverySnapshot | null = null;
     try {
@@ -6534,7 +7407,6 @@ export async function applyStaffInventoryImport({
                 row,
                 organizationId,
                 userId,
-                filename: proposal.source.filename,
               });
             } catch (cause) {
               if (cause instanceof ImportAssetModelConflictError) {
@@ -6584,7 +7456,7 @@ export async function applyStaffInventoryImport({
               row,
               organizationId,
               userId,
-              filename: proposal.source.filename,
+              applyEnrichment: true,
             });
           } catch (cause) {
             if (cause instanceof ImportAssetModelConflictError) {
@@ -6790,7 +7662,6 @@ export async function applyStaffInventoryImport({
                   row,
                   organizationId,
                   userId,
-                  filename: proposal.source.filename,
                 });
               } catch (cause) {
                 if (!(cause instanceof ImportAssetModelConflictError)) {
@@ -7038,7 +7909,10 @@ export async function applyStaffInventoryImport({
         writeStarted = true;
         const asset = await createAsset({
           title: row.title,
-          description: buildImportedDescription(proposal.source.filename, row),
+          description:
+            type === "QUANTITY_TRACKED" && row.assetModelDescription?.trim()
+              ? row.assetModelDescription.trim()
+              : buildImportedDescription(proposal.source.filename, row),
           userId,
           organizationId,
           valuation: null,
@@ -7060,6 +7934,14 @@ export async function applyStaffInventoryImport({
           unitOfMeasure:
             type === "QUANTITY_TRACKED" ? row.unitOfMeasure ?? "pcs" : null,
         });
+        if (type === "QUANTITY_TRACKED" && row.acceptSuggestedImage) {
+          await applyImportQuantityTrackedAssetImage({
+            assetId: asset.id,
+            userId,
+            organizationId,
+            row,
+          });
+        }
         const markedDone = await markImportLedgerItemDone({
           operationId,
           organizationId,

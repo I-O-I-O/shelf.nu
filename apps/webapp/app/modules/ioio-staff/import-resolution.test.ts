@@ -9,6 +9,7 @@ import {
   resolveImportCategorySuggestion,
   resolveImportLocation,
   resolveImportLocationSuggestion,
+  selectImportLocationCandidates,
 } from "./import-resolution";
 import { MOUSER_REAL_FIRST_PAGE_EXPECTED } from "../../../test/fixtures/mouser-invoice-fragments";
 
@@ -285,7 +286,7 @@ describe("deterministic category and location suggestions", () => {
     });
   });
 
-  it("leaves weak category and location matches unresolved", () => {
+  it("leaves weak categories unresolved while retaining a weak location suggestion", () => {
     const evidence = {
       productName: "Mystery item",
       rawDescription: "Unknown replacement component",
@@ -298,7 +299,11 @@ describe("deterministic category and location suggestions", () => {
         category: categories[0],
         locations,
       })
-    ).toEqual({ location: null, method: "unresolved" });
+    ).toMatchObject({
+      location: expect.objectContaining({ id: expect.any(String) }),
+      method: "deterministic-fallback",
+      status: "WEAK_SUGGESTION",
+    });
   });
 
   it("ranks motor, test-equipment, camera, cable, power, and tool categories from product evidence", () => {
@@ -549,7 +554,12 @@ describe("deterministic category and location suggestions", () => {
         evidence: { productName: "Mystery replacement item" },
         locations,
       })
-    ).toEqual({ location: null, method: "unresolved" });
+    ).toMatchObject({
+      location: null,
+      method: "unresolved",
+      status: "UNRESOLVED",
+      reasonCodes: ["LOCATION_UNRESOLVED"],
+    });
   });
 
   it("uses category inventory distribution as a strong location signal", () => {
@@ -620,6 +630,113 @@ describe("deterministic category and location suggestions", () => {
         units: 17,
       },
     ]);
+  });
+
+  it("shortlists cable and electronics products to matching existing locations", () => {
+    const locations = [
+      {
+        id: "cables",
+        name: "Cable Drawer",
+        parentId: "electronics-room",
+        pathLabel: "Electronics Room · Cabinet A · Cable Drawer",
+        description: "USB, power, and signal cables",
+        operational: false,
+        representativeProducts: ["USB-C Cable 1m", "Ethernet Patch Cable"],
+      },
+      {
+        id: "electronics",
+        name: "Electronics Cabinet",
+        parentId: "electronics-room",
+        pathLabel: "Electronics Room · Cabinet B · Electronics Cabinet",
+        description: "Development boards and electronic components",
+        operational: false,
+        representativeProducts: ["Arduino Uno R4", "ESP32 Development Board"],
+      },
+      {
+        id: "general",
+        name: "General Storage",
+        parentId: null,
+        pathLabel: "General Storage",
+        description: "Miscellaneous inventory",
+        operational: false,
+      },
+    ];
+    const cableCandidates = selectImportLocationCandidates({
+      products: [{ evidence: { productName: "USB-C cable, 2m" } }],
+      locations,
+    });
+    const electronicsCandidates = selectImportLocationCandidates({
+      products: [
+        {
+          evidence: {
+            productName: "Arduino Uno R4 WiFi development board",
+          },
+        },
+      ],
+      locations,
+    });
+
+    expect(cableCandidates.map(({ id }) => id)).toContain("cables");
+    expect(electronicsCandidates.map(({ id }) => id)).toContain("electronics");
+    expect(cableCandidates).not.toContainEqual(
+      expect.objectContaining({ id: "general" })
+    );
+  });
+
+  it("caps location context sent to the import helper", () => {
+    const locations = Array.from({ length: 40 }, (_, index) => ({
+      id: `cable-${index}`,
+      name: `Cable Drawer ${index}`,
+      parentId: null,
+      pathLabel: `Lab · Cable Drawer ${index}`,
+      description: "USB, power, and signal cables",
+      operational: false,
+    }));
+    const candidates = selectImportLocationCandidates({
+      products: [
+        { evidence: { productName: "USB cable" } },
+        { evidence: { productName: "Ethernet cable" } },
+        { evidence: { productName: "Power cable" } },
+        { evidence: { productName: "Signal cable" } },
+        { evidence: { productName: "Charging cable" } },
+      ],
+      locations,
+      limit: 20,
+    });
+
+    expect(candidates.length).toBeLessThanOrEqual(20);
+    expect(candidates.length).toBeGreaterThan(0);
+  });
+
+  it("keeps a useful weak deterministic suggestion when the lead is small", () => {
+    const locations = [
+      {
+        id: "cable-one",
+        name: "Cable Drawer A",
+        parentId: null,
+        pathLabel: "Room · Cable Drawer A",
+        operational: false,
+      },
+      {
+        id: "cable-two",
+        name: "Cable Drawer B",
+        parentId: null,
+        pathLabel: "Room · Cable Drawer B",
+        operational: false,
+      },
+    ];
+
+    expect(
+      resolveImportLocationSuggestion({
+        evidence: { productName: "USB-C cable" },
+        locations,
+      })
+    ).toMatchObject({
+      location: expect.objectContaining({ id: expect.any(String) }),
+      method: "deterministic-fallback",
+      status: "WEAK_SUGGESTION",
+      reasonCodes: ["LOCATION_DETERMINISTIC_FALLBACK"],
+    });
   });
 
   it("assigns the real Mouser fixture using only existing category and location candidates", () => {
@@ -717,6 +834,9 @@ describe("deterministic category and location suggestions", () => {
           "Electronics Lab · Cabinet B · Development Boards Drawer",
       }),
     ]);
+    expect(
+      results.filter((result) => result.locationCandidate !== null)
+    ).toHaveLength(MOUSER_REAL_FIRST_PAGE_EXPECTED.length);
   });
 });
 

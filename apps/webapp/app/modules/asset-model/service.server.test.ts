@@ -16,6 +16,7 @@ import {
   getAssetModels,
   getAssetModel,
   updateAssetModel,
+  updateAssetModelDescriptionIfUnchanged,
   updateAssetModelImage,
   deleteAssetModel,
   bulkDeleteAssetModels,
@@ -1049,6 +1050,93 @@ describe("updateAssetModelImage", () => {
         thumbnailImage: null,
         imageStoragePath: "org-1/asset-models/model-1/abc.jpg",
         thumbnailImageStoragePath: null,
+      },
+    });
+  });
+
+  it("preserves an existing image when import enrichment is insert-only", async () => {
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue({
+      image: "https://shelf.example.org/current.webp",
+      thumbnailImage: null,
+      imageStoragePath: "org-1/asset-models/model-1/current.webp",
+      thumbnailImageStoragePath: null,
+    });
+
+    const result = await updateAssetModelImage({
+      request: new Request("http://localhost", { method: "POST" }),
+      assetModelId: "model-1",
+      organizationId: "org-1",
+      onlyIfMissing: true,
+    });
+
+    expect(result).toBeNull();
+    expect(parseFileFormData).not.toHaveBeenCalled();
+    expect(db.assetModel.update).not.toHaveBeenCalled();
+    expect(db.assetModel.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not replace an image added concurrently after import review", async () => {
+    const withImage = new FormData();
+    withImage.set(
+      "image",
+      JSON.stringify({
+        originalPath: "org-1/asset-models/model-1/proposed.webp",
+        thumbnailPath: "org-1/asset-models/model-1/proposed-thumbnail.webp",
+      })
+    );
+    vitest.mocked(parseFileFormData).mockResolvedValue(withImage);
+    // @ts-expect-error mock setup
+    db.assetModel.findFirst.mockResolvedValue({
+      image: null,
+      thumbnailImage: null,
+      imageStoragePath: null,
+      thumbnailImageStoragePath: null,
+    });
+    // @ts-expect-error mock setup
+    db.assetModel.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await updateAssetModelImage({
+      request: new Request("http://localhost", { method: "POST" }),
+      assetModelId: "model-1",
+      organizationId: "org-1",
+      onlyIfMissing: true,
+    });
+
+    expect(result).toBeNull();
+    expect(db.assetModel.update).not.toHaveBeenCalled();
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "files",
+      objectPath: "org-1/asset-models/model-1/proposed.webp",
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "files",
+      objectPath: "org-1/asset-models/model-1/proposed-thumbnail.webp",
+    });
+  });
+});
+
+describe("updateAssetModelDescriptionIfUnchanged", () => {
+  it("updates a model only when the reviewed description is still current", async () => {
+    // @ts-expect-error mock setup
+    db.assetModel.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await updateAssetModelDescriptionIfUnchanged({
+      assetModelId: "model-1",
+      organizationId: "org-1",
+      expectedDescription: null,
+      description: "A compact development board for electronics prototyping.",
+    });
+
+    expect(result).toBe(true);
+    expect(db.assetModel.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "model-1",
+        organizationId: "org-1",
+        description: null,
+      },
+      data: {
+        description: "A compact development board for electronics prototyping.",
       },
     });
   });

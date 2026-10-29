@@ -10,7 +10,7 @@
  * abortable body size cap in `readBodyWithLimit`.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   assertSafeUrl,
@@ -20,6 +20,8 @@ import {
   safeFetch,
   ssrfGuardedLookup,
 } from "./ssrf.server";
+
+afterEach(() => vi.restoreAllMocks());
 
 // Classification is delegated to ipaddr.js with a strict default-deny policy:
 // only globally-routable `unicast` is allowed; every other range it recognises
@@ -178,6 +180,53 @@ describe("safeFetch input validation", () => {
 
   it("rejects malformed URLs", async () => {
     await expect(safeFetch("not a url")).rejects.toThrow(/invalid url/i);
+  });
+
+  it("enforces the redirect limit", async () => {
+    // why: a controlled redirect response verifies the bound without contacting external hosts.
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://images.example.org/redirect" },
+        })
+      )
+    );
+    await expect(safeFetch("https://images.example.org/start")).rejects.toThrow(
+      /too many redirects/i
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("aborts a request that exceeds its configured timeout", async () => {
+    // why: the mock holds the request open until safeFetch's own timer aborts it.
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("request aborted")),
+            { once: true }
+          );
+        })
+    );
+    await expect(
+      safeFetch("https://images.example.org/slow", { timeoutMs: 5 })
+    ).rejects.toThrow(/request aborted/i);
+  });
+
+  it("rejects a redirect to a private network address", async () => {
+    // why: return a fixed redirect so the private-address gate is tested before any socket opens.
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "http://127.0.0.1/internal" },
+      })
+    );
+    await expect(
+      safeFetch("https://images.example.org/redirect")
+    ).rejects.toBeInstanceOf(BlockedAddressError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   // Regression guard for the IP-literal bypass (GHSA review, Codex P1): undici

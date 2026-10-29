@@ -524,6 +524,7 @@ const candidateProposalRowSchema = z
     manufacturer: z.string().max(300).nullable(),
     mpn: z.string().max(300).nullable(),
     description: z.string().max(5_000).nullable(),
+    assetModelDescription: z.string().trim().max(600).nullable().optional(),
     productMatch: z
       .object({
         matchType: z.enum(["EXISTING", "NEW", "UNCERTAIN"]),
@@ -618,6 +619,7 @@ const mouserEnrichmentRowSchema = z
     productName: z.string().trim().min(1).max(500),
     manufacturer: z.string().trim().min(1).max(300).nullable(),
     description: z.string().trim().min(1).max(5_000).nullable(),
+    assetModelDescription: z.string().trim().max(600).nullable().optional(),
     quantity: z.number().int().positive().max(1_000_000),
     categoryId: identifierSchema.nullable(),
     categoryConfidence: confidenceSchema.optional(),

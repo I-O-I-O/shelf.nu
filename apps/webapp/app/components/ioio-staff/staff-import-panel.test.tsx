@@ -563,6 +563,44 @@ describe("StaffImportPanel review gate", () => {
     ).toBeVisible();
   });
 
+  it("shows the proposed description and image for staff review and editing", () => {
+    renderPanel({
+      assetModelDescription:
+        "A compact microcontroller board for electronics prototyping.",
+      assetModelDescriptionSource: "GENERATED",
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        dataBase64: "dGVzdA==",
+        sourceName: "Arduino Nano board",
+        sourceUrl: "https://openverse.org/image/1",
+        license: "cc0",
+      },
+    });
+
+    expect(screen.queryByText(/AssetModel description:/)).not.toBeVisible();
+    fireEvent.click(screen.getByText("Details"));
+    expect(
+      screen.getByText(
+        /A compact microcontroller board for electronics prototyping\./
+      )
+    ).toBeVisible();
+    expect(
+      screen.getByRole("img", { name: "Suggested product for Arduino Nano" })
+    ).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("AssetModel description")).toHaveValue(
+      "A compact microcontroller board for electronics prototyping."
+    );
+    const useImage = screen.getByRole("checkbox", {
+      name: "Use this image for the Shelf product",
+    });
+    expect(useImage).not.toBeChecked();
+    fireEvent.click(useImage);
+    expect(useImage).toBeChecked();
+  });
+
   it("supports row selection and bulk ignore without changing Apply or Cancel controls", () => {
     renderPanel({ action: "NEEDS_REVIEW" });
 
@@ -637,4 +675,36 @@ it("offers Choose location for unresolved rows", () => {
   expect(
     screen.getByRole("option", { name: "Choose location" })
   ).toBeInTheDocument();
+});
+
+it("shows a weak existing location suggestion in the inline picker", () => {
+  renderPanel(
+    {
+      locationId: null,
+      locationLabel: "Unassigned",
+      suggestedLocationId: "location-1",
+      locationSuggestionConfidence: 0.4,
+      locationSuggestionStatus: "WEAK_SUGGESTION",
+    },
+    true,
+    {
+      locationOptions: [
+        {
+          id: "location-1",
+          name: "Cable Drawer",
+          pathLabel: "Lab · Cable Drawer",
+          operational: false,
+          currentUnits: 0,
+          parentId: null,
+        },
+      ],
+    }
+  );
+
+  expect(
+    screen.getByText("Possible location: Lab · Cable Drawer · choose")
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("combobox", { name: "Location for Arduino Nano" })
+  ).toHaveValue("");
 });

@@ -16,6 +16,7 @@ export type ImportLocationCandidate = {
   operational?: boolean;
   currentUnits?: number;
   categoryAffinities?: ImportLocationCategoryAffinity[];
+  representativeProducts?: string[];
 };
 
 export type ImportLocationCategoryAffinity = {
@@ -26,6 +27,15 @@ export type ImportLocationCategoryAffinity = {
 };
 
 export type ImportSuggestionMethod = "claude" | "deterministic-fallback";
+export type ImportLocationSuggestionStatus =
+  | "SUGGESTED"
+  | "WEAK_SUGGESTION"
+  | "UNRESOLVED";
+export type ImportLocationDiagnosticReason =
+  | "LOCATION_CATEGORY_AFFINITY"
+  | "LOCATION_SIMILAR_ITEMS"
+  | "LOCATION_DETERMINISTIC_FALLBACK"
+  | "LOCATION_UNRESOLVED";
 
 export type ImportProductEvidence = {
   manufacturer?: string | null;
@@ -322,7 +332,7 @@ export function resolveImportCategorySuggestion({
   return finish(claudeCategory, "claude");
 }
 
-export function suggestImportLocation({
+function rankImportLocations({
   evidence,
   category,
   locations,
@@ -330,11 +340,7 @@ export function suggestImportLocation({
   evidence: ImportProductEvidence;
   category?: ImportCategoryCandidate | null;
   locations: Array<ImportLocationCandidate & { pathLabel: string }>;
-}): {
-  location: ImportLocationCandidate & { pathLabel: string };
-  score: number;
-  strength: "historical" | "semantic";
-} | null {
+}) {
   const productText = evidenceText(evidence);
   const categoryText = category
     ? `${category.name} ${category.description ?? ""}`
@@ -366,33 +372,76 @@ export function suggestImportLocation({
       : undefined;
     const affinityShare =
       affinity && totalAffinity > 0 ? affinity.assetCount / totalAffinity : 0;
+    const affinityCount = affinity?.assetCount ?? 0;
+    const similarProductScore = Math.max(
+      0,
+      ...(location.representativeProducts ?? []).map((product) =>
+        semanticMatchScore(productText, product)
+      )
+    );
     const strongHistory =
-      totalAffinity >= 3 &&
-      (affinity?.assetCount ?? 0) >= 2 &&
-      affinityShare >= 0.25;
-    const historicalScore =
-      affinity && totalAffinity >= 3
-        ? 36 * (affinity!.assetCount / totalAffinity) +
-          Math.min(6, Math.log2(affinity!.assetCount + 1))
-        : 0;
+      affinityCount >= 2 && affinityShare >= 0.2 && totalAffinity >= 2;
+    const historicalScore = affinityCount
+      ? 8 + 20 * affinityShare + Math.min(8, Math.log2(affinityCount + 1) * 2)
+      : 0;
     const depthBonus =
-      specificScore > 0 || strongHistory ? Math.min(depth, 6) * 2.5 : 0;
+      specificScore > 0 || similarProductScore > 0 || affinityCount > 0
+        ? Math.min(depth, 6) * 2.5
+        : 0;
+    const occupancyBonus =
+      location.currentUnits !== undefined &&
+      (specificScore > 0 || similarProductScore > 0 || affinityCount > 0)
+        ? Math.max(0, 3 - Math.log2(location.currentUnits + 1))
+        : 0;
+    const reasonCodes: ImportLocationDiagnosticReason[] = [];
+    if (affinityCount > 0) reasonCodes.push("LOCATION_CATEGORY_AFFINITY");
+    if (similarProductScore > 0) reasonCodes.push("LOCATION_SIMILAR_ITEMS");
     return {
       candidate: location,
-      score: specificScore + historicalScore + depthBonus,
+      score:
+        specificScore +
+        similarProductScore * 0.75 +
+        historicalScore +
+        depthBonus +
+        occupancyBonus,
       strength: strongHistory ? ("historical" as const) : ("semantic" as const),
+      reasonCodes,
     };
   });
-  const location = pickUniqueStrongest(rankedLocations, 12, 2);
-  if (!location) return null;
+  return [...rankedLocations].sort(
+    (left, right) =>
+      right.score - left.score ||
+      left.candidate.pathLabel.localeCompare(right.candidate.pathLabel)
+  );
+}
+
+export function suggestImportLocation({
+  evidence,
+  category,
+  locations,
+}: {
+  evidence: ImportProductEvidence;
+  category?: ImportCategoryCandidate | null;
+  locations: Array<ImportLocationCandidate & { pathLabel: string }>;
+}): {
+  location: ImportLocationCandidate & { pathLabel: string };
+  score: number;
+  strength: "historical" | "semantic";
+  status: Exclude<ImportLocationSuggestionStatus, "UNRESOLVED">;
+  reasonCodes: ImportLocationDiagnosticReason[];
+} | null {
+  const ranked = rankImportLocations({ evidence, category, locations });
+  const best = ranked[0];
+  if (!best || best.score <= 0) return null;
+  const next = ranked[1];
+  const clearlySuggested =
+    best.score >= 12 && (!next || best.score - next.score >= 2);
   return {
-    location,
-    score:
-      rankedLocations.find(({ candidate }) => candidate.id === location.id)
-        ?.score ?? 0,
-    strength:
-      rankedLocations.find(({ candidate }) => candidate.id === location.id)
-        ?.strength ?? "semantic",
+    location: best.candidate,
+    score: best.score,
+    strength: best.strength,
+    status: clearlySuggested ? "SUGGESTED" : "WEAK_SUGGESTION",
+    reasonCodes: best.reasonCodes,
   };
 }
 
@@ -411,6 +460,8 @@ export function resolveImportLocationSuggestion({
 }): {
   location: (ImportLocationCandidate & { pathLabel: string }) | null;
   method: ImportSuggestionMethod | "unresolved";
+  status: ImportLocationSuggestionStatus;
+  reasonCodes: ImportLocationDiagnosticReason[];
 } {
   const claudeLocation = locations.find(
     (location) => location.id === claudeLocationId && !location.operational
@@ -421,9 +472,31 @@ export function resolveImportLocationSuggestion({
     locations,
   });
   if (!claudeLocation || (claudeConfidence ?? 0) < 0.8) {
-    return deterministic
-      ? { location: deterministic.location, method: "deterministic-fallback" }
-      : { location: null, method: "unresolved" };
+    if (deterministic) {
+      return {
+        location: deterministic.location,
+        method: "deterministic-fallback",
+        status: deterministic.status,
+        reasonCodes: [
+          ...deterministic.reasonCodes,
+          "LOCATION_DETERMINISTIC_FALLBACK",
+        ],
+      };
+    }
+    if (claudeLocation) {
+      return {
+        location: claudeLocation,
+        method: "claude",
+        status: "WEAK_SUGGESTION",
+        reasonCodes: [],
+      };
+    }
+    return {
+      location: null,
+      method: "unresolved",
+      status: "UNRESOLVED",
+      reasonCodes: ["LOCATION_UNRESOLVED"],
+    };
   }
   if (
     deterministic &&
@@ -461,10 +534,89 @@ export function resolveImportLocationSuggestion({
       return {
         location: deterministic.location,
         method: "deterministic-fallback",
+        status: deterministic.status,
+        reasonCodes: [
+          ...deterministic.reasonCodes,
+          "LOCATION_DETERMINISTIC_FALLBACK",
+        ],
       };
     }
   }
-  return { location: claudeLocation, method: "claude" };
+  return {
+    location: claudeLocation,
+    method: "claude",
+    status: "SUGGESTED",
+    reasonCodes: [],
+  };
+}
+
+export function selectImportLocationCandidates({
+  products,
+  locations,
+  limit = 20,
+  perProductLimit = 5,
+}: {
+  products: Array<{
+    evidence: ImportProductEvidence;
+    category?: ImportCategoryCandidate | null;
+  }>;
+  locations: Array<ImportLocationCandidate & { pathLabel: string }>;
+  limit?: number;
+  perProductLimit?: number;
+}) {
+  const ranked = new Map<
+    string,
+    { location: ImportLocationCandidate & { pathLabel: string }; score: number }
+  >();
+  for (const product of products) {
+    const productRanked = rankImportLocations({
+      evidence: product.evidence,
+      category: product.category,
+      locations,
+    });
+    for (const { candidate, score } of productRanked
+      .filter(({ score }) => score > 0)
+      .slice(0, perProductLimit)) {
+      const current = ranked.get(candidate.id);
+      if (!current || score > current.score)
+        ranked.set(candidate.id, { location: candidate, score });
+    }
+  }
+  if (products.length > 0 && ranked.size < limit) {
+    const inventoryUsedLocations = locations
+      .filter(
+        (location) =>
+          !location.operational &&
+          (location.categoryAffinities?.length ?? 0) > 0
+      )
+      .map((location) => ({
+        location,
+        score:
+          (location.categoryAffinities ?? []).reduce(
+            (total, affinity) =>
+              total + affinity.assetCount * 2 + Math.log2(affinity.units + 1),
+            0
+          ) + Math.min(4, hierarchyDepth(location.pathLabel)),
+      }))
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          left.location.pathLabel.localeCompare(right.location.pathLabel)
+      );
+    for (const candidate of inventoryUsedLocations) {
+      if (ranked.size >= limit) break;
+      if (!ranked.has(candidate.location.id))
+        ranked.set(candidate.location.id, candidate);
+    }
+  }
+  return [...ranked.values()]
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.location.pathLabel.localeCompare(right.location.pathLabel)
+    )
+    .slice(0, limit)
+    .map(({ location }) => location);
 }
 
 export function buildImportLocationAffinities({
@@ -529,6 +681,57 @@ export function buildImportLocationAffinities({
           categoryName: categoryNames.get(affinity.categoryId) ?? "",
         }))
         .sort((left, right) => right.assetCount - left.assetCount),
+    ])
+  );
+}
+
+export function buildImportLocationRepresentativeProducts({
+  assets,
+  locations,
+}: {
+  assets: Array<{
+    title?: string | null;
+    description?: string | null;
+    modelName?: string | null;
+    assetLocations: Array<{
+      locationId: string;
+      assetKitId?: string | null;
+    }>;
+  }>;
+  locations: ImportLocationCandidate[];
+}) {
+  const assignableLocationIds = new Set(
+    locations.filter((location) => !location.operational).map(({ id }) => id)
+  );
+  const productCountsByLocation = new Map<string, Map<string, number>>();
+  for (const asset of assets) {
+    const product = [asset.modelName, asset.title, asset.description]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    if (!product) continue;
+    for (const placement of asset.assetLocations) {
+      if (
+        placement.assetKitId != null ||
+        !assignableLocationIds.has(placement.locationId)
+      ) {
+        continue;
+      }
+      const products =
+        productCountsByLocation.get(placement.locationId) ?? new Map();
+      products.set(product, (products.get(product) ?? 0) + 1);
+      productCountsByLocation.set(placement.locationId, products);
+    }
+  }
+  return new Map(
+    [...productCountsByLocation].map(([locationId, products]) => [
+      locationId,
+      [...products]
+        .sort(
+          (left, right) => right[1] - left[1] || left[0].localeCompare(right[0])
+        )
+        .slice(0, 12)
+        .map(([product]) => product.slice(0, 500)),
     ])
   );
 }
