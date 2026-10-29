@@ -85,6 +85,9 @@ declare global {
       ANTHROPIC_BASE_URL: string;
       OPENROUTER_API_KEY: string;
       IOIO_AI_PROVIDER: string;
+      BRAVE_SEARCH_API_KEY?: string;
+      IOIO_PRODUCT_IMAGE_MANUFACTURER_DOMAINS?: string;
+      IOIO_PRODUCT_IMAGE_TRUSTED_DISTRIBUTOR_DOMAINS?: string;
     }
   }
 }

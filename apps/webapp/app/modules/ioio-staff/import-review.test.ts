@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveImportReviewState,
+  validateImportRowForApply,
   type ImportReviewDecision,
   type ImportReviewRow,
 } from "./import-review";
@@ -15,6 +16,7 @@ const readyRow = {
   quantity: 5,
 };
 const approved = {
+  trackingModeConfirmed: true,
   decision: "APPROVE" as const,
   title: "Arduino Nano",
   assetId: null,
@@ -117,5 +119,113 @@ describe("staff import review readiness", () => {
         minQuantity: 2,
       })
     ).toBe("READY");
+  });
+});
+
+describe("structured Apply readiness", () => {
+  it("explains a historical CONFLICT with an invalid location", () => {
+    const result = validateImportRowForApply({
+      row: { ...readyRow, action: "CONFLICT" },
+      decision: { ...approved, locationId: "deleted-location" },
+      categoryAvailable: true,
+      locationAvailable: false,
+    });
+    expect(result).toMatchObject({
+      ready: false,
+      state: "NEEDS_REVIEW",
+      issues: [{ code: "INVALID_LOCATION" }],
+    });
+    expect(result.issues[0].message).toContain("Arduino Nano");
+    expect(result.issues[0].message).not.toContain("CONFLICT");
+  });
+  it("does not gate a resolved row on historical CONFLICT or a second approval", () => {
+    expect(
+      validateImportRowForApply({
+        row: { ...readyRow, action: "CONFLICT" },
+        decision: { ...approved, decision: null },
+        categoryAvailable: true,
+        locationAvailable: true,
+      })
+    ).toEqual({ ready: true, state: "READY", issues: [] });
+  });
+  it("returns every missing decision for a batch row", () => {
+    const result = validateImportRowForApply({
+      row: {
+        ...readyRow,
+        action: "POSSIBLE_DUPLICATE",
+        locationResolution: "UNMATCHED",
+      },
+      decision: {
+        ...approved,
+        quantity: null,
+        categoryId: null,
+        trackingModeConfirmed: false,
+      },
+      categoryAvailable: false,
+      locationAvailable: false,
+    });
+    expect(result.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining([
+        "MISSING_QUANTITY",
+        "MISSING_CATEGORY",
+        "MISSING_LOCATION",
+        "AMBIGUOUS_EXISTING_MATCH",
+        "TRACKING_REVIEW_REQUIRED",
+      ])
+    );
+  });
+});
+
+it("does not let missing image or description block an otherwise valid product", () => {
+  expect(
+    validateImportRowForApply({
+      row: {
+        ...readyRow,
+        uncertainFields: ["Product image", "AssetModel description"],
+      },
+      decision: { ...approved, decision: null },
+      categoryAvailable: true,
+      locationAvailable: true,
+    })
+  ).toMatchObject({ ready: true, issues: [] });
+});
+it.each([0, -1, 1.5, Infinity, NaN])(
+  "explains invalid quantity %s",
+  (quantity) => {
+    expect(
+      validateImportRowForApply({
+        row: readyRow,
+        decision: { ...approved, quantity },
+        categoryAvailable: true,
+        locationAvailable: true,
+      })
+    ).toMatchObject({ ready: false, issues: [{ code: "INVALID_QUANTITY" }] });
+  }
+);
+it("reports completed and ignored rows explicitly", () => {
+  expect(
+    validateImportRowForApply({
+      row: readyRow,
+      decision: approved,
+      categoryAvailable: true,
+      locationAvailable: true,
+      alreadyImported: true,
+    })
+  ).toMatchObject({
+    ready: false,
+    state: "IMPORTED",
+    issues: [{ code: "ALREADY_IMPORTED" }],
+  });
+  expect(
+    validateImportRowForApply({
+      row: readyRow,
+      decision: { ...approved, decision: "IGNORE" },
+      categoryAvailable: true,
+      locationAvailable: true,
+    })
+  ).toMatchObject({
+    ready: false,
+    state: "IGNORED",
+    issues: [{ code: "IGNORED" }],
   });
 });

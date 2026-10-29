@@ -11,9 +11,15 @@ import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   applyStaffInventoryImport,
   cancelStaffInventoryImport,
+  getStaffInventoryImportDrafts,
   getStaffInventoryImportProposal,
   prepareStaffInventoryImport,
+  saveStaffInventoryImportDraft,
 } from "~/modules/ioio-staff/inventory-import.server";
+import {
+  IMPORT_IMAGE_SOURCE_MAX_BYTES,
+  processStaffImportImageUpload,
+} from "~/modules/ioio-staff/product-enrichment.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -26,7 +32,11 @@ import { requirePermission } from "~/utils/roles.server";
 const ImportIntentSchema = z.enum([
   "analyze-file",
   "apply-import",
+  "apply-row",
+  "apply-selected",
   "cancel-import",
+  "save-draft",
+  "process-import-image",
 ]);
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -47,6 +57,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     canCreateCategory = false;
   }
   const operationId = new URL(request.url).searchParams.get("importOperation");
+  const allSavedDrafts = await getStaffInventoryImportDrafts({
+    context,
+    request,
+  });
   let importProposal = null;
   let importNotice = null;
   if (operationId) {
@@ -71,6 +85,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     importProposal,
     importNotice,
     canCreateCategory,
+    savedDrafts: allSavedDrafts.filter(
+      (draft) => draft.operationId !== operationId
+    ),
   });
 }
 
@@ -80,6 +97,45 @@ export async function action({ context, request }: ActionFunctionArgs) {
     ({ userId } = await requireIoioStaffAccess({ context, request }));
     const formData = await request.formData();
     const intent = ImportIntentSchema.parse(formData.get("intent"));
+
+    if (intent === "process-import-image") {
+      const file = formData.get("file");
+      const rowNumber = Number(formData.get("rowNumber"));
+      if (
+        !(file instanceof File) ||
+        file.size > IMPORT_IMAGE_SOURCE_MAX_BYTES ||
+        !Number.isSafeInteger(rowNumber) ||
+        rowNumber < 1
+      ) {
+        throw new ShelfError({
+          cause: null,
+          message: "Choose a valid product image.",
+          label: "Assets",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      let proposal: Awaited<ReturnType<typeof processStaffImportImageUpload>>;
+      try {
+        proposal = await processStaffImportImageUpload(
+          Buffer.from(await file.arrayBuffer()),
+          file.type
+        );
+      } catch {
+        throw new ShelfError({
+          cause: null,
+          message: "Choose a readable JPEG, PNG, or WebP image up to 8 MB.",
+          label: "Assets",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      return payload({
+        kind: "import-image-processed" as const,
+        rowNumber,
+        proposal,
+      });
+    }
 
     if (intent === "analyze-file") {
       const file = formData.get("file");
@@ -115,6 +171,25 @@ export async function action({ context, request }: ActionFunctionArgs) {
       .min(1)
       .max(100)
       .parse(formData.get("operationId"));
+    if (intent === "save-draft") {
+      const reviewDecisions = formData.get("reviewDecisions");
+      if (typeof reviewDecisions !== "string") {
+        throw new ShelfError({
+          cause: null,
+          message: "The review draft could not be saved. Reload and try again.",
+          label: "Assets",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      const result = await saveStaffInventoryImportDraft({
+        context,
+        request,
+        operationId,
+        reviewDecisions,
+      });
+      return payload({ kind: "import-draft-saved" as const, ...result });
+    }
     if (intent === "cancel-import") {
       const result = await cancelStaffInventoryImport({
         context,
@@ -127,6 +202,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
     const rawPdfDecisions = formData.get("pdfDecisions");
     const rawReviewDecisions = formData.get("reviewDecisions");
     const rawProposalHash = formData.get("proposalHash");
+    const applyOnlyRowNumber =
+      intent === "apply-row"
+        ? z.coerce.number().int().positive().parse(formData.get("rowNumber"))
+        : undefined;
     if (typeof rawProposalHash !== "string") {
       throw new ShelfError({
         cause: null,
@@ -142,12 +221,27 @@ export async function action({ context, request }: ActionFunctionArgs) {
       operationId,
       proposalHash: rawProposalHash,
       allowSameFileReimport: formData.get("allowSameFileReimport") === "true",
+      applyOnlyRowNumber,
+      applyOnlyRowNumbers:
+        intent === "apply-selected"
+          ? z
+              .array(z.number().int().positive())
+              .min(1)
+              .max(1000)
+              .parse(JSON.parse(String(formData.get("rowNumbers"))))
+          : undefined,
       pdfDecisions:
         typeof rawPdfDecisions === "string" ? rawPdfDecisions : null,
       reviewDecisions:
         typeof rawReviewDecisions === "string" ? rawReviewDecisions : null,
     });
     if ("status" in result) {
+      if (result.status === "NEEDS_REVIEW")
+        return payload({
+          error: null,
+          kind: "import-review-blocked" as const,
+          ...result,
+        });
       if (result.status === "DUPLICATE") {
         return payload({
           kind: "import-duplicate" as const,
@@ -157,6 +251,18 @@ export async function action({ context, request }: ActionFunctionArgs) {
       return payload({
         kind: "import-in-progress" as const,
         operationId: result.operationId,
+      });
+    }
+    if (result.remainingRows && result.remainingRows > 0) {
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({
+        kind: "import-partial" as const,
+        proposal,
+        result,
       });
     }
     return payload({ kind: "import-result" as const, result });
@@ -177,7 +283,7 @@ export const handle = {
 };
 
 export default function StaffImportPage() {
-  const { importProposal, importNotice, canCreateCategory } =
+  const { importProposal, importNotice, canCreateCategory, savedDrafts } =
     useLoaderData<typeof loader>();
   return (
     <div>
@@ -188,6 +294,7 @@ export default function StaffImportPage() {
           initialProposal={importProposal}
           initialNotice={importNotice}
           canCreateCategory={canCreateCategory}
+          savedDrafts={savedDrafts}
         />
       </div>
     </div>

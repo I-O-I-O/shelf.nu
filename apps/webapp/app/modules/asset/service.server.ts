@@ -5343,6 +5343,7 @@ export async function updateAssetMainImage({
   organizationId,
   isNewAsset = false,
   allowEmptyFile = false,
+  maxProcessedBytes,
 }: {
   request: Request;
   assetId: string;
@@ -5350,6 +5351,7 @@ export async function updateAssetMainImage({
   organizationId: Organization["id"];
   isNewAsset?: boolean;
   allowEmptyFile?: boolean;
+  maxProcessedBytes?: number;
 }): Promise<boolean> {
   let uploadedImagePaths: string[] = [];
   let imageSaved = false;
@@ -5369,6 +5371,7 @@ export async function updateAssetMainImage({
       thumbnailSize: 108, // Size matches what we use in AssetImage component
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
       allowEmptyFile,
+      maxProcessedBytes,
     });
 
     const image = fileData.get("mainImage") as string | null;

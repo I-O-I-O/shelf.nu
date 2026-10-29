@@ -74,19 +74,284 @@ function renderPanel(
 }
 
 describe("StaffImportPanel review gate", () => {
-  it("keeps ready rows quiet without a Status column", () => {
-    renderPanel({
-      action: "CREATE",
-      locationId: "location-1",
-      locationLabel: "Development Boards Drawer",
-    });
+  it("shows image and status columns for ready rows", () => {
+    renderPanel(
+      {
+        action: "CREATE",
+        locationId: "location-1",
+        locationLabel: "Development Boards Drawer",
+      },
+      true,
+      {
+        locationOptions: [
+          {
+            id: "location-1",
+            name: "Development Boards Drawer",
+            pathLabel: "Development Boards Drawer",
+            operational: false,
+            currentUnits: 0,
+            parentId: null,
+          },
+        ],
+      }
+    );
 
-    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
-    expect(screen.queryByText("Ready")).toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Image" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeTruthy();
+    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import" })).toBeTruthy();
     expect(screen.getByText("Development Boards Drawer")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ignore" })).toBeTruthy();
+  });
+
+  it("shows a no-image state and offers Fix when a location needs review", () => {
+    renderPanel({
+      locationId: null,
+      locationResolution: "UNMATCHED",
+      action: "NEEDS_REVIEW",
+    });
+
+    expect(screen.getByText("No reliable image found")).toBeTruthy();
+    expect(screen.getByText("Needs review")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fix" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Import" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
+    expect(screen.getByLabelText("Received quantity")).toBeTruthy();
+  });
+
+  it("submits a row Import through scoped Apply and preserves other approval decisions", async () => {
+    let submitted: FormData | null = null;
+    const rows = [
+      {
+        rowNumber: 1,
+        title: "Arduino Nano",
+        action: "CREATE",
+        assetId: null,
+        categoryId: "category-1",
+        locationId: "location-1",
+        quantity: 5,
+        receivedQuantity: 5,
+        type: "QUANTITY_TRACKED",
+        reason: "New item",
+      },
+      {
+        rowNumber: 2,
+        title: "USB-C Cable",
+        action: "CREATE",
+        assetId: null,
+        categoryId: "category-1",
+        locationId: "location-1",
+        quantity: 20,
+        receivedQuantity: 20,
+        type: "QUANTITY_TRACKED",
+        reason: "New item",
+      },
+    ];
+    const savedReviewDecisions = rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      assetId: null,
+      categoryId: row.categoryId,
+      locationId: row.locationId,
+      quantity: row.quantity,
+      type: row.type,
+      trackingModeConfirmed: false,
+      productChoice: "NEW",
+      unitOfMeasure: "pcs",
+      consumptionType: "TWO_WAY",
+    }));
+    renderPanel(
+      {},
+      true,
+      {
+        rows,
+        savedReviewDecisions,
+        locationOptions: [
+          {
+            id: "location-1",
+            name: "Container A2-1",
+            pathLabel: "Room A / Shelf A2 / Container A2-1",
+            operational: false,
+            currentUnits: 0,
+            parentId: null,
+          },
+        ],
+      } as Partial<StaffImportProposal>,
+      async ({ request }) => {
+        submitted = await request.formData();
+        return {
+          error: null,
+          kind: "import-in-progress",
+          operationId: "operation-1",
+        };
+      }
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]!);
+
+    await waitFor(() => expect(submitted).not.toBeNull());
+    expect(submitted?.get("intent")).toBe("apply-row");
+    expect(submitted?.get("rowNumber")).toBe("1");
+    expect(
+      JSON.parse(String(submitted?.get("reviewDecisions"))).map(
+        (decision: { decision: string }) => decision.decision
+      )
+    ).toEqual(["APPROVE", "APPROVE"]);
+  });
+
+  it("imports selected rows directly and shows structured server issues until corrected", async () => {
+    const rows = ["Arduino Nano", "USB-C Cable"].map((title, index) => ({
+      rowNumber: index + 1,
+      title,
+      action: "CREATE",
+      assetId: null,
+      categoryId: "category-1",
+      locationId: null,
+      quantity: 5,
+      receivedQuantity: 5,
+      type: "QUANTITY_TRACKED",
+      reason: "New item",
+    }));
+    let submitted: FormData | undefined;
+    renderPanel(
+      {},
+      true,
+      { rows } as Partial<StaffImportProposal>,
+      async ({ request }) => {
+        submitted = await request.formData();
+        return {
+          error: null,
+          kind: "import-review-blocked",
+          readyCount: 1,
+          blockedCount: 1,
+          blockedRows: [
+            {
+              rowNumber: 2,
+              title: "USB-C Cable",
+              issues: [
+                {
+                  code: "INVALID_CATEGORY",
+                  message: "Choose a valid active category for USB-C Cable.",
+                },
+              ],
+            },
+          ],
+        };
+      }
+    );
+    fireEvent.click(screen.getByLabelText("Select all products on this page"));
+    fireEvent.click(screen.getByRole("button", { name: "Import selected" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "1 ready · 1 need review"
+      )
+    );
+    expect(submitted?.get("intent")).toBe("apply-selected");
+    expect(submitted?.get("rowNumbers")).toBe("[1,2]");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("row", { name: /USB-C Cable/ })
+      ).toHaveTextContent("Needs review")
+    );
+    fireEvent.change(screen.getByLabelText("Category for USB-C Cable"), {
+      target: { value: "category-1" },
+    });
+    expect(screen.getByRole("row", { name: /USB-C Cable/ })).toHaveTextContent(
+      "Ready"
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps quantity tracking quiet and requires confirmation for individual tracking", () => {
+    renderPanel({
+      trackingReason: "Default for identical stock and components.",
+    });
+    expect(screen.queryByText("Individual tracking")).toBeNull();
+    expect(screen.getByText("Quantity tracked")).toBeTruthy();
+  });
+
+  it("shows individual tracking details and requires explicit confirmation", () => {
+    renderPanel({
+      type: "INDIVIDUAL",
+      trackingSource: "SOURCE_EXPLICIT",
+      trackingReasonCode: "EXPLICIT_SERIALIZED_SOURCE",
+      trackingReason:
+        "The source explicitly marks this item for individual tracking.",
+    });
+
+    expect(screen.getByText("Individual tracking")).toBeTruthy();
+    expect(screen.getByText("Individual / QR tracked")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "The source explicitly marks this item for individual tracking."
+      )
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText("Select Arduino Nano"));
+    expect(
+      screen.getByRole("button", { name: "Approve selected safe rows" })
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
+    const confirmation = screen.getByLabelText(
+      "Confirm that Apply should create separate individual QR-tracked assets."
+    );
+    expect(confirmation).not.toBeChecked();
+    fireEvent.click(confirmation);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+  });
+
+  it("allows staff to change a new model to quantity tracking during review", () => {
+    renderPanel({ type: "INDIVIDUAL", trackingSource: "SOURCE_EXPLICIT" });
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
+    fireEvent.change(screen.getByLabelText("Tracking mode"), {
+      target: { value: "QUANTITY_TRACKED" },
+    });
+
+    expect(
+      screen.queryByText(
+        "Confirm that Apply should create separate individual QR-tracked assets."
+      )
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+  });
+
+  it("locks tracking mode when a row uses an existing Shelf model", () => {
+    renderPanel({
+      assetId: "existing-asset",
+      type: "INDIVIDUAL",
+      trackingSource: "EXISTING_MODEL",
+      matchCandidates: [
+        {
+          id: "existing-asset",
+          title: "Arduino Nano",
+          quantity: null,
+          type: "INDIVIDUAL",
+          category: "Electronics",
+          location: null,
+          expectedAssetState: {
+            assetId: "existing-asset",
+            title: "Arduino Nano",
+            type: "INDIVIDUAL",
+            quantity: null,
+            categoryId: "category-1",
+            locationIds: [],
+            assetModelId: "model-1",
+          },
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(screen.getByLabelText("Tracking mode")).toBeDisabled();
+    expect(
+      screen.queryByText(
+        "Confirm that Apply should create separate individual QR-tracked assets."
+      )
+    ).toBeNull();
   });
 
   it("shows unresolved category and location as choices", () => {
@@ -109,10 +374,10 @@ describe("StaffImportPanel review gate", () => {
 
     expect(screen.getByText("Choose category")).toBeTruthy();
     expect(
-      screen.getByRole("combobox", { name: "Location for Arduino Nano" })
-    ).toHaveValue("");
+      screen.getByRole("button", { name: "Location for Arduino Nano" })
+    ).toHaveTextContent("Choose location");
     expect(screen.getByLabelText("Category for Arduino Nano")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
     expect(screen.getByLabelText("Location")).toBeTruthy();
   });
 
@@ -177,8 +442,14 @@ describe("StaffImportPanel review gate", () => {
     );
 
     expect(screen.getByText("Suggested: Electronics · choose")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Location for Arduino Nano" })
+    );
+    expect(screen.getByText("Suggested", { selector: "p" })).toBeTruthy();
     expect(
-      screen.getByText("Suggested: Electronics Room / Sensors Drawer · choose")
+      screen.getByRole("option", {
+        name: "Electronics Room / Sensors Drawer",
+      })
     ).toBeTruthy();
     expect(screen.getByLabelText("Category for Arduino Nano")).toHaveValue("");
   });
@@ -196,7 +467,7 @@ describe("StaffImportPanel review gate", () => {
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
     ).toBeDisabled();
-    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeTruthy();
   });
 
   it.each([
@@ -217,12 +488,13 @@ describe("StaffImportPanel review gate", () => {
   });
 
   it("enables Apply when the proposal row has all required decisions", () => {
-    renderPanel({ action: "CREATE", type: "INDIVIDUAL" });
+    renderPanel({ action: "CREATE", type: "QUANTITY_TRACKED" });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(
-      screen.getByRole("button", { name: "Apply approved changes" })
+      screen.getByRole("button", { name: "Apply 1 approved item" })
     ).toBeEnabled();
-    expect(screen.getByText("Individual")).toBeTruthy();
+    expect(screen.getByText("Quantity tracked")).toBeTruthy();
   });
 
   it("submits Apply and exits the pending state after success", async () => {
@@ -234,14 +506,16 @@ describe("StaffImportPanel review gate", () => {
         })
     );
     renderPanel(
-      { action: "CREATE", type: "INDIVIDUAL" },
+      { action: "CREATE", type: "QUANTITY_TRACKED" },
       true,
       {},
       applyAction
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
     fireEvent.click(
-      screen.getByRole("button", { name: "Apply approved changes" })
+      screen.getByRole("button", { name: "Apply 1 approved item" })
     );
 
     await waitFor(() => expect(applyAction).toHaveBeenCalledOnce());
@@ -273,14 +547,16 @@ describe("StaffImportPanel review gate", () => {
       })
     );
     renderPanel(
-      { action: "CREATE", type: "INDIVIDUAL" },
+      { action: "CREATE", type: "QUANTITY_TRACKED" },
       true,
       {},
       applyAction
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
     fireEvent.click(
-      screen.getByRole("button", { name: "Apply approved changes" })
+      screen.getByRole("button", { name: "Apply 1 approved item" })
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -289,7 +565,7 @@ describe("StaffImportPanel review gate", () => {
     expect(applyAction).toHaveBeenCalledOnce();
     expect(screen.queryByText("Applying approved changes...")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Apply approved changes" })
+      screen.getByRole("button", { name: "Apply 1 approved item" })
     ).toBeEnabled();
   });
 
@@ -304,7 +580,7 @@ describe("StaffImportPanel review gate", () => {
       false
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fix" }));
     expect(
       screen.getByRole("checkbox", { name: /Approve creating this category/i })
     ).toBeDisabled();
@@ -426,7 +702,9 @@ describe("StaffImportPanel review gate", () => {
     );
 
     expect(screen.getAllByRole("row")).toHaveLength(2);
-    expect(screen.getByText(/1 product found · 1 need review/)).toBeTruthy();
+    expect(
+      screen.getByText(/1 product found · 0 approved · 1 need review/)
+    ).toBeTruthy();
     expect(screen.getByText("713-101010001")).not.toBeVisible();
     expect(screen.getByText("101010001")).not.toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Tracking" })).toBeNull();
@@ -444,13 +722,28 @@ describe("StaffImportPanel review gate", () => {
     expect(
       screen.queryByRole("button", { name: "Approve safe matches" })
     ).toBeNull();
-    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeTruthy();
     expect(screen.queryByText("QUANTITY_TRACKED")).toBeNull();
     fireEvent.click(screen.getByText("Details"));
     expect(screen.getByText("713-101010001")).toBeVisible();
     expect(screen.getByText("101010001")).toBeVisible();
     expect(screen.getByText("Tracking:").parentElement).toHaveTextContent(
       "Tracking: Quantity"
+    );
+  });
+
+  it("shows normalized quantity in the compact table and preloads Edit", () => {
+    renderPanel({ quantity: 4, receivedQuantity: 4, type: "QUANTITY_TRACKED" });
+
+    expect(screen.getByRole("row", { name: /Arduino Nano/ })).toHaveTextContent(
+      "4"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const quantity = screen.getByLabelText("Received quantity");
+    expect(quantity).toHaveValue(4);
+    fireEvent.change(quantity, { target: { value: "7" } });
+    expect(screen.getByRole("row", { name: /Arduino Nano/ })).toHaveTextContent(
+      "7"
     );
   });
 
@@ -469,7 +762,10 @@ describe("StaffImportPanel review gate", () => {
       ],
     });
 
-    expect(screen.getByText("Possible match")).toBeTruthy();
+    expect(screen.getByText("Needs review")).toBeTruthy();
+    expect(
+      screen.getByText(/may already exist. Choose Use existing/)
+    ).toBeTruthy();
     expect(screen.queryByText("Duplicate")).toBeNull();
   });
 
@@ -526,12 +822,14 @@ describe("StaffImportPanel review gate", () => {
     renderPanel({}, true, { rows } as Partial<StaffImportProposal>);
 
     expect(screen.getAllByRole("row")).toHaveLength(13);
-    expect(screen.getByText(/12 products found · 12 need review/)).toBeTruthy();
+    expect(
+      screen.getByText(/12 products found · 0 approved · 12 need review/)
+    ).toBeTruthy();
     expect(screen.getAllByText("Relay Module")).toHaveLength(2);
     productNames
       .filter((title) => title !== "Relay Module")
       .forEach((title) => expect(screen.getByText(title)).toBeTruthy());
-    expect(screen.queryByRole("columnheader", { name: "Status" })).toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeTruthy();
     screen
       .getAllByText("Awaiting staff review")
       .forEach((reason) => expect(reason).not.toBeVisible());
@@ -571,14 +869,23 @@ describe("StaffImportPanel review gate", () => {
       productImageProposal: {
         status: "IMAGE_FOUND",
         mimeType: "image/webp",
-        dataBase64: "dGVzdA==",
+        imageId: `ioio-import-${"a".repeat(64)}`,
         sourceName: "Arduino Nano board",
         sourceUrl: "https://openverse.org/image/1",
         license: "cc0",
+        autoAccepted: true,
       },
     });
 
     expect(screen.queryByText(/AssetModel description:/)).not.toBeVisible();
+    expect(
+      screen.getByRole("img", {
+        name: "Proposed: Arduino Nano",
+      })
+    ).toBeVisible();
+    expect(
+      screen.getByRole("img", { name: "Proposed: Arduino Nano" })
+    ).toHaveAttribute("src", `/api/image/ioio-import-${"a".repeat(64)}`);
     fireEvent.click(screen.getByText("Details"));
     expect(
       screen.getByText(
@@ -596,9 +903,10 @@ describe("StaffImportPanel review gate", () => {
     const useImage = screen.getByRole("checkbox", {
       name: "Use this image for the Shelf product",
     });
-    expect(useImage).not.toBeChecked();
-    fireEvent.click(useImage);
     expect(useImage).toBeChecked();
+    expect(screen.getByLabelText("Upload another image")).toBeTruthy();
+    fireEvent.click(useImage);
+    expect(useImage).not.toBeChecked();
   });
 
   it("supports row selection and bulk ignore without changing Apply or Cancel controls", () => {
@@ -611,7 +919,7 @@ describe("StaffImportPanel review gate", () => {
 
     expect(screen.getByText("Ignored")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "Apply approved changes" })
+      screen.getByRole("button", { name: "Confirm 1 ignored row" })
     ).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
@@ -625,6 +933,175 @@ describe("StaffImportPanel review gate", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => expect(cancelAction).toHaveBeenCalledOnce());
+  });
+
+  it("approves one selected row and submits only that row for Apply", async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({
+      rowNumber: index + 1,
+      title:
+        index === 0 ? "Seeed Studio XIAO ESP32-S3 Sense" : `Item ${index + 1}`,
+      action: "CREATE",
+      assetId: null,
+      categoryId: "category-1",
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      quantity: index + 1,
+      receivedQuantity: index + 1,
+      type: "QUANTITY_TRACKED",
+      reason: "New item",
+    }));
+    let submittedDecisions: Array<{ rowNumber: number; decision: string }> = [];
+    const action = vi.fn(async ({ request }: { request: Request }) => {
+      const form = await request.formData();
+      submittedDecisions = JSON.parse(
+        String(form.get("reviewDecisions"))
+      ) as typeof submittedDecisions;
+      return {
+        error: null,
+        kind: "import-in-progress",
+        operationId: "operation-1",
+      };
+    });
+    renderPanel({}, true, { rows } as Partial<StaffImportProposal>, action);
+
+    expect(
+      screen.getByText(/20 products found · 0 approved · 0 need review/)
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]!);
+    expect(
+      screen.getByText(/20 products found · 1 approved · 0 need review/)
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Apply 1 approved item" })
+    );
+
+    await waitFor(() => expect(action).toHaveBeenCalledOnce());
+    expect(
+      submittedDecisions.filter(({ decision }) => decision === "APPROVE")
+    ).toMatchObject([{ rowNumber: 1, decision: "APPROVE", quantity: 1 }]);
+  });
+
+  it("bulk approves only the selected safe rows", () => {
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      rowNumber: index + 1,
+      title: `Item ${index + 1}`,
+      action: "CREATE",
+      assetId: null,
+      categoryId: "category-1",
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      quantity: index + 1,
+      receivedQuantity: index + 1,
+      type: "QUANTITY_TRACKED",
+      reason: "New item",
+    }));
+    renderPanel({}, true, { rows } as Partial<StaffImportProposal>);
+
+    for (let index = 1; index <= 5; index++) {
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: `Select Item ${index}` })
+      );
+    }
+    fireEvent.click(
+      screen.getByRole("button", { name: "Approve selected safe rows" })
+    );
+
+    expect(
+      screen.getByText(/6 products found · 5 approved · 0 need review/)
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Apply 5 approved items" })
+    ).toBeEnabled();
+  });
+
+  it("saves the edited review choices for later without applying inventory", async () => {
+    let savedDecisions: Array<Record<string, unknown>> = [];
+    const saveAction = vi.fn(async ({ request }: { request: Request }) => {
+      const form = await request.formData();
+      savedDecisions = JSON.parse(String(form.get("reviewDecisions"))) as Array<
+        Record<string, unknown>
+      >;
+      return {
+        error: null,
+        kind: "import-draft-saved",
+        operationId: "operation-1",
+      };
+    });
+    renderPanel(
+      { locationId: null },
+      true,
+      {
+        locationOptions: [
+          {
+            id: "location-1",
+            name: "Shelf B3",
+            pathLabel: "Storage / Section B / Shelf B3",
+            operational: false,
+            currentUnits: 2,
+            parentId: "section-b",
+          },
+        ],
+      },
+      saveAction
+    );
+
+    fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
+      target: { value: "category-1" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Location for Arduino Nano" })
+    );
+    fireEvent.click(
+      screen.getByRole("option", { name: "Storage / Section B / Shelf B3" })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save for later" }));
+
+    await waitFor(() => expect(saveAction).toHaveBeenCalledOnce());
+    expect(await screen.findByText(/Draft saved/)).toBeTruthy();
+    expect(
+      screen.getByText(/Draft · Nothing changes in Shelf until Apply/)
+    ).toBeTruthy();
+    expect(savedDecisions[0]).toMatchObject({
+      decision: "APPROVE",
+      categoryId: "category-1",
+      locationId: "location-1",
+    });
+    expect(screen.queryByText(/Import finished/)).toBeNull();
+  });
+
+  it("keeps imported rows visible and prevents selecting them again", () => {
+    renderPanel({ quantity: 4, receivedQuantity: 4 }, true, {
+      appliedRowNumbers: [1],
+    });
+
+    expect(screen.getAllByText("Imported")).toHaveLength(1);
+    expect(
+      screen.getByRole("checkbox", { name: "Select Arduino Nano" })
+    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it("keeps confirmed ignored rows out of Apply and bulk selection", () => {
+    renderPanel({}, true, {
+      ignoredRowNumbers: [1],
+      savedReviewDecisions: [{ rowNumber: 1, decision: "IGNORE" }],
+    });
+
+    expect(screen.getAllByText("Ignored")).toHaveLength(1);
+    expect(
+      screen.getByRole("checkbox", { name: "Select Arduino Nano" })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
   });
 });
 
@@ -651,15 +1128,21 @@ it("edits location inline using full organization paths without submitting", () 
     } as never,
     action
   );
-  const selector = screen.getByRole("combobox", {
+  const selector = screen.getByRole("button", {
     name: "Location for Arduino Nano",
   });
-  expect(selector).toHaveValue("a");
-  expect(
-    screen.getByRole("option", { name: "Storage / Section B / Container 1" })
-  ).toBeInTheDocument();
-  fireEvent.change(selector, { target: { value: "b" } });
-  expect(selector).toHaveValue("b");
+  expect(selector).toHaveTextContent("Storage / Section A / Container 1");
+  fireEvent.click(selector);
+  const search = screen.getByRole("searchbox", {
+    name: "Search locations for Arduino Nano",
+  });
+  fireEvent.change(search, { target: { value: "section b" } });
+  fireEvent.click(
+    screen.getByRole("option", {
+      name: "Storage / Section B / Container 1",
+    })
+  );
+  expect(selector).toHaveTextContent("Storage / Section B / Container 1");
   expect(
     screen.getByRole("combobox", { name: "Category for Arduino Nano" })
   ).toBeInTheDocument();
@@ -669,9 +1152,11 @@ it("edits location inline using full organization paths without submitting", () 
 });
 it("offers Choose location for unresolved rows", () => {
   renderPanel({ locationId: null });
-  expect(
-    screen.getByRole("combobox", { name: "Location for Arduino Nano" })
-  ).toHaveValue("");
+  const picker = screen.getByRole("button", {
+    name: "Location for Arduino Nano",
+  });
+  expect(picker).toHaveTextContent("Choose location");
+  fireEvent.click(picker);
   expect(
     screen.getByRole("option", { name: "Choose location" })
   ).toBeInTheDocument();
@@ -701,10 +1186,65 @@ it("shows a weak existing location suggestion in the inline picker", () => {
     }
   );
 
+  const picker = screen.getByRole("button", {
+    name: "Location for Arduino Nano",
+  });
+  expect(picker).toHaveTextContent("Choose location");
+  fireEvent.click(picker);
+  expect(screen.getByText("Suggested", { selector: "p" })).toBeTruthy();
   expect(
-    screen.getByText("Possible location: Lab · Cable Drawer · choose")
+    screen.getByRole("option", { name: "Lab · Cable Drawer" })
   ).toBeTruthy();
-  expect(
-    screen.getByRole("combobox", { name: "Location for Arduino Nano" })
-  ).toHaveValue("");
+});
+
+it.each([
+  ["storage", "Storage Room - B442 / Section B / Shelf B3"],
+  ["section b", "Storage Room - B442 / Section B / Shelf B3"],
+  ["b3", "Storage Room - B442 / Section B / Shelf B3"],
+  [
+    "container b3",
+    "Storage Room - B442 / Section B / Shelf B3 / Container B3-1",
+  ],
+  ["soldering", "Soldering Room - B443 / Shelf S2"],
+])("finds locations by hierarchy text: %s", (query, pathLabel) => {
+  renderPanel({ locationId: null }, true, {
+    locationOptions: [
+      {
+        id: "location-b3",
+        name: "Shelf B3",
+        pathLabel: "Storage Room - B442 / Section B / Shelf B3",
+        operational: false,
+        currentUnits: 2,
+        parentId: "section-b",
+      },
+      {
+        id: "location-container-b3-1",
+        name: "Container B3-1",
+        pathLabel:
+          "Storage Room - B442 / Section B / Shelf B3 / Container B3-1",
+        operational: false,
+        currentUnits: 2,
+        parentId: "location-b3",
+      },
+      {
+        id: "location-soldering",
+        name: "Shelf S2",
+        pathLabel: "Soldering Room - B443 / Shelf S2",
+        operational: false,
+        currentUnits: 2,
+        parentId: "soldering-room",
+      },
+    ],
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Location for Arduino Nano" })
+  );
+  fireEvent.change(
+    screen.getByRole("searchbox", {
+      name: "Search locations for Arduino Nano",
+    }),
+    { target: { value: query } }
+  );
+
+  expect(screen.getByRole("option", { name: pathLabel })).toBeInTheDocument();
 });

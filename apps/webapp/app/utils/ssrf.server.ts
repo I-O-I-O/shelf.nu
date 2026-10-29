@@ -153,6 +153,11 @@ export interface SafeFetchOptions {
   maxBytes?: number;
   /** Per-request timeout in milliseconds. */
   timeoutMs?: number;
+  /**
+   * Optional outbound headers. Credential headers are removed if a redirect
+   * changes origin so provider credentials cannot reach a result/image host.
+   */
+  headers?: HeadersInit;
 }
 
 /** Successful result of {@link safeFetch}. */
@@ -248,6 +253,9 @@ export async function safeFetch(
 
   try {
     let target = assertSafeUrl(url);
+    const requestHeaders = options.headers
+      ? new Headers(options.headers)
+      : undefined;
 
     for (let redirects = 0; ; redirects++) {
       if (redirects > MAX_REDIRECTS) {
@@ -265,6 +273,7 @@ export async function safeFetch(
         response = await fetch(target, {
           signal: controller.signal,
           redirect: "manual",
+          headers: requestHeaders ? new Headers(requestHeaders) : undefined,
           // Route through the SSRF-guarded dispatcher. `dispatcher` is the
           // undici RequestInit extension exposed by Node's global fetch.
           // @ts-expect-error -- `dispatcher` is not in the DOM RequestInit types.
@@ -294,7 +303,19 @@ export async function safeFetch(
           });
         }
         // Resolve relative redirects against the current URL, then re-validate.
-        target = assertSafeUrl(new URL(location, target).href);
+        const nextTarget = assertSafeUrl(new URL(location, target).href);
+        if (nextTarget.origin !== target.origin && requestHeaders) {
+          for (const name of [
+            "authorization",
+            "cookie",
+            "proxy-authorization",
+            "x-api-key",
+            "x-subscription-token",
+          ]) {
+            requestHeaders.delete(name);
+          }
+        }
+        target = nextTarget;
         continue;
       }
 
@@ -368,6 +389,24 @@ export async function readBodyWithLimit(
       cause: null,
       message: "Response has no body",
       additionalData: { url },
+      label,
+      shouldBeCaptured: false,
+    });
+  }
+
+  const declaredLength = response.headers.get("content-length");
+  if (
+    declaredLength &&
+    /^\d+$/.test(declaredLength) &&
+    Number(declaredLength) > maxBytes
+  ) {
+    await response.body.cancel().catch(() => {});
+    throw new ShelfError({
+      cause: null,
+      message: `Response exceeds maximum allowed size of ${
+        maxBytes / (1024 * 1024)
+      }MB`,
+      additionalData: { url, maxBytes },
       label,
       shouldBeCaptured: false,
     });

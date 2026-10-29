@@ -229,6 +229,43 @@ describe("safeFetch input validation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not forward provider credentials across external redirects", async () => {
+    // why: provider authentication must stay on the configured provider origin.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.example.org/search-result" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response("ok", {
+          headers: { "content-type": "application/json" },
+        })
+      );
+
+    await expect(
+      safeFetch("https://api.search.example.org/query", {
+        headers: {
+          accept: "application/json",
+          "x-subscription-token": "server-secret",
+        },
+      })
+    ).resolves.toEqual({
+      buffer: Buffer.from("ok"),
+      contentType: "application/json",
+    });
+
+    const firstHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    const redirectedHeaders = new Headers(
+      fetchMock.mock.calls[1]?.[1]?.headers
+    );
+    expect(firstHeaders.get("x-subscription-token")).toBe("server-secret");
+    expect(redirectedHeaders.get("x-subscription-token")).toBeNull();
+    expect(redirectedHeaders.get("accept")).toBe("application/json");
+  });
+
   // Regression guard for the IP-literal bypass (GHSA review, Codex P1): undici
   // does not route literal hosts through `connect.lookup`, so `safeFetch` must
   // reject them up front — before any socket is opened. These assertions run
@@ -280,6 +317,16 @@ describe("readBodyWithLimit", () => {
   it("aborts once the cumulative size exceeds the limit", async () => {
     const res = streamingResponse(1000, 100); // would be 100_000 bytes
     await expect(readBodyWithLimit(res, 5000, "http://x/test")).rejects.toThrow(
+      /maximum allowed size/i
+    );
+  });
+
+  it("rejects a declared Content-Length above the limit before reading", async () => {
+    const response = streamingResponse(1000, 4);
+    const res = new Response(response.body, {
+      headers: { "content-length": "9000" },
+    });
+    await expect(readBodyWithLimit(res, 8000, "http://x/test")).rejects.toThrow(
       /maximum allowed size/i
     );
   });

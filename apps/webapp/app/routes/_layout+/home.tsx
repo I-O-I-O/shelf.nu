@@ -118,6 +118,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "ask",
         "analyze-file",
         "apply-import",
+        "apply-row",
+        "apply-selected",
         "cancel-import",
         "save-dashboard",
         "reset-dashboard",
@@ -241,11 +243,25 @@ export async function action({ context, request }: ActionFunctionArgs) {
       operationId,
       proposalHash,
       allowSameFileReimport: formData.get("allowSameFileReimport") === "true",
+      applyOnlyRowNumber:
+        intent === "apply-row"
+          ? z.coerce.number().int().positive().parse(formData.get("rowNumber"))
+          : undefined,
+      applyOnlyRowNumbers:
+        intent === "apply-selected"
+          ? z
+              .array(z.number().int().positive())
+              .min(1)
+              .max(1000)
+              .parse(JSON.parse(String(formData.get("rowNumbers"))))
+          : undefined,
       pdfDecisions: typeof pdfDecisions === "string" ? pdfDecisions : null,
       reviewDecisions:
         typeof reviewDecisions === "string" ? reviewDecisions : null,
     });
     if ("status" in result) {
+      if (result.status === "NEEDS_REVIEW")
+        return payload({ kind: "import-review-blocked" as const, ...result });
       if (result.status === "DUPLICATE") {
         return payload({ kind: "import-duplicate", duplicate: result });
       }
@@ -253,6 +269,14 @@ export async function action({ context, request }: ActionFunctionArgs) {
         kind: "import-in-progress",
         operationId: result.operationId,
       });
+    }
+    if (result.remainingRows && result.remainingRows > 0) {
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({ kind: "import-partial" as const, proposal, result });
     }
     return payload({ kind: "import-result", result });
   } catch (cause) {
@@ -504,7 +528,7 @@ export default function HomePage() {
     ) : null,
     inventory_import: (
       <StaffImportPanel
-        actionPath="/home"
+        actionPath="/staff/import"
         initialNotice={importNotice}
         initialProposal={importProposal}
       />

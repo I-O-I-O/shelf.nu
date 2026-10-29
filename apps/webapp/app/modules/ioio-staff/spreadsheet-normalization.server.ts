@@ -38,13 +38,17 @@ export function readSpreadsheetCsv(buffer: Buffer): string[][] {
 
 export function detectSpreadsheetHeader(
   matrix: string[][],
-  aliases: Record<string, string>
+  aliases: Record<string, string>,
+  resolveAlias?: (header: string) => string | undefined
 ): { index: number; ambiguous: boolean } | null {
   const candidates = matrix
     .slice(0, 40)
     .flatMap((cells, index) => {
       const fields = cells
-        .map((cell) => aliases[normalizeSpreadsheetHeader(cell)])
+        .map(
+          (cell) =>
+            aliases[normalizeSpreadsheetHeader(cell)] ?? resolveAlias?.(cell)
+        )
         .filter(Boolean);
       const unique = new Set(fields);
       if (
@@ -59,7 +63,11 @@ export function detectSpreadsheetHeader(
         .slice(index + 1, index + 5)
         .filter((row) => row.some((cell) => cell.trim())).length;
       const quantityColumns = cells.flatMap((cell, column) =>
-        /quantity/i.test(aliases[normalizeSpreadsheetHeader(cell)] ?? "")
+        /quantity|qty|count/i.test(
+          aliases[normalizeSpreadsheetHeader(cell)] ??
+            resolveAlias?.(cell) ??
+            ""
+        )
           ? [column]
           : []
       );

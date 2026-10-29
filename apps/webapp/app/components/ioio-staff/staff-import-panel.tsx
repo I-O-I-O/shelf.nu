@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useFetcher, useLocation, useNavigate } from "react-router";
+import { Link, useFetcher, useLocation, useNavigate } from "react-router";
 import { CategoryBadge } from "~/components/assets/category-badge";
-import { resolveImportReviewState } from "~/modules/ioio-staff/import-review";
+import { ImportLocationPicker } from "~/components/ioio-staff/import-location-picker";
+import { importProductImagePreview } from "~/modules/ioio-staff/import-product-image";
+import {
+  validateImportRowForApply,
+  type ImportReviewIssue,
+} from "~/modules/ioio-staff/import-review";
 import type {
   StaffImportProposal,
   StaffImportProposalRow,
 } from "~/modules/ioio-staff/inventory-import.server";
+import type { ImportProductImageProposal } from "~/modules/ioio-staff/product-enrichment.server";
 
 type StaffImportResult = {
   operationId: string;
@@ -16,11 +22,37 @@ type StaffImportResult = {
   conflictRows?: Array<{ rowNumber: number; reason: string }>;
   ignoredRows?: number;
   reviewedRows?: number;
+  succeededRows?: number;
+  remainingRows?: number;
 };
 
 type StaffImportActionResponse =
+  | {
+      error: null;
+      kind: "import-review-blocked";
+      readyCount: number;
+      blockedCount: number;
+      blockedRows: Array<{
+        rowNumber: number;
+        title: string;
+        issues: ImportReviewIssue[];
+      }>;
+    }
   | { error: null; kind: "import-proposal"; proposal: StaffImportProposal }
+  | {
+      error: null;
+      kind: "import-partial";
+      proposal: StaffImportProposal;
+      result: StaffImportResult;
+    }
   | { error: null; kind: "import-result"; result: StaffImportResult }
+  | { error: null; kind: "import-draft-saved"; operationId: string }
+  | {
+      error: null;
+      kind: "import-image-processed";
+      rowNumber: number;
+      proposal: ImportProductImageProposal;
+    }
   | { error: null; kind: "import-in-progress"; operationId: string }
   | {
       error: null;
@@ -72,23 +104,63 @@ type ReviewDecision = {
   locationId: string | null;
   quantity: number | null;
   type: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
+  trackingModeConfirmed: boolean;
   productChoice: "EXISTING" | "NEW" | null;
   minQuantity: number | null;
   unitOfMeasure: string | null;
   consumptionType: "ONE_WAY" | "TWO_WAY" | null;
   assetModelDescription: string | null;
   acceptSuggestedImage: boolean;
+  manualImage?: ImportProductImageProposal | null;
 };
 
-function isSafeReviewAction(row: StaffImportProposalRow) {
-  return [
-    "CREATE",
-    "INCREASE_QUANTITY",
-    "NO_CHANGE",
-    "UPDATE_QUANTITY",
-    "UPDATE_CATEGORY",
-    "UPDATE_LOCATION",
-  ].includes(row.action);
+function serializeReviewDecision(
+  rowNumber: number,
+  decision: ReviewDecision | undefined,
+  decisionOverride?: ReviewDecision["decision"]
+) {
+  return {
+    rowNumber,
+    decision: decisionOverride ?? decision?.decision,
+    title: decision?.title,
+    assetId: decision?.assetId,
+    categoryId: decision?.categoryId,
+    newCategoryName: decision?.newCategoryName,
+    approveNewCategory: decision?.approveNewCategory,
+    locationId: decision?.locationId,
+    quantity: decision?.quantity,
+    type: decision?.type,
+    trackingModeConfirmed: decision?.trackingModeConfirmed,
+    productChoice: decision?.productChoice,
+    minQuantity: decision?.minQuantity,
+    unitOfMeasure: decision?.unitOfMeasure,
+    consumptionType: decision?.consumptionType,
+    assetModelDescription: decision?.assetModelDescription,
+    acceptSuggestedImage: decision?.acceptSuggestedImage,
+    manualImage: decision?.manualImage,
+  };
+}
+
+function isSafeReviewAction(
+  row: StaffImportProposalRow,
+  decision?: ReviewDecision
+) {
+  const selectedExisting =
+    decision?.productChoice === "EXISTING" && Boolean(decision.assetId);
+  const effectiveType = decision?.type ?? row.type;
+  return (
+    (effectiveType !== "INDIVIDUAL" ||
+      row.trackingSource === "EXISTING_MODEL" ||
+      selectedExisting) &&
+    [
+      "CREATE",
+      "INCREASE_QUANTITY",
+      "NO_CHANGE",
+      "UPDATE_QUANTITY",
+      "UPDATE_CATEGORY",
+      "UPDATE_LOCATION",
+    ].includes(row.action)
+  );
 }
 
 function actionLabel(action: string) {
@@ -106,10 +178,8 @@ function getReviewBadge(
   if (decision?.decision === "IGNORE" || state === "SKIPPED") {
     return { label: "Ignored", className: "bg-gray-100 text-gray-600" };
   }
-  if (state === "CONFLICT") {
-    return { label: "Conflict", className: "bg-red-100 text-red-800" };
-  }
   if (
+    state !== "READY" &&
     (row.action === "POSSIBLE_DUPLICATE" || row.action === "AMBIGUOUS") &&
     (row.matchCandidates?.length ?? 0) > 0
   ) {
@@ -139,11 +209,18 @@ export function StaffImportPanel({
   initialProposal = null,
   initialNotice = null,
   canCreateCategory = true,
+  savedDrafts = [],
 }: {
   actionPath: string;
   initialProposal?: StaffImportProposal | null;
   initialNotice?: string | null;
   canCreateCategory?: boolean;
+  savedDrafts?: Array<{
+    operationId: string;
+    filename: string;
+    rowCount: number;
+    createdAt: string;
+  }>;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -158,7 +235,8 @@ export function StaffImportPanel({
   const fetcher = useFetcher<StaffImportActionResponse>();
   const response = fetcher.data;
   const responseProposal =
-    response?.error === null && response.kind === "import-proposal"
+    response?.error === null &&
+    (response.kind === "import-proposal" || response.kind === "import-partial")
       ? response.proposal
       : null;
   const [dismissedOperationId, setDismissedOperationId] = useState<
@@ -368,6 +446,28 @@ export function StaffImportPanel({
           </button>
         </div>
       ) : null}
+      {!proposal && savedDrafts.length > 0 ? (
+        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
+          <h3 className="text-sm font-bold text-gray-900">
+            Continue saved import
+          </h3>
+          <ul className="mt-2 space-y-2">
+            {savedDrafts.map((draft) => (
+              <li key={draft.operationId}>
+                <Link
+                  to={`${actionPath}?importOperation=${encodeURIComponent(
+                    draft.operationId
+                  )}#staff-inventory-import`}
+                  className="text-sm font-semibold text-red-800 underline hover:text-red-950"
+                >
+                  {draft.filename} · {draft.rowCount}{" "}
+                  {draft.rowCount === 1 ? "row" : "rows"} · Draft
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {result ? (
         <p
           className={`mt-3 text-sm ${
@@ -384,7 +484,9 @@ export function StaffImportPanel({
       ) : null}
       {proposal ? (
         <StaffImportProposalView
-          key={proposal.operationId}
+          key={`${proposal.operationId}:${
+            proposal.appliedRowNumbers?.join(",") ?? ""
+          }:${proposal.ignoredRowNumbers?.join(",") ?? ""}`}
           proposal={proposal}
           actionPath={actionPath}
           onReset={resetImportState}
@@ -407,6 +509,7 @@ function StaffImportProposalView({
   canCreateCategory: boolean;
 }) {
   const fetcher = useFetcher<StaffImportActionResponse>();
+  const imageFetcher = useFetcher<StaffImportActionResponse>();
   const response = fetcher.data;
   const isMouserInvoice =
     proposal.source.extractionProvider?.startsWith("mouser-") ?? false;
@@ -417,31 +520,28 @@ function StaffImportProposalView({
   const [allowSameFileReimport, setAllowSameFileReimport] = useState(false);
   const [editRowNumber, setEditRowNumber] = useState<number | null>(null);
   const [selectedRowNumbers, setSelectedRowNumbers] = useState<number[]>([]);
+  const savedDecisionByRow = new Map(
+    (proposal.savedReviewDecisions ?? []).map((decision) => [
+      decision.rowNumber,
+      decision,
+    ])
+  );
   const [reviewDecisions, setReviewDecisions] = useState<
     Record<number, ReviewDecision>
   >(() =>
     Object.fromEntries(
-      proposal.rows.map((row) => [
-        row.rowNumber,
-        {
-          decision:
-            row.action === "IGNORE"
-              ? "IGNORE"
-              : isSafeReviewAction(row)
-              ? "APPROVE"
-              : null,
+      proposal.rows.map((row) => {
+        const defaults = {
+          decision: row.action === "IGNORE" ? "IGNORE" : null,
           title: row.title,
           assetId: row.assetId,
           categoryId: row.categoryId,
           newCategoryName: row.proposedCategoryName ?? null,
           approveNewCategory: false,
           locationId: row.locationId,
-          quantity:
-            row.receivedQuantity ??
-            (["RECEIVED", "SHIPPED"].includes(row.quantityStatus ?? "")
-              ? row.quantity
-              : null),
-          type: row.type,
+          quantity: row.receivedQuantity ?? row.quantity ?? null,
+          type: row.type ?? "QUANTITY_TRACKED",
+          trackingModeConfirmed: false,
           productChoice:
             row.action === "POSSIBLE_DUPLICATE" || row.action === "AMBIGUOUS"
               ? null
@@ -460,28 +560,44 @@ function StaffImportProposalView({
             (row.helperCandidate?.settingsSuggestions.find(
               (setting) => setting.key === "unitOfMeasure"
             )?.value as string | undefined) ??
-            (row.type === "QUANTITY_TRACKED" ? "pcs" : null),
+            ((row.type ?? "QUANTITY_TRACKED") === "QUANTITY_TRACKED"
+              ? "pcs"
+              : null),
           consumptionType:
             (row.helperCandidate?.settingsSuggestions.find(
               (setting) => setting.key === "consumptionType"
             )?.value as "ONE_WAY" | "TWO_WAY" | undefined) ??
-            (row.type === "QUANTITY_TRACKED" ? "TWO_WAY" : null),
+            ((row.type ?? "QUANTITY_TRACKED") === "QUANTITY_TRACKED"
+              ? "TWO_WAY"
+              : null),
           assetModelDescription: row.assetModelDescription ?? null,
-          acceptSuggestedImage: false,
-        },
-      ])
+          acceptSuggestedImage:
+            row.productImageProposal?.status === "IMAGE_FOUND" &&
+            row.productImageProposal.autoAccepted === true,
+        } satisfies ReviewDecision;
+        return [
+          row.rowNumber,
+          { ...defaults, ...savedDecisionByRow.get(row.rowNumber) },
+        ];
+      })
     )
   );
-  const [serverReviewStateOverrides, setServerReviewStateOverrides] = useState<
-    Record<number, "NEEDS_REVIEW" | "CONFLICT" | "INVALID">
+  const [serverIssues, setServerIssues] = useState<
+    Record<number, ImportReviewIssue[]>
   >({});
+  const activeBlockedRows =
+    response?.error === null && response.kind === "import-review-blocked"
+      ? response.blockedRows.filter(
+          (row) => serverIssues[row.rowNumber]?.length
+        )
+      : [];
   const reviewStates = Object.fromEntries(
     proposal.rows.map((row) => {
       const decision = reviewDecisions[row.rowNumber];
       return [
         row.rowNumber,
-        serverReviewStateOverrides[row.rowNumber] ??
-          resolveImportReviewState({
+        (() => {
+          const result = validateImportRowForApply({
             row: { ...row, categoryOptional: row.mouserLineItem === true },
             decision,
             categoryAvailable: Boolean(
@@ -500,7 +616,9 @@ function StaffImportProposalView({
                   (location) => location.id === decision.locationId
                 )
               ),
-          }),
+          });
+          return result.state === "IGNORED" ? "SKIPPED" : result.state;
+        })(),
       ];
     })
   ) as Record<
@@ -517,12 +635,28 @@ function StaffImportProposalView({
       ),
     ])
   );
-  const reviewCount = proposal.rows.filter((row) =>
-    ["Review", "Possible match", "Conflict"].includes(
-      reviewBadges[row.rowNumber].label
-    )
+  const appliedRowNumbers = new Set(proposal.appliedRowNumbers ?? []);
+  const ignoredRowNumbers = new Set(proposal.ignoredRowNumbers ?? []);
+  const isResolvedRow = (rowNumber: number) =>
+    appliedRowNumbers.has(rowNumber) || ignoredRowNumbers.has(rowNumber);
+  const isSavedDraft =
+    Boolean(proposal.savedReviewDecisions?.length) ||
+    (response?.error === null && response.kind === "import-draft-saved");
+  const reviewCount = proposal.rows.filter(
+    (row) =>
+      !isResolvedRow(row.rowNumber) &&
+      ["Review", "Possible match", "Conflict"].includes(
+        reviewBadges[row.rowNumber].label
+      )
+  ).length;
+  const approvedCount = proposal.rows.filter(
+    (row) =>
+      !isResolvedRow(row.rowNumber) &&
+      reviewDecisions[row.rowNumber]?.decision === "APPROVE" &&
+      reviewStates[row.rowNumber] === "READY"
   ).length;
   const readyCount = proposal.rows.filter((row) => {
+    if (isResolvedRow(row.rowNumber)) return false;
     if (reviewBadges[row.rowNumber].label !== "Ready") return false;
     if (!isMouserInvoice) return true;
     const decision = reviewDecisions[row.rowNumber];
@@ -550,19 +684,25 @@ function StaffImportProposalView({
       ).length
     : 0;
   const ignoredCount = proposal.rows.filter(
-    (row) => reviewBadges[row.rowNumber].label === "Ignored"
+    (row) =>
+      !isResolvedRow(row.rowNumber) &&
+      reviewBadges[row.rowNumber].label === "Ignored"
   ).length;
-  const safeReviewRows = proposal.rows.filter(isSafeReviewAction);
+  const applyableCount = proposal.rows.filter(
+    (row) =>
+      !isResolvedRow(row.rowNumber) &&
+      (reviewDecisions[row.rowNumber]?.decision === "IGNORE" ||
+        (reviewDecisions[row.rowNumber]?.decision === "APPROVE" &&
+          reviewStates[row.rowNumber] === "READY"))
+  ).length;
   const selectedSafeRows = proposal.rows.filter(
     (row) =>
-      selectedRowNumbers.includes(row.rowNumber) && isSafeReviewAction(row)
-  );
-  const hasBlockingReviewRows = Object.values(reviewStates).some(
-    (state) => !["READY", "SKIPPED"].includes(state)
+      !isResolvedRow(row.rowNumber) &&
+      selectedRowNumbers.includes(row.rowNumber) &&
+      isSafeReviewAction(row, reviewDecisions[row.rowNumber])
   );
   const canApply =
-    !hasBlockingReviewRows &&
-    proposal.rows.length > 0 &&
+    applyableCount > 0 &&
     fetcher.state === "idle" &&
     (proposalState === "review" ||
       proposalState === "error" ||
@@ -574,31 +714,17 @@ function StaffImportProposalView({
   const duplicateBlocksApply =
     duplicateResponse !== null &&
     (!duplicateResponse.canOverride || !allowSameFileReimport);
-  const serializedReviewDecisions = JSON.stringify(
-    proposal.rows
-      .map((row) => {
-        const decision = reviewDecisions[row.rowNumber];
-        return {
-          rowNumber: row.rowNumber,
-          decision: decision?.decision,
-          title: decision?.title,
-          assetId: decision?.assetId,
-          categoryId: decision?.categoryId,
-          newCategoryName: decision?.newCategoryName,
-          approveNewCategory: decision?.approveNewCategory,
-          locationId: decision?.locationId,
-          quantity: decision?.quantity,
-          type: decision?.type,
-          productChoice: decision?.productChoice,
-          minQuantity: decision?.minQuantity,
-          unitOfMeasure: decision?.unitOfMeasure,
-          consumptionType: decision?.consumptionType,
-          assetModelDescription: decision?.assetModelDescription,
-          acceptSuggestedImage: decision?.acceptSuggestedImage,
-        };
-      })
-      .filter((decision) => decision.decision)
-  );
+  const serializeReviewDecisions = (approveRowNumber?: number) =>
+    JSON.stringify(
+      proposal.rows.map((row) =>
+        serializeReviewDecision(
+          row.rowNumber,
+          reviewDecisions[row.rowNumber],
+          row.rowNumber === approveRowNumber ? "APPROVE" : undefined
+        )
+      )
+    );
+  const serializedReviewDecisions = serializeReviewDecisions();
   const totalReviewPages = Math.max(
     1,
     Math.ceil(proposal.rows.length / IMPORT_REVIEW_PAGE_SIZE)
@@ -607,11 +733,15 @@ function StaffImportProposalView({
     reviewPage * IMPORT_REVIEW_PAGE_SIZE,
     (reviewPage + 1) * IMPORT_REVIEW_PAGE_SIZE
   );
-  const selectedVisibleCount = reviewRows.filter((row) =>
+  const selectableReviewRows = reviewRows.filter(
+    (row) => !isResolvedRow(row.rowNumber)
+  );
+  const selectedVisibleCount = selectableReviewRows.filter((row) =>
     selectedRowNumbers.includes(row.rowNumber)
   ).length;
   const allVisibleSelected =
-    reviewRows.length > 0 && selectedVisibleCount === reviewRows.length;
+    selectableReviewRows.length > 0 &&
+    selectedVisibleCount === selectableReviewRows.length;
   const firstReviewRow = reviewPage * IMPORT_REVIEW_PAGE_SIZE + 1;
   const lastReviewRow = Math.min(
     (reviewPage + 1) * IMPORT_REVIEW_PAGE_SIZE,
@@ -622,7 +752,7 @@ function StaffImportProposalView({
     rowNumber: number,
     changes: Partial<ReviewDecision>
   ) => {
-    setServerReviewStateOverrides((current) => {
+    setServerIssues((current) => {
       const next = { ...current };
       delete next[rowNumber];
       return next;
@@ -636,20 +766,62 @@ function StaffImportProposalView({
     }));
   };
 
-  const approveSafeRows = () => {
-    setReviewDecisions((current) => {
-      const next = { ...current };
-      proposal.rows.forEach((row) => {
-        if (isSafeReviewAction(row)) {
-          next[row.rowNumber] = {
-            ...next[row.rowNumber],
-            decision: "APPROVE",
-          };
-        }
-      });
-      return next;
+  const importRows = (rowNumbers: number[]) => {
+    const formData = new FormData();
+    formData.set(
+      "intent",
+      rowNumbers.length === 1 ? "apply-row" : "apply-selected"
+    );
+    formData.set("operationId", proposal.operationId);
+    formData.set("proposalHash", proposal.proposalHash);
+    formData.set("allowSameFileReimport", String(allowSameFileReimport));
+    formData.set("rowNumber", String(rowNumbers[0]));
+    formData.set("rowNumbers", JSON.stringify(rowNumbers));
+    formData.set(
+      "reviewDecisions",
+      JSON.stringify(
+        proposal.rows.map((row) =>
+          serializeReviewDecision(
+            row.rowNumber,
+            reviewDecisions[row.rowNumber],
+            rowNumbers.includes(row.rowNumber) &&
+              reviewDecisions[row.rowNumber]?.decision !== "IGNORE"
+              ? "APPROVE"
+              : undefined
+          )
+        )
+      )
+    );
+    void fetcher.submit(formData, { method: "post", action: actionPath });
+  };
+
+  const uploadProductImage = (rowNumber: number, file?: File) => {
+    if (!file) return;
+    const formData = new FormData();
+    formData.set("intent", "process-import-image");
+    formData.set("rowNumber", String(rowNumber));
+    formData.set("file", file);
+    void imageFetcher.submit(formData, {
+      method: "post",
+      action: actionPath,
+      encType: "multipart/form-data",
     });
   };
+
+  useEffect(() => {
+    const result = imageFetcher.data;
+    if (!result || result.error || result.kind !== "import-image-processed") {
+      return;
+    }
+    setReviewDecisions((current) => ({
+      ...current,
+      [result.rowNumber]: {
+        ...current[result.rowNumber],
+        manualImage: result.proposal,
+        acceptSuggestedImage: true,
+      },
+    }));
+  }, [imageFetcher.data]);
 
   const toggleSelectedRow = (rowNumber: number, checked: boolean) => {
     setSelectedRowNumbers((current) =>
@@ -662,7 +834,7 @@ function StaffImportProposalView({
   };
 
   const toggleVisibleRows = (checked: boolean) => {
-    const visibleNumbers = reviewRows.map((row) => row.rowNumber);
+    const visibleNumbers = selectableReviewRows.map((row) => row.rowNumber);
     setSelectedRowNumbers((current) =>
       checked
         ? [...new Set([...current, ...visibleNumbers])]
@@ -684,7 +856,9 @@ function StaffImportProposalView({
     setReviewDecisions((current) => {
       const next = { ...current };
       selectedRowNumbers.forEach((rowNumber) => {
-        next[rowNumber] = { ...next[rowNumber], decision: "IGNORE" };
+        if (!isResolvedRow(rowNumber)) {
+          next[rowNumber] = { ...next[rowNumber], decision: "IGNORE" };
+        }
       });
       return next;
     });
@@ -692,19 +866,16 @@ function StaffImportProposalView({
 
   useEffect(() => {
     if (!fetcher.data) return;
-    if (fetcher.data.error) {
-      const rowStateMatch = fetcher.data.error.message.match(
-        /Row (\d+) is (NEEDS_REVIEW|CONFLICT|INVALID)/i
+    if (!fetcher.data.error && fetcher.data.kind === "import-review-blocked") {
+      setServerIssues(
+        Object.fromEntries(
+          fetcher.data.blockedRows.map((row) => [row.rowNumber, row.issues])
+        )
       );
-      if (rowStateMatch) {
-        setServerReviewStateOverrides((current) => ({
-          ...current,
-          [Number(rowStateMatch[1])]: rowStateMatch[2].toUpperCase() as
-            | "NEEDS_REVIEW"
-            | "CONFLICT"
-            | "INVALID",
-        }));
-      }
+      setProposalState("review");
+      return;
+    }
+    if (fetcher.data.error) {
       if (fetcher.data.error.message.includes("no longer available")) {
         setProposalState("expired");
         onReset(
@@ -726,6 +897,11 @@ function StaffImportProposalView({
           fetcher.data.result.conflictRows?.length ?? 0
         }.`
       );
+      return;
+    }
+    if (fetcher.data.kind === "import-partial") {
+      setProposalState("review");
+      setSelectedRowNumbers([]);
       return;
     }
     if (fetcher.data.kind === "import-in-progress") {
@@ -755,7 +931,9 @@ function StaffImportProposalView({
             {proposal.rows.length === 1 ? "product" : "products"} found
           </p>
           <p className="mt-0.5 text-xs text-gray-500">
-            Nothing changes until you confirm the import.
+            {isSavedDraft
+              ? "Draft · Nothing changes in Shelf until Apply."
+              : "Nothing changes until you confirm the import."}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -785,6 +963,14 @@ function StaffImportProposalView({
             >
               {allowSameFileReimport
                 ? "Apply changed proposal anyway"
+                : approvedCount === 1
+                ? "Apply 1 approved item"
+                : approvedCount > 1
+                ? `Apply ${approvedCount} approved items`
+                : ignoredCount > 0
+                ? `Confirm ${ignoredCount} ignored ${
+                    ignoredCount === 1 ? "row" : "rows"
+                  }`
                 : "Apply approved changes"}
             </button>
             <input
@@ -792,6 +978,29 @@ function StaffImportProposalView({
               name="reviewDecisions"
               value={serializedReviewDecisions}
             />
+          </fetcher.Form>
+          <fetcher.Form method="post" action={actionPath}>
+            <input type="hidden" name="intent" value="save-draft" />
+            <input
+              type="hidden"
+              name="operationId"
+              value={proposal.operationId}
+            />
+            <input
+              type="hidden"
+              name="reviewDecisions"
+              value={serializedReviewDecisions}
+            />
+            <button
+              type="submit"
+              disabled={
+                fetcher.state !== "idle" ||
+                !["review", "error"].includes(proposalState)
+              }
+              className="rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-bold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Save for later
+            </button>
           </fetcher.Form>
           <fetcher.Form
             method="post"
@@ -826,9 +1035,43 @@ function StaffImportProposalView({
 
       {fetcher.state !== "idle" ? (
         <p className="mt-3 text-sm text-gray-500" role="status">
-          {fetcher.state === "submitting"
-            ? "Applying approved changes..."
-            : "Cancelling import proposal..."}
+          {fetcher.formData?.get("intent") === "save-draft"
+            ? "Saving draft..."
+            : fetcher.formData?.get("intent") === "cancel-import"
+            ? "Cancelling import proposal..."
+            : "Applying approved changes..."}
+        </p>
+      ) : null}
+      {response?.error === null &&
+      response.kind === "import-review-blocked" &&
+      activeBlockedRows.length > 0 ? (
+        <div role="alert" className="mt-3 text-sm text-amber-800">
+          <p>
+            {response.readyCount +
+              response.blockedCount -
+              activeBlockedRows.length}{" "}
+            ready · {activeBlockedRows.length} need review. No selected products
+            were imported.
+          </p>
+          <ul>
+            {activeBlockedRows.map((row) => (
+              <li key={row.rowNumber}>
+                {row.issues.map((issue) => issue.message).join(" ")}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {response?.error === null && response.kind === "import-draft-saved" ? (
+        <p role="status" className="mt-3 text-sm text-green-700">
+          Draft saved. Nothing changes in Shelf until Apply.
+        </p>
+      ) : null}
+      {response?.error === null && response.kind === "import-partial" ? (
+        <p role="status" className="mt-3 text-sm text-green-700">
+          Applied {response.result.succeededRows} approved{" "}
+          {response.result.succeededRows === 1 ? "item" : "items"}.{" "}
+          {response.result.remainingRows ?? 0} rows remain in this draft.
         </p>
       ) : null}
       {proposalState === "in-progress" ? (
@@ -868,8 +1111,10 @@ function StaffImportProposalView({
         <p className="text-sm font-semibold text-gray-700" aria-live="polite">
           {proposal.rows.length}{" "}
           {proposal.rows.length === 1 ? "product" : "products"} found ·{" "}
-          {reviewCount > 0 ? `${reviewCount} need review` : ""}
-          {readyCount > 0 ? ` · ${readyCount} ready` : ""}
+          {approvedCount} approved · {reviewCount} need review
+          {readyCount > approvedCount
+            ? ` · ${readyCount - approvedCount} ready`
+            : ""}
           {unresolvedCategoryCount > 0
             ? ` · ${unresolvedCategoryCount} unassigned category`
             : ""}
@@ -878,15 +1123,6 @@ function StaffImportProposalView({
             : ""}
           {ignoredCount > 0 ? ` · ${ignoredCount} ignored` : ""}
         </p>
-        {safeReviewRows.length > 0 ? (
-          <button
-            type="button"
-            onClick={approveSafeRows}
-            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50"
-          >
-            Approve safe matches
-          </button>
-        ) : null}
       </div>
       {isMouserInvoice ? (
         <p className="mt-1 text-xs text-gray-500">
@@ -916,6 +1152,14 @@ function StaffImportProposalView({
           </button>
           <button
             type="button"
+            disabled={fetcher.state !== "idle" || duplicateBlocksApply}
+            onClick={() => importRows(selectedRowNumbers)}
+            className="rounded-md bg-red-700 px-2.5 py-1.5 text-xs font-bold text-white disabled:opacity-50"
+          >
+            Import selected
+          </button>
+          <button
+            type="button"
             onClick={ignoreSelectedRows}
             className="rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-bold text-gray-700 hover:bg-white"
           >
@@ -925,10 +1169,11 @@ function StaffImportProposalView({
       ) : null}
 
       <div className="mt-3 overflow-x-auto rounded-lg border border-gray-200">
-        <table className="w-full min-w-[920px] text-left text-sm">
+        <table className="w-full min-w-[1060px] text-left text-sm">
           <thead className="border-b border-gray-200 bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
             <tr>
               <th className="w-10 p-2">
+                <span className="sr-only">Select</span>
                 <input
                   type="checkbox"
                   aria-label="Select all products on this page"
@@ -942,11 +1187,16 @@ function StaffImportProposalView({
               <th className="w-16 p-2">Qty</th>
               <th className="p-2">Category</th>
               <th className="p-2">Location</th>
+              <th className="w-20 p-2">Image</th>
+              <th className="w-28 p-2">Status</th>
               <th className="p-2">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {reviewRows.map((row) => {
+              const isApplied = appliedRowNumbers.has(row.rowNumber);
+              const isIgnored = ignoredRowNumbers.has(row.rowNumber);
+              const isResolved = isApplied || isIgnored;
               const decision = reviewDecisions[row.rowNumber];
               const selectedLocation = decision?.locationId
                 ? proposal.locationOptions?.find(
@@ -984,7 +1234,62 @@ function StaffImportProposalView({
                 (candidate) =>
                   candidate.id === row.helperCandidate?.productMatch.candidateId
               );
+              const selectedExistingCandidate =
+                decision?.productChoice === "EXISTING" && decision.assetId
+                  ? row.matchCandidates?.find(
+                      (candidate) => candidate.id === decision.assetId
+                    )
+                  : null;
+              const isExistingTrackingSelection =
+                row.trackingSource === "EXISTING_MODEL" ||
+                Boolean(selectedExistingCandidate);
+              const effectiveTrackingType =
+                selectedExistingCandidate?.type ?? decision?.type ?? row.type;
+              const individualTrackingRequiresConfirmation =
+                effectiveTrackingType === "INDIVIDUAL" &&
+                !isExistingTrackingSelection;
               const badge = reviewBadges[row.rowNumber];
+              const rowValidation = validateImportRowForApply({
+                row: { ...row, categoryOptional: row.mouserLineItem === true },
+                decision,
+                alreadyImported: isApplied,
+                categoryAvailable: Boolean(
+                  (decision?.categoryId &&
+                    proposal.categoryOptions?.some(
+                      (category) =>
+                        category.id === decision.categoryId &&
+                        !category.archived
+                    )) ||
+                    (decision?.approveNewCategory &&
+                      decision.newCategoryName?.trim())
+                ),
+                locationAvailable:
+                  !decision?.locationId ||
+                  Boolean(
+                    proposal.locationOptions?.some(
+                      (location) => location.id === decision.locationId
+                    )
+                  ),
+                categoryPermission: canCreateCategory,
+              });
+              const rowCanImport =
+                !isResolved &&
+                decision?.decision !== "IGNORE" &&
+                rowValidation.ready &&
+                !serverIssues[row.rowNumber]?.length;
+              const statusLabel = isApplied
+                ? "Imported"
+                : isIgnored || badge.label === "Ignored"
+                ? "Ignored"
+                : rowCanImport
+                ? "Ready"
+                : "Needs review";
+              const statusClassName =
+                statusLabel === "Ready" || statusLabel === "Imported"
+                  ? "bg-green-100 text-green-800"
+                  : statusLabel === "Ignored"
+                  ? "bg-gray-100 text-gray-600"
+                  : "bg-amber-100 text-amber-800";
               const suggestedCategory = row.suggestedCategoryId
                 ? proposal.categoryOptions?.find(
                     (category) => category.id === row.suggestedCategoryId
@@ -996,7 +1301,13 @@ function StaffImportProposalView({
                   )
                 : null;
               const quantity =
-                decision?.quantity ?? row.quantity ?? row.proposedQuantity;
+                decision && decision.quantity !== undefined
+                  ? decision.quantity
+                  : row.receivedQuantity ?? row.quantity ?? null;
+              const proposedImage =
+                decision?.manualImage === null
+                  ? null
+                  : decision?.manualImage ?? row.productImageProposal;
               return (
                 <tr key={row.rowNumber} className="align-top">
                   <td className="p-2">
@@ -1006,6 +1317,7 @@ function StaffImportProposalView({
                         row.title || `row ${row.rowNumber}`
                       }`}
                       checked={selectedRowNumbers.includes(row.rowNumber)}
+                      disabled={isResolved}
                       onChange={(event) =>
                         toggleSelectedRow(
                           row.rowNumber,
@@ -1018,19 +1330,9 @@ function StaffImportProposalView({
                     <div className="line-clamp-2 break-words font-semibold leading-5 text-gray-950">
                       {row.title || "Unresolved item name"}
                     </div>
-                    {badge.label === "Possible match" ||
-                    badge.label === "Conflict" ||
-                    badge.label === "Ignored" ? (
-                      <span className="text-xs font-medium text-amber-700">
-                        {badge.label}
-                      </span>
-                    ) : row.action === "REJECT" ? (
-                      <span className="text-xs font-medium text-red-700">
-                        Invalid proposal · see Details
-                      </span>
-                    ) : row.action === "AMBIGUOUS" ? (
-                      <span className="text-xs font-medium text-amber-700">
-                        Match needs review
+                    {effectiveTrackingType === "INDIVIDUAL" ? (
+                      <span className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">
+                        Individual tracking
                       </span>
                     ) : null}
                     <details className="mt-1 text-xs text-gray-500">
@@ -1060,9 +1362,11 @@ function StaffImportProposalView({
                           </p>
                         ) : null}
                         {row.productImageProposal?.status === "IMAGE_FOUND" &&
-                        row.productImageProposal.dataBase64 ? (
+                        importProductImagePreview(row.productImageProposal) ? (
                           <img
-                            src={`data:image/webp;base64,${row.productImageProposal.dataBase64}`}
+                            src={importProductImagePreview(
+                              row.productImageProposal
+                            )}
                             alt={`Suggested product for ${row.title}`}
                             className="size-16 rounded border border-gray-200 bg-white object-contain"
                           />
@@ -1100,10 +1404,21 @@ function StaffImportProposalView({
                             {row.manufacturerPartNumber}
                           </p>
                         ) : null}
-                        {decision?.type || row.type ? (
+                        {effectiveTrackingType ? (
                           <p>
                             <span className="font-semibold">Tracking:</span>{" "}
-                            {trackingLabel(decision?.type ?? row.type)}
+                            {effectiveTrackingType === "INDIVIDUAL"
+                              ? "Individual / QR tracked"
+                              : "Quantity tracked"}
+                          </p>
+                        ) : null}
+                        {effectiveTrackingType ? (
+                          <p>
+                            <span className="font-semibold">Reason:</span>{" "}
+                            {decision?.type && decision.type !== row.type
+                              ? "Staff selected this tracking mode during review."
+                              : row.trackingReason ??
+                                "Default for identical stock and component inventory."}
                           </p>
                         ) : null}
                         {row.helperCandidate ? (
@@ -1344,6 +1659,14 @@ function StaffImportProposalView({
                                     ? "NEW"
                                     : "EXISTING"
                                   : null,
+                                type:
+                                  value && value !== "__new__"
+                                    ? row.matchCandidates?.find(
+                                        (candidate) => candidate.id === value
+                                      )?.type ?? row.type
+                                    : row.type ?? "QUANTITY_TRACKED",
+                                trackingModeConfirmed: false,
+                                decision: null,
                               });
                             }}
                             className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
@@ -1381,17 +1704,20 @@ function StaffImportProposalView({
                         <label className="block">
                           Tracking mode
                           <select
-                            value={reviewDecisions[row.rowNumber]?.type ?? ""}
-                            onChange={(event) =>
+                            value={effectiveTrackingType ?? ""}
+                            disabled={isExistingTrackingSelection}
+                            onChange={(event) => {
                               updateDecision(row.rowNumber, {
                                 type:
                                   event.target.value === "INDIVIDUAL" ||
                                   event.target.value === "QUANTITY_TRACKED"
                                     ? event.target.value
                                     : null,
-                              })
-                            }
-                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1"
+                                trackingModeConfirmed: false,
+                                decision: null,
+                              });
+                            }}
+                            className="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1 disabled:bg-gray-100"
                           >
                             <option value="">Choose tracking mode</option>
                             <option value="QUANTITY_TRACKED">
@@ -1400,6 +1726,28 @@ function StaffImportProposalView({
                             <option value="INDIVIDUAL">Individual + QR</option>
                           </select>
                         </label>
+                        {individualTrackingRequiresConfirmation ? (
+                          <label className="flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2 text-amber-950">
+                            <input
+                              type="checkbox"
+                              checked={
+                                reviewDecisions[row.rowNumber]
+                                  ?.trackingModeConfirmed ?? false
+                              }
+                              onChange={(event) =>
+                                updateDecision(row.rowNumber, {
+                                  trackingModeConfirmed:
+                                    event.currentTarget.checked,
+                                  decision: null,
+                                })
+                              }
+                            />
+                            <span>
+                              Confirm that Apply should create separate
+                              individual QR-tracked assets.
+                            </span>
+                          </label>
+                        ) : null}
                         {reviewDecisions[row.rowNumber]?.type ===
                         "QUANTITY_TRACKED" ? (
                           <fieldset className="space-y-2 rounded border border-gray-200 p-2">
@@ -1511,32 +1859,35 @@ function StaffImportProposalView({
                                 The existing model image will be kept.
                               </p>
                             </div>
-                          ) : row.productImageProposal?.status ===
-                              "IMAGE_FOUND" &&
-                            row.productImageProposal.dataBase64 ? (
+                          ) : proposedImage?.status === "IMAGE_FOUND" &&
+                            importProductImagePreview(proposedImage) ? (
                             <div>
                               <p className="mb-1 font-semibold">
-                                Suggested product image
+                                {proposedImage.source === "MANUAL_UPLOAD"
+                                  ? "Selected image"
+                                  : "Found automatically"}
                               </p>
                               <img
-                                src={`data:image/webp;base64,${row.productImageProposal.dataBase64}`}
-                                alt={`Suggested product for ${row.title}`}
+                                src={importProductImagePreview(proposedImage)}
+                                alt={`Proposed: ${row.title}`}
                                 className="size-20 rounded border border-gray-200 object-contain"
                               />
                               <p className="mt-1 text-gray-600">
-                                {row.productImageProposal.sourceName ??
-                                  "Openverse image"}
-                                {row.productImageProposal.license
-                                  ? ` · ${row.productImageProposal.license}`
+                                {proposedImage.sourceName ?? "Product image"}
+                                {proposedImage.source
+                                  ? ` · ${actionLabel(proposedImage.source)}`
                                   : ""}
-                                {row.productImageProposal.sourceUrl &&
+                                {proposedImage.license
+                                  ? ` · ${proposedImage.license}`
+                                  : ""}
+                                {proposedImage.sourceUrl &&
                                 /^https?:\/\//i.test(
-                                  row.productImageProposal.sourceUrl
+                                  proposedImage.sourceUrl
                                 ) ? (
                                   <>
                                     {" · "}
                                     <a
-                                      href={row.productImageProposal.sourceUrl}
+                                      href={proposedImage.sourceUrl}
                                       target="_blank"
                                       rel="noreferrer"
                                       className="underline"
@@ -1564,16 +1915,62 @@ function StaffImportProposalView({
                                   Use this image for the Shelf product
                                 </span>
                               </label>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateDecision(row.rowNumber, {
+                                    manualImage: null,
+                                    acceptSuggestedImage: false,
+                                  })
+                                }
+                                className="mt-2 text-sm text-gray-600 underline"
+                              >
+                                Remove image
+                              </button>
                             </div>
                           ) : (
                             <p className="text-gray-500">
-                              Product image:{" "}
-                              {actionLabel(
-                                row.productImageProposal?.status ??
-                                  "IMAGE_NOT_FOUND"
-                              )}
+                              No reliable image found.{" "}
+                              {proposedImage?.failureReason
+                                ? `Reason: ${actionLabel(
+                                    proposedImage.failureReason
+                                  )}.`
+                                : ""}{" "}
+                              {decision?.manualImage === null
+                                ? "No image selected"
+                                : actionLabel(
+                                    row.productImageProposal?.status ??
+                                      "IMAGE_NOT_FOUND"
+                                  )}
                             </p>
                           )}
+                          {!row.existingAssetModelImageUrl ? (
+                            <label className="block text-sm font-medium">
+                              Upload another image
+                              <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp"
+                                disabled={imageFetcher.state !== "idle"}
+                                onChange={(event) => {
+                                  uploadProductImage(
+                                    row.rowNumber,
+                                    event.currentTarget.files?.[0]
+                                  );
+                                  event.currentTarget.value = "";
+                                }}
+                                className="mt-1 block w-full text-sm font-normal"
+                              />
+                            </label>
+                          ) : null}
+                          {imageFetcher.data?.error ? (
+                            <p role="alert" className="text-sm text-red-700">
+                              {imageFetcher.data.error.message}
+                            </p>
+                          ) : imageFetcher.state !== "idle" ? (
+                            <p className="text-sm text-gray-500">
+                              Processing image…
+                            </p>
+                          ) : null}
                         </section>
                         {proposal.categoryOptions?.length ? (
                           <label className="block">
@@ -1680,7 +2077,14 @@ function StaffImportProposalView({
                     {quantity ?? "—"}
                   </td>
                   <td className="min-w-36 p-2">
-                    {proposal.categoryOptions?.length ? (
+                    {isResolved ? (
+                      <span>
+                        {selectedCategoryBadge?.name ??
+                          selectedCategoryOption?.name ??
+                          rowCategoryLabel ??
+                          "Unassigned"}
+                      </span>
+                    ) : proposal.categoryOptions?.length ? (
                       <label className="relative inline-flex items-center rounded-md focus-within:ring-2 focus-within:ring-red-200">
                         {selectedCategoryBadge ? (
                           <CategoryBadge category={selectedCategoryBadge} />
@@ -1731,106 +2135,137 @@ function StaffImportProposalView({
                     )}
                   </td>
                   <td className="max-w-64 p-2 text-gray-700">
-                    <label className="relative inline-flex items-center rounded-md focus-within:ring-2 focus-within:ring-red-200">
-                      <span className="line-clamp-2 break-words">
-                        {selectedLocation?.pathLabel ??
-                          (decision?.locationId === null
-                            ? suggestedLocation &&
-                              row.locationSuggestionStatus !== "UNRESOLVED"
-                              ? (row.locationSuggestionStatus ===
-                                "WEAK_SUGGESTION"
-                                  ? "Possible location: "
-                                  : "Suggested: ") +
-                                suggestedLocation.pathLabel +
-                                " · choose"
-                              : "Choose location"
-                            : row.locationLabel && row.locationId
-                            ? row.locationLabel
-                            : "Choose location")}
-                      </span>
-                      <span aria-hidden="true" className="px-1 text-gray-500">
-                        ▾
-                      </span>
-                      <select
-                        aria-label={`Location for ${row.title}`}
-                        value={decision?.locationId ?? ""}
-                        onChange={(event) =>
-                          updateDecision(row.rowNumber, {
-                            locationId: event.currentTarget.value || null,
-                          })
+                    {isResolved ? (
+                      selectedLocation?.pathLabel ??
+                      row.locationLabel ??
+                      "Unassigned"
+                    ) : (
+                      <ImportLocationPicker
+                        label={`Location for ${row.title}`}
+                        locations={proposal.locationOptions ?? []}
+                        selectedId={decision?.locationId ?? null}
+                        suggestedId={suggestedLocation?.id ?? null}
+                        onSelect={(locationId) =>
+                          updateDecision(row.rowNumber, { locationId })
                         }
-                        className="absolute inset-0 size-full cursor-pointer opacity-0"
-                      >
-                        <option value="">Choose location</option>
-                        {suggestedLocation && !suggestedLocation.operational ? (
-                          <optgroup label="Suggested">
-                            <option value={suggestedLocation.id}>
-                              {suggestedLocation.pathLabel ??
-                                suggestedLocation.name}
-                            </option>
-                          </optgroup>
-                        ) : null}
-                        <optgroup label="All locations">
-                          {proposal.locationOptions
-                            ?.filter(
-                              (location) =>
-                                location.id !==
-                                (suggestedLocation &&
-                                !suggestedLocation.operational
-                                  ? suggestedLocation.id
-                                  : null)
-                            )
-                            .map((location) => (
-                              <option key={location.id} value={location.id}>
-                                {location.pathLabel ?? location.name}
-                                {location.operational ? " (operational)" : ""}
-                              </option>
-                            ))}
-                        </optgroup>
-                      </select>
-                    </label>
+                      />
+                    )}
                   </td>
                   <td className="p-2">
-                    <div className="flex flex-wrap gap-1.5">
-                      <button
-                        type="button"
-                        disabled={!decision?.title.trim()}
-                        onClick={() =>
-                          updateDecision(row.rowNumber, { decision: "APPROVE" })
+                    {proposedImage?.status === "IMAGE_FOUND" &&
+                    importProductImagePreview(proposedImage) ? (
+                      <img
+                        src={importProductImagePreview(proposedImage)}
+                        alt={`Proposed: ${row.title}`}
+                        className="size-12 rounded border border-gray-200 bg-white object-contain"
+                      />
+                    ) : row.existingAssetModelThumbnailUrl ||
+                      row.existingAssetModelImageUrl ? (
+                      <img
+                        src={
+                          row.existingAssetModelThumbnailUrl ??
+                          row.existingAssetModelImageUrl ??
+                          ""
                         }
-                        className={`rounded-md px-2 py-1 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                          badge.label === "Ready"
-                            ? "bg-red-700 text-white hover:bg-red-800"
-                            : "border border-gray-300 text-gray-700 hover:bg-gray-50"
-                        }`}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setEditRowNumber((current) =>
-                            current === row.rowNumber ? null : row.rowNumber
-                          )
-                        }
-                        className={`rounded-md px-2 py-1 text-xs font-bold transition ${
-                          badge.label === "Ready"
-                            ? "border border-gray-300 text-gray-700 hover:bg-gray-50"
-                            : "bg-red-700 text-white hover:bg-red-800"
-                        }`}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateDecision(row.rowNumber, { decision: "IGNORE" })
-                        }
-                        className="rounded-md border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
-                      >
-                        Ignore
-                      </button>
-                    </div>
+                        alt={`Shelf model: ${row.title}`}
+                        className="size-12 rounded border border-gray-200 bg-white object-contain"
+                      />
+                    ) : (
+                      <span className="text-xs text-gray-500">
+                        No reliable image found
+                      </span>
+                    )}
+                  </td>
+                  <td className="p-2">
+                    <span
+                      className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${statusClassName}`}
+                      role="status"
+                    >
+                      {statusLabel}
+                    </span>
+                    {(serverIssues[row.rowNumber] ?? rowValidation.issues)
+                      .filter(
+                        (issue) =>
+                          !["IGNORED", "ALREADY_IMPORTED"].includes(issue.code)
+                      )
+                      .map((issue) => (
+                        <p
+                          key={issue.code}
+                          className="mt-1 text-xs text-amber-800"
+                        >
+                          {issue.message}
+                        </p>
+                      ))}
+                  </td>
+                  <td className="p-2">
+                    {isResolved ? null : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {rowCanImport ? (
+                          <button
+                            type="button"
+                            disabled={
+                              fetcher.state !== "idle" || duplicateBlocksApply
+                            }
+                            onClick={() => importRows([row.rowNumber])}
+                            className="rounded-md bg-red-700 px-2 py-1 text-xs font-bold text-white transition hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Import
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditRowNumber((current) =>
+                                current === row.rowNumber ? null : row.rowNumber
+                              )
+                            }
+                            className="rounded-md bg-red-700 px-2 py-1 text-xs font-bold text-white transition hover:bg-red-800"
+                          >
+                            Fix
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={
+                            !decision?.title.trim() ||
+                            (individualTrackingRequiresConfirmation &&
+                              !decision?.trackingModeConfirmed)
+                          }
+                          onClick={() =>
+                            updateDecision(row.rowNumber, {
+                              decision: "APPROVE",
+                            })
+                          }
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Approve
+                        </button>
+                        {rowCanImport ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditRowNumber((current) =>
+                                current === row.rowNumber ? null : row.rowNumber
+                              )
+                            }
+                            className="rounded-md border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                          >
+                            Edit
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateDecision(row.rowNumber, {
+                              decision: "IGNORE",
+                            })
+                          }
+                          className="rounded-md border border-gray-300 px-2 py-1 text-xs font-bold text-gray-700 hover:bg-gray-50"
+                        >
+                          Ignore
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               );

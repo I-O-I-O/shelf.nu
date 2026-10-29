@@ -323,12 +323,14 @@ export async function updateAssetModelImage({
   assetModelId,
   organizationId,
   onlyIfMissing = false,
+  maxProcessedBytes,
 }: {
   request: Request;
   assetModelId: AssetModel["id"];
   organizationId: Organization["id"];
   /** Preserve an image that already exists, including a concurrent write. */
   onlyIfMissing?: boolean;
+  maxProcessedBytes?: number;
 }): Promise<string | null> {
   let uploadedImagePaths: string[] = [];
   let imageSaved = false;
@@ -376,6 +378,7 @@ export async function updateAssetModelImage({
       thumbnailSize: 108,
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
       allowEmptyFile: true,
+      maxProcessedBytes,
     });
 
     const uploaded = fileData.get("image") as string | null;

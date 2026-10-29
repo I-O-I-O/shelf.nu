@@ -118,6 +118,46 @@ describe("IOIO staff dashboard loader", () => {
     expect(result.dashboardPreferences.hidden).toEqual([]);
   });
 
+  it("returns readiness issues from the legacy Home import handler", async () => {
+    mocks.applyStaffInventoryImport.mockResolvedValue({
+      status: "NEEDS_REVIEW",
+      operationId: "operation-1",
+      readyCount: 0,
+      blockedCount: 1,
+      blockedRows: [
+        {
+          rowNumber: 2,
+          title: "Arduino Nano",
+          issues: [
+            {
+              code: "MISSING_CATEGORY",
+              message:
+                "Arduino Nano needs a category before it can be imported.",
+            },
+          ],
+        },
+      ],
+    });
+    const form = new FormData();
+    form.set("intent", "apply-import");
+    form.set("operationId", "operation-1");
+    form.set("proposalHash", "hash");
+    form.set("reviewDecisions", "[]");
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/home", {
+          method: "POST",
+          body: form,
+        }),
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+    expect(result).toMatchObject({
+      kind: "import-review-blocked",
+      blockedRows: [{ rowNumber: 2, issues: [{ code: "MISSING_CATEGORY" }] }],
+    });
+  });
+
   it("routes the Home Apply form to the shared import engine", async () => {
     const resultData = {
       operationId: "operation-1",

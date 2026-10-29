@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import JSZip from "jszip";
+import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Logger } from "~/utils/logger";
 import {
@@ -9,6 +10,7 @@ import {
 import type { MouserEnrichmentRequest } from "./import-helper-contract.server";
 
 const database = vi.hoisted(() => ({
+  image: { upsert: vi.fn(), findFirst: vi.fn(), deleteMany: vi.fn() },
   asset: { findMany: vi.fn(), findFirst: vi.fn() },
   assetModel: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
   category: { findFirst: vi.fn(), findMany: vi.fn() },
@@ -17,6 +19,7 @@ const database = vi.hoisted(() => ({
   ioioWriteOperation: {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
+    findMany: vi.fn(),
     create: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -72,6 +75,13 @@ vi.mock("~/modules/asset-model/service.server", () => ({
 // why: importer preparation tests must stay offline; bounded external lookup and image validation are exercised in product-enrichment.server.test.ts.
 vi.mock("./product-enrichment.server", () => ({
   enrichImportProductRows: mockEnrichImportProductRows,
+  processStaffImportImageUpload: vi.fn((bytes: Buffer) => ({
+    status: "IMAGE_FOUND",
+    mimeType: "image/webp",
+    dataBase64: bytes.toString("base64"),
+    source: "MANUAL_UPLOAD",
+    sourceName: "Manual upload",
+  })),
 }));
 
 // why: preparation only needs public image URL resolution; Supabase storage access is covered by the existing storage-service tests.
@@ -134,19 +144,30 @@ vi.mock("./pdf-ocr.server", () => ({
 }));
 
 import { validateImportHelperResponse } from "./import-helper-contract.server";
+import { resolveImportReviewState } from "./import-review";
 import {
   applyStaffInventoryImport,
   classifyStaffImportRows,
   getIndividualUnitImportLimitError,
   getStaffImportProposalHash,
+  getStaffInventoryImportDrafts,
+  getStaffInventoryImportProposal,
   parseMouserInvoicePages,
   parseStaffImportFile,
   prepareStaffInventoryImport,
+  saveStaffInventoryImportDraft,
   summarizeStaffImportRows,
+  type StaffImportProposal,
+  type StaffImportProposalRow,
+  type StaffImportReviewDecision,
   type StaffImportResult,
 } from "./inventory-import.server";
 import { PdfOcrError } from "./pdf-ocr.server";
-import type { ImportProductEnrichmentRow } from "./product-enrichment.server";
+import type {
+  ExistingImportAssetModel,
+  ImportProductEnrichmentRow,
+  ProductSearchProvider,
+} from "./product-enrichment.server";
 import {
   MOUSER_FRAGMENTED_EXPECTED_ROWS,
   MOUSER_FRAGMENTED_PAGE_TEXT,
@@ -327,6 +348,10 @@ function makeGenericHelperReadyResult({
     quantity: number;
     evidenceText: string;
     quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
+    manufacturer?: string | null;
+    mpn?: string | null;
+    supplierProductNumber?: string | null;
+    description?: string | null;
   }>;
 }) {
   return {
@@ -334,15 +359,24 @@ function makeGenericHelperReadyResult({
     proposal: {
       schemaVersion: 1 as const,
       rows: items.map(
-        ({ productName, quantity, evidenceText, quantityStatus }) => ({
+        ({
+          productName,
+          quantity,
+          evidenceText,
+          quantityStatus,
+          manufacturer,
+          mpn,
+          supplierProductNumber,
+          description,
+        }) => ({
           sourceRef: "pdf-page-1",
           productName,
-          supplierProductNumber: null,
+          supplierProductNumber: supplierProductNumber ?? null,
           quantity,
           quantityStatus: quantityStatus ?? ("RECEIVED" as const),
-          manufacturer: null,
-          mpn: null,
-          description: productName,
+          manufacturer: manufacturer ?? null,
+          mpn: mpn ?? null,
+          description: description ?? productName,
           productMatch: {
             matchType: "NEW" as const,
             candidateId: null,
@@ -397,7 +431,21 @@ function makeMouserHelperResponse() {
   } as const;
 }
 
+const previewImages = new Map<
+  string,
+  { id: string; ownerOrgId: string; blob: Buffer; contentType: string }
+>();
 beforeEach(() => {
+  previewImages.clear();
+  database.image.upsert.mockImplementation(({ where, create }) => {
+    if (!previewImages.has(where.id)) previewImages.set(where.id, create);
+    return previewImages.get(where.id);
+  });
+  database.image.findFirst.mockImplementation(({ where }) => {
+    const image = previewImages.get(where.id);
+    return image?.ownerOrgId === where.ownerOrgId ? image : null;
+  });
+  database.image.deleteMany.mockResolvedValue({ count: 0 });
   mockOcrPdfPages.mockReset().mockRejectedValue(new PdfOcrError("unavailable"));
   database.category.findMany.mockResolvedValue([]);
   database.assetModel.findMany.mockResolvedValue([]);
@@ -421,9 +469,19 @@ beforeEach(() => {
       productImageProposal: { status: "IMAGE_NOT_FOUND" },
     })),
     diagnostics: {
+      newModels: 0,
+      existingModelsWithImage: 0,
       imageLookupAttempted: 0,
       imageCandidatesConsidered: 0,
       imageAccepted: 0,
+      imageLookupSucceeded: 0,
+      imageLookupFailed: 0,
+      imageSourceDocument: 0,
+      imageSourceManufacturer: 0,
+      imageSourceSupplier: 0,
+      imageProcessed: 0,
+      imageFinalBytes: 0,
+      imageMissing: 0,
       imageRejectedReason: {},
       descriptionGenerated: 0,
       descriptionSource: {
@@ -637,9 +695,19 @@ describe("staff inventory import safety", () => {
         },
       })),
       diagnostics: {
+        newModels: 1,
+        existingModelsWithImage: 0,
         imageLookupAttempted: 1,
         imageCandidatesConsidered: 1,
         imageAccepted: 1,
+        imageLookupSucceeded: 1,
+        imageLookupFailed: 0,
+        imageSourceDocument: 0,
+        imageSourceManufacturer: 0,
+        imageSourceSupplier: 0,
+        imageProcessed: 1,
+        imageFinalBytes: 9,
+        imageMissing: 0,
         imageRejectedReason: {},
         descriptionGenerated: 1,
         descriptionSource: {
@@ -668,11 +736,79 @@ describe("staff inventory import safety", () => {
         "A compact microcontroller board for electronics prototyping.",
       productImageProposal: {
         status: "IMAGE_FOUND",
-        dataBase64: imageDataBase64,
+        imageId: expect.stringMatching(/^ioio-import-/),
       },
     });
+    expect(
+      prepared.proposal.rows[0].productImageProposal?.dataBase64
+    ).toBeUndefined();
+    expect(previewImages.size).toBe(1);
     expect(mockUpdateAssetModelImage).not.toHaveBeenCalled();
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
+  it("keeps a product importable when temporary image persistence fails", async () => {
+    preparePdfImportMocks("operation-image-persist-failure");
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText: "Arduino Nano shipped 1",
+        items: [
+          {
+            productName: "Arduino Nano",
+            quantity: 1,
+            evidenceText: "Arduino Nano shipped 1",
+          },
+        ],
+      })
+    );
+    mockEnrichImportProductRows.mockImplementationOnce((rows) => ({
+      rows: rows.map((row) => ({
+        ...row,
+        productImageProposal: {
+          status: "IMAGE_FOUND",
+          mimeType: "image/webp",
+          dataBase64: Buffer.from("RIFF\u0004\u0000\u0000\u0000WEBP").toString(
+            "base64"
+          ),
+          autoAccepted: true,
+        },
+      })),
+      diagnostics: {
+        imageLookupAttempted: 1,
+        descriptionSource: {
+          SOURCE: 0,
+          SHELF_EXISTING: 0,
+          GENERATED: 0,
+          NONE: 1,
+        },
+      },
+    }));
+    database.image.upsert.mockRejectedValueOnce(
+      new Error("Preview store unavailable")
+    );
+    const result = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: "Arduino Nano shipped 1" }])],
+        "invoice.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+    expect(result).toMatchObject({
+      status: "PREPARED",
+      proposal: {
+        rows: [
+          {
+            productImageProposal: {
+              status: "IMAGE_FETCH_FAILED",
+              failureReason: "PROPOSAL_IMAGE_PERSIST_FAILED",
+            },
+          },
+        ],
+      },
+    });
+    expect(mockCreateAsset).not.toHaveBeenCalled();
   });
 
   it("reconstructs six Mouser lines across wrapped text and continuation pages", () => {
@@ -1183,7 +1319,7 @@ describe("staff inventory import safety", () => {
 
   async function applyNewImport({
     quantity,
-    type = "INDIVIDUAL",
+    type = "QUANTITY_TRACKED",
     existingAssets = [],
     pauseAtUnitIndex,
     duplicateProposal,
@@ -1203,6 +1339,7 @@ describe("staff inventory import safety", () => {
     categoryAppearedAfterReview = false,
     ambiguousLocation = false,
     decisionType,
+    trackingModeConfirmed,
     minQuantity,
     unitOfMeasure,
     consumptionType,
@@ -1210,11 +1347,26 @@ describe("staff inventory import safety", () => {
     assetModelDescription,
     productImageProposal,
     acceptSuggestedImage = false,
+    applyOnlyRowNumber,
+    applyOnlyRowNumbers,
     sourceRow,
+    proposalRows,
+    reviewDecisionRows,
   }: {
     quantity: number;
     type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
-    existingAssets?: Array<{ id: string; title: string }>;
+    existingAssets?: Array<{
+      id: string;
+      title: string;
+      type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
+      quantity?: number | null;
+      categoryId?: string | null;
+      assetLocations?: Array<{
+        locationId: string;
+        quantity: number | null;
+        assetKitId: string | null;
+      }>;
+    }>;
     pauseAtUnitIndex?: number;
     duplicateProposal?: { id: string; status: string; organizationId?: string };
     duplicateFile?: { id: string; status: string; proposalSha256: string };
@@ -1233,6 +1385,7 @@ describe("staff inventory import safety", () => {
     categoryAppearedAfterReview?: boolean;
     ambiguousLocation?: boolean;
     decisionType?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
+    trackingModeConfirmed?: boolean;
     minQuantity?: number | null;
     unitOfMeasure?: string | null;
     consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
@@ -1241,12 +1394,15 @@ describe("staff inventory import safety", () => {
     productImageProposal?: {
       status: "IMAGE_FOUND";
       mimeType: "image/webp";
-      dataBase64: string;
+      dataBase64?: string;
+      imageId?: string;
       sourceName?: string;
       sourceUrl?: string;
       license?: string;
     };
     acceptSuggestedImage?: boolean;
+    applyOnlyRowNumber?: number;
+    applyOnlyRowNumbers?: number[];
     sourceRow?: {
       title: string;
       quantity: number | null;
@@ -1254,6 +1410,8 @@ describe("staff inventory import safety", () => {
       orderedQuantity?: number | null;
       quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
     };
+    proposalRows?: StaffImportProposalRow[];
+    reviewDecisionRows?: StaffImportReviewDecision[];
   }) {
     vi.clearAllMocks();
     const operationId = `operation-${type}-${quantity}`;
@@ -1263,6 +1421,18 @@ describe("staff inventory import safety", () => {
       action: "CREATE" as const,
       assetId: null,
       type,
+      trackingSource:
+        type === "INDIVIDUAL"
+          ? ("SOURCE_EXPLICIT" as const)
+          : ("DETERMINISTIC_DEFAULT" as const),
+      trackingReason:
+        type === "INDIVIDUAL"
+          ? "The source explicitly marks this item for individual tracking."
+          : "Default for identical stock and component inventory.",
+      trackingReasonCode:
+        type === "INDIVIDUAL"
+          ? ("EXPLICIT_SERIALIZED_SOURCE" as const)
+          : ("DEFAULT_QUANTITY" as const),
       quantity: sourceRow ? sourceRow.quantity : quantity,
       receivedQuantity: sourceRow
         ? sourceRow.receivedQuantity ?? null
@@ -1289,14 +1459,15 @@ describe("staff inventory import safety", () => {
       },
       acceptSuggestedImage,
     };
+    const rows = proposalRows ?? [row];
     const proposalContent = {
       version: 1 as const,
       operationId,
       organizationId: "org-1",
       source: { filename: "inventory.csv", size: 42, sha256: "hash" },
-      rows: [row],
+      rows,
       counts: {
-        CREATE: 1,
+        CREATE: rows.filter(({ action }) => action === "CREATE").length,
         INCREASE_QUANTITY: 0,
         NO_CHANGE: 0,
         POSSIBLE_DUPLICATE: 0,
@@ -1530,30 +1701,36 @@ describe("staff inventory import safety", () => {
       operationId,
       proposalHash: proposalHashOverride ?? proposal.proposalHash,
       allowSameFileReimport,
+      applyOnlyRowNumber,
+      applyOnlyRowNumbers,
       ...(!omitReviewDecisions
         ? {
-            reviewDecisions: JSON.stringify([
-              skipDecision
-                ? { rowNumber: row.rowNumber, decision: "IGNORE" }
-                : {
-                    rowNumber: row.rowNumber,
-                    decision: "APPROVE",
-                    title: row.title,
-                    assetId: null,
-                    categoryId: useExistingCategory ? row.categoryId : null,
-                    newCategoryName: newCategoryName ?? null,
-                    approveNewCategory,
-                    locationId:
-                      submittedLocationId ?? selectedLocationId ?? null,
-                    quantity,
-                    type: decisionType === undefined ? type : decisionType,
-                    minQuantity,
-                    unitOfMeasure,
-                    consumptionType,
-                    assetModelDescription: assetModelDescription ?? null,
-                    acceptSuggestedImage,
-                  },
-            ]),
+            reviewDecisions: JSON.stringify(
+              reviewDecisionRows ?? [
+                skipDecision
+                  ? { rowNumber: row.rowNumber, decision: "IGNORE" }
+                  : {
+                      rowNumber: row.rowNumber,
+                      decision: "APPROVE",
+                      title: row.title,
+                      assetId: null,
+                      categoryId: useExistingCategory ? row.categoryId : null,
+                      newCategoryName: newCategoryName ?? null,
+                      approveNewCategory,
+                      locationId:
+                        submittedLocationId ?? selectedLocationId ?? null,
+                      quantity,
+                      type: decisionType === undefined ? type : decisionType,
+                      trackingModeConfirmed:
+                        trackingModeConfirmed ?? type === "INDIVIDUAL",
+                      minQuantity,
+                      unitOfMeasure,
+                      consumptionType,
+                      assetModelDescription: assetModelDescription ?? null,
+                      acceptSuggestedImage,
+                    },
+              ]
+            ),
           }
         : {}),
     });
@@ -1741,7 +1918,9 @@ describe("staff inventory import safety", () => {
     });
     database.asset.findMany.mockResolvedValue([asset]);
     database.asset.findFirst.mockResolvedValue(asset);
-    database.location.findMany.mockResolvedValue([]);
+    database.location.findMany.mockResolvedValue([
+      { id: "location-a", name: "Shelf A", parentId: null },
+    ]);
 
     return applyStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
@@ -1762,7 +1941,7 @@ describe("staff inventory import safety", () => {
     });
   }
 
-  it("creates one individual Asset, QR, and AssetModel for quantity one", async () => {
+  it("defaults a single imported product to quantity tracking", async () => {
     const { result, assetRows, ledgerRows, modelId } = await applyNewImport({
       quantity: 1,
     });
@@ -1770,13 +1949,15 @@ describe("staff inventory import safety", () => {
     expect(assetRows).toHaveLength(1);
     expect(assetRows[0]).toMatchObject({
       title: "Arduino Nano",
-      type: "INDIVIDUAL",
-      quantity: null,
-      assetModelId: modelId,
-      id: ledgerRows.find((item) => item.unitIndex === 0)?.targetAssetId,
-      newQrId: ledgerRows.find((item) => item.unitIndex === 0)?.qrId,
+      type: "QUANTITY_TRACKED",
+      quantity: 1,
     });
-    expect(mockCreateAssetModel).toHaveBeenCalledTimes(1);
+    expect(assetRows[0]).not.toHaveProperty("assetModelId");
+    expect(ledgerRows.find((item) => item.unitIndex === null)?.status).toBe(
+      "DONE"
+    );
+    expect(modelId).toBeNull();
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       totalRows: 1,
       succeededRows: 1,
@@ -1784,6 +1965,667 @@ describe("staff inventory import safety", () => {
     expect(
       database.ioioWriteOperation.updateMany.mock.calls.at(-1)?.[0].data.status
     ).toBe("SUCCEEDED");
+  });
+
+  it("saves and reopens a review draft without writing canonical inventory", async () => {
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    const proposalContent = {
+      version: 1 as const,
+      operationId: "draft-operation",
+      organizationId: "org-1",
+      source: { filename: "inventory.csv", size: 42, sha256: "draft-hash" },
+      rows: [
+        {
+          rowNumber: 2,
+          title: "Arduino Nano",
+          action: "CREATE" as const,
+          assetId: null,
+          type: "QUANTITY_TRACKED" as const,
+          quantity: 4,
+          receivedQuantity: 4,
+          category: "Electronics",
+          categoryId: "category-electronics",
+          location: null,
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "New item",
+          productImageProposal: {
+            status: "IMAGE_FOUND" as const,
+            mimeType: "image/webp" as const,
+            imageId: `ioio-import-${"a".repeat(64)}`,
+            autoAccepted: true,
+          },
+        },
+      ],
+      counts: {
+        CREATE: 1,
+        INCREASE_QUANTITY: 0,
+        NO_CHANGE: 0,
+        POSSIBLE_DUPLICATE: 0,
+        NEEDS_REVIEW: 0,
+        IGNORE: 0,
+        UPDATE_QUANTITY: 0,
+        UPDATE_LOCATION: 0,
+        UPDATE_CATEGORY: 0,
+        AMBIGUOUS: 0,
+        REJECT: 0,
+      },
+      createdAt: new Date().toISOString(),
+      categoryOptions: [
+        { id: "category-electronics", name: "Electronics", archived: false },
+      ],
+      locationOptions: [
+        {
+          id: "location-shelf-b3",
+          name: "Shelf B3",
+          parentId: "section-b",
+          pathLabel: "Storage / Section B / Shelf B3",
+          operational: false,
+          currentUnits: 2,
+        },
+      ],
+    };
+    const proposal = {
+      ...proposalContent,
+      proposalHash: getStaffImportProposalHash(proposalContent),
+    };
+    const operation = {
+      id: proposal.operationId,
+      operationType: "INVENTORY_IMPORT",
+      organizationId: "org-1",
+      userId: "staff-1",
+      status: "PREPARED",
+      fileSha256: proposal.source.sha256,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      description: JSON.stringify({ kind: "STAFF_INVENTORY_IMPORT", proposal }),
+    };
+    database.ioioWriteOperation.findFirst.mockImplementation(({ where }) =>
+      where.id === operation.id ? operation : null
+    );
+    database.ioioWriteOperation.updateMany.mockImplementation(
+      ({ where, data }) => {
+        if (where.id !== operation.id || operation.status !== "PREPARED") {
+          return { count: 0 };
+        }
+        Object.assign(operation, data);
+        return { count: 1 };
+      }
+    );
+    database.ioioWriteOperation.findMany.mockResolvedValue([operation]);
+    database.ioioImportItem.findMany.mockResolvedValue([]);
+
+    const decisions = [
+      {
+        rowNumber: 2,
+        decision: "APPROVE" as const,
+        title: "Arduino Nano",
+        categoryId: "category-electronics",
+        locationId: "location-shelf-b3",
+        quantity: 4,
+        type: "QUANTITY_TRACKED" as const,
+      },
+    ];
+    await saveStaffInventoryImportDraft({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: operation.id,
+      reviewDecisions: JSON.stringify(decisions),
+    });
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: operation.id,
+    });
+    const drafts = await getStaffInventoryImportDrafts({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+    });
+
+    expect(reopened.rows[0].productImageProposal).toMatchObject({
+      status: "IMAGE_FOUND",
+      imageId: `ioio-import-${"a".repeat(64)}`,
+    });
+    expect(reopened.rows[0].productImageProposal?.dataBase64).toBeUndefined();
+    expect(reopened.savedReviewDecisions).toMatchObject(decisions);
+    expect(reopened.rows[0]?.locationId).toBeNull();
+    expect(drafts).toEqual([
+      expect.objectContaining({
+        operationId: operation.id,
+        filename: "inventory.csv",
+        rowCount: 1,
+      }),
+    ]);
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
+  it("applies one approved row from a 20-row proposal and leaves the other 19 pending", async () => {
+    const proposalRows: StaffImportProposalRow[] = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        rowNumber: index + 2,
+        title: index === 0 ? "Arduino Nano" : `Inventory Item ${index + 1}`,
+        action: "CREATE",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        quantity: 1,
+        receivedQuantity: 1,
+        category: "Electronics",
+        categoryId: "category-electronics",
+        location: null,
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New item",
+        ...(index === 0
+          ? {
+              productImageProposal: {
+                status: "IMAGE_FOUND" as const,
+                mimeType: "image/webp" as const,
+                dataBase64: Buffer.from(
+                  "RIFF\u0004\u0000\u0000\u0000WEBP"
+                ).toString("base64"),
+                source: "OPENVERSE" as const,
+                autoAccepted: true,
+              },
+            }
+          : {
+              productImageProposal: {
+                status: "IMAGE_FOUND" as const,
+                mimeType: "image/webp" as const,
+                imageId: `ioio-import-${"b".repeat(64)}`,
+                autoAccepted: true,
+              },
+            }),
+      })
+    );
+    const decisions: StaffImportReviewDecision[] = proposalRows.map(
+      (row, index) => ({
+        rowNumber: row.rowNumber,
+        decision: index === 0 ? "APPROVE" : null,
+        ...(index === 0
+          ? {
+              title: row.title,
+              assetId: null,
+              categoryId: row.categoryId,
+              locationId: null,
+              quantity: 1,
+              type: "QUANTITY_TRACKED",
+              unitOfMeasure: "pcs",
+              consumptionType: "TWO_WAY",
+              acceptSuggestedImage: true,
+            }
+          : {}),
+      })
+    );
+    const {
+      result,
+      assetRows,
+      ledgerRows,
+      operation,
+      operationId,
+      proposalHash,
+    } = await applyNewImport({
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      proposalRows,
+      reviewDecisionRows: decisions,
+    });
+
+    expect(assetRows).toHaveLength(1);
+    expect(result).toMatchObject({ succeededRows: 1, remainingRows: 19 });
+    expect(operation.status).toBe("PREPARED");
+    expect(ledgerRows.filter((item) => item.status === "DONE")).toHaveLength(1);
+    expect(ledgerRows.filter((item) => item.status === "PENDING")).toHaveLength(
+      19
+    );
+    expect(mockUpdateAssetMainImage).toHaveBeenCalledTimes(1);
+    await expect(
+      applyStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId,
+        proposalHash,
+        reviewDecisions: JSON.stringify(decisions),
+      })
+    ).rejects.toThrow("There are no approved rows left to apply.");
+    expect(assetRows).toHaveLength(1);
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+    });
+    expect(reopened.rows[1].productImageProposal?.imageId).toBe(
+      `ioio-import-${"b".repeat(64)}`
+    );
+    expect(reopened.rows[1].productImageProposal?.dataBase64).toBeUndefined();
+    expect(reopened.appliedRowNumbers).toEqual([2]);
+    expect(reopened.ignoredRowNumbers).toEqual([]);
+  });
+
+  it("applies only the requested row and preserves the other approved draft decisions", async () => {
+    const proposalRows: StaffImportProposalRow[] = Array.from(
+      { length: 3 },
+      (_, index) => ({
+        rowNumber: index + 2,
+        title: `Inventory Item ${index + 1}`,
+        action: "CREATE",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        quantity: 1,
+        receivedQuantity: 1,
+        category: "Electronics",
+        categoryId: "category-electronics",
+        location: null,
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New item",
+      })
+    );
+    const decisions: StaffImportReviewDecision[] = proposalRows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      assetId: null,
+      categoryId: row.categoryId,
+      locationId: null,
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      unitOfMeasure: "pcs",
+      consumptionType: "TWO_WAY",
+      minQuantity: row.rowNumber === 4 ? -1 : null,
+    }));
+    const { result, assetRows, ledgerRows, operationId, proposalHash } =
+      await applyNewImport({
+        quantity: 1,
+        proposalRows,
+        reviewDecisionRows: decisions,
+        applyOnlyRowNumber: 3,
+      });
+
+    expect(assetRows.map(({ title }) => title)).toEqual(["Inventory Item 2"]);
+    expect(result).toMatchObject({ succeededRows: 1, remainingRows: 2 });
+    expect(ledgerRows.filter((item) => item.status === "DONE")).toHaveLength(1);
+    expect(ledgerRows.filter((item) => item.status === "PENDING")).toHaveLength(
+      2
+    );
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+    });
+    expect(reopened.appliedRowNumbers).toEqual([3]);
+    expect(reopened.savedReviewDecisions).toMatchObject(
+      decisions.map((decision) => ({
+        rowNumber: decision.rowNumber,
+        decision: "APPROVE",
+      }))
+    );
+    const retry = await applyStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+      proposalHash,
+      applyOnlyRowNumber: 3,
+      reviewDecisions: JSON.stringify(decisions),
+    });
+    expect(retry).toMatchObject({
+      status: "NEEDS_REVIEW",
+      blockedRows: [{ rowNumber: 3, issues: [{ code: "ALREADY_IMPORTED" }] }],
+    });
+    expect(assetRows).toHaveLength(1);
+    const next = await applyStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+      proposalHash,
+      applyOnlyRowNumber: 2,
+      reviewDecisions: JSON.stringify(decisions),
+    });
+    expect(next).toMatchObject({ succeededRows: 1, remainingRows: 1 });
+    expect(assetRows).toHaveLength(2);
+  });
+
+  it("keeps an explicit Create new tracking decision when reclassification finds an individual candidate", async () => {
+    const expectedAssetState = {
+      assetId: "existing-board",
+      title: "Arduino Nano",
+      type: "INDIVIDUAL" as const,
+      quantity: null,
+      categoryId: "category-electronics",
+      locationIds: [],
+      assetModelId: null,
+    };
+    const row: StaffImportProposalRow = {
+      rowNumber: 2,
+      title: "Arduino Nano",
+      action: "POSSIBLE_DUPLICATE",
+      assetId: null,
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      quantity: 1,
+      receivedQuantity: 1,
+      categoryId: "category-electronics",
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      reason: "Review possible duplicate",
+      matchCandidates: [
+        {
+          id: "existing-board",
+          title: "Arduino Nano",
+          type: "INDIVIDUAL",
+          quantity: null,
+          category: "Electronics",
+          location: null,
+          expectedAssetState,
+        },
+      ],
+    };
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      proposalRows: [row],
+      existingAssets: [
+        {
+          id: "existing-board",
+          title: "Arduino Nano",
+          type: "INDIVIDUAL",
+          quantity: null,
+          categoryId: "category-electronics",
+          assetLocations: [],
+        },
+      ],
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: null,
+          title: row.title,
+          assetId: null,
+          categoryId: row.categoryId,
+          locationId: null,
+          quantity: 1,
+          type: "QUANTITY_TRACKED",
+          productChoice: "NEW",
+        },
+      ],
+      applyOnlyRowNumber: 2,
+    });
+    expect(result).toMatchObject({ succeededRows: 1 });
+    expect(assetRows).toHaveLength(1);
+    expect(assetRows[0]).toMatchObject({
+      type: "QUANTITY_TRACKED",
+      quantity: 1,
+    });
+  });
+
+  it.each([false, true])(
+    "validates required fields instead of stored CONFLICT (missing category: %s)",
+    async (missingCategory) => {
+      const row: StaffImportProposalRow = {
+        rowNumber: 2,
+        title: "Arduino Nano",
+        action: "CREATE",
+        reviewState: "CONFLICT",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        quantity: 5,
+        receivedQuantity: 5,
+        categoryId: missingCategory ? null : "category-electronics",
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "Historical review state",
+      };
+      const { result, assetRows } = await applyNewImport({
+        quantity: 5,
+        proposalRows: [row],
+        reviewDecisionRows: [
+          {
+            rowNumber: 2,
+            decision: "APPROVE",
+            title: row.title,
+            assetId: null,
+            categoryId: row.categoryId,
+            locationId: null,
+            quantity: 5,
+            type: "QUANTITY_TRACKED",
+            productChoice: "NEW",
+          },
+        ],
+      });
+      if (missingCategory) {
+        expect(result).toMatchObject({
+          status: "NEEDS_REVIEW",
+          readyCount: 0,
+          blockedCount: 1,
+          blockedRows: [
+            { rowNumber: 2, issues: [{ code: "MISSING_CATEGORY" }] },
+          ],
+        });
+        expect(assetRows).toHaveLength(0);
+      } else {
+        expect(result).toMatchObject({ succeededRows: 1 });
+        expect(assetRows).toHaveLength(1);
+      }
+    }
+  );
+
+  it("returns all blocked selected rows before writing a mixed batch", async () => {
+    const rows: StaffImportProposalRow[] = Array.from(
+      { length: 6 },
+      (_, index) => ({
+        rowNumber: index + 2,
+        title: `Product ${index + 1}`,
+        action: "CREATE",
+        reviewState: "CONFLICT",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        quantity: 1,
+        receivedQuantity: 1,
+        categoryId: index < 3 ? "category-electronics" : null,
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New item",
+      })
+    );
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      proposalRows: rows,
+      applyOnlyRowNumbers: [2, 3, 4, 5, 6],
+      reviewDecisionRows: rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        decision: "APPROVE",
+        title: row.title,
+        assetId: null,
+        categoryId: row.categoryId,
+        locationId: null,
+        quantity: 1,
+        type: "QUANTITY_TRACKED",
+        productChoice: "NEW",
+      })),
+    });
+    expect(result).toMatchObject({
+      status: "NEEDS_REVIEW",
+      readyCount: 3,
+      blockedCount: 2,
+      blockedRows: [
+        { rowNumber: 5, issues: [{ code: "MISSING_CATEGORY" }] },
+        { rowNumber: 6, issues: [{ code: "MISSING_CATEGORY" }] },
+      ],
+    });
+    expect(assetRows).toHaveLength(0);
+    expect(mockCreateCategory).not.toHaveBeenCalled();
+  });
+
+  it("accepts a direct row import without a second approval flag", async () => {
+    const { result, assetRows } = await applyNewImport({
+      quantity: 5,
+      applyOnlyRowNumber: 2,
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: null,
+          title: "Arduino Nano",
+          assetId: null,
+          categoryId: "category-electronics",
+          locationId: null,
+          quantity: 5,
+          type: "QUANTITY_TRACKED",
+          productChoice: "NEW",
+        },
+      ],
+    });
+    expect(result).toMatchObject({ succeededRows: 1 });
+    expect(assetRows).toHaveLength(1);
+  });
+
+  it("returns an explicit ignored issue for an ignored row in a scoped import", async () => {
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      skipDecision: true,
+      applyOnlyRowNumber: 2,
+    });
+    expect(result).toMatchObject({
+      status: "NEEDS_REVIEW",
+      readyCount: 0,
+      blockedCount: 1,
+      blockedRows: [{ rowNumber: 2, issues: [{ code: "IGNORED" }] }],
+    });
+    expect(assetRows).toHaveLength(0);
+  });
+
+  it.each([0, -1])(
+    "returns structured invalid quantity for %s without writes",
+    async (quantity) => {
+      const { result, assetRows } = await applyNewImport({ quantity });
+      expect(result).toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedRows: [{ issues: [{ code: "INVALID_QUANTITY" }] }],
+      });
+      expect(assetRows).toHaveLength(0);
+    }
+  );
+
+  it("keeps ignored rows resolved while the rest of the proposal remains pending", async () => {
+    const remainingRow: StaffImportProposalRow = {
+      rowNumber: 3,
+      title: "USB-C Cable",
+      action: "CREATE",
+      assetId: null,
+      type: "QUANTITY_TRACKED",
+      quantity: 1,
+      receivedQuantity: 1,
+      category: "Electronics",
+      categoryId: "category-electronics",
+      location: null,
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      reason: "New item",
+    };
+    const { result, assetRows, operationId } = await applyNewImport({
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      proposalRows: [
+        {
+          rowNumber: 2,
+          title: "Arduino Nano",
+          action: "CREATE",
+          assetId: null,
+          type: "QUANTITY_TRACKED",
+          quantity: 1,
+          receivedQuantity: 1,
+          category: "Electronics",
+          categoryId: "category-electronics",
+          location: null,
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "New item",
+        },
+        remainingRow,
+      ],
+      reviewDecisionRows: [
+        { rowNumber: 2, decision: "IGNORE" },
+        { rowNumber: 3, decision: null },
+      ],
+    });
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+    });
+
+    expect(result).toMatchObject({ skippedRows: 1, remainingRows: 1 });
+    expect(assetRows).toHaveLength(0);
+    expect(reopened.ignoredRowNumbers).toEqual([2]);
+    expect(reopened.appliedRowNumbers).toEqual([]);
+  });
+
+  it("applies only the three approved rows from a partial proposal", async () => {
+    const proposalRows: StaffImportProposalRow[] = Array.from(
+      { length: 5 },
+      (_, index) => ({
+        rowNumber: index + 2,
+        title: index === 0 ? "Arduino Nano" : `Inventory Item ${index + 1}`,
+        action: "CREATE",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        quantity: 1,
+        receivedQuantity: 1,
+        category: "Electronics",
+        categoryId: "category-electronics",
+        location: null,
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New item",
+      })
+    );
+    const decisions: StaffImportReviewDecision[] = proposalRows.map(
+      (row, index) => ({
+        rowNumber: row.rowNumber,
+        decision: index < 3 ? "APPROVE" : null,
+        ...(index < 3
+          ? {
+              title: row.title,
+              assetId: null,
+              categoryId: row.categoryId,
+              locationId: null,
+              quantity: 1,
+              type: "QUANTITY_TRACKED",
+              unitOfMeasure: "pcs",
+              consumptionType: "TWO_WAY",
+            }
+          : {}),
+      })
+    );
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      proposalRows,
+      reviewDecisionRows: decisions,
+    });
+
+    expect(assetRows).toHaveLength(3);
+    expect(result).toMatchObject({ succeededRows: 3, remainingRows: 2 });
   });
 
   it("applies the received shipment quantity parsed from a PDF through the existing Shelf path", async () => {
@@ -1868,7 +2710,18 @@ describe("staff inventory import safety", () => {
         useExistingCategory: false,
         newCategoryName: "Sensors",
       })
-    ).rejects.toThrow("Row 2 is NEEDS_REVIEW");
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "MISSING_CATEGORY" }),
+            ]),
+          },
+        ],
+      },
+    });
 
     expect(mockCreateCategory).not.toHaveBeenCalled();
     expect(mockCreateAsset).not.toHaveBeenCalled();
@@ -1881,7 +2734,18 @@ describe("staff inventory import safety", () => {
         type: "QUANTITY_TRACKED",
         categoryArchivedAfterReview: true,
       })
-    ).rejects.toThrow(/Row 2 is CONFLICT/i);
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "INVALID_CATEGORY" }),
+            ]),
+          },
+        ],
+      },
+    });
     expect(mockCreateAsset).not.toHaveBeenCalled();
   });
 
@@ -1895,7 +2759,18 @@ describe("staff inventory import safety", () => {
         approveNewCategory: true,
         categoryAppearedAfterReview: true,
       })
-    ).rejects.toThrow(/Row 2 is CONFLICT/i);
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "INVALID_CATEGORY" }),
+            ]),
+          },
+        ],
+      },
+    });
     expect(mockCreateCategory).not.toHaveBeenCalled();
     expect(mockCreateAsset).not.toHaveBeenCalled();
   });
@@ -1909,7 +2784,18 @@ describe("staff inventory import safety", () => {
         newCategoryName: "Sensors",
         approveNewCategory: false,
       })
-    ).rejects.toThrow(/Row 2 is NEEDS_REVIEW/i);
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "MISSING_CATEGORY" }),
+            ]),
+          },
+        ],
+      },
+    });
     expect(mockCreateCategory).not.toHaveBeenCalled();
     expect(mockCreateAsset).not.toHaveBeenCalled();
   });
@@ -1921,7 +2807,18 @@ describe("staff inventory import safety", () => {
         type: "QUANTITY_TRACKED",
         ambiguousLocation: true,
       })
-    ).rejects.toThrow(/Row 2 is NEEDS_REVIEW/i);
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "MISSING_LOCATION" }),
+            ]),
+          },
+        ],
+      },
+    });
     expect(mockCreateAsset).not.toHaveBeenCalled();
   });
 
@@ -1944,7 +2841,18 @@ describe("staff inventory import safety", () => {
         type: "QUANTITY_TRACKED",
         decisionType: null,
       })
-    ).rejects.toThrow(/Row 2 is NEEDS_REVIEW/i);
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "TRACKING_REVIEW_REQUIRED" }),
+            ]),
+          },
+        ],
+      },
+    });
 
     const { assetRows } = await applyNewImport({
       quantity: 5,
@@ -1961,10 +2869,126 @@ describe("staff inventory import safety", () => {
     });
   });
 
+  it("blocks a new individual-tracking proposal until staff confirms it", async () => {
+    await expect(
+      applyNewImport({
+        quantity: 2,
+        type: "INDIVIDUAL",
+        trackingModeConfirmed: false,
+      })
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "TRACKING_REVIEW_REQUIRED" }),
+            ]),
+          },
+        ],
+      },
+    });
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+
+  it("allows a confirmed manual override from quantity to individual tracking", async () => {
+    const { assetRows } = await applyNewImport({
+      quantity: 2,
+      type: "QUANTITY_TRACKED",
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: "APPROVE",
+          title: "Arduino Nano",
+          assetId: null,
+          categoryId: "category-electronics",
+          locationId: null,
+          quantity: 2,
+          type: "INDIVIDUAL",
+          trackingModeConfirmed: true,
+          productChoice: "NEW",
+        },
+      ],
+    });
+
+    expect(assetRows).toHaveLength(2);
+    expect(assetRows.every((asset) => asset.type === "INDIVIDUAL")).toBe(true);
+  });
+
+  it("rejects review attempts to change an existing model tracking mode", async () => {
+    const proposalRow = {
+      rowNumber: 2,
+      title: "USB-C Cable",
+      action: "NO_CHANGE" as const,
+      assetId: "existing-cable",
+      type: "QUANTITY_TRACKED" as const,
+      trackingSource: "EXISTING_MODEL" as const,
+      trackingReasonCode: "EXISTING_MODEL_QUANTITY" as const,
+      trackingReason:
+        "Uses this existing Shelf model’s quantity tracking mode.",
+      quantity: 1,
+      receivedQuantity: 1,
+      quantityStatus: "RECEIVED" as const,
+      category: "Electronics",
+      categoryId: "category-electronics",
+      location: null,
+      locationId: null,
+      currentQuantity: 1,
+      currentCategoryId: "category-electronics",
+      currentLocationId: null,
+      reason: "Existing model",
+      expectedAssetState: {
+        assetId: "existing-cable",
+        title: "USB-C Cable",
+        type: "QUANTITY_TRACKED" as const,
+        quantity: 1,
+        categoryId: "category-electronics",
+        locationIds: [],
+        assetModelId: null,
+      },
+    };
+    await expect(
+      applyNewImport({
+        quantity: 1,
+        proposalRows: [proposalRow],
+        reviewDecisionRows: [
+          {
+            rowNumber: 2,
+            decision: "APPROVE",
+            title: "USB-C Cable",
+            assetId: "existing-cable",
+            categoryId: "category-electronics",
+            locationId: null,
+            quantity: 1,
+            type: "INDIVIDUAL",
+            trackingModeConfirmed: true,
+          },
+        ],
+      })
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: expect.arrayContaining([
+              expect.objectContaining({ code: "TRACKING_REVIEW_REQUIRED" }),
+            ]),
+          },
+        ],
+      },
+    });
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+  });
+
   it("rejects a client location ID outside the organization proposal options", async () => {
     await expect(
       applyNewImport({ quantity: 1, submittedLocationId: "foreign-location" })
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({
+      result: {
+        status: "NEEDS_REVIEW",
+        blockedRows: [{ issues: [{ code: "INVALID_LOCATION" }] }],
+      },
+    });
     expect(mockCreateAsset).not.toHaveBeenCalled();
   });
 
@@ -1982,6 +3006,7 @@ describe("staff inventory import safety", () => {
   it("creates five individual Assets with one model and distinct QR IDs", async () => {
     const { result, assetRows, ledgerRows, modelId } = await applyNewImport({
       quantity: 5,
+      type: "INDIVIDUAL",
     });
 
     expect(
@@ -2024,6 +3049,7 @@ describe("staff inventory import safety", () => {
     const { result, assetRows, operationId, proposalHash } =
       await applyNewImport({
         quantity: 5,
+        type: "INDIVIDUAL",
       });
     const secondResult = await applyStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
@@ -2131,9 +3157,12 @@ describe("staff inventory import safety", () => {
   it.each(["quantity", "categoryId", "locationId"] as const)(
     "blocks a %s edit after review as CONFLICT without overwriting it",
     async (changedField) => {
-      await expect(applyAfterConcurrentAssetEdit(changedField)).rejects.toThrow(
-        /CONFLICT/i
-      );
+      await expect(
+        applyAfterConcurrentAssetEdit(changedField)
+      ).resolves.toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedRows: [{ issues: [{ code: "CANONICAL_DATA_CHANGED" }] }],
+      });
       expect(mockUpdateAsset).not.toHaveBeenCalled();
     }
   );
@@ -2146,7 +3175,11 @@ describe("staff inventory import safety", () => {
       operationId,
       operation,
       proposalHash,
-    } = await applyNewImport({ quantity: 5, pauseAtUnitIndex: 3 });
+    } = await applyNewImport({
+      quantity: 5,
+      type: "INDIVIDUAL",
+      pauseAtUnitIndex: 3,
+    });
     expect(firstResult).toEqual({ status: "IN_PROGRESS", operationId });
     expect(assetRows).toHaveLength(3);
 
@@ -2196,6 +3229,7 @@ describe("staff inventory import safety", () => {
   it("uses a deterministic alternative when an individual unit title already exists", async () => {
     const { assetRows } = await applyNewImport({
       quantity: 2,
+      type: "INDIVIDUAL",
       existingAssets: [{ id: "existing-asset", title: "Arduino Nano #001" }],
     });
 
@@ -2297,9 +3331,17 @@ describe("staff inventory import safety", () => {
         userId: "staff-1",
         organizationId: "org-1",
         isNewAsset: true,
+        maxProcessedBytes: 2 * 1024 * 1024,
         request: expect.any(Request),
       })
     );
+    const imageForm =
+      await mockUpdateAssetMainImage.mock.calls[0][0].request.formData();
+    expect(imageForm.get("mainImage")).toMatchObject({
+      type: "image/webp",
+      name: "product-image.webp",
+    });
+    expect(imageForm.get("image")).toBeNull();
   });
 
   it("does not upload a suggested image when staff leaves it unchecked", async () => {
@@ -2375,6 +3417,22 @@ describe("staff inventory import safety", () => {
       },
     ]);
   });
+
+  it.each(["Qty", "Quantity", "Quantity on hand", "Stock qty", "Antal"])(
+    "normalizes the %s spreadsheet quantity header and whitespace",
+    async (quantityHeader) => {
+      const rows = await parseStaffImportFile({
+        filename: "inventory.csv",
+        buffer: Buffer.from(`Product,${quantityHeader}\nUSB-C Cable, 5 \n`),
+      });
+
+      expect(rows[0]).toMatchObject({
+        title: "USB-C Cable",
+        quantity: 5,
+        quantityStatus: "RECEIVED",
+      });
+    }
+  );
 
   it("rejects personal borrower columns before proposal creation", async () => {
     await expect(
@@ -2607,6 +3665,173 @@ describe("staff inventory import safety", () => {
         genericClaudeResult: "line-items-found",
       })
     );
+  });
+
+  it("searches from text-only PDF invoice identity and applies the proposed image", async () => {
+    preparePdfImportMocks("operation-pdf-product-image-search");
+    const pageText = [
+      "Seeed Studio supplier invoice",
+      "XIAO ESP32-S3 Sense | 113991115 | Shipped quantity 5",
+    ].join("\n");
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({
+        pageText,
+        items: [
+          {
+            productName: "XIAO ESP32-S3 Sense",
+            manufacturer: "Seeed Studio",
+            mpn: "113991115",
+            supplierProductNumber: "SUP-113991115",
+            quantity: 5,
+            evidenceText:
+              "XIAO ESP32-S3 Sense | 113991115 | Shipped quantity 5",
+            description: "XIAO ESP32-S3 Sense compact camera development board",
+          },
+        ],
+      })
+    );
+    const actualProductEnrichment = (await vi.importActual(
+      "./product-enrichment.server"
+    )) as {
+      enrichImportProductRows: (
+        rows: ImportProductEnrichmentRow[],
+        models: ExistingImportAssetModel[],
+        getKey:
+          | ((row: ImportProductEnrichmentRow) => string | undefined)
+          | undefined,
+        provider: ProductSearchProvider
+      ) => Promise<{
+        rows: ImportProductEnrichmentRow[];
+        diagnostics: object;
+      }>;
+    };
+    const imageBytes = await sharp({
+      create: {
+        width: 320,
+        height: 240,
+        channels: 3,
+        background: { r: 48, g: 110, b: 172 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const productPageUrl =
+      "https://www.seeedstudio.com/xiao-esp32-s3-sense.html";
+    const imageUrl = "https://media.seeedstudio.com/xiao-esp32-s3-sense.png";
+    const productPage = Buffer.from(
+      `<script type="application/ld+json">${JSON.stringify({
+        "@type": "Product",
+        name: "XIAO ESP32-S3 Sense",
+        brand: { "@type": "Brand", name: "Seeed Studio" },
+        mpn: "113991115",
+        image: imageUrl,
+      })}</script>`
+    );
+    // why: product search is an external provider; keep its invoice query and
+    // result deterministic while the actual PDF/enrichment/Apply code runs.
+    const searchMock = vi.fn((query: string) =>
+      query === "Seeed Studio 113991115"
+        ? Promise.resolve([
+            {
+              productPageUrl,
+              title: "Seeed Studio XIAO ESP32-S3 Sense",
+              description: "Manufacturer product page, MPN 113991115",
+              sourceDomain: "www.seeedstudio.com",
+            },
+          ])
+        : Promise.resolve([])
+    );
+    const provider: ProductSearchProvider = { search: searchMock };
+    // why: product page and image hosts are untrusted network dependencies;
+    // mocked Responses keep this full PDF-to-Apply path offline and bounded.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((input) => {
+        const url = String(input);
+        if (url === productPageUrl) {
+          return Promise.resolve(
+            new Response(productPage, {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            })
+          );
+        }
+        if (url === imageUrl) {
+          return Promise.resolve(
+            new Response(imageBytes, {
+              headers: { "content-type": "image/png" },
+            })
+          );
+        }
+        throw new Error("Unexpected outbound URL");
+      });
+    mockEnrichImportProductRows.mockImplementationOnce(
+      async (
+        rows: ImportProductEnrichmentRow[],
+        models: ExistingImportAssetModel[],
+        getKey:
+          | ((row: ImportProductEnrichmentRow) => string | undefined)
+          | undefined
+      ) =>
+        actualProductEnrichment.enrichImportProductRows(
+          rows,
+          models,
+          getKey,
+          provider
+        )
+    );
+
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makePdfFromPages([{ text: pageText }])], "seeed.pdf", {
+        type: "application/pdf",
+      }),
+    });
+
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
+    const proposedRow = prepared.proposal.rows[0];
+    expect(proposedRow).toMatchObject({
+      title: "XIAO ESP32-S3 Sense",
+      manufacturer: "Seeed Studio",
+      manufacturerPartNumber: "113991115",
+      supplierPartNumber: "SUP-113991115",
+      quantity: 5,
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        source: "MANUFACTURER",
+        identityEvidence: "EXACT_MPN",
+        autoAccepted: true,
+      },
+    });
+    expect(proposedRow.productUrl).toBeUndefined();
+    expect(proposedRow.productImageUrl).toBeUndefined();
+    expect(searchMock).toHaveBeenCalledWith("Seeed Studio 113991115", 5);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(proposedRow.productImageProposal?.imageId).toMatch(/^ioio-import-/);
+    expect(proposedRow.productImageProposal?.dataBase64).toBeUndefined();
+    expect(
+      previewImages.get(proposedRow.productImageProposal?.imageId ?? "")!.blob
+        .byteLength
+    ).toBeLessThanOrEqual(2 * 1024 * 1024);
+
+    const { result } = await applyNewImport({
+      quantity: 5,
+      type: "QUANTITY_TRACKED",
+      assetModelDescription: proposedRow.assetModelDescription,
+      productImageProposal: {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        imageId: proposedRow.productImageProposal?.imageId,
+        sourceName: proposedRow.productImageProposal?.sourceName,
+        sourceUrl: proposedRow.productImageProposal?.sourceUrl,
+      },
+      acceptSuggestedImage: true,
+    });
+
+    expect(result.succeededRows).toBe(1);
+    expect(mockUpdateAssetMainImage).toHaveBeenCalledTimes(1);
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
   });
 
   it("uses generic Claude for a readable text-based purchase list", async () => {
@@ -3373,7 +4598,7 @@ describe("staff inventory import safety", () => {
         quantity: 1,
         receivedQuantity: 1,
         categoryId: "cat-electronics",
-        type: null,
+        type: "QUANTITY_TRACKED",
         sourcePage: 1,
       },
       {
@@ -3384,7 +4609,7 @@ describe("staff inventory import safety", () => {
         quantity: 4,
         receivedQuantity: 4,
         categoryId: null,
-        type: null,
+        type: "QUANTITY_TRACKED",
         sourcePage: 1,
       },
     ]);
@@ -3980,11 +5205,279 @@ describe("staff inventory import safety", () => {
     expect(ordered.action).toBe("NEEDS_REVIEW");
     expect(ordered.proposedQuantity).toBe(8);
   });
+
+  it.each([
+    ["USB-C Cable", 20],
+    ["Arduino Nano", 5],
+    ["JST cable", 10],
+    ["small sensor module", 8],
+    ["DC motor", 10],
+  ])("defaults %s stock to quantity tracking", (title, quantity) => {
+    const [row] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title,
+          quantity,
+          category: "Electronics",
+          location: null,
+          type: null,
+        },
+      ],
+      assets: [],
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [],
+    });
+
+    expect(row).toMatchObject({
+      action: "CREATE",
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      trackingReasonCode: "DEFAULT_QUANTITY",
+    });
+  });
+
+  it("uses existing Shelf tracking semantics even when source mode differs", () => {
+    const [quantityModelRow] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title: "USB-C Cable",
+          quantity: 20,
+          receivedQuantity: 20,
+          quantityStatus: "RECEIVED",
+          category: null,
+          location: null,
+          type: "INDIVIDUAL",
+          trackingSource: "SOURCE_EXPLICIT",
+        },
+      ],
+      assets: [
+        {
+          id: "quantity-cable",
+          title: "USB-C Cable",
+          type: "QUANTITY_TRACKED",
+          quantity: 10,
+          categoryId: null,
+          assetLocations: [],
+        },
+      ],
+      categories: [],
+      locations: [],
+    });
+    const [individualModelRow] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 3,
+          title: "Rigol DS1054Z",
+          quantity: 1,
+          category: null,
+          location: null,
+          type: null,
+        },
+      ],
+      assets: [
+        {
+          id: "individual-scope",
+          title: "Rigol DS1054Z",
+          type: "INDIVIDUAL",
+          quantity: null,
+          categoryId: null,
+          assetLocations: [],
+        },
+      ],
+      categories: [],
+      locations: [],
+    });
+
+    expect(quantityModelRow).toMatchObject({
+      type: "QUANTITY_TRACKED",
+      trackingSource: "EXISTING_MODEL",
+      trackingReasonCode: "EXISTING_MODEL_QUANTITY",
+    });
+    expect(individualModelRow).toMatchObject({
+      type: "INDIVIDUAL",
+      trackingSource: "EXISTING_MODEL",
+      trackingReasonCode: "EXISTING_MODEL_INDIVIDUAL",
+    });
+  });
+
+  it("uses the tracking mode of a linked AssetModel and increases its quantity asset", () => {
+    const [row] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title: "Arduino Nano",
+          quantity: 4,
+          receivedQuantity: 4,
+          quantityStatus: "RECEIVED",
+          category: null,
+          location: null,
+          type: "INDIVIDUAL",
+          trackingSource: "SOURCE_EXPLICIT",
+          existingAssetModelId: "model-nano",
+        },
+      ],
+      assets: [
+        {
+          id: "quantity-nano",
+          title: "Arduino Nano Stock",
+          type: "QUANTITY_TRACKED",
+          quantity: 3,
+          categoryId: null,
+          assetModelId: "model-nano",
+          assetLocations: [],
+        },
+      ],
+      categories: [],
+      locations: [],
+    });
+
+    expect(row).toMatchObject({
+      action: "INCREASE_QUANTITY",
+      assetId: "quantity-nano",
+      type: "QUANTITY_TRACKED",
+      proposedQuantity: 7,
+      trackingSource: "EXISTING_MODEL",
+      trackingReasonCode: "EXISTING_MODEL_QUANTITY",
+    });
+  });
+
+  it("does not use quantity, manufacturer, category, or MPN alone as individual evidence", () => {
+    const [row] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title: "Seeed Studio XIAO ESP32-S3 Sense",
+          quantity: 20,
+          category: "Electronics",
+          location: null,
+          type: null,
+          manufacturer: "Seeed Studio",
+          manufacturerPartNumber: "SKU-ESP32S3-SENSE",
+        },
+      ],
+      assets: [],
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [],
+    });
+
+    expect(row).toMatchObject({
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      trackingReasonCode: "DEFAULT_QUANTITY",
+    });
+  });
+
+  it("proposes individual tracking from a serial number and requires staff confirmation", () => {
+    const [row] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title: "Digital oscilloscope",
+          quantity: 1,
+          category: "Electronics",
+          location: null,
+          type: null,
+          serialNumber: "SCOPE-1042",
+        },
+      ],
+      assets: [],
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [],
+    });
+
+    expect(row).toMatchObject({
+      type: "INDIVIDUAL",
+      trackingSource: "SOURCE_EXPLICIT",
+      trackingReasonCode: "EXPLICIT_SERIALIZED_SOURCE",
+    });
+    const state = (trackingModeConfirmed: boolean) =>
+      resolveImportReviewState({
+        row,
+        decision: {
+          decision: "APPROVE",
+          title: row.title,
+          categoryId: row.categoryId,
+          quantity: 1,
+          type: "INDIVIDUAL",
+          trackingModeConfirmed,
+          productChoice: "NEW",
+        },
+        categoryAvailable: true,
+        locationAvailable: true,
+      });
+    expect(state(false)).toBe("NEEDS_REVIEW");
+    expect(state(true)).toBe("READY");
+  });
+
+  it("requires source and equipment evidence together for individual equipment", () => {
+    const [strong] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 2,
+          title: "Rigol DS1054Z Digital Oscilloscope",
+          quantity: 2,
+          category: "Electronics",
+          sourceDescription: "Loanable test equipment",
+          location: null,
+          type: null,
+        },
+      ],
+      assets: [],
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [],
+    });
+    const [ambiguous] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 3,
+          title: "Digital oscilloscope",
+          quantity: 2,
+          category: "Electronics",
+          sourceDescription: "Digital oscilloscope",
+          location: null,
+          type: null,
+        },
+      ],
+      assets: [],
+      categories: [{ id: "electronics", name: "Electronics" }],
+      locations: [],
+    });
+
+    expect(strong).toMatchObject({
+      type: "INDIVIDUAL",
+      trackingSource: "DETERMINISTIC_EQUIPMENT_EVIDENCE",
+      trackingReasonCode: "EQUIPMENT_REVIEW",
+    });
+    expect(ambiguous).toMatchObject({
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      trackingReasonCode: "DEFAULT_QUANTITY",
+    });
+  });
 });
 
 describe("normalized spreadsheet import", () => {
   const parse = (text: string) =>
     parseStaffImportFile({ filename: "stock.csv", buffer: Buffer.from(text) });
+  it("normalizes explicit tracking modes and per-unit serial evidence", async () => {
+    const [serialized, explicitQuantity] = await parse(
+      "Product,Qty,Serial Number,Tracking Mode\nOscilloscope,1,SCOPE-1042,\nUSB-C Cable,20,,QUANTITY_TRACKED"
+    );
+
+    expect(serialized).toMatchObject({
+      title: "Oscilloscope",
+      serialNumber: "SCOPE-1042",
+      type: null,
+    });
+    expect(explicitQuantity).toMatchObject({
+      title: "USB-C Cable",
+      type: "QUANTITY_TRACKED",
+      trackingSource: "SOURCE_EXPLICIT",
+    });
+  });
+
   it.each([",", ";", "\t"])(
     "reads quoted fields, BOM and %s delimiters",
     async (delimiter) => {
@@ -4040,7 +5533,7 @@ describe("normalized spreadsheet import", () => {
   });
   it("produces equivalent 20-product rows from multiple-sheet XLSX and CSV", async () => {
     const matrix = [
-      ["Product name", "Received", "Brand", "MPN"],
+      ["Product name", "Qty", "Brand", "MPN"],
       ...[
         "Arduino Nano",
         "ESP32 DevKit",
@@ -4137,6 +5630,189 @@ describe("normalized spreadsheet import", () => {
 });
 
 describe("spreadsheet proposal enrichment", () => {
+  it("carries equivalent CSV and XLSX quantities into the 20-row proposal", async () => {
+    // why: use the real file preparation path while replacing network and database boundaries.
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+    database.asset.findMany.mockResolvedValue([]);
+    database.assetModel.findMany.mockResolvedValue([]);
+    database.category.findMany.mockResolvedValue([]);
+    database.location.findMany.mockResolvedValue([]);
+    database.location.count.mockResolvedValue(0);
+    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
+    database.ioioWriteOperation.findFirst.mockResolvedValue({ id: "proposal" });
+    database.ioioWriteOperation.create.mockResolvedValue({});
+    database.ioioImportItem.createMany.mockResolvedValue({ count: 20 });
+    database.ioioImportItem.findMany.mockResolvedValue([]);
+    mockGetCategories.mockResolvedValue([
+      { id: "electronics", name: "Electronics" },
+    ]);
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "manual",
+      reason: "helper_not_configured",
+    });
+
+    const products = [
+      "Seeed Studio XIAO ESP32-S3 Sense",
+      "Arduino Nano",
+      "ESP32 DevKit",
+      "Raspberry Pi Pico",
+      "USB-C Cable",
+      "HDMI Adapter",
+      "JST Connector",
+      "NEMA 17 Motor",
+      "Micro Servo",
+      "Motor Driver",
+      "Temperature Sensor",
+      "Distance Sensor",
+      "IMU Module",
+      "Pressure Sensor",
+      "Breadboard",
+      "Resistor Kit",
+      "LED Strip",
+      "Bench Power Supply",
+      "Digital Multimeter",
+      "Soldering Iron",
+    ];
+    const table = [
+      ["Product", "Qty", "Manufacturer", "MPN", "Category"],
+      ...products.map((name, index) => [
+        name,
+        String(index + 1),
+        "Maker",
+        `MPN-${index + 1}`,
+        "Electronics",
+      ]),
+    ];
+    const csvText = table.map((row) => row.join(",")).join("\n");
+    const csvPrepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([csvText], "inventory.csv", { type: "text/csv" }),
+    });
+
+    const workbook = new JSZip();
+    workbook.file(
+      "xl/workbook.xml",
+      '<workbook><sheets><sheet name="Notes" r:id="n"/><sheet name="Inventory" r:id="i"/></sheets></workbook>'
+    );
+    workbook.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="n" Target="worksheets/notes.xml"/><Relationship Id="i" Target="worksheets/inventory.xml"/></Relationships>'
+    );
+    const xml = (rows: string[][]) =>
+      `<worksheet><sheetData>${rows
+        .map(
+          (row, rowIndex) =>
+            `<row r="${rowIndex + 1}">${row
+              .map((cell, columnIndex) => {
+                const reference = `${String.fromCharCode(65 + columnIndex)}${
+                  rowIndex + 1
+                }`;
+                if (rowIndex > 2 && columnIndex === 1) {
+                  return `<c r="${reference}"><v>${cell}</v></c>`;
+                }
+                return `<c r="${reference}" t="inlineStr"><is><t>${cell}</t></is></c>`;
+              })
+              .join("")}</row>`
+        )
+        .join("")}</sheetData></worksheet>`;
+    workbook.file(
+      "xl/worksheets/notes.xml",
+      xml([["Notes"], ["Not an inventory table"]])
+    );
+    workbook.file(
+      "xl/worksheets/inventory.xml",
+      xml([["Supplier: Example"], [], ...table, []])
+    );
+    const xlsxBytes = await workbook.generateAsync({ type: "nodebuffer" });
+    const xlsxPrepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File(
+        [new Uint8Array(xlsxBytes).buffer as ArrayBuffer],
+        "inventory.xlsx",
+        {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+      ),
+    });
+
+    expect(csvPrepared.status).toBe("PREPARED");
+    expect(xlsxPrepared.status).toBe("PREPARED");
+    if (
+      csvPrepared.status !== "PREPARED" ||
+      xlsxPrepared.status !== "PREPARED"
+    ) {
+      throw new Error("Expected both spreadsheet proposals");
+    }
+    const logicalRows = (proposal: StaffImportProposal) =>
+      proposal.rows.map((row) => ({
+        title: row.title,
+        quantity: row.receivedQuantity ?? row.quantity ?? row.proposedQuantity,
+        manufacturer: row.manufacturer,
+        mpn: row.manufacturerPartNumber,
+        categoryId: row.categoryId,
+        suggestedLocationId: row.suggestedLocationId,
+      }));
+    expect(csvPrepared.proposal.rows).toHaveLength(20);
+    expect(xlsxPrepared.proposal.rows).toHaveLength(20);
+    expect(logicalRows(csvPrepared.proposal)).toEqual(
+      logicalRows(xlsxPrepared.proposal)
+    );
+    expect(logicalRows(csvPrepared.proposal)).toEqual(
+      products.map((title, index) => ({
+        title,
+        quantity: index + 1,
+        manufacturer: "Maker",
+        mpn: `MPN-${index + 1}`,
+        categoryId: "electronics",
+        suggestedLocationId: null,
+      }))
+    );
+  });
+
+  it("asks staff to choose when multiple XLSX sheets contain inventory", async () => {
+    const workbook = new JSZip();
+    workbook.file(
+      "xl/workbook.xml",
+      '<workbook><sheets><sheet name="Cables" r:id="c"/><sheet name="Boards" r:id="b"/></sheets></workbook>'
+    );
+    workbook.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Target="worksheets/cables.xml" Id="c"/><Relationship Target="worksheets/boards.xml" Id="b"/></Relationships>'
+    );
+    const sheetXml = (name: string, product: string) =>
+      `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Product</t></is></c><c r="B1" t="inlineStr"><is><t>Qty</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>${name} ${product}</t></is></c><c r="B2"><v>2</v></c></row></sheetData></worksheet>`;
+    workbook.file("xl/worksheets/cables.xml", sheetXml("USB", "Cable"));
+    workbook.file("xl/worksheets/boards.xml", sheetXml("Arduino", "Nano"));
+    const buffer = await workbook.generateAsync({ type: "nodebuffer" });
+    const file = {
+      filename: "stock.xlsx",
+      buffer: Buffer.from(buffer),
+    };
+
+    await expect(parseStaffImportFile(file)).rejects.toThrow(
+      "multiple_inventory_sheets: More than one worksheet contains an inventory table"
+    );
+    const selectedRows = await parseStaffImportFile({
+      ...file,
+      filename: "stock",
+      contentType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      spreadsheetSheet: "Cables",
+    });
+    expect(selectedRows).toHaveLength(1);
+    expect(selectedRows[0]).toMatchObject({
+      title: "USB Cable",
+      quantity: 2,
+      sourceSheet: "Cables",
+    });
+  });
+
   it("batches 65 rows and retains them safely when the helper is unavailable", async () => {
     // why: external persistence and helper transport are replaced to inspect the proposal boundary.
     vi.clearAllMocks();

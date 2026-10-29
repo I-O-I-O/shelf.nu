@@ -351,10 +351,12 @@ export async function uploadFile(
     generateThumbnail = false,
     thumbnailSize = 108, // Default thumbnail size
     upsert = false,
+    maxProcessedBytes,
   }: UploadOptions & {
     generateThumbnail?: boolean;
     thumbnailSize?: number;
     upsert?: boolean;
+    maxProcessedBytes?: number;
   }
 ): Promise<string | { originalPath: string; thumbnailPath: string }> {
   const uploadedObjectPaths: string[] = [];
@@ -366,6 +368,8 @@ export async function uploadFile(
   try {
     // Process original image
     const file = await cropImage(fileData, resizeOptions);
+    if (maxProcessedBytes !== undefined && file.byteLength > maxProcessedBytes)
+      throw new Error("Processed image exceeds the final image size limit.");
 
     // Upload original file
     const { data, error } = await getSupabaseAdmin()
@@ -399,6 +403,13 @@ export async function uploadFile(
         }
       );
 
+      if (
+        maxProcessedBytes !== undefined &&
+        thumbnailFile.byteLength > maxProcessedBytes
+      )
+        throw new Error(
+          "Processed thumbnail exceeds the final image size limit."
+        );
       // Upload thumbnail
       // Include the path before the request: if Storage accepts the object but
       // the response is lost, cleanup should still attempt to remove it.
@@ -482,6 +493,7 @@ export async function parseFileFormData({
   thumbnailSize = 108,
   maxFileSize = DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
   allowEmptyFile = false,
+  maxProcessedBytes,
 }: {
   request: Request;
   newFileName: string;
@@ -490,6 +502,7 @@ export async function parseFileFormData({
   generateThumbnail?: boolean;
   thumbnailSize?: number;
   maxFileSize?: number;
+  maxProcessedBytes?: number;
   /** Treat the multipart parser's zero-byte no-selection placeholder as absent. */
   allowEmptyFile?: boolean;
 }) {
@@ -561,6 +574,7 @@ export async function parseFileFormData({
         resizeOptions,
         generateThumbnail,
         thumbnailSize,
+        maxProcessedBytes,
       });
 
       // For profile pictures and other cases that don't need thumbnails,

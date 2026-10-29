@@ -635,3 +635,28 @@ describe("partial image upload cleanup", () => {
     expect(storageRemoveMock).not.toHaveBeenCalled();
   });
 });
+
+it("enforces the requested final byte cap after canonical processing and before storage", async () => {
+  const sharp = (await import("sharp")).default;
+  const bytes = await sharp({
+    create: { width: 128, height: 128, channels: 3, background: "#abc" },
+  })
+    .png()
+    .toBuffer();
+  storageUploadMock.mockClear();
+  await expect(
+    uploadFile(
+      (async function* () {
+        await Promise.resolve();
+        yield bytes;
+      })(),
+      {
+        filename: "org/product",
+        contentType: "image/png",
+        bucketName: "assets",
+        maxProcessedBytes: 1,
+      }
+    )
+  ).rejects.toThrow();
+  expect(storageUploadMock).not.toHaveBeenCalled();
+});

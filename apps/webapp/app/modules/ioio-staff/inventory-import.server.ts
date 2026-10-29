@@ -72,6 +72,11 @@ import {
   resolveIndividualUnitTitles,
 } from "./import-planner";
 import {
+  persistImportProductImage,
+  readImportProductImage,
+  pruneImportProductImages,
+} from "./import-product-image.server";
+import {
   buildImportLocationAffinities,
   buildImportLocationRepresentativeProducts,
   getImportLocationPath,
@@ -90,12 +95,15 @@ import {
 } from "./import-resolution";
 import {
   resolveImportReviewState,
+  validateImportRowForApply,
+  type ImportReviewIssue,
   type StaffImportReviewState,
 } from "./import-review";
 import { PDF_OCR_MAX_PAGES, PdfOcrError, ocrPdfPages } from "./pdf-ocr.server";
 import { pdfjsResourceUrl } from "./pdfjs-runtime.server";
 import {
   enrichImportProductRows,
+  processStaffImportImageUpload,
   type ExistingImportAssetModel,
   type ImportProductDescriptionSource,
   type ImportProductImageProposal,
@@ -166,6 +174,22 @@ export type ImportRowDiagnosticReasonCode =
   | "QUANTITY_INVALID"
   | ImportLocationDiagnosticReason;
 
+export type ImportTrackingSource =
+  | "EXISTING_MODEL"
+  | "DETERMINISTIC_DEFAULT"
+  | "DETERMINISTIC_EQUIPMENT_EVIDENCE"
+  | "SOURCE_EXPLICIT"
+  | "CLAUDE_ASSISTED"
+  | "MANUAL_OVERRIDE";
+
+export type ImportTrackingReasonCode =
+  | "DEFAULT_QUANTITY"
+  | "EXISTING_MODEL_QUANTITY"
+  | "EXISTING_MODEL_INDIVIDUAL"
+  | "EXPLICIT_SERIALIZED_SOURCE"
+  | "EQUIPMENT_REVIEW"
+  | "MANUAL_OVERRIDE";
+
 export type StaffImportDiagnostics = {
   rowsParsed: number;
   rowsWithQuantity: number;
@@ -173,10 +197,26 @@ export type StaffImportDiagnostics = {
   rowsWithSuggestedLocation: number;
   locationFallbackUsed: number;
   locationUnresolved: number;
+  quantityTrackedRows?: number;
+  individualTrackedRows?: number;
+  individualTrackingByExistingModel?: number;
+  individualTrackingByStrongEvidence?: number;
+  individualTrackingManualOverride?: number;
+  newModels?: number;
+  existingModelsWithImage?: number;
   imageLookupAttempted?: number;
+  imageLookupSucceeded?: number;
+  imageLookupFailed?: number;
+  imageSourceDocument?: number;
+  imageSourceManufacturer?: number;
+  imageSourceSupplier?: number;
+  imageProcessed?: number;
+  imageFinalBytes?: number;
+  imageMissing?: number;
   imageCandidatesConsidered?: number;
   imageAccepted?: number;
   imageRejectedReason?: Record<string, number>;
+  searchProviderConfigured?: boolean;
   descriptionGenerated?: number;
   descriptionSource?: Record<ImportProductDescriptionSource, number>;
 };
@@ -190,6 +230,10 @@ export type StaffImportRow = {
   category: string | null;
   location: string | null;
   type: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
+  trackingReason?: string;
+  trackingReasonCode?: ImportTrackingReasonCode;
+  trackingSource?: ImportTrackingSource;
+  serialNumber?: string | null;
   sourceDescription?: string | null;
   manufacturer?: string | null;
   manufacturerPartNumber?: string | null;
@@ -208,6 +252,8 @@ export type StaffImportRow = {
   assetModelDescriptionSource?: ImportProductDescriptionSource;
   productImageProposal?: ImportProductImageProposal;
   acceptSuggestedImage?: boolean;
+  productUrl?: string | null;
+  productImageUrl?: string | null;
   suggestedCategoryId?: string | null;
   categorySuggestionConfidence?: number;
   suggestedLocationId?: string | null;
@@ -306,6 +352,33 @@ export type StaffImportProposal = {
   locationOptions?: ImportLocationOption[];
   pdfSummary?: StaffImportPdfSummary;
   diagnostics?: StaffImportDiagnostics;
+  /** Persisted staff review state; excluded from the immutable proposal hash. */
+  savedReviewDecisions?: StaffImportReviewDecision[];
+  /** Rows completed by the canonical import service's row ledger. */
+  appliedRowNumbers?: number[];
+  /** Rows resolved as ignored by the canonical import service's row ledger. */
+  ignoredRowNumbers?: number[];
+};
+
+export type StaffImportReviewDecision = {
+  rowNumber: number;
+  decision: "APPROVE" | "IGNORE" | null;
+  title?: string;
+  assetId?: string | null;
+  categoryId?: string | null;
+  newCategoryName?: string | null;
+  approveNewCategory?: boolean;
+  locationId?: string | null;
+  quantity?: number | null;
+  type?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
+  trackingModeConfirmed?: boolean;
+  productChoice?: "EXISTING" | "NEW" | null;
+  minQuantity?: number | null;
+  unitOfMeasure?: string | null;
+  consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
+  assetModelDescription?: string | null;
+  acceptSuggestedImage?: boolean;
+  manualImage?: ImportProductImageProposal | null;
 };
 
 export type StaffImportResult = {
@@ -326,6 +399,7 @@ export type StaffImportResult = {
   failedRowsCount: number;
   conflictedRowsCount: number;
   skippedRows: number;
+  remainingRows?: number;
 };
 
 export type StaffInventoryImportPreparation =
@@ -360,6 +434,9 @@ export function getStaffImportProposalHash(
     operationId: _operationId,
     createdAt: _createdAt,
     proposalHash: _proposalHash,
+    savedReviewDecisions: _savedReviewDecisions,
+    appliedRowNumbers: _appliedRowNumbers,
+    ignoredRowNumbers: _ignoredRowNumbers,
     ...content
   } = proposal as StaffImportProposal;
   return createHash("sha256").update(stableJson(content)).digest("hex");
@@ -707,10 +784,24 @@ const HEADER_ALIASES: Record<string, StaffImportInputField> = {
   "mfr part no": "manufacturerPartNumber",
   "manufacturer pn": "manufacturerPartNumber",
   stock: "quantity",
+  "stock quantity": "quantity",
+  "stock qty": "quantity",
+  "quantity in stock": "quantity",
+  "qty in stock": "quantity",
+  "quantity on hand": "quantity",
+  "qty on hand": "quantity",
+  "available quantity": "quantity",
+  "qty available": "quantity",
   antal: "quantity",
   received: "receivedQuantity",
+  "received qty": "receivedQuantity",
+  "qty received": "receivedQuantity",
   shipped: "shippedQuantityInput",
+  "shipped qty": "shippedQuantityInput",
+  "qty shipped": "shippedQuantityInput",
   delivered: "deliveredQuantityInput",
+  "delivered qty": "deliveredQuantityInput",
+  "qty delivered": "deliveredQuantityInput",
   backordered: "backorderedQuantityInput",
   backorder: "backorderedQuantityInput",
   "back order": "backorderedQuantityInput",
@@ -736,6 +827,11 @@ const HEADER_ALIASES: Record<string, StaffImportInputField> = {
   description: "sourceDescription",
   "product description": "sourceDescription",
   "unit description": "unitDescription",
+  serial: "serialNumber",
+  "serial number": "serialNumber",
+  "asset tag": "serialNumber",
+  "asset number": "serialNumber",
+  "tracking mode": "type",
   manufacturer: "manufacturer",
   "manufacturer name": "manufacturer",
   mpn: "manufacturerPartNumber",
@@ -749,10 +845,8 @@ const HEADER_ALIASES: Record<string, StaffImportInputField> = {
   "qty ordered": "orderedQuantity",
   "quantity shipped": "shippedQuantityInput",
   "shipped quantity": "shippedQuantityInput",
-  "qty shipped": "shippedQuantityInput",
   "quantity delivered": "deliveredQuantityInput",
   "delivered quantity": "deliveredQuantityInput",
-  "qty delivered": "deliveredQuantityInput",
   "delivery quantity": "deliveredQuantityInput",
   "quantity backordered": "backorderedQuantityInput",
   "backordered quantity": "backorderedQuantityInput",
@@ -760,15 +854,42 @@ const HEADER_ALIASES: Record<string, StaffImportInputField> = {
   "back order quantity": "backorderedQuantityInput",
   "quantity received": "receivedQuantity",
   "received quantity": "receivedQuantity",
-  "qty received": "receivedQuantity",
+  "quantity available": "quantity",
+  "on hand quantity": "quantity",
+  "on hand qty": "quantity",
   notes: "sourceNotes",
   "line notes": "sourceNotes",
+  url: "productUrl",
+  "product url": "productUrl",
+  "manufacturer url": "productUrl",
+  "supplier product url": "productUrl",
+  "image url": "productImageUrl",
+  "product image url": "productImageUrl",
+  "image link": "productImageUrl",
 };
 
 const PRIVATE_HEADER =
   /borrower|borrowed by|email|e-mail|student|phone|contact|lending.?id|user.?id|auth|role/i;
 const IGNORED_HEADER =
   /price|value|vat|tax|invoice|subtotal|total|address|payment|currency|account|page/i;
+
+function spreadsheetHeaderField(
+  value: string
+): StaffImportInputField | undefined {
+  const header = normalizeSpreadsheetHeader(value);
+  const alias = HEADER_ALIASES[header];
+  if (alias) return alias;
+  if (IGNORED_HEADER.test(header)) return undefined;
+  if (!/\b(quantity|qty|count|stock|antal)\b/.test(header)) return undefined;
+  if (/\b(back.?order(?:ed)?|pending)\b/.test(header)) {
+    return "backorderedQuantityInput";
+  }
+  if (/\border(?:ed)?\b/.test(header)) return "orderedQuantity";
+  if (/\breceiv(?:ed|ing)?\b/.test(header)) return "receivedQuantity";
+  if (/\bdeliver(?:ed|y)?\b/.test(header)) return "deliveredQuantityInput";
+  if (/\bship(?:ped|ping)?\b/.test(header)) return "shippedQuantityInput";
+  return "quantity";
+}
 const PDF_AI_ANALYSIS_REQUIRED_MESSAGE =
   "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items.";
 const PDF_OCR_REQUIRED_MESSAGE =
@@ -2625,18 +2746,16 @@ function headerMap(
   const map = new Map<number, StaffImportInputField>();
   const seen = new Set<string>();
   headers.forEach((rawHeader, index) => {
-    const header = safeCell(rawHeader, "Column name")
-      .toLowerCase()
-      .replace(/[_-]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    const header = normalizeSpreadsheetHeader(
+      safeCell(rawHeader, "Column name")
+    );
     if (!header) return;
     if (PRIVATE_HEADER.test(header)) {
       throw importError(
         "Personal borrower or account columns are not accepted."
       );
     }
-    const field = HEADER_ALIASES[header];
+    const field = spreadsheetHeaderField(header);
     if (!field) {
       if (IGNORED_HEADER.test(header)) return;
       if (options.ignoreUnsupportedColumns) return;
@@ -2669,10 +2788,14 @@ function parseImportQuantity(value: string | undefined) {
   if (!text) return { value: null, invalid: false };
   // Accept only an unadorned whole number. Prices, formatted currency,
   // fractions, and unsafe integers must be reviewed instead of coerced.
-  if (!/^(?:\d{1,7}|\d{1,3}(?:,\d{3})+)$/.test(text)) {
+  const groupedInteger = /^\d{1,3}(?:,\d{3})+$/.test(text);
+  const wholeNumber = /^(?:\d{1,7}|\d{1,7}[.,]0+)$/.test(text);
+  if (!groupedInteger && !wholeNumber) {
     return { value: null, invalid: true };
   }
-  const quantity = Number(text.replace(/,/g, ""));
+  const quantity = Number(
+    groupedInteger ? text.replace(/,/g, "") : text.replace(",", ".")
+  );
   if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1_000_000) {
     return { value: null, invalid: true };
   }
@@ -2812,6 +2935,10 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
       category: values.category?.trim() || null,
       location: values.location?.trim() || null,
       type: normalizedType,
+      ...(normalizedType ? { trackingSource: "SOURCE_EXPLICIT" as const } : {}),
+      ...(values.serialNumber?.trim()
+        ? { serialNumber: safeCell(values.serialNumber, "Serial number") }
+        : {}),
       ...(sourceDescription ? { sourceDescription } : {}),
       ...(values.manufacturer?.trim()
         ? { manufacturer: values.manufacturer.trim() }
@@ -2827,6 +2954,12 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
         : {}),
       ...(values.sourceNotes?.trim()
         ? { sourceNotes: values.sourceNotes.trim() }
+        : {}),
+      ...(values.productUrl?.trim()
+        ? { productUrl: values.productUrl.trim() }
+        : {}),
+      ...(values.productImageUrl?.trim()
+        ? { productImageUrl: values.productImageUrl.trim() }
         : {}),
       ...(orderedQuantity !== null ? { orderedQuantity } : {}),
       ...(actualQuantity !== null ? { receivedQuantity: actualQuantity } : {}),
@@ -2889,7 +3022,25 @@ async function parseStaffImportFileWithSummary({
   if (buffer.length > STAFF_IMPORT_MAX_BYTES) {
     throw importError("The file is too large. The maximum is 5 MB.");
   }
-  const extension = filename.toLowerCase().split(".").pop();
+  const normalizedContentType = (contentType ?? "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  const filenameExtension = filename.toLowerCase().split(".").pop();
+  const extension =
+    filenameExtension === "csv" ||
+    filenameExtension === "xlsx" ||
+    filenameExtension === "pdf"
+      ? filenameExtension
+      : normalizedContentType ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ? "xlsx"
+      : normalizedContentType === "text/csv" ||
+        normalizedContentType === "application/csv"
+      ? "csv"
+      : normalizedContentType === "application/pdf"
+      ? "pdf"
+      : filenameExtension;
   if (extension !== "csv" && extension !== "xlsx" && extension !== "pdf") {
     throw importError("Upload a CSV, XLSX, or PDF file.");
   }
@@ -2996,6 +3147,17 @@ async function parseStaffImportFileWithSummary({
         ? [{ name: "CSV", matrix: readSpreadsheetCsv(buffer) }]
         : await parseXlsx(buffer);
   } catch (cause) {
+    Logger.warn({
+      event: "ioio_spreadsheet_parse_failed",
+      fileType: extension,
+      sheetCount: 0,
+      detectedSheet: null,
+      headerRow: null,
+      rowsParsed: 0,
+      rowsNormalized: 0,
+      errorCode:
+        extension === "csv" ? "CSV_PARSE_FAILED" : "WORKBOOK_UNREADABLE",
+    });
     throw importError(
       `${extension === "csv" ? "csv_parse_failed" : "workbook_unreadable"}: ${
         cause instanceof Error ? cause.message : "Cannot read file"
@@ -3027,8 +3189,52 @@ async function parseStaffImportFileWithSummary({
     throw importError(
       "header_not_found: Header row must be between 1 and 1000."
     );
+  let selectedSheet = spreadsheetSheet ?? null;
+  if (extension === "xlsx" && !selectedSheet) {
+    const candidates = sheets.flatMap((sheet) => {
+      if (
+        /^(notes?|instructions?|read\s*me|information)$/i.test(
+          sheet.name.trim()
+        )
+      ) {
+        return [];
+      }
+      const header = detectSpreadsheetHeader(
+        sheet.matrix,
+        HEADER_ALIASES,
+        (cell) => spreadsheetHeaderField(cell)
+      );
+      return header ? [{ name: sheet.name, headerRow: header.index + 1 }] : [];
+    });
+    const explicitlyNamedInventorySheets = candidates.filter(({ name }) =>
+      /\binventory\b/i.test(name)
+    );
+    if (explicitlyNamedInventorySheets.length === 1) {
+      selectedSheet = explicitlyNamedInventorySheets[0]!.name;
+    } else if (candidates.length === 1) {
+      selectedSheet = candidates[0]!.name;
+    } else if (candidates.length > 1) {
+      const sheetNames = candidates
+        .map(({ name }) => name.slice(0, 80))
+        .join(", ");
+      Logger.warn({
+        event: "ioio_spreadsheet_parse_failed",
+        fileType: extension,
+        sheetCount: sheets.length,
+        sheetNames: sheets.map(({ name }) => name.slice(0, 80)),
+        detectedSheet: null,
+        headerRow: null,
+        rowsParsed: 0,
+        rowsNormalized: 0,
+        errorCode: "MULTIPLE_INVENTORY_SHEETS",
+      });
+      throw importError(
+        `multiple_inventory_sheets: More than one worksheet contains an inventory table (${sheetNames}). Enter the sheet name in Spreadsheet options and upload again.`
+      );
+    }
+  }
   for (const sheet of sheets) {
-    if (spreadsheetSheet && sheet.name !== spreadsheetSheet) continue;
+    if (selectedSheet && sheet.name !== selectedSheet) continue;
     if (
       !spreadsheetSheet &&
       /^(notes?|instructions?|read\s*me|information)$/i.test(sheet.name.trim())
@@ -3041,7 +3247,7 @@ async function parseStaffImportFileWithSummary({
           (cells) =>
             cells.some((cell) =>
               ["title", "sourceDescription"].includes(
-                HEADER_ALIASES[normalizeSpreadsheetHeader(cell)]
+                spreadsheetHeaderField(cell) ?? ""
               )
             ) && cells.some((cell) => PRIVATE_HEADER.test(cell))
         )
@@ -3051,7 +3257,9 @@ async function parseStaffImportFileWithSummary({
       );
     const header = spreadsheetHeaderRow
       ? { index: spreadsheetHeaderRow - 1, ambiguous: false }
-      : detectSpreadsheetHeader(sheet.matrix, HEADER_ALIASES);
+      : detectSpreadsheetHeader(sheet.matrix, HEADER_ALIASES, (cell) =>
+          spreadsheetHeaderField(cell)
+        );
     if (!header) continue;
     diagnostics.tables++;
     const headers = sheet.matrix[header.index];
@@ -3090,7 +3298,7 @@ async function parseStaffImportFileWithSummary({
         "sourceDescription",
         "manufacturerPartNumber",
         "supplierPartNumber",
-      ].includes(HEADER_ALIASES[normalizeSpreadsheetHeader(cell)])
+      ].includes(spreadsheetHeaderField(cell) as never)
     );
     for (let index = header.index + 1; index < sheet.matrix.length; index++) {
       const cells = sheet.matrix[index];
@@ -3107,18 +3315,13 @@ async function parseStaffImportFileWithSummary({
           cells.some(
             (value, column) =>
               value === MISSING_FORMULA_VALUE &&
-              Boolean(
-                HEADER_ALIASES[
-                  normalizeSpreadsheetHeader(headers[column] ?? "")
-                ]
-              )
+              Boolean(spreadsheetHeaderField(headers[column] ?? ""))
           )
         )
           throw new Error("Formula has no stored value; export as values");
         const normalizedCells = cells.map((value, column) =>
-          /quantity/i.test(
-            HEADER_ALIASES[normalizeSpreadsheetHeader(headers[column] ?? "")] ??
-              ""
+          /quantity|qty|count/i.test(
+            spreadsheetHeaderField(headers[column] ?? "") ?? ""
           )
             ? value.replace(/^(\d+),0+$/, "$1")
             : value
@@ -3129,9 +3332,7 @@ async function parseStaffImportFileWithSummary({
             (cells[column] ?? "").trim().toUpperCase()
           )
             ? headers.some(
-                (cell) =>
-                  HEADER_ALIASES[normalizeSpreadsheetHeader(cell)] ===
-                  "category"
+                (cell) => spreadsheetHeaderField(cell) === "category"
               )
               ? "source class"
               : "category"
@@ -3203,12 +3404,36 @@ async function parseStaffImportFileWithSummary({
         ];
       }
   Logger.info({ event: "ioio_spreadsheet_parsed", ...diagnostics });
-  if (!diagnostics.tables)
+  if (!diagnostics.tables) {
+    Logger.warn({
+      event: "ioio_spreadsheet_parse_failed",
+      fileType: extension,
+      sheetCount: sheets.length,
+      sheetNames: sheets.map(({ name }) => name.slice(0, 80)),
+      detectedSheet: selectedSheet,
+      headerRow: spreadsheetHeaderRow ?? null,
+      rowsParsed: diagnostics.rowsParsed,
+      rowsNormalized: diagnostics.rowsAccepted,
+      errorCode: "NO_INVENTORY_TABLE",
+    });
     throw importError(
       "no_inventory_table_found: header_not_found. Export an inventory sheet with product and quantity headers."
     );
-  if (!rows.length)
+  }
+  if (!rows.length) {
+    Logger.warn({
+      event: "ioio_spreadsheet_parse_failed",
+      fileType: extension,
+      sheetCount: sheets.length,
+      sheetNames: sheets.map(({ name }) => name.slice(0, 80)),
+      detectedSheet: selectedSheet,
+      headerRow: spreadsheetHeaderRow ?? null,
+      rowsParsed: diagnostics.rowsParsed,
+      rowsNormalized: diagnostics.rowsAccepted,
+      errorCode: "NO_VALID_INVENTORY_ROWS",
+    });
     throw importError("zero_valid_rows: No product rows found.");
+  }
   return {
     rows,
     provider: "spreadsheet-normalized:v1",
@@ -3482,12 +3707,119 @@ function getMatchCandidates(
     .slice(0, 5);
 }
 
+function getNewImportTrackingPolicy(row: StaffImportRow) {
+  if (row.trackingSource === "MANUAL_OVERRIDE" && row.type) {
+    return {
+      type: row.type,
+      trackingSource: "MANUAL_OVERRIDE" as const,
+      trackingReasonCode: "MANUAL_OVERRIDE" as const,
+      trackingReason:
+        row.type === "INDIVIDUAL"
+          ? "Staff selected individual tracking during review."
+          : "Staff selected quantity tracking during review.",
+    };
+  }
+
+  if (row.trackingSource === "SOURCE_EXPLICIT" && row.type) {
+    return {
+      type: row.type,
+      trackingSource: "SOURCE_EXPLICIT" as const,
+      trackingReasonCode:
+        row.type === "INDIVIDUAL"
+          ? ("EXPLICIT_SERIALIZED_SOURCE" as const)
+          : ("DEFAULT_QUANTITY" as const),
+      trackingReason:
+        row.type === "INDIVIDUAL"
+          ? "The source explicitly marks this item for individual tracking."
+          : "The source explicitly marks this item for quantity tracking.",
+    };
+  }
+
+  const sourceText = [
+    row.sourceDescription,
+    row.unitDescription,
+    row.sourceNotes,
+    row.category,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const explicitIndividualEvidence =
+    Boolean(row.serialNumber?.trim()) ||
+    /\b(seriali[sz]ed|serial(?: number| no\.?)|asset tags?|individual units?|each units? tracked|tracked individually|individual(?:ly)? tracked|separate qr)\b/i.test(
+      sourceText
+    );
+  if (explicitIndividualEvidence) {
+    return {
+      type: "INDIVIDUAL" as const,
+      trackingSource: "SOURCE_EXPLICIT" as const,
+      trackingReasonCode: "EXPLICIT_SERIALIZED_SOURCE" as const,
+      trackingReason:
+        "The source contains a serial or explicit individual-tracking signal.",
+    };
+  }
+
+  const equipmentConcept =
+    /\b(oscilloscope|spectrum analyzer|network analyzer|microscope|bench instrument|test instrument|lab instrument)\b/i.test(
+      `${row.title} ${row.sourceDescription ?? ""}`
+    );
+  const managedEquipmentEvidence =
+    /\b(test equipment|lab equipment|laboratory equipment|loanable|checked out|check.?out|high[- ]value|individually managed)\b/i.test(
+      sourceText
+    );
+  if (equipmentConcept && managedEquipmentEvidence) {
+    return {
+      type: "INDIVIDUAL" as const,
+      trackingSource: "DETERMINISTIC_EQUIPMENT_EVIDENCE" as const,
+      trackingReasonCode: "EQUIPMENT_REVIEW" as const,
+      trackingReason:
+        "Equipment description indicates separate loanable or managed units.",
+    };
+  }
+
+  return {
+    type: "QUANTITY_TRACKED" as const,
+    trackingSource: "DETERMINISTIC_DEFAULT" as const,
+    trackingReasonCode: "DEFAULT_QUANTITY" as const,
+    trackingReason: "Default for identical stock and component inventory.",
+  };
+}
+
+function getExistingModelTrackingPolicy(
+  row: StaffImportRow,
+  assets: ExistingAsset[]
+) {
+  if (!row.existingAssetModelId) return null;
+  const linkedTypes = new Set(
+    assets
+      .filter((asset) => asset.assetModelId === row.existingAssetModelId)
+      .map((asset) => asset.type)
+  );
+  if (linkedTypes.size !== 1) return null;
+  const [type] = linkedTypes;
+  if (!type) return null;
+  return {
+    type,
+    trackingSource: "EXISTING_MODEL" as const,
+    trackingReasonCode:
+      type === AssetType.INDIVIDUAL
+        ? ("EXISTING_MODEL_INDIVIDUAL" as const)
+        : ("EXISTING_MODEL_QUANTITY" as const),
+    trackingReason:
+      type === AssetType.INDIVIDUAL
+        ? "Uses this existing Shelf model’s individual tracking mode."
+        : "Uses this existing Shelf model’s quantity tracking mode.",
+  };
+}
+
 function classifyRow(
   row: StaffImportRow,
   assets: ExistingAsset[],
   categories: NamedRecord[],
   locations: ImportLocationOption[]
 ): StaffImportProposalRow {
+  const trackingPolicy =
+    getExistingModelTrackingPolicy(row, assets) ??
+    getNewImportTrackingPolicy(row);
   const isProcurementRow = Boolean(
     row.sourceDescription ||
       row.manufacturer ||
@@ -3523,6 +3855,7 @@ function classifyRow(
     locationResolution.status === "MATCH" ? locationResolution.location : null;
   const base: Omit<StaffImportProposalRow, "action" | "reason"> = {
     ...row,
+    ...trackingPolicy,
     assetId: null,
     categoryId: category?.id ?? null,
     locationId: location?.id ?? null,
@@ -3621,10 +3954,33 @@ function classifyRow(
     };
   }
 
-  const candidates = getMatchCandidates(row, assets, categories, locations);
-  const exactCandidates = candidates.filter(
-    (candidate) => candidate.score >= 90
-  );
+  let candidates = getMatchCandidates(row, assets, categories, locations);
+  let exactCandidates = candidates.filter((candidate) => candidate.score >= 90);
+  if (!exactCandidates.length && row.existingAssetModelId) {
+    const linkedQuantityAssets = assets.filter(
+      (asset) =>
+        asset.assetModelId === row.existingAssetModelId &&
+        asset.type === AssetType.QUANTITY_TRACKED
+    );
+    const modelCandidates = linkedQuantityAssets.flatMap((asset) =>
+      getMatchCandidates(
+        { ...row, title: asset.title, existingAssetModelId: null },
+        [asset],
+        categories,
+        locations
+      )
+    );
+    if (modelCandidates.length) {
+      const modelCandidateIds = new Set(
+        modelCandidates.map(({ asset }) => asset.id)
+      );
+      candidates = [
+        ...modelCandidates,
+        ...candidates.filter(({ asset }) => !modelCandidateIds.has(asset.id)),
+      ].slice(0, 5);
+      exactCandidates = modelCandidates;
+    }
+  }
   if (exactCandidates.length > 1) {
     return {
       ...base,
@@ -3698,6 +4054,16 @@ function classifyRow(
   ].filter(Boolean) as string[];
   const details = {
     ...base,
+    type: asset.type,
+    trackingSource: "EXISTING_MODEL" as const,
+    trackingReasonCode:
+      asset.type === AssetType.INDIVIDUAL
+        ? ("EXISTING_MODEL_INDIVIDUAL" as const)
+        : ("EXISTING_MODEL_QUANTITY" as const),
+    trackingReason:
+      asset.type === AssetType.INDIVIDUAL
+        ? "Uses this existing Shelf model’s individual tracking mode."
+        : "Uses this existing Shelf model’s quantity tracking mode.",
     assetId: asset.id,
     expectedAssetState: getExpectedAssetState(asset),
     currentQuantity: asset.quantity,
@@ -3724,13 +4090,6 @@ function classifyRow(
       action: isProcurementRow ? "NEEDS_REVIEW" : "REJECT",
       reason:
         "Individual Shelf assets cannot receive a quantity greater than one.",
-    };
-  }
-  if (row.type && row.type !== asset.type) {
-    return {
-      ...details,
-      action: isProcurementRow ? "NEEDS_REVIEW" : "AMBIGUOUS",
-      reason: "Tracking type differs from the existing Shelf asset.",
     };
   }
   if (
@@ -4113,7 +4472,9 @@ function mapHelperProposalToRows({
         quantityReasonCode,
         ...locationSelection.reasonCodes,
       ],
-      type: candidate.trackingSuggestion.mode,
+      // Helper tracking output is advisory only. The deterministic Shelf-side
+      // policy assigns the proposal mode when rows are classified.
+      type: null,
       supplierPartNumber: candidate.supplierProductNumber,
       sourceDescription: candidate.description,
       manufacturer: candidate.manufacturer,
@@ -4148,7 +4509,6 @@ function mapHelperProposalToRows({
         quantityStatus === "UNKNOWN"
           ? ["Quantity"]
           : []),
-        ...(candidate.trackingSuggestion.mode ? [] : ["Tracking mode"]),
       ],
       helperCandidate: candidate,
       sourceEvidence,
@@ -4996,9 +5356,19 @@ export async function prepareStaffInventoryImport({
         productImageProposal: { status: "IMAGE_FETCH_FAILED" as const },
       })),
       diagnostics: {
+        newModels: normalizedProposalRows.length,
+        existingModelsWithImage: 0,
         imageLookupAttempted: 0,
         imageCandidatesConsidered: 0,
         imageAccepted: 0,
+        imageLookupSucceeded: 0,
+        imageLookupFailed: normalizedProposalRows.length,
+        imageSourceDocument: 0,
+        imageSourceManufacturer: 0,
+        imageSourceSupplier: 0,
+        imageProcessed: 0,
+        imageFinalBytes: 0,
+        imageMissing: normalizedProposalRows.length,
         imageRejectedReason: {
           IMAGE_FETCH_FAILED: normalizedProposalRows.length,
         },
@@ -5011,6 +5381,9 @@ export async function prepareStaffInventoryImport({
           NONE: normalizedProposalRows.filter((row) => !row.sourceDescription)
             .length,
         },
+        searchProviderConfigured: Boolean(
+          process.env.BRAVE_SEARCH_API_KEY?.trim()
+        ),
       },
     };
   }
@@ -5046,11 +5419,46 @@ export async function prepareStaffInventoryImport({
         !row.suggestedLocationId ||
         row.locationSuggestionStatus === "UNRESOLVED"
     ).length,
+    quantityTrackedRows: proposalRows.filter(
+      (row) => row.type === "QUANTITY_TRACKED"
+    ).length,
+    individualTrackedRows: proposalRows.filter(
+      (row) => row.type === "INDIVIDUAL"
+    ).length,
+    individualTrackingByExistingModel: proposalRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" && row.trackingSource === "EXISTING_MODEL"
+    ).length,
+    individualTrackingByStrongEvidence: proposalRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" &&
+        ["SOURCE_EXPLICIT", "DETERMINISTIC_EQUIPMENT_EVIDENCE"].includes(
+          row.trackingSource ?? ""
+        )
+    ).length,
+    individualTrackingManualOverride: proposalRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" && row.trackingSource === "MANUAL_OVERRIDE"
+    ).length,
     imageLookupAttempted: productEnrichment.diagnostics.imageLookupAttempted,
+    imageLookupSucceeded: productEnrichment.diagnostics.imageLookupSucceeded,
+    imageLookupFailed: productEnrichment.diagnostics.imageLookupFailed,
+    newModels: productEnrichment.diagnostics.newModels,
+    existingModelsWithImage:
+      productEnrichment.diagnostics.existingModelsWithImage,
+    imageSourceDocument: productEnrichment.diagnostics.imageSourceDocument,
+    imageSourceManufacturer:
+      productEnrichment.diagnostics.imageSourceManufacturer,
+    imageSourceSupplier: productEnrichment.diagnostics.imageSourceSupplier,
+    imageProcessed: productEnrichment.diagnostics.imageProcessed,
+    imageFinalBytes: productEnrichment.diagnostics.imageFinalBytes,
+    imageMissing: productEnrichment.diagnostics.imageMissing,
     imageCandidatesConsidered:
       productEnrichment.diagnostics.imageCandidatesConsidered,
     imageAccepted: productEnrichment.diagnostics.imageAccepted,
     imageRejectedReason: productEnrichment.diagnostics.imageRejectedReason,
+    searchProviderConfigured:
+      productEnrichment.diagnostics.searchProviderConfigured ?? false,
     descriptionGenerated: productEnrichment.diagnostics.descriptionGenerated,
     descriptionSource: productEnrichment.diagnostics.descriptionSource,
   };
@@ -5059,6 +5467,42 @@ export async function prepareStaffInventoryImport({
     format: getStaffImportFormat(file.name),
     ...diagnostics,
   });
+  if (
+    proposalRows.some(
+      (row) => row.productImageProposal?.status === "IMAGE_FOUND"
+    )
+  ) {
+    await pruneImportProductImages(organizationId, userId).catch(() => {});
+    for (const row of proposalRows) {
+      const image = row.productImageProposal;
+      if (image?.status !== "IMAGE_FOUND") continue;
+      try {
+        row.productImageProposal = await persistImportProductImage({
+          image,
+          operationId,
+          organizationId,
+          userId,
+        });
+        if (row.productImageProposal.attempt)
+          row.productImageProposal.attempt.proposalImageStored = true;
+      } catch {
+        row.productImageProposal = {
+          status: "IMAGE_FETCH_FAILED",
+          failureReason: "PROPOSAL_IMAGE_PERSIST_FAILED",
+          attempt: image.attempt
+            ? {
+                ...image.attempt,
+                proposalImageStored: false,
+                failureReason: "PROPOSAL_IMAGE_PERSIST_FAILED",
+              }
+            : undefined,
+        };
+      }
+    }
+  }
+  diagnostics.imageAccepted = proposalRows.filter(
+    (row) => row.productImageProposal?.status === "IMAGE_FOUND"
+  ).length;
   const proposalContent: Omit<StaffImportProposal, "proposalHash"> = {
     version: 1,
     operationId,
@@ -5116,21 +5560,47 @@ export async function prepareStaffInventoryImport({
   const nextIdempotencyKey = existingOperation
     ? `${idempotencyKey}:${randomUUID()}`
     : idempotencyKey;
-  await db.ioioWriteOperation.create({
-    data: {
-      id: operationId,
-      operationType: STAFF_IMPORT_OPERATION,
-      source: "IOIO_STAFF_ASSISTANT",
-      status: "PREPARED",
-      idempotencyKey: nextIdempotencyKey,
-      userId,
-      organizationId,
-      reportType: STAFF_IMPORT_OPERATION,
-      fileSha256: proposal.source.sha256,
-      description: JSON.stringify({ kind: "STAFF_INVENTORY_IMPORT", proposal }),
-    },
-  });
+  try {
+    await db.ioioWriteOperation.create({
+      data: {
+        id: operationId,
+        operationType: STAFF_IMPORT_OPERATION,
+        source: "IOIO_STAFF_ASSISTANT",
+        status: "PREPARED",
+        idempotencyKey: nextIdempotencyKey,
+        userId,
+        organizationId,
+        reportType: STAFF_IMPORT_OPERATION,
+        fileSha256: proposal.source.sha256,
+        description: JSON.stringify({
+          kind: "STAFF_INVENTORY_IMPORT",
+          proposal,
+        }),
+      },
+    });
+  } catch (cause) {
+    Logger.info({
+      event: "ioio_staff_import_image_attempt",
+      operationId,
+      failureReason: "PROPOSAL_IMAGE_PERSIST_FAILED",
+      proposalImageStored: false,
+      imageCount: proposal.rows.filter(
+        (row) => row.productImageProposal?.imageId
+      ).length,
+    });
+    throw cause;
+  }
   await ensureProposalLedger(proposal);
+  for (const row of proposal.rows)
+    Logger.info({
+      event: "ioio_staff_import_image_attempt",
+      operationId,
+      rowNumber: row.rowNumber,
+      ...row.productImageProposal?.attempt,
+      status: row.productImageProposal?.status,
+      failureReason: row.productImageProposal?.failureReason,
+      proposalImageStored: Boolean(row.productImageProposal?.imageId),
+    });
   Logger.info({
     event: "ioio_staff_import_prepared",
     operationId,
@@ -5188,7 +5658,180 @@ export async function getStaffInventoryImportProposal({
     });
     throw staffImportUnavailableError();
   }
-  return readStoredProposal(operation.description);
+  const proposal = readStoredProposal(operation.description);
+  const ledgerItems = await getImportLedgerItems({
+    operationId,
+    organizationId,
+  });
+  return {
+    ...proposal,
+    savedReviewDecisions: readStoredReviewDraft(operation.description),
+    appliedRowNumbers: getResolvedImportRowNumbers({
+      proposal,
+      ledgerItems,
+      status: "DONE",
+    }),
+    ignoredRowNumbers: getResolvedImportRowNumbers({
+      proposal,
+      ledgerItems,
+      status: "SKIPPED",
+    }),
+  };
+}
+
+function getResolvedImportRowNumbers({
+  proposal,
+  ledgerItems,
+  status,
+}: {
+  proposal: StaffImportProposal;
+  ledgerItems: Awaited<ReturnType<typeof getImportLedgerItems>>;
+  status: "DONE" | "SKIPPED";
+}) {
+  return proposal.rows
+    .filter((row) => {
+      const rowItems = ledgerItems.filter(
+        (item) => item.rowKey === `row-${row.rowNumber}`
+      );
+      const unitItems = rowItems.filter((item) => item.unitIndex !== null);
+      const countedItems = unitItems.length
+        ? unitItems
+        : rowItems.filter((item) => item.unitIndex === null);
+      return (
+        countedItems.length > 0 &&
+        countedItems.every((item) => item.status === status)
+      );
+    })
+    .map(({ rowNumber }) => rowNumber);
+}
+
+export async function getStaffInventoryImportDrafts({
+  context,
+  request,
+}: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request">) {
+  const { organizationId, userId } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  const operations = await db.ioioWriteOperation.findMany({
+    where: {
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: "PREPARED",
+      createdAt: {
+        gte: new Date(Date.now() - STAFF_IMPORT_REVIEW_RETENTION_MS),
+      },
+    },
+    select: { id: true, description: true, createdAt: true },
+    orderBy: { updatedAt: "desc" },
+    take: 10,
+  });
+  return operations.flatMap((operation) => {
+    try {
+      const proposal = readStoredProposal(operation.description);
+      return [
+        {
+          operationId: operation.id,
+          filename: proposal.source.filename,
+          rowCount: proposal.rows.length,
+          createdAt: operation.createdAt.toISOString(),
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export async function saveStaffInventoryImportDraft({
+  context,
+  request,
+  operationId,
+  reviewDecisions,
+}: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
+  operationId: string;
+  reviewDecisions: string;
+}) {
+  const { organizationId, userId } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  const operation = await db.ioioWriteOperation.findFirst({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: "PREPARED",
+    },
+    select: { description: true, createdAt: true },
+  });
+  if (!operation || isStaffImportExpired(operation.createdAt)) {
+    throw staffImportUnavailableError();
+  }
+  const proposal = readStoredProposal(operation.description);
+  const decisions = readReviewDecisions(reviewDecisions, {
+    allowUnresolved: true,
+  });
+  const proposalRowNumbers = new Set(
+    proposal.rows.map(({ rowNumber }) => rowNumber)
+  );
+  if (decisions.some(({ rowNumber }) => !proposalRowNumbers.has(rowNumber))) {
+    throw importError("The saved review decisions do not match this proposal.");
+  }
+  for (const decision of decisions) {
+    if (
+      decision.locationId &&
+      !proposal.locationOptions?.some(
+        (location) => location.id === decision.locationId
+      )
+    ) {
+      throw importError("Choose a location from this Shelf organization.");
+    }
+    if (
+      decision.categoryId &&
+      !proposal.categoryOptions?.some(
+        (category) => category.id === decision.categoryId && !category.archived
+      )
+    ) {
+      throw importError(
+        "Choose an active category from this Shelf organization."
+      );
+    }
+  }
+  let stored: Record<string, unknown>;
+  try {
+    stored = JSON.parse(operation.description) as Record<string, unknown>;
+  } catch {
+    throw importError("The saved import proposal is invalid.");
+  }
+  const saved = await db.ioioWriteOperation.updateMany({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: "PREPARED",
+    },
+    data: {
+      description: JSON.stringify({
+        ...stored,
+        kind: "STAFF_INVENTORY_IMPORT",
+        proposal: readStoredProposal(operation.description),
+        reviewDraft: decisions,
+      }),
+    },
+  });
+  if (saved.count !== 1) throw staffImportUnavailableError();
+  Logger.info({
+    event: "ioio_staff_import_draft_saved",
+    operationId,
+    organizationId,
+    userId,
+    rows: decisions.length,
+  });
+  return { operationId, saved: true };
 }
 
 export async function cancelStaffInventoryImport({
@@ -5244,6 +5887,19 @@ function readStoredProposal(description: string): StaffImportProposal {
     return { ...value.proposal, proposalHash: computedHash };
   } catch {
     throw importError("The saved import proposal is invalid.");
+  }
+}
+
+function readStoredReviewDraft(description: string) {
+  try {
+    const value = JSON.parse(description) as { reviewDraft?: unknown };
+    return Array.isArray(value.reviewDraft)
+      ? readReviewDecisions(JSON.stringify(value.reviewDraft), {
+          allowUnresolved: true,
+        })
+      : [];
+  } catch {
+    return [];
   }
 }
 
@@ -5312,28 +5968,12 @@ function readStoredImportResult(description: string): StaffImportResult {
   }
 }
 
-type StaffImportReviewDecision = {
-  rowNumber: number;
-  decision: "APPROVE" | "IGNORE";
-  title?: string;
-  assetId?: string | null;
-  categoryId?: string | null;
-  newCategoryName?: string | null;
-  approveNewCategory?: boolean;
-  locationId?: string | null;
-  quantity?: number | null;
-  type?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
-  productChoice?: "EXISTING" | "NEW" | null;
-  minQuantity?: number | null;
-  unitOfMeasure?: string | null;
-  consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
-  assetModelDescription?: string | null;
-  acceptSuggestedImage?: boolean;
-};
-
-function readReviewDecisions(value: string | null | undefined) {
+function readReviewDecisions(
+  value: string | null | undefined,
+  { allowUnresolved = false }: { allowUnresolved?: boolean } = {}
+) {
   if (!value) return [];
-  if (value.length > 100_000) {
+  if (value.length > 2_000_000) {
     throw importError("The import review decisions are too large.");
   }
   let parsed: unknown;
@@ -5358,12 +5998,13 @@ function readReviewDecisions(value: string | null | undefined) {
       !Number.isInteger(rowNumber) ||
       rowNumber < 1 ||
       seen.has(rowNumber) ||
-      (action !== "APPROVE" && action !== "IGNORE")
+      (action !== "APPROVE" &&
+        action !== "IGNORE" &&
+        !(allowUnresolved && (action === null || action === undefined)))
     ) {
       throw importError("The PDF review decisions are invalid.");
     }
     seen.add(rowNumber);
-    if (action === "IGNORE") return { rowNumber, decision: action };
     const title =
       decision.title === undefined
         ? undefined
@@ -5401,6 +6042,13 @@ function readReviewDecisions(value: string | null | undefined) {
     ) {
       throw importError("The selected tracking mode is not supported.");
     }
+    const trackingModeConfirmed = decision.trackingModeConfirmed;
+    if (
+      trackingModeConfirmed !== undefined &&
+      typeof trackingModeConfirmed !== "boolean"
+    ) {
+      throw importError("Tracking mode confirmation must be explicit.");
+    }
     const productChoice = decision.productChoice;
     if (
       productChoice !== undefined &&
@@ -5415,8 +6063,8 @@ function readReviewDecisions(value: string | null | undefined) {
       quantity !== undefined &&
       quantity !== null &&
       (typeof quantity !== "number" ||
-        !Number.isInteger(quantity) ||
-        quantity <= 0)
+        !Number.isFinite(quantity) ||
+        (!allowUnresolved && (!Number.isInteger(quantity) || quantity <= 0)))
     ) {
       throw importError("Review quantities must be positive whole numbers.");
     }
@@ -5425,8 +6073,9 @@ function readReviewDecisions(value: string | null | undefined) {
       minQuantity !== undefined &&
       minQuantity !== null &&
       (typeof minQuantity !== "number" ||
-        !Number.isInteger(minQuantity) ||
-        minQuantity < 0)
+        !Number.isFinite(minQuantity) ||
+        (!allowUnresolved &&
+          (!Number.isInteger(minQuantity) || minQuantity < 0)))
     ) {
       throw importError(
         "Minimum quantity must be a non-negative whole number."
@@ -5477,9 +6126,50 @@ function readReviewDecisions(value: string | null | undefined) {
     ) {
       throw importError("Suggested image approval must be explicit.");
     }
+    let manualImage: ImportProductImageProposal | null | undefined;
+    if (decision.manualImage === null) {
+      manualImage = null;
+    } else if (decision.manualImage !== undefined) {
+      if (
+        !decision.manualImage ||
+        typeof decision.manualImage !== "object" ||
+        Array.isArray(decision.manualImage)
+      ) {
+        throw importError("The uploaded product image is invalid.");
+      }
+      const image = decision.manualImage as Record<string, unknown>;
+      const dataBase64 = image.dataBase64;
+      if (
+        image.status !== "IMAGE_FOUND" ||
+        image.mimeType !== "image/webp" ||
+        image.source !== "MANUAL_UPLOAD" ||
+        typeof dataBase64 !== "string" ||
+        dataBase64.length > 90_000 ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(dataBase64)
+      ) {
+        throw importError("The uploaded product image is invalid.");
+      }
+      const imageBytes = Buffer.from(dataBase64, "base64");
+      if (
+        imageBytes.length === 0 ||
+        imageBytes.length > 64 * 1024 ||
+        imageBytes.toString("base64") !== dataBase64 ||
+        detectImageFormat(imageBytes) !== "image/webp"
+      ) {
+        throw importError("The uploaded product image is invalid.");
+      }
+      manualImage = {
+        status: "IMAGE_FOUND",
+        mimeType: "image/webp",
+        dataBase64,
+        sourceName: "Manual upload",
+        source: "MANUAL_UPLOAD",
+        autoAccepted: true,
+      };
+    }
     return {
       rowNumber,
-      decision: action,
+      decision: action === "APPROVE" || action === "IGNORE" ? action : null,
       ...(title !== undefined ? { title } : {}),
       ...(assetId !== undefined ? { assetId } : {}),
       ...(categoryId !== undefined ? { categoryId } : {}),
@@ -5488,12 +6178,14 @@ function readReviewDecisions(value: string | null | undefined) {
       ...(locationId !== undefined ? { locationId } : {}),
       ...(quantity !== undefined ? { quantity } : {}),
       ...(type !== undefined ? { type } : {}),
+      ...(trackingModeConfirmed !== undefined ? { trackingModeConfirmed } : {}),
       ...(productChoice !== undefined ? { productChoice } : {}),
       ...(minQuantity !== undefined ? { minQuantity } : {}),
       ...(unitOfMeasure !== undefined ? { unitOfMeasure } : {}),
       ...(consumptionType !== undefined ? { consumptionType } : {}),
       ...(assetModelDescription !== undefined ? { assetModelDescription } : {}),
       ...(acceptSuggestedImage !== undefined ? { acceptSuggestedImage } : {}),
+      ...(manualImage !== undefined ? { manualImage } : {}),
     };
   });
 }
@@ -5526,31 +6218,64 @@ function buildImportedDescription(
   return parts.join(". ").slice(0, 2000);
 }
 
-function makeSuggestedImageRequest(row: StaffImportProposalRow) {
+async function makeSuggestedImageRequest(
+  row: StaffImportProposalRow,
+  organizationId: string,
+  field = "image"
+) {
   const proposal = row.productImageProposal;
   if (
     !row.acceptSuggestedImage ||
     proposal?.status !== "IMAGE_FOUND" ||
-    proposal.mimeType !== "image/webp" ||
-    !proposal.dataBase64 ||
-    proposal.dataBase64.length > 180_000 ||
-    !/^[A-Za-z0-9+/]+={0,2}$/.test(proposal.dataBase64)
-  ) {
+    proposal.mimeType !== "image/webp"
+  )
+    return null;
+  let imageBytes: Buffer;
+  try {
+    if (proposal.imageId)
+      imageBytes = await readImportProductImage(
+        proposal.imageId,
+        organizationId
+      );
+    else {
+      if (
+        !proposal.dataBase64 ||
+        proposal.dataBase64.length > 180_000 ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(proposal.dataBase64)
+      )
+        return null;
+      imageBytes = Buffer.from(proposal.dataBase64, "base64");
+      if (imageBytes.toString("base64") !== proposal.dataBase64) return null;
+    }
+  } catch {
     return null;
   }
-  const imageBytes = Buffer.from(proposal.dataBase64, "base64");
   if (
-    imageBytes.byteLength === 0 ||
-    imageBytes.byteLength > 128 * 1024 ||
-    imageBytes.toString("base64") !== proposal.dataBase64 ||
+    !imageBytes.length ||
+    imageBytes.length > 128 * 1024 ||
     detectImageFormat(imageBytes) !== "image/webp"
-  ) {
+  )
     return null;
+  let safeImageBytes = imageBytes;
+  if (proposal.source === "MANUAL_UPLOAD") {
+    let normalizedImage: ImportProductImageProposal;
+    try {
+      normalizedImage = await processStaffImportImageUpload(
+        imageBytes,
+        "image/webp"
+      );
+    } catch {
+      return null;
+    }
+    if (!normalizedImage.dataBase64) return null;
+    safeImageBytes = Buffer.from(normalizedImage.dataBase64, "base64");
   }
   const formData = new FormData();
   formData.append(
-    "image",
-    new File([imageBytes], "product-image.webp", { type: "image/webp" })
+    field,
+    new File([new Uint8Array(safeImageBytes)], "product-image.webp", {
+      type: "image/webp",
+    })
   );
   return new Request("http://shelf.local/import-product-image", {
     method: "POST",
@@ -5589,27 +6314,42 @@ async function applyImportAssetModelEnrichment({
   }
 
   if (!row.acceptSuggestedImage) return;
-  const request = makeSuggestedImageRequest(row);
+  const request = await makeSuggestedImageRequest(row, organizationId);
   if (!request) {
     Logger.info({
       event: "ioio_staff_import_image_save_failed",
       rowNumber: row.rowNumber,
       status: "IMAGE_INVALID_TYPE",
+      failureReason: "APPLY_IMAGE_UPLOAD_FAILED",
+      applyImageUploaded: false,
+      applyImageAttached: false,
     });
     return;
   }
   try {
-    await updateAssetModelImage({
+    const uploaded = await updateAssetModelImage({
       request,
       assetModelId,
       organizationId,
       onlyIfMissing: true,
+      maxProcessedBytes: 2 * 1024 * 1024,
+    });
+    Logger.info({
+      event: "ioio_staff_import_image_apply",
+      rowNumber: row.rowNumber,
+      assetModelId,
+      applyImageUploaded: Boolean(uploaded),
+      applyImageAttached: Boolean(uploaded),
+      status: uploaded ? "ATTACHED" : "EXISTING_IMAGE_PRESERVED",
     });
   } catch (cause) {
     Logger.info({
       event: "ioio_staff_import_image_save_failed",
       rowNumber: row.rowNumber,
       status: "IMAGE_FETCH_FAILED",
+      failureReason: "APPLY_IMAGE_UPLOAD_FAILED",
+      applyImageUploaded: false,
+      applyImageAttached: false,
       errorType: cause instanceof Error ? cause.name : "unknown",
     });
   }
@@ -5627,28 +6367,47 @@ async function applyImportQuantityTrackedAssetImage({
   row: StaffImportProposalRow;
 }) {
   if (!row.acceptSuggestedImage) return;
-  const request = makeSuggestedImageRequest(row);
+  const request = await makeSuggestedImageRequest(
+    row,
+    organizationId,
+    "mainImage"
+  );
   if (!request) {
     Logger.info({
       event: "ioio_staff_import_image_save_failed",
       rowNumber: row.rowNumber,
       status: "IMAGE_INVALID_TYPE",
+      failureReason: "APPLY_IMAGE_UPLOAD_FAILED",
+      applyImageUploaded: false,
+      applyImageAttached: false,
     });
     return;
   }
   try {
-    await updateAssetMainImage({
+    const attached = await updateAssetMainImage({
       request,
       assetId,
       userId,
       organizationId,
       isNewAsset: true,
+      maxProcessedBytes: 2 * 1024 * 1024,
+    });
+    Logger.info({
+      event: "ioio_staff_import_image_apply",
+      rowNumber: row.rowNumber,
+      assetId,
+      applyImageUploaded: attached === true,
+      applyImageAttached: attached === true,
+      failureReason: attached ? undefined : "APPLY_IMAGE_UPLOAD_FAILED",
     });
   } catch (cause) {
     Logger.info({
       event: "ioio_staff_import_image_save_failed",
       rowNumber: row.rowNumber,
       status: "IMAGE_FETCH_FAILED",
+      failureReason: "APPLY_IMAGE_UPLOAD_FAILED",
+      applyImageUploaded: false,
+      applyImageAttached: false,
       errorType: cause instanceof Error ? cause.name : "unknown",
     });
   }
@@ -5686,7 +6445,18 @@ type ImportLedgerItem = Awaited<
 export type StaffImportApplyResponse =
   | StaffImportResult
   | { status: "IN_PROGRESS"; operationId: string }
-  | StaffImportDuplicateResult;
+  | StaffImportDuplicateResult
+  | {
+      status: "NEEDS_REVIEW";
+      operationId: string;
+      readyCount: number;
+      blockedCount: number;
+      blockedRows: Array<{
+        rowNumber: number;
+        title: string;
+        issues: ImportReviewIssue[];
+      }>;
+    };
 
 function readStoredExecutionPlan(
   description: string
@@ -6231,12 +7001,16 @@ export async function applyStaffInventoryImport({
   operationId,
   proposalHash,
   allowSameFileReimport = false,
+  applyOnlyRowNumber,
+  applyOnlyRowNumbers,
   pdfDecisions,
   reviewDecisions,
 }: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
   operationId: string;
   proposalHash: string;
   allowSameFileReimport?: boolean;
+  applyOnlyRowNumber?: number;
+  applyOnlyRowNumbers?: number[];
   pdfDecisions?: string | null;
   reviewDecisions?: string | null;
 }): Promise<StaffImportApplyResponse> {
@@ -6299,12 +7073,76 @@ export async function applyStaffInventoryImport({
   const decisions = isResume
     ? []
     : reviewDecisions
-    ? readReviewDecisions(reviewDecisions)
+    ? readReviewDecisions(reviewDecisions, { allowUnresolved: true })
     : readLegacyPdfDecisions(pdfDecisions);
+  if (!isResume && (applyOnlyRowNumber !== undefined || applyOnlyRowNumbers)) {
+    for (const decision of decisions) {
+      if (
+        decision.decision !== "IGNORE" &&
+        (decision.rowNumber === applyOnlyRowNumber ||
+          applyOnlyRowNumbers?.includes(decision.rowNumber))
+      )
+        decision.decision = "APPROVE";
+    }
+  }
   const hasFullReviewDecisions = Boolean(reviewDecisions);
   const decisionsByRow = new Map(
     decisions.map((decision) => [decision.rowNumber, decision])
   );
+  if (
+    !isResume &&
+    applyOnlyRowNumber !== undefined &&
+    (!Number.isSafeInteger(applyOnlyRowNumber) ||
+      applyOnlyRowNumber < 1 ||
+      !proposal.rows.some((row) => row.rowNumber === applyOnlyRowNumber) ||
+      !decisionsByRow.has(applyOnlyRowNumber))
+  ) {
+    throw importError("Choose a reviewed row that is approved for import.");
+  }
+  const scopedRows =
+    (applyOnlyRowNumbers ? [...new Set(applyOnlyRowNumbers)] : undefined) ??
+    (applyOnlyRowNumber !== undefined ? [applyOnlyRowNumber] : undefined);
+  if (
+    !isResume &&
+    scopedRows &&
+    (!scopedRows.length ||
+      scopedRows.some(
+        (number) =>
+          !Number.isSafeInteger(number) ||
+          !proposal.rows.some((row) => row.rowNumber === number) ||
+          !decisionsByRow.has(number)
+      ))
+  )
+    throw importError("Choose reviewed products to import.");
+  let completedForValidation = new Set<number>();
+  const inScope = (rowNumber: number) =>
+    !scopedRows || scopedRows.includes(rowNumber);
+  const blockedResponse = (
+    blockedRows: Array<{
+      rowNumber: number;
+      title: string;
+      issues: ImportReviewIssue[];
+    }>,
+    total: number
+  ) => {
+    Logger.info({
+      event: "ioio_staff_import_review_blocked",
+      operationId,
+      readyCount: total - blockedRows.length,
+      blockedCount: blockedRows.length,
+      rows: blockedRows.map((row) => ({
+        rowNumber: row.rowNumber,
+        issueCodes: row.issues.map((issue) => issue.code),
+      })),
+    });
+    return {
+      status: "NEEDS_REVIEW" as const,
+      operationId,
+      readyCount: total - blockedRows.length,
+      blockedCount: blockedRows.length,
+      blockedRows,
+    };
+  };
   let rowsToApply = storedExecutionPlan?.rows ?? proposal.rows;
   if (!isResume) {
     if (!reviewDecisions) {
@@ -6312,16 +7150,21 @@ export async function applyStaffInventoryImport({
         "Staff confirmation is required before applying an import proposal."
       );
     }
-    const reviewedRowNumbers = new Set(
-      decisions.map(({ rowNumber }) => rowNumber)
+    const unknownReviewRow = decisions.find(
+      ({ rowNumber }) =>
+        !proposal.rows.some((row) => row.rowNumber === rowNumber)
     );
-    const unresolvedRow = proposal.rows.find(
-      (row) => !reviewedRowNumbers.has(row.rowNumber)
-    );
-    if (unresolvedRow) {
+    if (unknownReviewRow) {
       throw importError(
-        `Row ${unresolvedRow.rowNumber} has not been explicitly reviewed.`
+        `Row ${unknownReviewRow.rowNumber} is not part of this proposal.`
       );
+    }
+    if (
+      !decisions.some(
+        ({ decision }) => decision === "APPROVE" || decision === "IGNORE"
+      )
+    ) {
+      throw importError("Approve or ignore at least one row before Apply.");
     }
   }
   if (!isResume && decisions.length > 0) {
@@ -6335,62 +7178,83 @@ export async function applyStaffInventoryImport({
     }
   }
   if (!isResume) {
-    let preflightBlockState: StaffImportReviewState = "NEEDS_REVIEW";
-    const preflightBlock = proposal.rows.find((row) => {
-      const decision = decisionsByRow.get(row.rowNumber);
-      const resolvedDecision = decision
-        ? {
-            ...decision,
-            type: decision.type !== undefined ? decision.type : row.type,
-            quantity:
-              decision.quantity !== undefined
-                ? decision.quantity
-                : row.receivedQuantity ?? row.quantity,
-            minQuantity:
-              decision.minQuantity !== undefined ? decision.minQuantity : null,
-            unitOfMeasure:
-              decision.unitOfMeasure !== undefined
-                ? decision.unitOfMeasure
-                : row.type === "QUANTITY_TRACKED"
-                ? "pcs"
-                : null,
-            consumptionType:
-              decision.consumptionType !== undefined
-                ? decision.consumptionType
-                : row.type === "QUANTITY_TRACKED"
-                ? "TWO_WAY"
-                : null,
-          }
-        : undefined;
-      const state = resolveImportReviewState({
+    const ledger = await getImportLedgerItems({ operationId, organizationId });
+    const completed = new Map(
+      ledger
+        .filter(
+          (item) =>
+            item.unitIndex === null && ["DONE", "SKIPPED"].includes(item.status)
+        )
+        .map((item) => [Number(item.rowKey.replace(/^row-/, "")), item.status])
+    );
+    completedForValidation = new Set(completed.keys());
+    if (scopedRows?.some((number) => completed.has(number))) {
+      return blockedResponse(
+        proposal.rows
+          .filter(
+            (row) =>
+              scopedRows.includes(row.rowNumber) && completed.has(row.rowNumber)
+          )
+          .map((row) => ({
+            rowNumber: row.rowNumber,
+            title: row.title,
+            issues: [
+              {
+                code:
+                  completed.get(row.rowNumber) === "DONE"
+                    ? ("ALREADY_IMPORTED" as const)
+                    : ("IGNORED" as const),
+                message: `${row.title} has already been ${
+                  completed.get(row.rowNumber) === "DONE"
+                    ? "imported"
+                    : "ignored"
+                }.`,
+              },
+            ],
+          })),
+        scopedRows.length
+      );
+    }
+    const selected = proposal.rows.filter(
+      (row) =>
+        inScope(row.rowNumber) &&
+        !completed.has(row.rowNumber) &&
+        (decisionsByRow.get(row.rowNumber)?.decision === "APPROVE" ||
+          scopedRows?.includes(row.rowNumber))
+    );
+    const blockedRows = selected.flatMap((row) => {
+      const decision = decisionsByRow.get(row.rowNumber)!;
+      const validation = validateImportRowForApply({
         row,
-        decision: resolvedDecision,
+        decision,
         categoryAvailable: Boolean(
-          (resolvedDecision?.categoryId &&
+          (decision.categoryId &&
             proposal.categoryOptions?.some(
               (category) =>
-                category.id === resolvedDecision.categoryId &&
-                !category.archived
+                category.id === decision.categoryId && !category.archived
             )) ||
-            (resolvedDecision?.approveNewCategory &&
-              resolvedDecision.newCategoryName)
+            decision.approveNewCategory
         ),
         locationAvailable:
-          !resolvedDecision?.locationId ||
+          !decision.locationId ||
           Boolean(
             proposal.locationOptions?.some(
-              (location) => location.id === resolvedDecision.locationId
+              (location) => location.id === decision.locationId
             )
           ),
       });
-      preflightBlockState = state;
-      return state !== "READY" && state !== "SKIPPED";
+      return validation.ready
+        ? []
+        : [
+            {
+              rowNumber: row.rowNumber,
+              title: decision.title ?? row.title,
+              issues: validation.issues,
+            },
+          ];
     });
-    if (preflightBlock) {
-      throw importError(
-        `Row ${preflightBlock.rowNumber} is ${preflightBlockState}. Approve does not resolve missing product, category, location, tracking, or quantity decisions.`
-      );
-    }
+    if (blockedRows.length)
+      return blockedResponse(blockedRows, selected.length);
   }
   if (!isResume && decisions.length > 0) {
     const [assets, categories, rawLocations] = await Promise.all([
@@ -6435,7 +7299,10 @@ export async function applyStaffInventoryImport({
     if (
       decisions.some(
         (decision) =>
-          decision.decision === "APPROVE" && decision.approveNewCategory
+          decision.decision === "APPROVE" &&
+          inScope(decision.rowNumber) &&
+          !completedForValidation.has(decision.rowNumber) &&
+          decision.approveNewCategory
       )
     ) {
       await requirePermission({
@@ -6452,9 +7319,16 @@ export async function applyStaffInventoryImport({
       where: { organizationId, id: { in: archivedCategoryIds } },
       select: { id: true, name: true },
     });
-    const reviewConflict = proposal.rows.find((row) => {
+    const canonicalIssues = new Map<number, ImportReviewIssue>();
+    const reviewConflicts = proposal.rows.filter((row) => {
+      if (
+        !inScope(row.rowNumber) ||
+        completedForValidation.has(row.rowNumber)
+      ) {
+        return false;
+      }
       const decision = decisionsByRow.get(row.rowNumber);
-      if (!decision || decision.decision === "IGNORE") return false;
+      if (!decision || decision.decision !== "APPROVE") return false;
       const categoryId =
         decision.categoryId !== undefined
           ? decision.categoryId
@@ -6472,6 +7346,10 @@ export async function applyStaffInventoryImport({
           normalizeImportLabel(currentCategory.name) !==
             normalizeImportLabel(reviewedCategory.name)
         ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_CATEGORY",
+            message: `${row.title}: The reviewed category changed. Choose an active category again.`,
+          });
           return true;
         }
       }
@@ -6485,6 +7363,10 @@ export async function applyStaffInventoryImport({
             (category) => normalizeImportLabel(category.name) === normalizedName
           )
         ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_CATEGORY",
+            message: `${row.title}: The proposed category now exists. Choose the existing category.`,
+          });
           return true;
         }
       }
@@ -6508,6 +7390,10 @@ export async function applyStaffInventoryImport({
             currentName: currentLocation.name,
           })
         ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_LOCATION",
+            message: `${row.title}: The reviewed location changed. Choose a current location again.`,
+          });
           return true;
         }
       }
@@ -6517,6 +7403,29 @@ export async function applyStaffInventoryImport({
         const currentAsset = assets.find(
           (asset) => asset.id === selectedAssetId
         );
+        if (
+          currentAsset &&
+          decision.type &&
+          decision.type !== currentAsset.type
+        ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "TRACKING_REVIEW_REQUIRED",
+            message: `${row.title} must use the existing Shelf product's tracking type.`,
+          });
+          return true;
+        }
+        if (
+          selectedAssetId !== row.assetId &&
+          !row.matchCandidates?.some(
+            (candidate) => candidate.id === selectedAssetId
+          )
+        ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_PRODUCT_IDENTITY",
+            message: `Choose an existing product offered for ${row.title}, or choose Create new.`,
+          });
+          return true;
+        }
         const expectedAssetState =
           selectedAssetId === row.assetId
             ? row.expectedAssetState
@@ -6528,16 +7437,28 @@ export async function applyStaffInventoryImport({
           !expectedAssetState ||
           !matchesExpectedAssetState(expectedAssetState, currentAsset)
         ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "CANONICAL_DATA_CHANGED",
+            message: `${row.title}: The existing product changed after review. Reload the proposal and review that product again.`,
+          });
           return true;
         }
       }
       return false;
     });
-    if (reviewConflict) {
-      throw importError(
-        `Row ${reviewConflict.rowNumber} is CONFLICT because its reviewed product, category, or location changed. Reload and review the current data before Apply.`
+    if (reviewConflicts.length)
+      return blockedResponse(
+        reviewConflicts.map((row) => ({
+          rowNumber: row.rowNumber,
+          title: row.title,
+          issues: [canonicalIssues.get(row.rowNumber)!],
+        })),
+        proposal.rows.filter(
+          (row) =>
+            inScope(row.rowNumber) &&
+            decisionsByRow.get(row.rowNumber)?.decision === "APPROVE"
+        ).length
       );
-    }
     const createdCategoryByNormalizedName = new Map<string, NamedRecord>();
     const archivedCategoryNames = new Set(
       archivedCategories.map((category) => normalizeImportLabel(category.name))
@@ -6562,33 +7483,13 @@ export async function applyStaffInventoryImport({
       }
       if (
         decision.acceptSuggestedImage &&
-        row.productImageProposal?.status !== "IMAGE_FOUND"
+        row.productImageProposal?.status !== "IMAGE_FOUND" &&
+        decision.manualImage?.status !== "IMAGE_FOUND"
       ) {
         throw importError(
           "A product image can be accepted only from this proposal's validated suggestion."
         );
       }
-      const resolvedDecision: StaffImportReviewDecision = {
-        ...decision,
-        type: decision.type !== undefined ? decision.type : row.type,
-        quantity:
-          decision.quantity !== undefined
-            ? decision.quantity
-            : row.receivedQuantity ?? row.quantity,
-        minQuantity: decision.minQuantity ?? null,
-        unitOfMeasure:
-          decision.unitOfMeasure !== undefined
-            ? decision.unitOfMeasure
-            : row.type === "QUANTITY_TRACKED"
-            ? "pcs"
-            : null,
-        consumptionType:
-          decision.consumptionType !== undefined
-            ? decision.consumptionType
-            : row.type === "QUANTITY_TRACKED"
-            ? "TWO_WAY"
-            : null,
-      };
       if (
         decision.assetId &&
         decision.assetId !== row.assetId &&
@@ -6602,6 +7503,9 @@ export async function applyStaffInventoryImport({
       }
       const selectedAssetId =
         decision.assetId !== undefined ? decision.assetId : row.assetId;
+      const selectedAsset = selectedAssetId
+        ? assets.find((asset) => asset.id === selectedAssetId)
+        : undefined;
       const expectedAssetState = selectedAssetId
         ? selectedAssetId === row.assetId
           ? row.expectedAssetState
@@ -6609,20 +7513,51 @@ export async function applyStaffInventoryImport({
               (candidate) => candidate.id === selectedAssetId
             )?.expectedAssetState
         : undefined;
+      if (
+        selectedAsset &&
+        decision.type != null &&
+        decision.type !== selectedAsset.type
+      ) {
+        throw importError(
+          "An existing Shelf model's tracking mode cannot be changed through import review."
+        );
+      }
+      const resolvedType =
+        selectedAsset?.type ??
+        (decision.type !== undefined ? decision.type : row.type);
       let reviewConflictReason: string | null = null;
       if (selectedAssetId) {
-        const currentAsset = assets.find(
-          (asset) => asset.id === selectedAssetId
-        );
         if (
-          !currentAsset ||
+          !selectedAsset ||
           !expectedAssetState ||
-          !matchesExpectedAssetState(expectedAssetState, currentAsset)
+          !matchesExpectedAssetState(expectedAssetState, selectedAsset)
         ) {
           reviewConflictReason =
             "The selected asset changed after review. Re-review its quantity, category, location, or product before applying.";
         }
       }
+      const resolvedDecision: StaffImportReviewDecision = {
+        ...decision,
+        type: resolvedType,
+        trackingModeConfirmed: decision.trackingModeConfirmed === true,
+        quantity:
+          decision.quantity !== undefined
+            ? decision.quantity
+            : row.receivedQuantity ?? row.quantity,
+        minQuantity: decision.minQuantity ?? null,
+        unitOfMeasure:
+          decision.unitOfMeasure !== undefined
+            ? decision.unitOfMeasure
+            : resolvedType === "QUANTITY_TRACKED"
+            ? "pcs"
+            : null,
+        consumptionType:
+          decision.consumptionType !== undefined
+            ? decision.consumptionType
+            : resolvedType === "QUANTITY_TRACKED"
+            ? "TWO_WAY"
+            : null,
+      };
       let selectedCategoryId =
         decision.categoryId !== undefined
           ? decision.categoryId
@@ -6755,6 +7690,10 @@ export async function applyStaffInventoryImport({
           "The approved location changed or no longer exists in this organization.";
       }
       const title = resolvedDecision.title ?? row.title;
+      const manualTrackingOverride =
+        !selectedAsset &&
+        resolvedDecision.type != null &&
+        resolvedDecision.type !== row.type;
       const resolvedReviewFields = new Set([
         ...(title.trim() ? ["Item name"] : []),
         ...(selectedAssetId || resolvedDecision.productChoice
@@ -6778,6 +7717,12 @@ export async function applyStaffInventoryImport({
             title,
             ...(resolvedDecision.type !== undefined
               ? { type: resolvedDecision.type }
+              : {}),
+            ...(manualTrackingOverride
+              ? {
+                  trackingSource: "MANUAL_OVERRIDE" as const,
+                  trackingReasonCode: "MANUAL_OVERRIDE" as const,
+                }
               : {}),
             ...(resolvedDecision.quantity !== undefined
               ? {
@@ -6803,8 +7748,31 @@ export async function applyStaffInventoryImport({
         categories: categoriesForClassification,
         locations,
       })[0];
+      const classifiedTracking = selectedAsset
+        ? {
+            ...classified,
+            type: selectedAsset.type,
+            trackingSource: "EXISTING_MODEL" as const,
+            trackingReasonCode:
+              selectedAsset.type === AssetType.INDIVIDUAL
+                ? ("EXISTING_MODEL_INDIVIDUAL" as const)
+                : ("EXISTING_MODEL_QUANTITY" as const),
+            trackingReason:
+              selectedAsset.type === AssetType.INDIVIDUAL
+                ? "Uses this existing Shelf model’s individual tracking mode."
+                : "Uses this existing Shelf model’s quantity tracking mode.",
+          }
+        : {
+            ...classified,
+            type: resolvedType,
+            trackingSource: manualTrackingOverride
+              ? ("MANUAL_OVERRIDE" as const)
+              : row.trackingSource === "EXISTING_MODEL"
+              ? ("DETERMINISTIC_DEFAULT" as const)
+              : row.trackingSource,
+          };
       return {
-        ...classified,
+        ...classifiedTracking,
         ...(resolvedDecision.productChoice === "NEW"
           ? { action: "CREATE" as const }
           : {}),
@@ -6818,6 +7786,10 @@ export async function applyStaffInventoryImport({
           resolvedDecision.assetModelDescription !== undefined
             ? resolvedDecision.assetModelDescription
             : row.assetModelDescription ?? null,
+        productImageProposal:
+          resolvedDecision.manualImage?.status === "IMAGE_FOUND"
+            ? resolvedDecision.manualImage
+            : row.productImageProposal,
         acceptSuggestedImage: resolvedDecision.acceptSuggestedImage === true,
         expectedAssetState,
         categoryLabel: selectedCategoryLabel,
@@ -6838,7 +7810,7 @@ export async function applyStaffInventoryImport({
         categoryId: selectedCategoryId ?? null,
         reviewState: resolveImportReviewState({
           row: {
-            ...classified,
+            ...classifiedTracking,
             categoryResolution:
               selectedCategoryId && selectedCategory
                 ? "ACTIVE_MATCH"
@@ -6864,71 +7836,111 @@ export async function applyStaffInventoryImport({
       };
     };
     rowsToApply = [];
+    const existingLedgerItems = await getImportLedgerItems({
+      operationId,
+      organizationId,
+    });
+    const completedRowNumbers = new Set(
+      existingLedgerItems
+        .filter(
+          (item) =>
+            item.unitIndex === null &&
+            (item.status === "DONE" || item.status === "SKIPPED")
+        )
+        .map((item) => Number(item.rowKey.replace(/^row-/, "")))
+    );
     for (const row of proposal.rows) {
+      if (
+        !inScope(row.rowNumber) ||
+        completedForValidation.has(row.rowNumber)
+      ) {
+        continue;
+      }
+      const decision = decisionsByRow.get(row.rowNumber);
+      if (
+        !decision ||
+        decision.decision === null ||
+        completedRowNumbers.has(row.rowNumber)
+      ) {
+        continue;
+      }
       rowsToApply.push(await resolveReviewedRow(row));
     }
   }
-  const blockedReviewRow = rowsToApply.find((row) => {
-    const state =
-      row.reviewState ??
-      (isResume
-        ? resolveImportReviewState({
-            row,
-            decision: {
-              decision: row.action === "IGNORE" ? "IGNORE" : "APPROVE",
-              title: row.title,
-              assetId: row.assetId,
-              categoryId: row.categoryId,
-              newCategoryName: null,
-              approveNewCategory: false,
-              locationId: row.locationId,
-              quantity: row.receivedQuantity ?? row.quantity,
-              type: row.type,
-              minQuantity: row.minQuantity,
-              unitOfMeasure:
-                row.unitOfMeasure ??
-                (row.type === "QUANTITY_TRACKED" ? "pcs" : null),
-              consumptionType:
-                row.consumptionType ??
-                (row.type === "QUANTITY_TRACKED" ? "TWO_WAY" : null),
-            },
-            categoryAvailable: Boolean(row.categoryId),
-            locationAvailable: true,
-          })
-        : "NEEDS_REVIEW");
-    return state !== "READY" && state !== "SKIPPED";
-  });
-  if (blockedReviewRow) {
-    throw importError(
-      `Row ${blockedReviewRow.rowNumber} is ${
-        blockedReviewRow.reviewState ?? "NEEDS_REVIEW"
-      }. Resolve its required review decisions before Apply.`
-    );
+  if (!isResume && rowsToApply.length === 0) {
+    throw importError("There are no approved rows left to apply.");
   }
+  const trackingRows = rowsToApply.filter((row) => row.action !== "IGNORE");
+  Logger.info({
+    event: "ioio_staff_import_tracking_diagnostics",
+    operationId,
+    quantityTrackedRows: trackingRows.filter(
+      (row) => row.type === "QUANTITY_TRACKED"
+    ).length,
+    individualTrackedRows: trackingRows.filter(
+      (row) => row.type === "INDIVIDUAL"
+    ).length,
+    individualTrackingByExistingModel: trackingRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" && row.trackingSource === "EXISTING_MODEL"
+    ).length,
+    individualTrackingByStrongEvidence: trackingRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" &&
+        ["SOURCE_EXPLICIT", "DETERMINISTIC_EQUIPMENT_EVIDENCE"].includes(
+          row.trackingSource ?? ""
+        )
+    ).length,
+    individualTrackingManualOverride: trackingRows.filter(
+      (row) =>
+        row.type === "INDIVIDUAL" && row.trackingSource === "MANUAL_OVERRIDE"
+    ).length,
+  });
+  const finalBlocked = rowsToApply.flatMap((row) => {
+    if (row.action === "IGNORE") return [];
+    const decision = decisionsByRow.get(row.rowNumber);
+    const validation = validateImportRowForApply({
+      row,
+      decision: {
+        ...decision,
+        decision: "APPROVE",
+        title: row.title,
+        type: row.type,
+        categoryId: row.categoryId,
+        approveNewCategory: false,
+        locationId: row.locationId,
+        quantity: row.receivedQuantity ?? row.quantity,
+        trackingModeConfirmed:
+          decision?.trackingModeConfirmed ??
+          (isResume && row.type === "INDIVIDUAL"),
+      },
+      categoryAvailable: Boolean(row.categoryId) || row.mouserLineItem === true,
+      locationAvailable: true,
+      canonicalIssue: row.reviewConflictReason
+        ? {
+            code: "CANONICAL_DATA_CHANGED",
+            message: `${row.title}: ${row.reviewConflictReason}`,
+          }
+        : undefined,
+    });
+    return validation.ready
+      ? []
+      : [
+          {
+            rowNumber: row.rowNumber,
+            title: row.title,
+            issues: validation.issues,
+          },
+        ];
+  });
+  if (finalBlocked.length)
+    return blockedResponse(
+      finalBlocked,
+      rowsToApply.filter((row) => row.action !== "IGNORE").length
+    );
   const individualUnitLimitError =
     getIndividualUnitImportLimitError(rowsToApply);
   if (individualUnitLimitError) throw importError(individualUnitLimitError);
-  const unresolvedHelperRow = rowsToApply.find(
-    (row) =>
-      row.helperCandidate &&
-      (row.type === null ||
-        row.action === "AMBIGUOUS" ||
-        row.action === "REJECT" ||
-        (row.action === "POSSIBLE_DUPLICATE" && !row.assetId))
-  );
-  if (unresolvedHelperRow) {
-    throw importError(
-      `Helper row ${unresolvedHelperRow.rowNumber} still has unresolved required fields. Review its quantity, tracking mode, category, and product match before applying.`
-    );
-  }
-  const unresolvedCategoryRow = rowsToApply.find(
-    (row) => row.action !== "IGNORE" && !row.categoryId
-  );
-  if (unresolvedCategoryRow) {
-    throw importError(
-      `Row ${unresolvedCategoryRow.rowNumber} needs an active category or an explicitly approved new category before Apply.`
-    );
-  }
 
   const executionHash = getStaffImportExecutionHash(proposal, rowsToApply);
   if (
@@ -7040,9 +8052,12 @@ export async function applyStaffInventoryImport({
           description: JSON.stringify({
             kind: "STAFF_INVENTORY_IMPORT",
             proposal,
+            reviewDraft: decisions,
             executionPlan: {
               rows: rowsToApply,
-              reviewedRows: decisions.length,
+              reviewedRows: decisions.filter(
+                ({ decision }) => decision !== null
+              ).length,
             },
           }),
         },
@@ -7320,7 +8335,19 @@ export async function applyStaffInventoryImport({
           where: { organizationId, title: row.title },
           select: { id: true },
         });
-        if (existing.length > 0) {
+        const originalRow = proposal.rows.find(
+          (candidate) => candidate.rowNumber === row.rowNumber
+        );
+        const reviewedDuplicateIds = new Set(
+          originalRow?.matchCandidates?.map((candidate) => candidate.id) ?? []
+        );
+        const explicitlyNew =
+          decisionsByRow.get(row.rowNumber)?.productChoice === "NEW";
+        if (
+          existing.some(
+            (asset) => !explicitlyNew || !reviewedDuplicateIds.has(asset.id)
+          )
+        ) {
           const reason =
             "An exact-title asset appeared after review. Re-review this row before applying it.";
           const markedConflict = await markImportLedgerItemConflict({
@@ -7885,9 +8912,7 @@ export async function applyStaffInventoryImport({
           }
           continue;
         }
-        const type =
-          row.type ??
-          (receivedQuantity > 1 ? "QUANTITY_TRACKED" : "INDIVIDUAL");
+        const type = row.type ?? "QUANTITY_TRACKED";
         await recordImportLedgerExpectedPrior({
           operationId,
           organizationId,
@@ -8393,16 +9418,34 @@ export async function applyStaffInventoryImport({
     failedRows,
     conflictRows,
     ignoredRows: rowSummary.skippedRows,
-    reviewedRows: storedExecutionPlan?.reviewedRows ?? decisions.length,
+    reviewedRows:
+      storedExecutionPlan?.reviewedRows ??
+      decisions.filter(({ decision }) => decision !== null).length,
     ...rowSummary,
   };
+  const remainingRows = proposal.rows.filter((row) => {
+    const rowItems = finalLedgerItems.filter(
+      (item) => item.rowKey === `row-${row.rowNumber}`
+    );
+    const unitItems = rowItems.filter((item) => item.unitIndex !== null);
+    const countedItems = unitItems.length
+      ? unitItems
+      : rowItems.filter((item) => item.unitIndex === null);
+    return (
+      countedItems.length === 0 ||
+      countedItems.some((item) => item.status === "PENDING")
+    );
+  }).length;
+  result.remainingRows = remainingRows;
+  const keepReviewing = remainingRows > 0;
   const completed = await db.ioioWriteOperation.updateMany({
     where: { id: operationId, organizationId, userId, status: "APPLYING" },
     data: {
-      status: aggregateStatus,
+      status: keepReviewing ? "PREPARED" : aggregateStatus,
       description: JSON.stringify({
         kind: "STAFF_INVENTORY_IMPORT",
         proposal,
+        reviewDraft: decisions,
         result,
       }),
       failureCode:
@@ -8411,7 +9454,7 @@ export async function applyStaffInventoryImport({
           : failedRows.length > 0
           ? "ROW_FAILURE"
           : null,
-      completedAt: new Date(),
+      completedAt: keepReviewing ? null : new Date(),
     },
   });
   if (completed.count !== 1) return { status: "IN_PROGRESS", operationId };
