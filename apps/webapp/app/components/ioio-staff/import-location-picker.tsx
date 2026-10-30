@@ -21,12 +21,14 @@ export function ImportLocationPicker({
   selectedId,
   suggestedId,
   onSelect,
+  className,
 }: {
   label: string;
   locations: ImportLocationOption[];
   selectedId: string | null;
   suggestedId: string | null;
   onSelect: (locationId: string | null) => void;
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -103,7 +105,9 @@ export function ImportLocationPicker({
           type="button"
           aria-label={label}
           aria-haspopup="listbox"
-          className="inline-flex max-w-full items-center rounded-md text-left text-sm text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-red-200"
+          className={`inline-flex max-w-full items-center rounded-md text-left text-sm text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-red-200 ${
+            className ?? ""
+          }`}
         >
           <span className="line-clamp-2 break-words">
             {selected?.pathLabel ?? "Choose location"}

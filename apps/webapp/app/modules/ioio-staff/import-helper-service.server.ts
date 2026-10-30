@@ -127,10 +127,7 @@ export const IMPORT_HELPER_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
           trackingSuggestion: strictObject(
             {
               mode: {
-                oneOf: [
-                  { enum: ["INDIVIDUAL", "QUANTITY_TRACKED"] },
-                  { type: "null" },
-                ],
+                oneOf: [{ enum: ["QUANTITY_TRACKED"] }, { type: "null" }],
               },
               confidence,
             },
@@ -590,7 +587,7 @@ When product identity is clear, optionally provide assetModelDescription: a prac
 
 Do not return headers, repeated headers, footers, totals, prices, tax, VAT, shipping, legal text, addresses, order metadata, page labels, table headings, Continued/Fortsätter, customs fields (TARIC, HTS, ECCN, COO), labels such as “Tillv. Artikelnr”, partial words, isolated numeric fragments, or table coordinates as products. If you are uncertain whether text belongs to a product, omit it rather than creating a garbage candidate.
 
-Suggest the most specific fitting category from the existing Shelf category allowlist, using its name and description; otherwise categoryId must be null and proposedName must be null. Never invent a category. Suggest an existing assignable Shelf location from the location allowlist using product identity, category, and location name/path/description/hierarchy. Prefer category placement counts supplied in location occupancy context when they show a clear historical preference; they are compact evidence, not capacity rules. Prefer a specifically relevant child over a general parent. Leave locationSuggestions empty if no good match. Choose a tracking mode only when reasonably confident: QUANTITY_TRACKED for clearly interchangeable stock, INDIVIDUAL for obvious equipment/dev boards/sensors where individual tracking may be useful. Otherwise set mode to null. Do not ask routine standalone-versus-kit questions; mark a kit only when the source clearly identifies one.
+Suggest the most specific fitting category from the existing Shelf category allowlist, using its name and description; otherwise categoryId must be null and proposedName must be null. Never invent a category. Suggest an existing assignable Shelf location from the location allowlist using product identity, category, and location name/path/description/hierarchy. Prefer category placement counts supplied in location occupancy context when they show a clear historical preference; they are compact evidence, not capacity rules. Prefer a specifically relevant child over a general parent. Leave locationSuggestions empty if no good match. Always use QUANTITY_TRACKED as the tracking suggestion for imported items, regardless of serial numbers, equipment type, or source wording. Never suggest INDIVIDUAL; staff can choose it manually during review. Do not ask routine standalone-versus-kit questions; mark a kit only when the source clearly identifies one.
 
 Ask zero questions for a normal, safely reviewable line item. Return no more than one question per row, only when a missing or ambiguous fact is necessary to import safely. Missing manufacturer or MPN alone does not require a question.
 

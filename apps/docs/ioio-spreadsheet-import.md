@@ -20,6 +20,8 @@ Limits remain 5 MB and 1,000 product rows. Source-specific provenance lives in e
 
 Import readiness is calculated by `validateImportRowForApply` from the reviewed product identity, quantity, existing/new choice, tracking, and required category/location IDs. Historical `CONFLICT`/`reviewState` values do not gate Apply. The server validates canonical records again and returns `readyCount`, `blockedCount`, and per-row issue codes/messages before claiming inventory writes. Image and description enrichment never block readiness.
 
+New import rows default to quantity tracking, including rows with serial numbers or equipment descriptions. Staff can choose individual tracking explicitly in review; an existing Shelf model keeps its established tracking mode.
+
 Row Import applies that row immediately through the existing ledger. Import selected validates only the selected rows and blocks the entire selected batch if any need review, listing all blocked products; staff can fix those rows or select just the ready ones. Remaining draft edits and approvals survive partial imports. Imported rows are excluded from later validation and retries return an explicit already-imported issue. The dashboard panel posts to the same `/staff/import` action; the legacy Home handler also returns structured readiness responses.
 
 Real product-image verification, exact configuration, recorded probe results, temporary-preview retention, failure reason codes and the quantity-stock/AssetModel boundary are documented in [ioio-product-image-verification.md](./ioio-product-image-verification.md).

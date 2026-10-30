@@ -16,7 +16,6 @@ import { z } from "zod";
 import { ErrorContent } from "~/components/errors";
 import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customizer";
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
-import { StaffImportPanel } from "~/components/ioio-staff/staff-import-panel";
 import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
 import { db } from "~/database/db.server";
 import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
@@ -69,29 +68,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         ])
       : [null, null, null, null];
 
-    let importProposal = null;
-    let importNotice = null;
-    const operationId = new URL(request.url).searchParams.get(
-      "importOperation"
-    );
-    if (isStaff && operationId) {
-      try {
-        importProposal = await getStaffInventoryImportProposal({
-          context,
-          request,
-          operationId,
-        });
-      } catch (cause) {
-        const reason = makeShelfError(cause);
-        if (reason.message.includes("no longer available")) {
-          importNotice =
-            "This import proposal expired or is no longer available. Start a new import to continue.";
-        } else {
-          throw data(error(reason), { status: reason.status });
-        }
-      }
-    }
-
     return payload({
       header: { title: "Home" },
       isStaff,
@@ -101,8 +77,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       dashboardPreferences: normalizeStaffDashboardPreferences(
         savedDashboardPreferences?.staffDashboardPreferences
       ),
-      importProposal,
-      importNotice,
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -294,15 +268,8 @@ export const handle = {
 };
 
 export default function HomePage() {
-  const {
-    dashboardPreferences,
-    isStaff,
-    importNotice,
-    importProposal,
-    labTasks,
-    purchasing,
-    taHours,
-  } = useLoaderData<typeof loader>();
+  const { dashboardPreferences, isStaff, labTasks, purchasing, taHours } =
+    useLoaderData<typeof loader>();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
@@ -526,13 +493,7 @@ export default function HomePage() {
         </div>
       </section>
     ) : null,
-    inventory_import: (
-      <StaffImportPanel
-        actionPath="/staff/import"
-        initialNotice={importNotice}
-        initialProposal={importProposal}
-      />
-    ),
+    inventory_import: <StaffInventoryTools />,
   };
 
   return (
@@ -579,19 +540,14 @@ export default function HomePage() {
         </form>
 
         {isStaff ? (
-          <>
-            <div className="mt-6">
-              <StaffInventoryTools />
-            </div>
-            <div className="mt-6 space-y-6">
-              {dashboardPreferences.order.map(
-                (widgetId: StaffDashboardWidgetId) =>
-                  hiddenWidgets.has(widgetId) ? null : (
-                    <div key={widgetId}>{widgets[widgetId]}</div>
-                  )
-              )}
-            </div>
-          </>
+          <div className="mt-6 space-y-6">
+            {dashboardPreferences.order.map(
+              (widgetId: StaffDashboardWidgetId) =>
+                hiddenWidgets.has(widgetId) ? null : (
+                  <div key={widgetId}>{widgets[widgetId]}</div>
+                )
+            )}
+          </div>
         ) : null}
       </div>
     </div>

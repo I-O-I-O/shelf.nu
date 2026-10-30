@@ -14,6 +14,7 @@ import {
   getStaffInventoryImportDrafts,
   getStaffInventoryImportProposal,
   prepareStaffInventoryImport,
+  revertStaffInventoryImportRow,
   saveStaffInventoryImportDraft,
 } from "~/modules/ioio-staff/inventory-import.server";
 import {
@@ -37,6 +38,8 @@ const ImportIntentSchema = z.enum([
   "cancel-import",
   "save-draft",
   "process-import-image",
+  "revert-row",
+  "revert-selected",
 ]);
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -171,6 +174,68 @@ export async function action({ context, request }: ActionFunctionArgs) {
       .min(1)
       .max(100)
       .parse(formData.get("operationId"));
+    if (intent === "revert-row") {
+      const rowNumber = z.coerce
+        .number()
+        .int()
+        .positive()
+        .parse(formData.get("rowNumber"));
+      const result = await revertStaffInventoryImportRow({
+        context,
+        request,
+        operationId,
+        rowNumber,
+      });
+      return payload({ kind: "import-row-reverted" as const, result });
+    }
+    if (intent === "revert-selected") {
+      const rowNumbers = z
+        .string()
+        .transform((value, ctx) => {
+          try {
+            return JSON.parse(value);
+          } catch {
+            ctx.addIssue({ code: "custom", message: "Invalid row selection." });
+            return z.NEVER;
+          }
+        })
+        .pipe(
+          z
+            .array(z.number().int().positive())
+            .min(1)
+            .max(1000)
+            .refine((values) => new Set(values).size === values.length)
+        )
+        .parse(formData.get("rowNumbers"));
+      const revertedRowNumbers: number[] = [];
+      const failedRows: Array<{ rowNumber: number; message: string }> = [];
+      for (const rowNumber of rowNumbers) {
+        try {
+          await revertStaffInventoryImportRow({
+            context,
+            request,
+            operationId,
+            rowNumber,
+          });
+          revertedRowNumbers.push(rowNumber);
+        } catch (cause) {
+          failedRows.push({
+            rowNumber,
+            message: makeShelfError(cause).message,
+          });
+        }
+      }
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({
+        kind: "import-rows-reverted" as const,
+        proposal,
+        result: { operationId, revertedRowNumbers, failedRows },
+      });
+    }
     if (intent === "save-draft") {
       const reviewDecisions = formData.get("reviewDecisions");
       if (typeof reviewDecisions !== "string") {
@@ -265,7 +330,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
         result,
       });
     }
-    return payload({ kind: "import-result" as const, result });
+    const proposal = await getStaffInventoryImportProposal({
+      context,
+      request,
+      operationId,
+    });
+    return payload({ kind: "import-complete" as const, proposal, result });
   } catch (cause) {
     const reason = userId
       ? makeShelfError(cause, { userId })

@@ -12,9 +12,20 @@ import type { MouserEnrichmentRequest } from "./import-helper-contract.server";
 const database = vi.hoisted(() => ({
   image: { upsert: vi.fn(), findFirst: vi.fn(), deleteMany: vi.fn() },
   asset: { findMany: vi.fn(), findFirst: vi.fn() },
+  custody: { count: vi.fn() },
+  bookingAsset: { count: vi.fn() },
+  consumptionLog: { count: vi.fn() },
+  assetKit: { count: vi.fn() },
+  reportFound: { count: vi.fn() },
+  note: { count: vi.fn() },
+  tag: { count: vi.fn() },
+  assetCustomFieldValue: { count: vi.fn() },
+  auditAsset: { count: vi.fn() },
+  auditScan: { count: vi.fn() },
+  purchaseItem: { count: vi.fn() },
   assetModel: { findFirst: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
   category: { findFirst: vi.fn(), findMany: vi.fn() },
-  qr: { findFirst: vi.fn() },
+  qr: { findFirst: vi.fn(), findMany: vi.fn() },
   location: { findMany: vi.fn(), count: vi.fn() },
   ioioWriteOperation: {
     findUnique: vi.fn(),
@@ -35,6 +46,8 @@ const mockStaffAccess = vi.hoisted(() => vi.fn());
 const mockGetCategories = vi.hoisted(() => vi.fn());
 const mockCreateAsset = vi.hoisted(() => vi.fn());
 const mockUpdateAsset = vi.hoisted(() => vi.fn());
+const mockDeleteAsset = vi.hoisted(() => vi.fn());
+const mockReplaceAssetPlacements = vi.hoisted(() => vi.fn());
 const mockCreateAssetModel = vi.hoisted(() => vi.fn());
 const mockUpdateAssetMainImage = vi.hoisted(() => vi.fn());
 const mockUpdateAssetModelDescriptionIfUnchanged = vi.hoisted(() => vi.fn());
@@ -59,6 +72,8 @@ vi.mock("~/database/db.server", () => ({
 vi.mock("~/modules/asset/service.server", () => ({
   BULK_CREATE_MAX: 100,
   createAsset: mockCreateAsset,
+  deleteAsset: mockDeleteAsset,
+  replaceAssetPlacements: mockReplaceAssetPlacements,
   updateAssetMainImage: mockUpdateAssetMainImage,
   updateAsset: mockUpdateAsset,
 }));
@@ -155,6 +170,7 @@ import {
   parseMouserInvoicePages,
   parseStaffImportFile,
   prepareStaffInventoryImport,
+  revertStaffInventoryImportRow,
   saveStaffInventoryImportDraft,
   summarizeStaffImportRows,
   type StaffImportProposal,
@@ -352,6 +368,7 @@ function makeGenericHelperReadyResult({
     mpn?: string | null;
     supplierProductNumber?: string | null;
     description?: string | null;
+    trackingSuggestion?: "QUANTITY_TRACKED" | "INDIVIDUAL" | null;
   }>;
 }) {
   return {
@@ -368,6 +385,7 @@ function makeGenericHelperReadyResult({
           mpn,
           supplierProductNumber,
           description,
+          trackingSuggestion,
         }) => ({
           sourceRef: "pdf-page-1",
           productName,
@@ -387,7 +405,10 @@ function makeGenericHelperReadyResult({
             proposedName: null,
             confidence: 0.4,
           },
-          trackingSuggestion: { mode: null, confidence: 0.4 },
+          trackingSuggestion: {
+            mode: trackingSuggestion ?? null,
+            confidence: 0.4,
+          },
           kitHint: { isKit: false, name: null, confidence: 0.9 },
           settingsSuggestions: [],
           locationSuggestions: [],
@@ -461,6 +482,20 @@ beforeEach(() => {
   mockUpdateAssetModelDescriptionIfUnchanged.mockResolvedValue(true);
   mockUpdateAssetModelImage.mockResolvedValue("https://shelf.test/image.webp");
   mockUpdateAssetMainImage.mockResolvedValue(true);
+  mockDeleteAsset.mockResolvedValue(undefined);
+  mockReplaceAssetPlacements.mockResolvedValue(undefined);
+  database.custody.count.mockResolvedValue(0);
+  database.bookingAsset.count.mockResolvedValue(0);
+  database.consumptionLog.count.mockResolvedValue(0);
+  database.assetKit.count.mockResolvedValue(0);
+  database.reportFound.count.mockResolvedValue(0);
+  database.note.count.mockResolvedValue(0);
+  database.tag.count.mockResolvedValue(0);
+  database.assetCustomFieldValue.count.mockResolvedValue(0);
+  database.auditAsset.count.mockResolvedValue(0);
+  database.auditScan.count.mockResolvedValue(0);
+  database.purchaseItem.count.mockResolvedValue(0);
+  database.qr.findMany.mockResolvedValue([]);
   mockEnrichImportProductRows.mockImplementation((rows) => ({
     rows: rows.map((row: ImportProductEnrichmentRow) => ({
       ...row,
@@ -1723,6 +1758,7 @@ describe("staff inventory import safety", () => {
                       type: decisionType === undefined ? type : decisionType,
                       trackingModeConfirmed:
                         trackingModeConfirmed ?? type === "INDIVIDUAL",
+                      trackingModeSelectedByStaff: type === "INDIVIDUAL",
                       minQuantity,
                       unitOfMeasure,
                       consumptionType,
@@ -2069,7 +2105,9 @@ describe("staff inventory import safety", () => {
         categoryId: "category-electronics",
         locationId: "location-shelf-b3",
         quantity: 4,
-        type: "QUANTITY_TRACKED" as const,
+        type: "INDIVIDUAL" as const,
+        trackingModeConfirmed: false,
+        trackingModeSelectedByStaff: true,
       },
     ];
     await saveStaffInventoryImportDraft({
@@ -2906,6 +2944,96 @@ describe("staff inventory import safety", () => {
           quantity: 2,
           type: "INDIVIDUAL",
           trackingModeConfirmed: true,
+          trackingModeSelectedByStaff: true,
+          productChoice: "NEW",
+        },
+      ],
+    });
+
+    expect(assetRows).toHaveLength(2);
+    expect(assetRows.every((asset) => asset.type === "INDIVIDUAL")).toBe(true);
+  });
+
+  it("blocks individual tracking unless staff selected it explicitly", async () => {
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      type: "INDIVIDUAL",
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: "APPROVE",
+          title: "Rigol DS1054Z Digital Oscilloscope",
+          assetId: null,
+          categoryId: "category-electronics",
+          locationId: null,
+          quantity: 1,
+          type: "INDIVIDUAL",
+          trackingModeConfirmed: true,
+          trackingModeSelectedByStaff: false,
+          productChoice: "NEW",
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: "NEEDS_REVIEW",
+      blockedRows: [
+        {
+          issues: expect.arrayContaining([
+            expect.objectContaining({ code: "TRACKING_REVIEW_REQUIRED" }),
+          ]),
+        },
+      ],
+    });
+    expect(assetRows).toHaveLength(0);
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
+  it("normalizes a legacy source-individual proposal to quantity when staff keeps the default", async () => {
+    const { assetRows } = await applyNewImport({
+      quantity: 1,
+      type: "INDIVIDUAL",
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: "APPROVE",
+          title: "Rigol DS1054Z Digital Oscilloscope",
+          assetId: null,
+          categoryId: "category-electronics",
+          locationId: null,
+          quantity: 1,
+          type: "QUANTITY_TRACKED",
+          trackingModeSelectedByStaff: false,
+          productChoice: "NEW",
+        },
+      ],
+    });
+
+    expect(assetRows).toHaveLength(1);
+    expect(assetRows[0]).toMatchObject({
+      title: "Rigol DS1054Z Digital Oscilloscope",
+      type: "QUANTITY_TRACKED",
+      quantity: 1,
+    });
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
+  it("keeps a staff-selected individual mode on a legacy source-individual draft", async () => {
+    const { assetRows } = await applyNewImport({
+      quantity: 2,
+      type: "INDIVIDUAL",
+      reviewDecisionRows: [
+        {
+          rowNumber: 2,
+          decision: "APPROVE",
+          title: "Arduino Nano",
+          assetId: null,
+          categoryId: "category-electronics",
+          locationId: null,
+          quantity: 2,
+          type: "INDIVIDUAL",
+          trackingModeConfirmed: true,
+          trackingModeSelectedByStaff: true,
           productChoice: "NEW",
         },
       ],
@@ -3524,6 +3652,7 @@ describe("staff inventory import safety", () => {
             productName: "USB-C Cable",
             quantity: 4,
             evidenceText: "USB-C Cable, SKU CB-120, shipped quantity 4",
+            trackingSuggestion: "INDIVIDUAL",
           },
         ],
       })
@@ -3591,6 +3720,8 @@ describe("staff inventory import safety", () => {
     expect(prepared.proposal.rows[0]).toMatchObject({
       title: "USB-C Cable",
       quantity: 4,
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
     });
     expect(mockRequestImportHelperProposal).toHaveBeenCalledTimes(1);
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
@@ -5369,7 +5500,7 @@ describe("staff inventory import safety", () => {
     });
   });
 
-  it("proposes individual tracking from a serial number and requires staff confirmation", () => {
+  it("defaults serial-number rows to quantity tracking and permits a manual individual override", () => {
     const [row] = classifyStaffImportRows({
       rows: [
         {
@@ -5388,9 +5519,9 @@ describe("staff inventory import safety", () => {
     });
 
     expect(row).toMatchObject({
-      type: "INDIVIDUAL",
-      trackingSource: "SOURCE_EXPLICIT",
-      trackingReasonCode: "EXPLICIT_SERIALIZED_SOURCE",
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      trackingReasonCode: "DEFAULT_QUANTITY",
     });
     const state = (trackingModeConfirmed: boolean) =>
       resolveImportReviewState({
@@ -5402,6 +5533,7 @@ describe("staff inventory import safety", () => {
           quantity: 1,
           type: "INDIVIDUAL",
           trackingModeConfirmed,
+          trackingModeSelectedByStaff: true,
           productChoice: "NEW",
         },
         categoryAvailable: true,
@@ -5411,7 +5543,7 @@ describe("staff inventory import safety", () => {
     expect(state(true)).toBe("READY");
   });
 
-  it("requires source and equipment evidence together for individual equipment", () => {
+  it("defaults equipment rows to quantity tracking regardless of source evidence", () => {
     const [strong] = classifyStaffImportRows({
       rows: [
         {
@@ -5446,9 +5578,9 @@ describe("staff inventory import safety", () => {
     });
 
     expect(strong).toMatchObject({
-      type: "INDIVIDUAL",
-      trackingSource: "DETERMINISTIC_EQUIPMENT_EVIDENCE",
-      trackingReasonCode: "EQUIPMENT_REVIEW",
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+      trackingReasonCode: "DEFAULT_QUANTITY",
     });
     expect(ambiguous).toMatchObject({
       type: "QUANTITY_TRACKED",
@@ -5462,8 +5594,8 @@ describe("normalized spreadsheet import", () => {
   const parse = (text: string) =>
     parseStaffImportFile({ filename: "stock.csv", buffer: Buffer.from(text) });
   it("normalizes explicit tracking modes and per-unit serial evidence", async () => {
-    const [serialized, explicitQuantity] = await parse(
-      "Product,Qty,Serial Number,Tracking Mode\nOscilloscope,1,SCOPE-1042,\nUSB-C Cable,20,,QUANTITY_TRACKED"
+    const [serialized, explicitQuantity, sourceIndividual] = await parse(
+      "Product,Qty,Serial Number,Tracking Mode\nOscilloscope,1,SCOPE-1042,\nUSB-C Cable,20,,QUANTITY_TRACKED\nDigital oscilloscope,1,SCOPE-1043,INDIVIDUAL"
     );
 
     expect(serialized).toMatchObject({
@@ -5476,7 +5608,148 @@ describe("normalized spreadsheet import", () => {
       type: "QUANTITY_TRACKED",
       trackingSource: "SOURCE_EXPLICIT",
     });
+    expect(sourceIndividual).toMatchObject({
+      title: "Digital oscilloscope",
+      serialNumber: "SCOPE-1043",
+      type: null,
+    });
   });
+
+  it.each([
+    ["Rigol DS1054Z Digital Oscilloscope", 1],
+    ["UNI-T UT61E+ Digital Multimeter", 2],
+  ])(
+    "defaults PDF row %s (quantity %i) to quantity tracking",
+    async (title, quantity) => {
+      const rows = await parseStaffImportFile({
+        filename: "equipment.pdf",
+        buffer: makePdfFromPages([
+          {
+            text: `Product | Quantity | Category\n${title} | ${quantity} | Electronics`,
+          },
+        ]),
+      });
+      const [proposalRow] = classifyStaffImportRows({
+        rows,
+        assets: [],
+        categories: [{ id: "electronics", name: "Electronics" }],
+        locations: [],
+      });
+
+      expect(proposalRow).toMatchObject({
+        title,
+        quantity,
+        type: "QUANTITY_TRACKED",
+        trackingSource: "DETERMINISTIC_DEFAULT",
+        trackingReasonCode: "DEFAULT_QUANTITY",
+      });
+    }
+  );
+
+  it("defaults ordinary CSV components to quantity tracking", async () => {
+    const rows = await parse("Product,Qty\nResistor assortment,1");
+    const [proposalRow] = classifyStaffImportRows({
+      rows,
+      assets: [],
+      categories: [],
+      locations: [],
+    });
+
+    expect(proposalRow).toMatchObject({
+      title: "Resistor assortment",
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+    });
+  });
+
+  it("defaults ordinary XLSX components to quantity tracking", async () => {
+    const workbook = new JSZip();
+    workbook.file(
+      "xl/workbook.xml",
+      '<workbook><sheets><sheet name="Inventory" r:id="rId1" /></sheets></workbook>'
+    );
+    workbook.file(
+      "xl/_rels/workbook.xml.rels",
+      '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml" /></Relationships>'
+    );
+    workbook.file(
+      "xl/worksheets/sheet1.xml",
+      '<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>Product</t></is></c><c r="B1" t="inlineStr"><is><t>Qty</t></is></c></row><row><c r="A2" t="inlineStr"><is><t>Resistor assortment</t></is></c><c r="B2"><v>1</v></c></row></sheetData></worksheet>'
+    );
+    const rows = await parseStaffImportFile({
+      filename: "components.xlsx",
+      buffer: await workbook.generateAsync({ type: "nodebuffer" }),
+    });
+    const [proposalRow] = classifyStaffImportRows({
+      rows,
+      assets: [],
+      categories: [],
+      locations: [],
+    });
+
+    expect(proposalRow).toMatchObject({
+      title: "Resistor assortment",
+      quantity: 1,
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+    });
+  });
+
+  it.each(["PDF", "CSV", "XLSX"] as const)(
+    "defaults %s equipment imports to quantity tracking",
+    async (format) => {
+      let rows: Awaited<ReturnType<typeof parseStaffImportFile>>;
+      if (format === "PDF") {
+        rows = await parseStaffImportFile({
+          filename: "equipment.pdf",
+          buffer: makePdfFromPages([
+            {
+              text: "Product | Quantity | Description\nDigital oscilloscope | 2 | Serialized loanable test equipment",
+            },
+          ]),
+        });
+      } else if (format === "CSV") {
+        rows = await parseStaffImportFile({
+          filename: "equipment.csv",
+          buffer: Buffer.from(
+            "Product,Qty,Serial Number,Tracking Mode,Description\nDigital oscilloscope,2,SCOPE-1042,INDIVIDUAL,Serialized loanable test equipment"
+          ),
+        });
+      } else {
+        const workbook = new JSZip();
+        workbook.file(
+          "xl/workbook.xml",
+          '<workbook><sheets><sheet name="Inventory" r:id="rId1" /></sheets></workbook>'
+        );
+        workbook.file(
+          "xl/_rels/workbook.xml.rels",
+          '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml" /></Relationships>'
+        );
+        workbook.file(
+          "xl/worksheets/sheet1.xml",
+          '<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>Product</t></is></c><c r="B1" t="inlineStr"><is><t>Qty</t></is></c><c r="C1" t="inlineStr"><is><t>Serial Number</t></is></c><c r="D1" t="inlineStr"><is><t>Tracking Mode</t></is></c><c r="E1" t="inlineStr"><is><t>Description</t></is></c></row><row><c r="A2" t="inlineStr"><is><t>Digital oscilloscope</t></is></c><c r="B2"><v>2</v></c><c r="C2" t="inlineStr"><is><t>SCOPE-1042</t></is></c><c r="D2" t="inlineStr"><is><t>INDIVIDUAL</t></is></c><c r="E2" t="inlineStr"><is><t>Serialized loanable test equipment</t></is></c></row></sheetData></worksheet>'
+        );
+        rows = await parseStaffImportFile({
+          filename: "equipment.xlsx",
+          buffer: await workbook.generateAsync({ type: "nodebuffer" }),
+        });
+      }
+
+      const [proposalRow] = classifyStaffImportRows({
+        rows,
+        assets: [],
+        categories: [],
+        locations: [],
+      });
+
+      expect(proposalRow).toMatchObject({
+        type: "QUANTITY_TRACKED",
+        trackingSource: "DETERMINISTIC_DEFAULT",
+        trackingReasonCode: "DEFAULT_QUANTITY",
+      });
+    }
+  );
 
   it.each([",", ";", "\t"])(
     "reads quoted fields, BOM and %s delimiters",
@@ -6036,4 +6309,255 @@ describe("spreadsheet canonical category fallback", () => {
       expect(mockCreateAsset).not.toHaveBeenCalled();
     }
   );
+});
+
+describe("staff inventory import revert", () => {
+  const createProposal = (action: "CREATE" | "INCREASE_QUANTITY") => {
+    const content = {
+      version: 1 as const,
+      operationId: "revert-operation",
+      organizationId: "org-1",
+      source: { filename: "inventory.csv", size: 42, sha256: "sha" },
+      rows: [
+        {
+          rowNumber: 1,
+          title: "Arduino Nano",
+          action,
+          assetId: action === "CREATE" ? null : "asset-1",
+          categoryId: null,
+          locationId: null,
+          currentQuantity: action === "CREATE" ? null : 2,
+          currentCategoryId: null,
+          currentLocationId: null,
+          quantity: 3,
+          receivedQuantity: 3,
+          type: "QUANTITY_TRACKED" as const,
+          reason: "Imported inventory",
+        },
+      ],
+      counts: {} as StaffImportProposal["counts"],
+      createdAt: new Date().toISOString(),
+    };
+    return {
+      ...content,
+      proposalHash: getStaffImportProposalHash(content),
+    } as StaffImportProposal;
+  };
+
+  const setupOperation = (
+    proposal: StaffImportProposal,
+    ledgerItem: Record<string, unknown>,
+    status = "SUCCEEDED"
+  ) => {
+    const operation = {
+      id: proposal.operationId,
+      status,
+      createdAt: new Date(),
+      description: JSON.stringify({
+        proposal,
+        reviewDraft: [{ rowNumber: 1, decision: "APPROVE" }],
+      }),
+    };
+    database.ioioWriteOperation.findFirst.mockImplementation(() => ({
+      ...operation,
+    }));
+    database.ioioWriteOperation.updateMany.mockImplementation(
+      ({ where, data }) => {
+        if (where.status !== operation.status) return { count: 0 };
+        Object.assign(operation, data);
+        return { count: 1 };
+      }
+    );
+    database.ioioImportItem.findMany.mockResolvedValue([ledgerItem]);
+    database.ioioImportItem.updateMany.mockImplementation(({ where, data }) => {
+      if (
+        where.operationId === operation.id &&
+        where.rowKey === ledgerItem.rowKey &&
+        where.status === ledgerItem.status
+      ) {
+        Object.assign(ledgerItem, data);
+        if (data.writtenState) ledgerItem.writtenState = null;
+        return { count: 1 };
+      }
+      return { count: 0 };
+    });
+    return operation;
+  };
+
+  const revert = (rowNumber = 1) =>
+    revertStaffInventoryImportRow({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: "revert-operation",
+      rowNumber,
+    });
+
+  it("reopens a completed import as a read-only proposal with implemented rows", async () => {
+    const proposal = createProposal("CREATE");
+    const ledgerItem = {
+      id: "ledger-1",
+      rowKey: "row-1",
+      unitIndex: null,
+      status: "DONE",
+      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
+      writtenState: { outcome: "created", assetId: "asset-1" },
+    };
+    const operation = {
+      id: proposal.operationId,
+      status: "SUCCEEDED",
+      createdAt: new Date(),
+      description: JSON.stringify({
+        proposal,
+        reviewDraft: [],
+        revertedRowNumbers: [1],
+      }),
+    };
+    database.ioioWriteOperation.findFirst.mockResolvedValue(operation);
+    database.ioioImportItem.findMany.mockResolvedValue([ledgerItem]);
+
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: proposal.operationId,
+    });
+
+    expect(reopened).toMatchObject({
+      reviewClosed: true,
+      appliedRowNumbers: [1],
+      revertibleRowNumbers: [1],
+      revertedRowNumbers: [],
+    });
+  });
+
+  it("reverts a newly created asset through Shelf's audited delete service", async () => {
+    const proposal = createProposal("CREATE");
+    const timestamp = new Date();
+    const ledgerItem = {
+      id: "ledger-1",
+      rowKey: "row-1",
+      unitIndex: null,
+      status: "DONE",
+      updatedAt: timestamp,
+      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
+      writtenState: { outcome: "created", assetId: "asset-1" },
+    };
+    const operation = setupOperation(proposal, ledgerItem, "PREPARED");
+    database.asset.findFirst.mockResolvedValue({
+      id: "asset-1",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    await expect(revert()).resolves.toEqual({
+      operationId: "revert-operation",
+      rowNumber: 1,
+      reverted: true,
+    });
+
+    expect(mockDeleteAsset).toHaveBeenCalledWith({
+      id: "asset-1",
+      organizationId: "org-1",
+      actorUserId: "staff-1",
+    });
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+    expect(ledgerItem).toMatchObject({ status: "PENDING", writtenState: null });
+    expect(JSON.parse(operation.description)).toMatchObject({
+      revertedRowNumbers: [1],
+      reviewDraft: [{ rowNumber: 1, decision: null }],
+      revertHistory: [
+        {
+          rowNumber: 1,
+          ledgerItems: [
+            {
+              status: "DONE",
+              writtenState: { outcome: "created", assetId: "asset-1" },
+            },
+          ],
+        },
+      ],
+    });
+    expect(operation.status).toBe("PREPARED");
+
+    const proposalAfterRevert = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: proposal.operationId,
+    });
+    expect(proposalAfterRevert).toMatchObject({
+      appliedRowNumbers: [],
+      revertedRowNumbers: [1],
+      reviewClosed: false,
+      savedReviewDecisions: [{ rowNumber: 1, decision: null }],
+    });
+
+    await expect(revert()).rejects.toThrow("already been reverted");
+    expect(mockDeleteAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores an updated asset only when the imported value is still current", async () => {
+    const proposal = createProposal("INCREASE_QUANTITY");
+    const updatedAt = new Date();
+    const snapshot = {
+      kind: "ASSET_UPDATE",
+      action: "INCREASE_QUANTITY",
+      assetId: "asset-1",
+      before: { quantity: 2, categoryId: null, manualLocationIds: [] },
+      target: { quantity: 5 },
+    };
+    setupOperation(proposal, {
+      id: "ledger-1",
+      rowKey: "row-1",
+      unitIndex: null,
+      status: "DONE",
+      updatedAt,
+      expectedPrior: snapshot,
+      writtenState: {
+        outcome: "updated",
+        assetId: "asset-1",
+        action: "INCREASE_QUANTITY",
+      },
+    });
+    database.asset.findFirst.mockResolvedValue({
+      id: "asset-1",
+      quantity: 5,
+      categoryId: null,
+      updatedAt,
+      assetLocations: [],
+    });
+
+    await revert();
+
+    expect(mockUpdateAsset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "asset-1",
+        quantity: 2,
+        organizationId: "org-1",
+        userId: "staff-1",
+      })
+    );
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+  });
+
+  it("refuses to delete a created asset after it has changed", async () => {
+    const proposal = createProposal("CREATE");
+    const operation = setupOperation(proposal, {
+      id: "ledger-1",
+      rowKey: "row-1",
+      unitIndex: null,
+      status: "DONE",
+      updatedAt: new Date("2026-01-01T00:00:00.500Z"),
+      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
+      writtenState: { outcome: "created", assetId: "asset-1" },
+    });
+    database.asset.findFirst.mockResolvedValue({
+      id: "asset-1",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:01.000Z"),
+    });
+
+    await expect(revert()).rejects.toThrow("changed after it was created");
+
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+    expect(operation.status).toBe("SUCCEEDED");
+  });
 });

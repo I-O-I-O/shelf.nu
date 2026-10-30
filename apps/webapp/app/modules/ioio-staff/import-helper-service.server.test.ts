@@ -71,7 +71,7 @@ function makeRequest(): ImportHelperRequest {
         mpn: "ABX00071",
       },
     ],
-    allowedTrackingModes: ["INDIVIDUAL", "QUANTITY_TRACKED"],
+    allowedTrackingModes: ["QUANTITY_TRACKED"],
     allowedSettings: [],
   });
 }
@@ -99,7 +99,7 @@ function makeProposal(): ImportHelperResponse {
           proposedName: null,
           confidence: 0.8,
         },
-        trackingSuggestion: { mode: "INDIVIDUAL", confidence: 0.95 },
+        trackingSuggestion: { mode: "QUANTITY_TRACKED", confidence: 0.95 },
         kitHint: { isKit: false, name: null, confidence: 0.99 },
         settingsSuggestions: [],
         locationSuggestions: [
@@ -563,6 +563,13 @@ describe("standalone import helper HTTP service", () => {
     expect(prompt).toContain("Return no more than one question per row");
     expect(prompt).toContain("legal text, addresses, order metadata");
     expect(prompt).toContain("isolated numeric fragments");
+    expect(prompt).toContain(
+      "Always use QUANTITY_TRACKED as the tracking suggestion for imported items"
+    );
+    expect(prompt).toContain("Never suggest INDIVIDUAL");
+    expect(prompt).not.toContain(
+      "INDIVIDUAL for obvious equipment/dev boards/sensors"
+    );
   });
 
   it("keeps Mouser enrichment focused on title and category cleanup", () => {

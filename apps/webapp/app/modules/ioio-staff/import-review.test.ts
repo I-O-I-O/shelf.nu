@@ -17,6 +17,7 @@ const readyRow = {
 };
 const approved = {
   trackingModeConfirmed: true,
+  trackingModeSelectedByStaff: true,
   decision: "APPROVE" as const,
   title: "Arduino Nano",
   assetId: null,
@@ -47,6 +48,29 @@ describe("staff import review readiness", () => {
     expect(evaluate(readyRow, { ...approved, decision: "IGNORE" })).toBe(
       "SKIPPED"
     );
+  });
+
+  it("requires a staff-selected tracking mode before using individual tracking", () => {
+    const defaultQuantityRow: ImportReviewRow = {
+      ...readyRow,
+      type: "QUANTITY_TRACKED",
+      trackingSource: "DETERMINISTIC_DEFAULT",
+    };
+    const unselectedIndividual = {
+      ...approved,
+      type: "INDIVIDUAL" as const,
+      trackingModeSelectedByStaff: false,
+    };
+
+    expect(evaluate(defaultQuantityRow, unselectedIndividual)).toBe(
+      "NEEDS_REVIEW"
+    );
+    expect(
+      evaluate(defaultQuantityRow, {
+        ...unselectedIndividual,
+        trackingModeSelectedByStaff: true,
+      })
+    ).toBe("READY");
   });
 
   it("allows a grouped Mouser row to remain uncategorized when no category was suggested", () => {

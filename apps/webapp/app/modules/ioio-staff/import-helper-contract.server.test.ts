@@ -98,7 +98,7 @@ function makeRequest(): ImportHelperRequest {
         mpn: "ABX00071",
       },
     ],
-    allowedTrackingModes: ["INDIVIDUAL", "QUANTITY_TRACKED"],
+    allowedTrackingModes: ["QUANTITY_TRACKED"],
     allowedSettings: [
       { key: "minQuantity", minimum: 0, maximum: 1000 },
       { key: "unitOfMeasure", allowedValues: ["pcs", "boxes"] },
@@ -130,7 +130,7 @@ function makeResponse() {
           proposedName: null,
           confidence: 0.9,
         },
-        trackingSuggestion: { mode: "INDIVIDUAL", confidence: 0.95 },
+        trackingSuggestion: { mode: "QUANTITY_TRACKED", confidence: 0.95 },
         kitHint: { isKit: false, name: null, confidence: 0.99 },
         settingsSuggestions: [
           { key: "unitOfMeasure", value: "pcs", confidence: 0.8 },
@@ -650,7 +650,7 @@ describe("import helper contract", () => {
     expect(checkedLocation.rows[0]?.locationSuggestions).toEqual([]);
   });
 
-  it("rejects invalid quantities and unsupported tracking suggestions", () => {
+  it("normalizes individual suggestions to quantity and rejects unsupported modes", () => {
     const zeroQuantity = makeResponse();
     zeroQuantity.rows[0]!.quantity = 0;
     expect(() =>
@@ -660,15 +660,42 @@ describe("import helper contract", () => {
       )
     ).toThrow("malformed or unsupported response");
 
+    const individualTracking = makeResponse();
+    individualTracking.rows[0]!.trackingSuggestion.mode =
+      "INDIVIDUAL" as "QUANTITY_TRACKED";
+    expect(
+      parseAndValidateImportHelperResponse(
+        JSON.stringify(individualTracking),
+        makeRequest()
+      )
+    ).toMatchObject({
+      rows: [
+        {
+          trackingSuggestion: { mode: "QUANTITY_TRACKED" },
+        },
+      ],
+    });
+
     const unsupportedTracking = makeResponse();
     unsupportedTracking.rows[0]!.trackingSuggestion.mode =
-      "SERIALIZED" as "INDIVIDUAL";
+      "SERIALIZED" as "QUANTITY_TRACKED";
     expect(() =>
       parseAndValidateImportHelperResponse(
         JSON.stringify(unsupportedTracking),
         makeRequest()
       )
     ).toThrow("malformed or unsupported response");
+  });
+
+  it("only allows quantity tracking in import helper requests", () => {
+    const request = makeRequest();
+    expect(request.allowedTrackingModes).toEqual(["QUANTITY_TRACKED"]);
+    expect(() =>
+      importHelperRequestSchema.parse({
+        ...request,
+        allowedTrackingModes: ["INDIVIDUAL", "QUANTITY_TRACKED"],
+      })
+    ).toThrow();
   });
 
   it("filters invoice headers, prices, and fragments while cleaning code-only titles", () => {
@@ -755,31 +782,6 @@ describe("import helper contract", () => {
         makeRequest()
       )
     ).toThrow("evidence that cannot be verified");
-  });
-
-  it("enforces the individual-unit limits in the helper proposal", () => {
-    const tooManyOnRow = makeResponse();
-    tooManyOnRow.rows[0]!.quantity = 101;
-    expect(() =>
-      parseAndValidateImportHelperResponse(
-        JSON.stringify(tooManyOnRow),
-        makeRequest()
-      )
-    ).toThrow("individual-unit row limit");
-
-    const tooManyAcrossImport = makeResponse();
-    tooManyAcrossImport.rows = Array.from({ length: 6 }, (_, index) => ({
-      ...makeResponse().rows[0]!,
-      sourceRef: "page-1",
-      quantity: 100,
-      productName: `Arduino Nano ${index}`,
-    }));
-    expect(() =>
-      parseAndValidateImportHelperResponse(
-        JSON.stringify(tooManyAcrossImport),
-        makeRequest()
-      )
-    ).toThrow("individual-unit import limit");
   });
 
   it("returns safe manual mode for malformed JSON", async () => {

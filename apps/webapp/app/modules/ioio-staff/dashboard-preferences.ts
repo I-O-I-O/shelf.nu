@@ -3,7 +3,7 @@ export const STAFF_DASHBOARD_WIDGETS = [
   { id: "purchasing", label: "Purchasing" },
   { id: "lab_tasks", label: "Lab tasks" },
   { id: "ta_hours", label: "TA hours" },
-  { id: "inventory_import", label: "Inventory import" },
+  { id: "inventory_import", label: "Inventory shortcuts" },
 ] as const;
 
 export type StaffDashboardWidgetId =

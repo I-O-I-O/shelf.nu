@@ -48,6 +48,22 @@ describe("staff navigation preferences", () => {
     ]);
   });
 
+  it("drops removed inventory shortcuts from existing saved orders", () => {
+    expect(
+      normalizeStaffNavigationOrder(
+        [
+          "/home",
+          "/staff/ask",
+          "/staff/organize",
+          "/staff/import",
+          "/handbook",
+          "/assets",
+        ],
+        ["/home", "/staff/ask", "/handbook", "/assets"]
+      )
+    ).toEqual(["/home", "/staff/ask", "/handbook", "/assets"]);
+  });
+
   it("scopes storage by user and organization and restores only that preference", () => {
     const userOneOrgOne = getStaffNavigationStorageKey("user-1", "org-1");
     const userTwoOrgOne = getStaffNavigationStorageKey("user-2", "org-1");

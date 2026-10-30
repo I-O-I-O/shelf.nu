@@ -220,6 +220,8 @@ describe("IOIO staff Loans navigation active state", () => {
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("link", { name: "Import" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Organize" })).toBeNull();
 
     for (const label of ["Operations", "Lab Tasks", "Purchasing", "TA Hours"]) {
       expect(

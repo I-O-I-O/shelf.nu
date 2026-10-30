@@ -27,9 +27,6 @@ vi.mock("lottie-react", () => ({ default: () => null }));
 vi.mock("~/components/ioio-staff/dashboard-customizer", () => ({
   DashboardCustomizer: () => null,
 }));
-vi.mock("~/components/ioio-staff/staff-import-panel", () => ({
-  StaffImportPanel: () => null,
-}));
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: mocks.requirePermission,
 }));
@@ -205,8 +202,8 @@ describe("IOIO staff dashboard loader", () => {
   });
 });
 
-describe("IOIO staff dashboard inventory tools", () => {
-  it("shows the inventory-tools section on the staff home route", async () => {
+describe("IOIO staff dashboard inventory shortcuts", () => {
+  it("shows compact Import and Organize cards without the old explanation", async () => {
     const Stub = createRoutesStub([
       {
         path: "/home",
@@ -215,8 +212,6 @@ describe("IOIO staff dashboard inventory tools", () => {
         loader: () => ({
           isStaff: true,
           dashboardPreferences: { order: ["inventory_import"], hidden: [] },
-          importNotice: null,
-          importProposal: null,
           labTasks: null,
           purchasing: null,
           taHours: null,
@@ -227,13 +222,20 @@ describe("IOIO staff dashboard inventory tools", () => {
     render(createElement(Stub, { initialEntries: ["/home"] }));
 
     expect(
-      await screen.findByRole("heading", { name: "Inventory tools", level: 2 })
+      await screen.findByRole("heading", { name: "Import", level: 2 })
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Import inventory" })
     ).toHaveAttribute("href", "/staff/import");
     expect(
-      screen.getByRole("link", { name: "Organize inventory" })
-    ).toHaveAttribute("href", "/staff/organize");
+      screen.getByRole("heading", { name: "Organize", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Organize" })).toHaveAttribute(
+      "href",
+      "/staff/organize"
+    );
+    expect(screen.queryByText("Inventory tools")).not.toBeInTheDocument();
+    expect(screen.queryByText("How the AI works")).not.toBeInTheDocument();
+    expect(screen.queryByText("Works best for")).not.toBeInTheDocument();
   });
 });

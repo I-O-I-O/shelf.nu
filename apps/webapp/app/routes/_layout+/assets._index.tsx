@@ -8,7 +8,6 @@ import type {
 import { data, useLoaderData } from "react-router";
 import { z } from "zod";
 import { StaffInventoryList } from "~/components/assets/assets-index/staff-inventory-list";
-import { ImportButton } from "~/components/assets/import-button";
 import { NewAssetDropdown } from "~/components/assets/new-asset-dropdown";
 import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import Header from "~/components/layout/header";
@@ -647,12 +646,6 @@ export default function AssetIndexPage() {
       <StaffInventoryList
         headerActions={
           <>
-            {canCreateAssets ? (
-              <ImportButton
-                canImportAssets={canImportAssets}
-                to="/staff/import"
-              />
-            ) : null}
             <InventoryQrScanner
               audience="staff"
               buttonLabel="Scan QR"

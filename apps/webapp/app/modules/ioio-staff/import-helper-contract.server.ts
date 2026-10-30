@@ -21,8 +21,6 @@ export const MAX_REORGANIZATION_LOCATIONS = 20;
 export const MAX_IMPORT_HELPER_CANDIDATES = 50;
 export const MAX_IMPORT_HELPER_ROWS = 100;
 export const MOUSER_ENRICHMENT_BATCH_SIZE = 50;
-export const MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_ROW = 100;
-export const MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_IMPORT = 500;
 
 const documentPageSchema = z
   .object({
@@ -125,10 +123,7 @@ const genericImportHelperRequestSchema = z
     productCandidates: z
       .array(productCandidateSchema)
       .max(MAX_IMPORT_HELPER_CANDIDATES),
-    allowedTrackingModes: z
-      .array(z.enum(["INDIVIDUAL", "QUANTITY_TRACKED"]))
-      .min(1)
-      .max(2),
+    allowedTrackingModes: z.array(z.literal("QUANTITY_TRACKED")).length(1),
     allowedSettings: z.array(settingRuleSchema).max(3),
   })
   .strict()
@@ -544,7 +539,10 @@ const candidateProposalRowSchema = z
       ),
     trackingSuggestion: z
       .object({
-        mode: z.enum(["INDIVIDUAL", "QUANTITY_TRACKED"]).nullable(),
+        mode: z
+          .enum(["QUANTITY_TRACKED", "INDIVIDUAL"])
+          .nullable()
+          .transform(() => "QUANTITY_TRACKED" as const),
         confidence: confidenceSchema,
       })
       .strict(),
@@ -1113,8 +1111,6 @@ export function validateImportHelperResponse(
   const settingRules = new Map(
     request.allowedSettings.map((rule) => [rule.key, rule])
   );
-  let individualUnits = 0;
-
   result.rows.forEach((row, rowIndex) => {
     const invalid = (message: string, path: (string | number)[]): never => {
       throw new ImportHelperValidationError(
@@ -1225,19 +1221,7 @@ export function validateImportHelperResponse(
         ]);
       }
     }
-    if (row.trackingSuggestion.mode === "INDIVIDUAL" && row.quantity !== null) {
-      if (row.quantity > MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_ROW) {
-        invalid("exceeds the individual-unit row limit", ["quantity"]);
-      }
-      individualUnits += row.quantity;
-    }
   });
-
-  if (individualUnits > MAX_IMPORT_HELPER_INDIVIDUAL_UNITS_PER_IMPORT) {
-    throw new ImportHelperValidationError(
-      "Helper response exceeds the individual-unit import limit."
-    );
-  }
 
   return result;
 }

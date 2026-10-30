@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getStaffInventoryImportProposal: vi.fn(),
   getStaffInventoryImportDrafts: vi.fn(),
   saveStaffInventoryImportDraft: vi.fn(),
+  revertStaffInventoryImportRow: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
   processStaffImportImageUpload: vi.fn(),
 }));
@@ -31,6 +32,7 @@ vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   getStaffInventoryImportProposal: mocks.getStaffInventoryImportProposal,
   getStaffInventoryImportDrafts: mocks.getStaffInventoryImportDrafts,
   saveStaffInventoryImportDraft: mocks.saveStaffInventoryImportDraft,
+  revertStaffInventoryImportRow: mocks.revertStaffInventoryImportRow,
   prepareStaffInventoryImport: vi.fn(),
 }));
 
@@ -126,6 +128,11 @@ describe("staff inventory import route", () => {
       ignoredRows: 0,
     };
     mocks.applyStaffInventoryImport.mockResolvedValue(resultData);
+    mocks.getStaffInventoryImportProposal.mockResolvedValue({
+      operationId: "operation-1",
+      rows: [],
+      appliedRowNumbers: [1],
+    });
     const form = new FormData();
     form.set("intent", "apply-import");
     form.set("operationId", "operation-1");
@@ -152,7 +159,8 @@ describe("staff inventory import route", () => {
     );
     expect(result).toMatchObject({
       error: null,
-      kind: "import-result",
+      kind: "import-complete",
+      proposal: { appliedRowNumbers: [1] },
       result: resultData,
     });
   });
@@ -360,6 +368,95 @@ describe("staff inventory import route", () => {
       kind: "import-partial",
       proposal,
       result: resultData,
+    });
+  });
+
+  it("routes a row revert through the server-side import service", async () => {
+    mocks.revertStaffInventoryImportRow.mockResolvedValue({
+      operationId: "operation-1",
+      rowNumber: 3,
+      reverted: true,
+    });
+    const form = new FormData();
+    form.set("intent", "revert-row");
+    form.set("operationId", "operation-1");
+    form.set("rowNumber", "3");
+
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/staff/import", {
+          method: "POST",
+          body: form,
+        }),
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+
+    expect(mocks.revertStaffInventoryImportRow).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: "operation-1", rowNumber: 3 })
+    );
+    expect(result).toMatchObject({
+      error: null,
+      kind: "import-row-reverted",
+      result: { rowNumber: 3, reverted: true },
+    });
+  });
+
+  it("reverts only the selected implemented rows through the server service", async () => {
+    mocks.revertStaffInventoryImportRow
+      .mockResolvedValueOnce({
+        operationId: "operation-1",
+        rowNumber: 1,
+        reverted: true,
+      })
+      .mockResolvedValueOnce({
+        operationId: "operation-1",
+        rowNumber: 3,
+        reverted: true,
+      });
+    const proposal = {
+      operationId: "operation-1",
+      rows: [],
+      appliedRowNumbers: [2],
+      revertedRowNumbers: [1, 3],
+    };
+    mocks.getStaffInventoryImportProposal.mockResolvedValue(proposal);
+    const form = new FormData();
+    form.set("intent", "revert-selected");
+    form.set("operationId", "operation-1");
+    form.set("rowNumbers", JSON.stringify([1, 3]));
+
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/staff/import", {
+          method: "POST",
+          body: form,
+        }),
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+
+    expect(mocks.revertStaffInventoryImportRow).toHaveBeenCalledTimes(2);
+    expect(mocks.revertStaffInventoryImportRow).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ operationId: "operation-1", rowNumber: 1 })
+    );
+    expect(mocks.revertStaffInventoryImportRow).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ operationId: "operation-1", rowNumber: 3 })
+    );
+    expect(mocks.revertStaffInventoryImportRow).not.toHaveBeenCalledWith(
+      expect.objectContaining({ rowNumber: 2 })
+    );
+    expect(result).toMatchObject({
+      error: null,
+      kind: "import-rows-reverted",
+      proposal,
+      result: {
+        operationId: "operation-1",
+        revertedRowNumbers: [1, 3],
+        failedRows: [],
+      },
     });
   });
 });

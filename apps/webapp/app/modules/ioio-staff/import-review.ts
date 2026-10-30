@@ -16,6 +16,7 @@ export type ImportReviewDecision = {
   quantity?: number | null;
   type?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
   trackingModeConfirmed?: boolean;
+  trackingModeSelectedByStaff?: boolean;
   productChoice?: "EXISTING" | "NEW" | null;
   minQuantity?: number | null;
   unitOfMeasure?: string | null;
@@ -127,10 +128,15 @@ export function resolveImportReviewState({
   if (
     requiresTracking &&
     decision.type === "INDIVIDUAL" &&
-    !existingModelSelection &&
-    decision.trackingModeConfirmed !== true
+    !existingModelSelection
   ) {
-    return "NEEDS_REVIEW";
+    if (
+      decision.trackingModeConfirmed !== true ||
+      (decision.trackingModeSelectedByStaff !== true &&
+        row.trackingSource !== "MANUAL_OVERRIDE")
+    ) {
+      return "NEEDS_REVIEW";
+    }
   }
   if (
     requiresTracking &&
@@ -317,7 +323,11 @@ export function validateImportRowForApply({
       (decision?.productChoice === "EXISTING" && Boolean(decision.assetId)));
   if (
     (!type && !row.mouserLineItem) ||
-    (type === "INDIVIDUAL" && !existing && !decision?.trackingModeConfirmed) ||
+    (type === "INDIVIDUAL" &&
+      !existing &&
+      (decision?.trackingModeConfirmed !== true ||
+        (decision?.trackingModeSelectedByStaff !== true &&
+          row.trackingSource !== "MANUAL_OVERRIDE"))) ||
     (existing && row.type && type !== row.type)
   )
     add(

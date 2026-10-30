@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { inflateRawSync, inflateSync } from "node:zlib";
-import { AssetType, ConsumptionType, type Prisma } from "@prisma/client";
+import { AssetType, ConsumptionType, Prisma } from "@prisma/client";
 import JSZip from "jszip";
 import { db } from "~/database/db.server";
 import {
   BULK_CREATE_MAX,
   createAsset,
+  deleteAsset,
+  replaceAssetPlacements,
   updateAssetMainImage,
   updateAsset,
 } from "~/modules/asset/service.server";
@@ -200,7 +202,6 @@ export type StaffImportDiagnostics = {
   quantityTrackedRows?: number;
   individualTrackedRows?: number;
   individualTrackingByExistingModel?: number;
-  individualTrackingByStrongEvidence?: number;
   individualTrackingManualOverride?: number;
   newModels?: number;
   existingModelsWithImage?: number;
@@ -358,6 +359,12 @@ export type StaffImportProposal = {
   appliedRowNumbers?: number[];
   /** Rows resolved as ignored by the canonical import service's row ledger. */
   ignoredRowNumbers?: number[];
+  /** Rows whose applied changes have since been reverted. */
+  revertedRowNumbers?: number[];
+  /** Applied rows with enough ledger evidence to support a safe revert. */
+  revertibleRowNumbers?: number[];
+  /** Completed proposals stay viewable for their review retention period. */
+  reviewClosed?: boolean;
 };
 
 export type StaffImportReviewDecision = {
@@ -372,6 +379,8 @@ export type StaffImportReviewDecision = {
   quantity?: number | null;
   type?: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
   trackingModeConfirmed?: boolean;
+  /** Preserves an explicit staff selection separately from legacy auto-defaults. */
+  trackingModeSelectedByStaff?: boolean;
   productChoice?: "EXISTING" | "NEW" | null;
   minQuantity?: number | null;
   unitOfMeasure?: string | null;
@@ -2917,11 +2926,8 @@ function parseRows(matrix: string[][], options: ParseRowsOptions = {}) {
     }
     const type = values.type?.trim().toUpperCase() as StaffImportRow["type"];
     let normalizedType = type || null;
-    if (
-      normalizedType &&
-      normalizedType !== "INDIVIDUAL" &&
-      normalizedType !== "QUANTITY_TRACKED"
-    ) {
+    if (normalizedType === "INDIVIDUAL") normalizedType = null;
+    if (normalizedType && normalizedType !== "QUANTITY_TRACKED") {
       if (!options.tolerateInvalidValues) {
         throw importError(`Row ${rowIndex + 2} has an invalid tracking type.`);
       }
@@ -3720,59 +3726,16 @@ function getNewImportTrackingPolicy(row: StaffImportRow) {
     };
   }
 
-  if (row.trackingSource === "SOURCE_EXPLICIT" && row.type) {
+  if (
+    row.trackingSource === "SOURCE_EXPLICIT" &&
+    row.type === "QUANTITY_TRACKED"
+  ) {
     return {
-      type: row.type,
+      type: "QUANTITY_TRACKED" as const,
       trackingSource: "SOURCE_EXPLICIT" as const,
-      trackingReasonCode:
-        row.type === "INDIVIDUAL"
-          ? ("EXPLICIT_SERIALIZED_SOURCE" as const)
-          : ("DEFAULT_QUANTITY" as const),
+      trackingReasonCode: "DEFAULT_QUANTITY" as const,
       trackingReason:
-        row.type === "INDIVIDUAL"
-          ? "The source explicitly marks this item for individual tracking."
-          : "The source explicitly marks this item for quantity tracking.",
-    };
-  }
-
-  const sourceText = [
-    row.sourceDescription,
-    row.unitDescription,
-    row.sourceNotes,
-    row.category,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const explicitIndividualEvidence =
-    Boolean(row.serialNumber?.trim()) ||
-    /\b(seriali[sz]ed|serial(?: number| no\.?)|asset tags?|individual units?|each units? tracked|tracked individually|individual(?:ly)? tracked|separate qr)\b/i.test(
-      sourceText
-    );
-  if (explicitIndividualEvidence) {
-    return {
-      type: "INDIVIDUAL" as const,
-      trackingSource: "SOURCE_EXPLICIT" as const,
-      trackingReasonCode: "EXPLICIT_SERIALIZED_SOURCE" as const,
-      trackingReason:
-        "The source contains a serial or explicit individual-tracking signal.",
-    };
-  }
-
-  const equipmentConcept =
-    /\b(oscilloscope|spectrum analyzer|network analyzer|microscope|bench instrument|test instrument|lab instrument)\b/i.test(
-      `${row.title} ${row.sourceDescription ?? ""}`
-    );
-  const managedEquipmentEvidence =
-    /\b(test equipment|lab equipment|laboratory equipment|loanable|checked out|check.?out|high[- ]value|individually managed)\b/i.test(
-      sourceText
-    );
-  if (equipmentConcept && managedEquipmentEvidence) {
-    return {
-      type: "INDIVIDUAL" as const,
-      trackingSource: "DETERMINISTIC_EQUIPMENT_EVIDENCE" as const,
-      trackingReasonCode: "EQUIPMENT_REVIEW" as const,
-      trackingReason:
-        "Equipment description indicates separate loanable or managed units.",
+        "The source explicitly marks this item for quantity tracking.",
     };
   }
 
@@ -4334,7 +4297,7 @@ function buildStaffImportHelperRequest({
       manufacturer: null,
       mpn: null,
     })),
-    allowedTrackingModes: ["INDIVIDUAL", "QUANTITY_TRACKED"],
+    allowedTrackingModes: ["QUANTITY_TRACKED"],
     // The current importer does not apply configurable product settings.
     allowedSettings: [],
   });
@@ -5429,13 +5392,6 @@ export async function prepareStaffInventoryImport({
       (row) =>
         row.type === "INDIVIDUAL" && row.trackingSource === "EXISTING_MODEL"
     ).length,
-    individualTrackingByStrongEvidence: proposalRows.filter(
-      (row) =>
-        row.type === "INDIVIDUAL" &&
-        ["SOURCE_EXPLICIT", "DETERMINISTIC_EQUIPMENT_EVIDENCE"].includes(
-          row.trackingSource ?? ""
-        )
-    ).length,
     individualTrackingManualOverride: proposalRows.filter(
       (row) =>
         row.type === "INDIVIDUAL" && row.trackingSource === "MANUAL_OVERRIDE"
@@ -5642,7 +5598,10 @@ export async function getStaffInventoryImportProposal({
     },
     select: { status: true, description: true, createdAt: true },
   });
-  if (!operation || operation.status !== "PREPARED") {
+  if (
+    !operation ||
+    !["PREPARED", "SUCCEEDED", "PARTIAL"].includes(operation.status)
+  ) {
     throw staffImportUnavailableError();
   }
   if (isStaffImportExpired(operation.createdAt)) {
@@ -5663,20 +5622,95 @@ export async function getStaffInventoryImportProposal({
     operationId,
     organizationId,
   });
+  const appliedRowNumbers = getResolvedImportRowNumbers({
+    proposal,
+    ledgerItems,
+    status: "DONE",
+  });
+  const appliedRows = new Set(appliedRowNumbers);
   return {
     ...proposal,
     savedReviewDecisions: readStoredReviewDraft(operation.description),
-    appliedRowNumbers: getResolvedImportRowNumbers({
-      proposal,
-      ledgerItems,
-      status: "DONE",
-    }),
+    appliedRowNumbers,
     ignoredRowNumbers: getResolvedImportRowNumbers({
       proposal,
       ledgerItems,
       status: "SKIPPED",
     }),
+    revertedRowNumbers: readStoredRevertedRows(operation.description).filter(
+      (rowNumber) => !appliedRows.has(rowNumber)
+    ),
+    revertibleRowNumbers: getRevertibleImportRowNumbers({
+      proposal,
+      ledgerItems,
+    }),
+    reviewClosed: operation.status !== "PREPARED",
   };
+}
+
+function getRevertibleImportRowNumbers({
+  proposal,
+  ledgerItems,
+}: {
+  proposal: StaffImportProposal;
+  ledgerItems: ImportLedgerItem[];
+}) {
+  return proposal.rows.flatMap((row) => {
+    const rowItems = ledgerItems.filter(
+      (item) => item.rowKey === `row-${row.rowNumber}`
+    );
+    const root = rowItems.find((item) => item.unitIndex === null);
+    if (root?.status !== "DONE") return [];
+    const written = root.writtenState;
+    if (!written || typeof written !== "object" || Array.isArray(written))
+      return [];
+    const outcome = (written as Record<string, Prisma.JsonValue>).outcome;
+    if (outcome === "created") return [row.rowNumber];
+    if (outcome === "individual_units") {
+      const units = rowItems.filter((item) => item.unitIndex !== null);
+      return units.length > 0 &&
+        units.every((item) => {
+          if (item.status !== "DONE" || !item.writtenState) return false;
+          if (
+            typeof item.writtenState !== "object" ||
+            Array.isArray(item.writtenState)
+          )
+            return false;
+          return (
+            (item.writtenState as Record<string, Prisma.JsonValue>).outcome ===
+            "created"
+          );
+        })
+        ? [row.rowNumber]
+        : [];
+    }
+    if (outcome !== "updated") return [];
+    const snapshot = readImportAssetRecoverySnapshot(root.expectedPrior);
+    if (!snapshot) return [];
+    if (
+      snapshot.action === "UPDATE_LOCATION" &&
+      !snapshot.before.manualLocations
+    ) {
+      return [];
+    }
+    return [row.rowNumber];
+  });
+}
+
+function readStoredRevertedRows(description: string) {
+  try {
+    const value = JSON.parse(description) as { revertedRowNumbers?: unknown };
+    return Array.isArray(value.revertedRowNumbers)
+      ? value.revertedRowNumbers.filter(
+          (rowNumber): rowNumber is number =>
+            typeof rowNumber === "number" &&
+            Number.isInteger(rowNumber) &&
+            rowNumber > 0
+        )
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function getResolvedImportRowNumbers({
@@ -5903,6 +5937,336 @@ function readStoredReviewDraft(description: string) {
   }
 }
 
+async function assertImportedAssetCanBeDeleted({
+  assetId,
+  organizationId,
+  lastImportWriteAt,
+}: {
+  assetId: string;
+  organizationId: string;
+  lastImportWriteAt: Date;
+}) {
+  const asset = await db.asset.findFirst({
+    where: { id: assetId, organizationId },
+    select: { id: true, createdAt: true, updatedAt: true },
+  });
+  if (!asset || asset.updatedAt.getTime() > lastImportWriteAt.getTime()) {
+    throw importError(
+      "This imported item changed after it was created, so it cannot be safely reverted."
+    );
+  }
+  const [
+    custody,
+    bookings,
+    consumption,
+    kits,
+    reports,
+    notes,
+    tags,
+    fields,
+    audits,
+    auditScans,
+    purchases,
+    qrCodes,
+  ] = await Promise.all([
+    db.custody.count({ where: { assetId } }),
+    db.bookingAsset.count({ where: { assetId } }),
+    db.consumptionLog.count({ where: { assetId } }),
+    db.assetKit.count({ where: { assetId } }),
+    db.reportFound.count({ where: { assetId } }),
+    db.note.count({ where: { assetId } }),
+    db.tag.count({
+      where: { organizationId, assets: { some: { id: assetId } } },
+    }),
+    db.assetCustomFieldValue.count({ where: { assetId } }),
+    db.auditAsset.count({ where: { assetId } }),
+    db.auditScan.count({ where: { assetId } }),
+    db.purchaseItem.count({ where: { linkedAssetId: assetId } }),
+    db.qr.findMany({
+      where: { assetId, organizationId },
+      select: { _count: { select: { scans: true } } },
+    }),
+  ]);
+  if (
+    custody ||
+    bookings ||
+    consumption ||
+    kits ||
+    reports ||
+    notes ||
+    tags ||
+    fields ||
+    audits ||
+    auditScans ||
+    purchases ||
+    qrCodes.some(({ _count }) => _count.scans > 0)
+  ) {
+    throw importError(
+      "This imported item now has related activity, so it cannot be safely reverted."
+    );
+  }
+}
+
+function readWrittenState(item: ImportLedgerItem) {
+  if (
+    !item.writtenState ||
+    typeof item.writtenState !== "object" ||
+    Array.isArray(item.writtenState)
+  ) {
+    return null;
+  }
+  return item.writtenState as Record<string, Prisma.JsonValue>;
+}
+
+export async function revertStaffInventoryImportRow({
+  context,
+  request,
+  operationId,
+  rowNumber,
+}: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
+  operationId: string;
+  rowNumber: number;
+}) {
+  const { organizationId, userId } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  const operation = await db.ioioWriteOperation.findFirst({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: { in: ["PREPARED", "SUCCEEDED", "PARTIAL"] },
+    },
+    select: { status: true, description: true, createdAt: true },
+  });
+  if (!operation || isStaffImportExpired(operation.createdAt)) {
+    throw staffImportUnavailableError();
+  }
+  const proposal = readStoredProposal(operation.description);
+  const row = proposal.rows.find(
+    (candidate) => candidate.rowNumber === rowNumber
+  );
+  if (!row) throw importError("This import row is not available to revert.");
+  const revertedRowNumbers = readStoredRevertedRows(operation.description);
+  const rowItems = (
+    await getImportLedgerItems({ operationId, organizationId })
+  ).filter((item) => item.rowKey === `row-${rowNumber}`);
+  const root = rowItems.find((item) => item.unitIndex === null);
+  if (revertedRowNumbers.includes(rowNumber) && root?.status !== "DONE") {
+    throw importError("This import row has already been reverted.");
+  }
+  if (!root || root.status !== "DONE") {
+    throw importError("This import row is not fully implemented.");
+  }
+
+  const claimed = await db.ioioWriteOperation.updateMany({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: operation.status,
+    },
+    data: { status: "REVERTING" },
+  });
+  if (claimed.count !== 1) throw staffImportUnavailableError();
+
+  try {
+    const written = readWrittenState(root);
+    if (!written) throw importError("This row has no safe revert record.");
+
+    if (written.outcome === "updated") {
+      const snapshot = readImportAssetRecoverySnapshot(root.expectedPrior);
+      if (!snapshot) throw importError("This row has no safe revert record.");
+      if (written.action !== snapshot.action) {
+        throw importError("This row's saved revert record is inconsistent.");
+      }
+      if (
+        snapshot.action === "UPDATE_LOCATION" &&
+        !snapshot.before.manualLocations
+      ) {
+        throw importError(
+          "The original location quantities were not recorded, so this change cannot be safely reverted."
+        );
+      }
+      const assetVersion = await db.asset.findFirst({
+        where: { id: snapshot.assetId, organizationId },
+        select: { updatedAt: true },
+      });
+      if (
+        !assetVersion ||
+        assetVersion.updatedAt.getTime() > root.updatedAt.getTime()
+      ) {
+        throw importError(
+          "This inventory item changed after import, so the change was not reverted."
+        );
+      }
+      const observed = await inspectAssetRecoverySnapshot({
+        snapshot,
+        organizationId,
+      });
+      if (observed !== "TARGET") {
+        throw importError(
+          "This inventory item changed after import, so the change was not reverted."
+        );
+      }
+      if (
+        snapshot.action === "INCREASE_QUANTITY" ||
+        snapshot.action === "UPDATE_QUANTITY"
+      ) {
+        await updateAsset({
+          id: snapshot.assetId,
+          organizationId,
+          userId,
+          request,
+          quantity: snapshot.before.quantity,
+        });
+      } else if (snapshot.action === "UPDATE_CATEGORY") {
+        await updateAsset({
+          id: snapshot.assetId,
+          organizationId,
+          userId,
+          request,
+          categoryId: snapshot.before.categoryId,
+        });
+      } else {
+        await replaceAssetPlacements({
+          assetId: snapshot.assetId,
+          organizationId,
+          userId,
+          placements: snapshot.before.manualLocations ?? [],
+        });
+      }
+    } else {
+      const createdAssets =
+        written.outcome === "created" && typeof written.assetId === "string"
+          ? [{ assetId: written.assetId, lastImportWriteAt: root.updatedAt }]
+          : written.outcome === "individual_units"
+          ? rowItems.flatMap((item) => {
+              if (item.unitIndex === null || item.status !== "DONE") return [];
+              const unitWritten = readWrittenState(item);
+              return unitWritten?.outcome === "created" &&
+                typeof unitWritten.assetId === "string"
+                ? [
+                    {
+                      assetId: unitWritten.assetId,
+                      lastImportWriteAt: item.updatedAt,
+                    },
+                  ]
+                : [];
+            })
+          : [];
+      if (!createdAssets.length) {
+        throw importError(
+          "This import row did not create an inventory item to revert."
+        );
+      }
+      for (const asset of createdAssets) {
+        await assertImportedAssetCanBeDeleted({ ...asset, organizationId });
+      }
+      for (const asset of createdAssets) {
+        await deleteAsset({
+          id: asset.assetId,
+          organizationId,
+          actorUserId: userId,
+        });
+      }
+    }
+
+    const nextRevertedRowNumbers = [
+      ...new Set([...revertedRowNumbers, rowNumber]),
+    ].sort((left, right) => left - right);
+    const stored = JSON.parse(operation.description) as Record<string, unknown>;
+    const storedReviewDraft = Array.isArray(stored.reviewDraft)
+      ? stored.reviewDraft.map((entry) => {
+          if (
+            !entry ||
+            typeof entry !== "object" ||
+            Array.isArray(entry) ||
+            (entry as { rowNumber?: unknown }).rowNumber !== rowNumber
+          ) {
+            return entry;
+          }
+          return { ...entry, decision: null };
+        })
+      : [];
+    const revertedLedgerItems = rowItems.map((item) => ({
+      id: item.id,
+      rowKey: item.rowKey,
+      unitIndex: item.unitIndex,
+      kind: item.kind,
+      status: item.status,
+      expectedPrior: item.expectedPrior,
+      writtenState: item.writtenState,
+      targetAssetId: item.targetAssetId,
+      targetKitId: item.targetKitId,
+      qrId: item.qrId,
+    }));
+    const resetLedger = await db.ioioImportItem.updateMany({
+      where: {
+        operationId,
+        organizationId,
+        rowKey: `row-${rowNumber}`,
+        status: "DONE",
+      },
+      data: {
+        status: "PENDING",
+        writtenState: Prisma.DbNull,
+        targetAssetId: null,
+        targetKitId: null,
+        qrId: null,
+        heartbeatAt: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+    if (resetLedger.count !== rowItems.length) {
+      throw staffImportUnavailableError();
+    }
+    const previousRevertHistory = Array.isArray(stored.revertHistory)
+      ? stored.revertHistory
+      : [];
+    const completed = await db.ioioWriteOperation.updateMany({
+      where: { id: operationId, organizationId, userId, status: "REVERTING" },
+      data: {
+        status: operation.status,
+        description: JSON.stringify({
+          ...stored,
+          reviewDraft: storedReviewDraft,
+          revertedRowNumbers: nextRevertedRowNumbers,
+          revertHistory: [
+            ...previousRevertHistory,
+            {
+              rowNumber,
+              userId,
+              at: new Date().toISOString(),
+              ledgerItems: revertedLedgerItems,
+            },
+          ],
+          lastReverted: { rowNumber, userId, at: new Date().toISOString() },
+        }),
+      },
+    });
+    if (completed.count !== 1) throw staffImportUnavailableError();
+    Logger.info({
+      event: "ioio_staff_import_row_reverted",
+      operationId,
+      rowNumber,
+      organizationId,
+      userId,
+    });
+    return { operationId, rowNumber, reverted: true };
+  } catch (cause) {
+    await db.ioioWriteOperation.updateMany({
+      where: { id: operationId, organizationId, userId, status: "REVERTING" },
+      data: { status: operation.status },
+    });
+    throw cause;
+  }
+}
+
 function readStoredImportResult(description: string): StaffImportResult {
   try {
     const value = JSON.parse(description) as {
@@ -6049,6 +6413,13 @@ function readReviewDecisions(
     ) {
       throw importError("Tracking mode confirmation must be explicit.");
     }
+    const trackingModeSelectedByStaff = decision.trackingModeSelectedByStaff;
+    if (
+      trackingModeSelectedByStaff !== undefined &&
+      typeof trackingModeSelectedByStaff !== "boolean"
+    ) {
+      throw importError("Tracking mode selection must be explicit.");
+    }
     const productChoice = decision.productChoice;
     if (
       productChoice !== undefined &&
@@ -6179,6 +6550,9 @@ function readReviewDecisions(
       ...(quantity !== undefined ? { quantity } : {}),
       ...(type !== undefined ? { type } : {}),
       ...(trackingModeConfirmed !== undefined ? { trackingModeConfirmed } : {}),
+      ...(trackingModeSelectedByStaff !== undefined
+        ? { trackingModeSelectedByStaff }
+        : {}),
       ...(productChoice !== undefined ? { productChoice } : {}),
       ...(minQuantity !== undefined ? { minQuantity } : {}),
       ...(unitOfMeasure !== undefined ? { unitOfMeasure } : {}),
@@ -6430,11 +6804,13 @@ type ImportAssetRecoverySnapshot = {
     quantity: number | null;
     categoryId: string | null;
     manualLocationIds: string[];
+    manualLocations?: Array<{ locationId: string; quantity: number }>;
   };
   target: {
     quantity?: number | null;
     categoryId?: string | null;
     manualLocationIds?: string[];
+    manualLocations?: Array<{ locationId: string; quantity: number }>;
   };
 };
 
@@ -6518,14 +6894,24 @@ function getSnapshotValue(
     case "UPDATE_CATEGORY":
       return value.categoryId;
     case "UPDATE_LOCATION":
-      return value.manualLocationIds;
+      return snapshot.target.manualLocations
+        ? value.manualLocations
+        : value.manualLocationIds;
   }
 }
 
 function recoveryValueMatches(left: unknown, right: unknown) {
   if (Array.isArray(left) && Array.isArray(right)) {
+    const normalized = (values: unknown[]) =>
+      values
+        .map((value) =>
+          value && typeof value === "object"
+            ? JSON.stringify(value)
+            : String(value)
+        )
+        .sort();
     return (
-      JSON.stringify([...left].sort()) === JSON.stringify([...right].sort())
+      JSON.stringify(normalized(left)) === JSON.stringify(normalized(right))
     );
   }
   return left === right;
@@ -6546,7 +6932,7 @@ async function inspectAssetRecoverySnapshot({
       categoryId: true,
       assetLocations: {
         where: { assetKitId: null },
-        select: { locationId: true },
+        select: { locationId: true, quantity: true },
       },
     },
   });
@@ -6556,6 +6942,10 @@ async function inspectAssetRecoverySnapshot({
     quantity: asset.quantity,
     categoryId: asset.categoryId,
     manualLocationIds: asset.assetLocations.map(({ locationId }) => locationId),
+    manualLocations: asset.assetLocations.map(({ locationId, quantity }) => ({
+      locationId,
+      quantity,
+    })),
   };
   const currentValue = getSnapshotValue(snapshot, current);
   if (
@@ -7468,7 +7858,11 @@ export async function applyStaffInventoryImport({
     ): Promise<StaffImportProposalRow> => {
       const decision = decisionsByRow.get(row.rowNumber);
       if (!hasFullReviewDecisions && row.pdfClassification !== "PARTIAL") {
-        return row;
+        return row.assetId ||
+          row.trackingSource === "EXISTING_MODEL" ||
+          row.trackingSource === "MANUAL_OVERRIDE"
+          ? row
+          : { ...row, ...getNewImportTrackingPolicy(row) };
       }
       if (!decision || decision.decision === "IGNORE") {
         return {
@@ -7522,9 +7916,20 @@ export async function applyStaffInventoryImport({
           "An existing Shelf model's tracking mode cannot be changed through import review."
         );
       }
+      const importDefaultTrackingType =
+        row.trackingSource === "EXISTING_MODEL"
+          ? row.type
+          : getNewImportTrackingPolicy(row).type;
+      const staffSelectedTrackingType =
+        decision.trackingModeSelectedByStaff === true && decision.type != null
+          ? decision.type
+          : null;
       const resolvedType =
         selectedAsset?.type ??
-        (decision.type !== undefined ? decision.type : row.type);
+        staffSelectedTrackingType ??
+        (row.trackingSource === "MANUAL_OVERRIDE"
+          ? row.type
+          : importDefaultTrackingType);
       let reviewConflictReason: string | null = null;
       if (selectedAssetId) {
         if (
@@ -7692,8 +8097,10 @@ export async function applyStaffInventoryImport({
       const title = resolvedDecision.title ?? row.title;
       const manualTrackingOverride =
         !selectedAsset &&
+        row.trackingSource !== "EXISTING_MODEL" &&
+        decision.trackingModeSelectedByStaff === true &&
         resolvedDecision.type != null &&
-        resolvedDecision.type !== row.type;
+        resolvedDecision.type !== importDefaultTrackingType;
       const resolvedReviewFields = new Set([
         ...(title.trim() ? ["Item name"] : []),
         ...(selectedAssetId || resolvedDecision.productChoice
@@ -7765,11 +8172,10 @@ export async function applyStaffInventoryImport({
         : {
             ...classified,
             type: resolvedType,
-            trackingSource: manualTrackingOverride
-              ? ("MANUAL_OVERRIDE" as const)
-              : row.trackingSource === "EXISTING_MODEL"
-              ? ("DETERMINISTIC_DEFAULT" as const)
-              : row.trackingSource,
+            trackingSource:
+              manualTrackingOverride || row.trackingSource === "MANUAL_OVERRIDE"
+                ? ("MANUAL_OVERRIDE" as const)
+                : ("DETERMINISTIC_DEFAULT" as const),
           };
       return {
         ...classifiedTracking,
@@ -7883,13 +8289,6 @@ export async function applyStaffInventoryImport({
     individualTrackingByExistingModel: trackingRows.filter(
       (row) =>
         row.type === "INDIVIDUAL" && row.trackingSource === "EXISTING_MODEL"
-    ).length,
-    individualTrackingByStrongEvidence: trackingRows.filter(
-      (row) =>
-        row.type === "INDIVIDUAL" &&
-        ["SOURCE_EXPLICIT", "DETERMINISTIC_EQUIPMENT_EVIDENCE"].includes(
-          row.trackingSource ?? ""
-        )
     ).length,
     individualTrackingManualOverride: trackingRows.filter(
       (row) =>
@@ -9066,6 +9465,9 @@ export async function applyStaffInventoryImport({
         manualLocationIds: asset.assetLocations
           .filter((assetLocation) => assetLocation.assetKitId === null)
           .map((assetLocation) => assetLocation.locationId),
+        manualLocations: asset.assetLocations
+          .filter((assetLocation) => assetLocation.assetKitId === null)
+          .map(({ locationId, quantity }) => ({ locationId, quantity })),
       };
       if (action === "INCREASE_QUANTITY") {
         if (
@@ -9224,7 +9626,18 @@ export async function applyStaffInventoryImport({
           action,
           assetId: asset.id,
           before,
-          target: { manualLocationIds: [row.locationId] },
+          target: {
+            manualLocationIds: [row.locationId],
+            manualLocations: [
+              {
+                locationId: row.locationId,
+                quantity:
+                  asset.type === AssetType.QUANTITY_TRACKED
+                    ? asset.quantity ?? 0
+                    : 1,
+              },
+            ],
+          },
         };
         const recorded = await recordImportLedgerExpectedPrior({
           operationId,
