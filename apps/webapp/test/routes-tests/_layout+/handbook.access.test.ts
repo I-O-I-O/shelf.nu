@@ -1,27 +1,35 @@
+import { createElement } from "react";
+import { render, screen } from "@testing-library/react";
+import { createRoutesStub } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loader as handbookArticleLoader } from "~/routes/_layout+/handbook.$slug";
-import { loader as handbookIndexLoader } from "~/routes/_layout+/handbook._index";
+import HandbookIndexPage, {
+  loader as handbookIndexLoader,
+} from "~/routes/_layout+/handbook._index";
 
 const mocks = vi.hoisted(() => ({
-  requirePermission: vi.fn(),
-  listPublishedHandbookArticles: vi.fn(),
-  getPublishedHandbookArticle: vi.fn(),
+  requireIoioHandbookRead: vi.fn(),
+  getHandbookIndex: vi.fn(),
+  getHandbookArticleDetail: vi.fn(),
 }));
 
-// why: access is controlled by Shelf's permission service, which is the input
-// varied here to prove the Handbook routes accept both intended IOIO roles.
-vi.mock("~/utils/roles.server", () => ({
-  requirePermission: mocks.requirePermission,
+// why: route tests supply a known Shelf permission result and avoid database access.
+vi.mock("~/modules/ioio-handbook/access.server", () => ({
+  requireIoioHandbookRead: mocks.requireIoioHandbookRead,
 }));
-
-// why: these route tests verify role access and organization scoping, not the
-// Handbook database query implementation.
-vi.mock("~/modules/ioio-handbook/service.server", () => ({
-  listPublishedHandbookArticles: mocks.listPublishedHandbookArticles,
-  getPublishedHandbookArticle: mocks.getPublishedHandbookArticle,
+// why: test route data wiring independently from the Handbook database service.
+vi.mock("~/modules/ioio-handbook/handbook-index.server", () => ({
+  getHandbookIndex: mocks.getHandbookIndex,
 }));
-
-// why: ErrorContent and MarkdownViewer are not rendered by loader tests.
+// why: ensure page loaders do not import Claude review infrastructure.
+vi.mock("~/modules/ioio-handbook/handbook-review.server", () => {
+  throw new Error("Claude helper unavailable");
+});
+// why: article detail behavior is outside this index route test.
+vi.mock("~/modules/ioio-handbook/workflow.server", () => ({
+  getHandbookArticleDetail: mocks.getHandbookArticleDetail,
+}));
+// why: these view components are irrelevant to loader behavior and import browser-only dependencies.
 vi.mock("~/components/errors", () => ({ ErrorContent: () => null }));
 vi.mock("~/components/markdown/markdown-viewer", () => ({
   MarkdownViewer: () => null,
@@ -35,32 +43,34 @@ function loaderArgs(path: string, params: Record<string, string> = {}) {
   } as never;
 }
 
-function handbookPermission(role: string) {
+function accessFor(role: string) {
   return {
     organizationId: "ioio-team-1",
-    currentOrganization: { id: "ioio-team-1", type: "TEAM" },
-    userOrganizations: [
-      {
-        organizationId: "ioio-team-1",
-        organization: { id: "ioio-team-1", type: "TEAM" },
-        roles: [role],
-      },
-    ],
+    userId: "user-1",
     role,
+    canEdit: role === "ADMIN" || role === "OWNER",
+    isStudent: role === "SELF_SERVICE",
   };
 }
 
-describe("IOIO Handbook read access", () => {
+const emptyHome = {
+  articles: [],
+  categories: [],
+  topics: [],
+};
+
+describe("IOIO Handbook routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.requirePermission.mockImplementation(() =>
-      Promise.resolve(handbookPermission("ADMIN"))
-    );
-    mocks.listPublishedHandbookArticles.mockResolvedValue([]);
-    mocks.getPublishedHandbookArticle.mockResolvedValue({
+    mocks.requireIoioHandbookRead.mockResolvedValue(accessFor("ADMIN"));
+    mocks.getHandbookIndex.mockResolvedValue(emptyHome);
+    mocks.getHandbookArticleDetail.mockResolvedValue({
       id: "article-1",
       slug: "equipment-care",
-      publishedVersion: { title: "Equipment care" },
+      viewedVersion: { title: "Equipment care" },
+      currentVersion: { title: "Equipment care" },
+      history: [],
+      isHistorical: false,
     });
   });
 
@@ -68,44 +78,61 @@ describe("IOIO Handbook read access", () => {
     ["ADMIN", true, false],
     ["OWNER", true, false],
     ["SELF_SERVICE", false, true],
-  ])(
-    "allows %s to read the Handbook index and article",
-    async (role, canEdit, isStudent) => {
-      mocks.requirePermission.mockImplementation(() =>
-        Promise.resolve(handbookPermission(role))
-      );
+  ])("loads current knowledge for %s", async (role, canEdit, isStudent) => {
+    mocks.requireIoioHandbookRead.mockResolvedValue(accessFor(role));
 
-      const index = (await handbookIndexLoader(loaderArgs("/handbook"))) as {
-        canEdit: boolean;
-        isStudent: boolean;
-      };
-      const article = (await handbookArticleLoader(
-        loaderArgs("/handbook/equipment-care", { slug: "equipment-care" })
-      )) as { canEdit: boolean; isStudent: boolean };
+    const index = (await handbookIndexLoader(loaderArgs("/handbook"))) as {
+      canEdit: boolean;
+      isStudent: boolean;
+      articles: unknown[];
+    };
+    const article = (await handbookArticleLoader(
+      loaderArgs("/handbook/equipment-care", { slug: "equipment-care" })
+    )) as { canEdit: boolean; isStudent: boolean };
 
-      expect(index).toMatchObject({ canEdit, isStudent });
-      expect(article).toMatchObject({ canEdit, isStudent });
-      expect(mocks.listPublishedHandbookArticles).toHaveBeenCalledWith({
+    expect(index).toMatchObject({ canEdit, isStudent, articles: [] });
+    expect(article).toMatchObject({ canEdit, isStudent });
+    expect(mocks.getHandbookIndex).toHaveBeenCalledWith(
+      expect.objectContaining({
         organizationId: "ioio-team-1",
         query: "",
-        section: undefined,
-      });
-      expect(mocks.getPublishedHandbookArticle).toHaveBeenCalledWith({
-        organizationId: "ioio-team-1",
-        slug: "equipment-care",
-        versionId: undefined,
-      });
-    }
-  );
-
-  it("keeps Handbook access unavailable to non-staff and non-student roles", async () => {
-    mocks.requirePermission.mockResolvedValue(handbookPermission("BASE"));
-
-    const result = await handbookIndexLoader(loaderArgs("/handbook")).catch(
-      (reason: unknown) => reason
+      })
     );
+    expect(mocks.getHandbookArticleDetail).toHaveBeenCalledWith({
+      organizationId: "ioio-team-1",
+      slug: "equipment-care",
+      versionId: undefined,
+    });
+  });
 
-    expect((result as { init: { status: number } }).init.status).toBe(403);
-    expect(mocks.listPublishedHandbookArticles).not.toHaveBeenCalled();
+  it("renders a clear empty state for a new organization", async () => {
+    const Stub = createRoutesStub([
+      {
+        path: "/handbook",
+        Component: HandbookIndexPage,
+        HydrateFallback: () => createElement("div", null, "Loading Handbook"),
+        loader: () => ({
+          ...emptyHome,
+          canEdit: false,
+          isStudent: true,
+          articleTypes: ["Guide"],
+          filters: {
+            query: "",
+            category: "",
+            topic: "",
+            type: "",
+          },
+        }),
+      },
+    ]);
+
+    render(createElement(Stub, { initialEntries: ["/handbook"] }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Handbook" })
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "No articles yet" })
+    ).toBeVisible();
   });
 });

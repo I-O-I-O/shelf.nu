@@ -1047,9 +1047,11 @@ model Location {
   // Asset placement is via the `AssetLocation` pivot; `kits` stays a
   // direct relation since `Kit.locationId` remains a FK (kits have a
   // single location, like INDIVIDUAL assets).
-  assetLocations AssetLocation[]
-  kits           Kit[]
-  notes          LocationNote[]  @relation("LocationNotes")
+  assetLocations    AssetLocation[]
+  kits              Kit[]
+  notes             LocationNote[]           @relation("LocationNotes")
+  handbookVersions  HandbookArticleVersion[] @relation("HandbookVersionLocation")
+  handbookRevisions HandbookRevision[]       @relation("HandbookRevisionLocation")
 
   // Self-relation for nested locations
   parentId String?
@@ -1274,6 +1276,10 @@ model Organization {
   handbookArticles           HandbookArticle[]
   handbookSources            HandbookSource[]
   handbookObservations       HandbookObservation[]
+  handbookCategories         HandbookCategory[]
+  handbookTopics             HandbookTopic[]
+  handbookRevisions          HandbookRevision[]
+  handbookFindings           HandbookFinding[]
 
   // Indexes for foreign keys
   @@index([userId])
@@ -1300,6 +1306,64 @@ enum HandbookSourceKind {
   STAFF_CONTRIBUTION
 }
 
+enum HandbookRevisionStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum HandbookFindingType {
+  DUPLICATE
+  CONFLICT
+  POSSIBLY_STALE
+  MISSING_STRUCTURE
+  BROKEN_LINK
+}
+
+enum HandbookFindingStatus {
+  OPEN
+  DISMISSED
+  RESOLVED
+}
+
+/// Broad, organization-scoped Handbook category.
+model HandbookCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String   @db.VarChar(80)
+  slug           String   @db.VarChar(100)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  topics       HandbookTopic[]
+  versions     HandbookArticleVersion[]
+  revisions    HandbookRevision[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, name])
+}
+
+/// Specific subject within a category. Slugs are unique within a category.
+model HandbookTopic {
+  id             String   @id @default(cuid())
+  organizationId String
+  categoryId     String
+  name           String   @db.VarChar(100)
+  slug           String   @db.VarChar(120)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     HandbookCategory         @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  versions     HandbookArticleVersion[]
+  revisions    HandbookRevision[]
+
+  @@unique([categoryId, slug])
+  @@index([organizationId, name])
+}
+
 /// Human-facing knowledge page. Draft fields remain separate from published
 /// snapshots so readers never see unreviewed edits.
 model HandbookArticle {
@@ -1322,8 +1386,11 @@ model HandbookArticle {
 
   organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   versions         HandbookArticleVersion[] @relation("HandbookArticleVersions")
+  revisions        HandbookRevision[]
   publishedVersion HandbookArticleVersion?  @relation("HandbookPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
   observations     HandbookObservation[]
+  findings         HandbookFinding[]        @relation("HandbookFindingArticle")
+  relatedFindings  HandbookFinding[]        @relation("HandbookFindingRelatedArticle")
 
   @@unique([organizationId, slug])
   @@index([organizationId, status, updatedAt])
@@ -1340,16 +1407,99 @@ model HandbookArticleVersion {
   section           String   @db.VarChar(80)
   publishedByUserId String
   publishedAt       DateTime @default(now()) @db.Timestamptz(3)
+  authorUserId      String?
+  categoryId        String?
+  topicId           String?
+  articleType       String   @default("Guide") @db.VarChar(40)
+  locationId        String?
+  videoUrls         String[] @default([])
 
   article      HandbookArticle             @relation("HandbookArticleVersions", fields: [articleId], references: [id], onDelete: Cascade)
   publishedFor HandbookArticle?            @relation("HandbookPublishedVersion")
+  category     HandbookCategory?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  topic        HandbookTopic?              @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  location     Location?                   @relation("HandbookVersionLocation", fields: [locationId], references: [id], onDelete: SetNull)
   assetModels  HandbookArticleAssetModel[]
   kits         HandbookArticleKit[]
   sources      HandbookVersionSource[]
   observations HandbookObservation[]       @relation("ObservationPublishedVersion")
+  proposals    HandbookRevision[]          @relation("HandbookRevisionPublishedVersion")
 
   @@unique([articleId, versionNumber])
   @@index([articleId, publishedAt(sort: Desc)])
+  @@index([categoryId, topicId])
+  @@index([locationId])
+}
+
+/// Mutable only while a proposal is DRAFT or PENDING_REVIEW. Once approved,
+/// an immutable HandbookArticleVersion snapshot is created and linked here.
+model HandbookRevision {
+  id                 String                 @id @default(cuid())
+  organizationId     String
+  articleId          String
+  revisionNumber     Int
+  status             HandbookRevisionStatus @default(DRAFT)
+  title              String                 @db.VarChar(180)
+  summary            String                 @default("") @db.VarChar(700)
+  content            String                 @db.Text
+  section            String                 @default("General") @db.VarChar(80)
+  categoryId         String?
+  topicId            String?
+  articleType        String                 @default("Guide") @db.VarChar(40)
+  locationId         String?
+  videoUrls          String[]               @default([])
+  assetModelIds      String[]               @default([])
+  kitIds             String[]               @default([])
+  sourceUrls         String[]               @default([])
+  authorUserId       String
+  submittedAt        DateTime?              @db.Timestamptz(3)
+  reviewedAt         DateTime?              @db.Timestamptz(3)
+  reviewedByUserId   String?
+  reviewNotes        String?                @db.Text
+  aiReview           Json?
+  publishedVersionId String?                @unique
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  organization     Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article          HandbookArticle         @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  category         HandbookCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  topic            HandbookTopic?          @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  location         Location?               @relation("HandbookRevisionLocation", fields: [locationId], references: [id], onDelete: SetNull)
+  publishedVersion HandbookArticleVersion? @relation("HandbookRevisionPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
+  findings         HandbookFinding[]
+
+  @@unique([articleId, revisionNumber])
+  @@index([organizationId, status, submittedAt(sort: Desc)])
+  @@index([articleId, revisionNumber(sort: Desc)])
+  @@index([authorUserId, status, updatedAt(sort: Desc)])
+}
+
+/// Staff-reviewed knowledge health finding. Findings never mutate articles.
+model HandbookFinding {
+  id               String                @id @default(cuid())
+  organizationId   String
+  type             HandbookFindingType
+  status           HandbookFindingStatus @default(OPEN)
+  articleId        String?
+  relatedArticleId String?
+  revisionId       String?
+  title            String                @db.VarChar(240)
+  details          String                @db.Text
+  staffDecision    String?               @db.VarChar(40)
+  createdByUserId  String?
+  decidedByUserId  String?
+  decidedAt        DateTime?             @db.Timestamptz(3)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article        HandbookArticle?  @relation("HandbookFindingArticle", fields: [articleId], references: [id], onDelete: Cascade)
+  relatedArticle HandbookArticle?  @relation("HandbookFindingRelatedArticle", fields: [relatedArticleId], references: [id], onDelete: Cascade)
+  revision       HandbookRevision? @relation(fields: [revisionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, type, createdAt(sort: Desc)])
+  @@index([articleId, relatedArticleId, type])
 }
 
 model HandbookArticleAssetModel {

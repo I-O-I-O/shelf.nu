@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createActionArgs } from "@mocks/remix";
+import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => ({
   assetFindMany: vi.fn(),
   assetModelFindFirst: vi.fn(),
   assetModelFindMany: vi.fn(),
+  userFindUniqueOrThrow: vi.fn(),
+  getIoioArchivedItemIds: vi.fn(),
+  simpleModeLoader: vi.fn(),
 }));
 
 // why: permission lookup is the authorization boundary; a fixed Staff result
@@ -29,12 +32,16 @@ vi.mock("~/modules/asset-index-settings/service.server", () => ({
   changeMode: vi.fn(),
   getAssetIndexSettings: mocks.getAssetIndexSettings,
 }));
+// why: isolate the Staff Inventory page loader from its independent list query.
+vi.mock("~/modules/asset/data.server", () => ({
+  simpleModeLoader: mocks.simpleModeLoader,
+}));
 
 // why: only the Trash service boundary is under test; archive and asset
 // service operations are separate Inventory intents.
 vi.mock("~/modules/ioio-staff/archive.server", () => ({
   archiveIoioItems: mocks.archiveIoioItems,
-  getIoioArchivedItemIds: vi.fn().mockResolvedValue([]),
+  getIoioArchivedItemIds: mocks.getIoioArchivedItemIds,
   trashIoioItems: mocks.trashIoioItems,
 }));
 vi.mock("~/modules/ioio-staff/visibility.server", () => ({
@@ -55,7 +62,7 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
 // connection; visibility authorization resolves the canonical AssetModel.
 vi.mock("~/database/db.server", () => ({
   db: {
-    user: { findUniqueOrThrow: vi.fn() },
+    user: { findUniqueOrThrow: mocks.userFindUniqueOrThrow },
     asset: {
       findFirst: mocks.assetFindFirst,
       findMany: mocks.assetFindMany,
@@ -67,7 +74,7 @@ vi.mock("~/database/db.server", () => ({
   },
 }));
 
-import { action } from "~/routes/_layout+/assets._index";
+import { action, loader } from "~/routes/_layout+/assets._index";
 
 const context = {
   getSession: () => ({ userId: "staff-1" }),
@@ -100,9 +107,38 @@ describe("active Staff Inventory Trash action", () => {
     mocks.assetModelFindFirst.mockResolvedValue(null);
     mocks.assetFindMany.mockResolvedValue([]);
     mocks.assetModelFindMany.mockResolvedValue([]);
+    mocks.getIoioArchivedItemIds.mockResolvedValue([]);
     mocks.trashIoioItems.mockResolvedValue([
       { itemType: "ASSET", itemId: "asset-1" },
     ]);
+  });
+
+  it("loads the active Staff Inventory page with an empty Shelf list", async () => {
+    mocks.requirePermission.mockResolvedValue({
+      organizationId: "org-1",
+      organizations: [],
+      currentOrganization: { type: "TEAM" },
+      canUseBarcodes: false,
+      canSeeAllCustody: false,
+      role: "ADMIN",
+    });
+    mocks.userFindUniqueOrThrow.mockResolvedValue({
+      firstName: "Staff",
+      displayName: "Staff",
+    });
+    mocks.simpleModeLoader.mockResolvedValue({ items: [], totalItems: 0 });
+
+    const result = await loader(
+      createLoaderArgs({
+        context,
+        request: new Request("http://localhost/assets"),
+      })
+    );
+
+    expect(result).toBeDefined();
+    expect(mocks.simpleModeLoader).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: "org-1", userId: "staff-1" })
+    );
   });
 
   it("trashes the submitted Shelf Asset ID and stays on active Inventory", async () => {

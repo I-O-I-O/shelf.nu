@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import {
   Bold,
+  ImagePlus,
   Italic,
   Link2,
   List,
@@ -108,6 +109,7 @@ interface EditorToolbarProps {
   onQuote: () => void;
   onDivider?: () => void;
   hasDivider: boolean;
+  onInsertImage?: () => void;
 }
 
 export function EditorToolbar({
@@ -123,6 +125,7 @@ export function EditorToolbar({
   onQuote,
   onDivider,
   hasDivider,
+  onInsertImage,
 }: EditorToolbarProps) {
   return (
     <div
@@ -146,6 +149,13 @@ export function EditorToolbar({
           disabled={!state.canRedo}
         />
       </div>
+      {onInsertImage ? (
+        <ToolbarButton
+          label="Insert image"
+          icon={<ImagePlus size={18} strokeWidth={1.5} aria-hidden="true" />}
+          onClick={onInsertImage}
+        />
+      ) : null}
       <ParagraphSelect value={state.block} onChange={onParagraphChange} />
       <div className="flex items-center gap-2">
         <ToolbarButton

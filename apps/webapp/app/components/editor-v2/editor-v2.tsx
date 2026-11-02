@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import type { TextareaHTMLAttributes } from "react";
 import "prosemirror-view/style/prosemirror.css";
@@ -40,6 +41,7 @@ interface EditorV2Props
   name: string;
   defaultValue: string;
   onChange?: (value: string) => void;
+  onUploadImage?: (file: File) => Promise<{ src: string; alt?: string }>;
 }
 
 const HINT_TEXT = "Use / to access commands.";
@@ -57,6 +59,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       onBlur,
       onFocus,
       onChange,
+      onUploadImage,
       ...textareaProps
     },
     ref
@@ -68,6 +71,8 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
     const editorContainerRef = useRef<HTMLDivElement | null>(null);
     const hiddenTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const imageInputRef = useRef<HTMLInputElement | null>(null);
+    const [imageError, setImageError] = useState<string | null>(null);
 
     const commands = useMemo(() => createSlashCommands(schema), [schema]);
 
@@ -106,6 +111,36 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       schema,
       viewRef
     );
+
+    const insertImage = async (file?: File) => {
+      if (!file || !onUploadImage || !viewRef.current) return;
+      setImageError(null);
+      if (file.size > 2 * 1024 * 1024) {
+        setImageError("Images must be 2 MB or smaller.");
+        return;
+      }
+      try {
+        const uploaded = await onUploadImage(file);
+        const imageNode = schema.nodes.image?.create({
+          src: uploaded.src,
+          alt: uploaded.alt ?? file.name,
+          title: null,
+        });
+        if (!imageNode)
+          throw new Error("Images are not supported in this editor.");
+        const view = viewRef.current;
+        view.dispatch(
+          view.state.tr.replaceSelectionWith(imageNode).scrollIntoView()
+        );
+        view.focus();
+      } catch (error) {
+        setImageError(
+          error instanceof Error
+            ? error.message
+            : "The image could not be uploaded."
+        );
+      }
+    };
 
     // Extract onKeyDown from restTextareaProps if it exists
     const parentOnKeyDown = restTextareaProps.onKeyDown as
@@ -199,6 +234,9 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
                   : undefined
               }
               hasDivider={Boolean(schema.nodes.horizontal_rule)}
+              onInsertImage={
+                onUploadImage ? () => imageInputRef.current?.click() : undefined
+              }
             />
           </div>
           <div
@@ -263,10 +301,30 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           data-testid="editor-v2-input"
           {...restTextareaProps}
         />
+        {onUploadImage ? (
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            tabIndex={-1}
+            aria-label="Upload image for this article"
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              void insertImage(file);
+              event.currentTarget.value = "";
+            }}
+          />
+        ) : null}
         <div className="flex flex-col gap-1 text-xs text-gray-500">
           <span>
             {label} supports Markdown and Markdoc. {HINT_TEXT}
           </span>
+          {imageError ? (
+            <span role="alert" className="text-red-700">
+              {imageError}
+            </span>
+          ) : null}
           {maxLength ? (
             <span
               className={
