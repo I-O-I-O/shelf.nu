@@ -3,7 +3,7 @@ import type {
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import { data, Link, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
 import { StaffImportPanel } from "~/components/ioio-staff/staff-import-panel";
 import Header from "~/components/layout/header";
@@ -47,6 +47,11 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     context,
     request,
   });
+  const requestUrl = new URL(request.url);
+  if (requestUrl.searchParams.has("format")) {
+    requestUrl.searchParams.delete("format");
+    return redirect(`${requestUrl.pathname}${requestUrl.search}`);
+  }
   let canCreateCategory = false;
   try {
     await requirePermission({
@@ -145,7 +150,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       if (!(file instanceof File)) {
         throw new ShelfError({
           cause: null,
-          message: "Choose a CSV, XLSX, or PDF file to review.",
+          message: "Choose a PDF file to review.",
           label: "Assets",
           status: 400,
           shouldBeCaptured: false,
@@ -155,11 +160,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
         context,
         request,
         file,
-        spreadsheetSheet:
-          String(formData.get("spreadsheetSheet") ?? "").trim() || undefined,
-        spreadsheetHeaderRow: formData.get("spreadsheetHeaderRow")
-          ? Number(formData.get("spreadsheetHeaderRow"))
-          : undefined,
       });
       return prepared.status !== "PREPARED"
         ? payload({ kind: "import-result" as const, result: prepared.result })

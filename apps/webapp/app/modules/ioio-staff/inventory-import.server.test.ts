@@ -4841,7 +4841,7 @@ describe("staff inventory import safety", () => {
       operationId: result.operationId,
       organizationId: "org-1",
       source: {
-        filename: "inventory.csv",
+        filename: "inventory.pdf",
         size: 16,
         sha256: "file-sha",
       },
@@ -4865,9 +4865,11 @@ describe("staff inventory import safety", () => {
     const response = await prepareStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
       request: new Request("http://localhost/staff/import"),
-      file: new File(["Name,Quantity\nNano,1"], "inventory.csv", {
-        type: "text/csv",
-      }),
+      file: new File(
+        [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
+        "inventory.pdf",
+        { type: "application/pdf" }
+      ),
     });
 
     expect(response).toEqual({ status: "SUCCEEDED", result });
@@ -4908,9 +4910,11 @@ describe("staff inventory import safety", () => {
     const prepared = await prepareStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
       request: new Request("http://localhost/staff/import"),
-      file: new File(["Name,Quantity\nNano,1"], "inventory.csv", {
-        type: "text/csv",
-      }),
+      file: new File(
+        [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
+        "inventory.pdf",
+        { type: "application/pdf" }
+      ),
     });
 
     expect(prepared).toEqual({ status: "PARTIAL", result });
@@ -5902,152 +5906,7 @@ describe("normalized spreadsheet import", () => {
   });
 });
 
-describe("spreadsheet proposal enrichment", () => {
-  it("carries equivalent CSV and XLSX quantities into the 20-row proposal", async () => {
-    // why: use the real file preparation path while replacing network and database boundaries.
-    vi.clearAllMocks();
-    mockStaffAccess.mockResolvedValue({
-      organizationId: "org-1",
-      userId: "staff-1",
-    });
-    database.asset.findMany.mockResolvedValue([]);
-    database.assetModel.findMany.mockResolvedValue([]);
-    database.category.findMany.mockResolvedValue([]);
-    database.location.findMany.mockResolvedValue([]);
-    database.location.count.mockResolvedValue(0);
-    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
-    database.ioioWriteOperation.findFirst.mockResolvedValue({ id: "proposal" });
-    database.ioioWriteOperation.create.mockResolvedValue({});
-    database.ioioImportItem.createMany.mockResolvedValue({ count: 20 });
-    database.ioioImportItem.findMany.mockResolvedValue([]);
-    mockGetCategories.mockResolvedValue([
-      { id: "electronics", name: "Electronics" },
-    ]);
-    mockRequestImportHelperProposal.mockResolvedValue({
-      status: "manual",
-      reason: "helper_not_configured",
-    });
-
-    const products = [
-      "Seeed Studio XIAO ESP32-S3 Sense",
-      "Arduino Nano",
-      "ESP32 DevKit",
-      "Raspberry Pi Pico",
-      "USB-C Cable",
-      "HDMI Adapter",
-      "JST Connector",
-      "NEMA 17 Motor",
-      "Micro Servo",
-      "Motor Driver",
-      "Temperature Sensor",
-      "Distance Sensor",
-      "IMU Module",
-      "Pressure Sensor",
-      "Breadboard",
-      "Resistor Kit",
-      "LED Strip",
-      "Bench Power Supply",
-      "Digital Multimeter",
-      "Soldering Iron",
-    ];
-    const table = [
-      ["Product", "Qty", "Manufacturer", "MPN", "Category"],
-      ...products.map((name, index) => [
-        name,
-        String(index + 1),
-        "Maker",
-        `MPN-${index + 1}`,
-        "Electronics",
-      ]),
-    ];
-    const csvText = table.map((row) => row.join(",")).join("\n");
-    const csvPrepared = await prepareStaffInventoryImport({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      file: new File([csvText], "inventory.csv", { type: "text/csv" }),
-    });
-
-    const workbook = new JSZip();
-    workbook.file(
-      "xl/workbook.xml",
-      '<workbook><sheets><sheet name="Notes" r:id="n"/><sheet name="Inventory" r:id="i"/></sheets></workbook>'
-    );
-    workbook.file(
-      "xl/_rels/workbook.xml.rels",
-      '<Relationships><Relationship Id="n" Target="worksheets/notes.xml"/><Relationship Id="i" Target="worksheets/inventory.xml"/></Relationships>'
-    );
-    const xml = (rows: string[][]) =>
-      `<worksheet><sheetData>${rows
-        .map(
-          (row, rowIndex) =>
-            `<row r="${rowIndex + 1}">${row
-              .map((cell, columnIndex) => {
-                const reference = `${String.fromCharCode(65 + columnIndex)}${
-                  rowIndex + 1
-                }`;
-                if (rowIndex > 2 && columnIndex === 1) {
-                  return `<c r="${reference}"><v>${cell}</v></c>`;
-                }
-                return `<c r="${reference}" t="inlineStr"><is><t>${cell}</t></is></c>`;
-              })
-              .join("")}</row>`
-        )
-        .join("")}</sheetData></worksheet>`;
-    workbook.file(
-      "xl/worksheets/notes.xml",
-      xml([["Notes"], ["Not an inventory table"]])
-    );
-    workbook.file(
-      "xl/worksheets/inventory.xml",
-      xml([["Supplier: Example"], [], ...table, []])
-    );
-    const xlsxBytes = await workbook.generateAsync({ type: "nodebuffer" });
-    const xlsxPrepared = await prepareStaffInventoryImport({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      file: new File(
-        [new Uint8Array(xlsxBytes).buffer as ArrayBuffer],
-        "inventory.xlsx",
-        {
-          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }
-      ),
-    });
-
-    expect(csvPrepared.status).toBe("PREPARED");
-    expect(xlsxPrepared.status).toBe("PREPARED");
-    if (
-      csvPrepared.status !== "PREPARED" ||
-      xlsxPrepared.status !== "PREPARED"
-    ) {
-      throw new Error("Expected both spreadsheet proposals");
-    }
-    const logicalRows = (proposal: StaffImportProposal) =>
-      proposal.rows.map((row) => ({
-        title: row.title,
-        quantity: row.receivedQuantity ?? row.quantity ?? row.proposedQuantity,
-        manufacturer: row.manufacturer,
-        mpn: row.manufacturerPartNumber,
-        categoryId: row.categoryId,
-        suggestedLocationId: row.suggestedLocationId,
-      }));
-    expect(csvPrepared.proposal.rows).toHaveLength(20);
-    expect(xlsxPrepared.proposal.rows).toHaveLength(20);
-    expect(logicalRows(csvPrepared.proposal)).toEqual(
-      logicalRows(xlsxPrepared.proposal)
-    );
-    expect(logicalRows(csvPrepared.proposal)).toEqual(
-      products.map((title, index) => ({
-        title,
-        quantity: index + 1,
-        manufacturer: "Maker",
-        mpn: `MPN-${index + 1}`,
-        categoryId: "electronics",
-        suggestedLocationId: null,
-      }))
-    );
-  });
-
+describe("dormant spreadsheet parser internals", () => {
   it("asks staff to choose when multiple XLSX sheets contain inventory", async () => {
     const workbook = new JSZip();
     workbook.file(
@@ -6086,104 +5945,6 @@ describe("spreadsheet proposal enrichment", () => {
     });
   });
 
-  it("batches 65 rows and retains them safely when the helper is unavailable", async () => {
-    // why: external persistence and helper transport are replaced to inspect the proposal boundary.
-    vi.clearAllMocks();
-    mockStaffAccess.mockResolvedValue({
-      organizationId: "org-1",
-      userId: "staff-1",
-    });
-    database.asset.findMany.mockResolvedValue([]);
-    database.location.findMany.mockResolvedValue([]);
-    mockGetCategories.mockResolvedValue([{ id: "boards", name: "Boards" }]);
-    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
-    database.ioioWriteOperation.findFirst.mockResolvedValue({
-      id: "spreadsheet-operation",
-    });
-    database.ioioImportItem.createMany.mockResolvedValue({ count: 65 });
-    database.ioioImportItem.findMany.mockResolvedValue([]);
-    mockRequestImportHelperProposal.mockResolvedValue({
-      status: "manual",
-      reason: "helper_not_configured",
-    });
-    const text =
-      "Name,Quantity,Category\n" +
-      Array.from({ length: 65 }, (_, index) => `Board ${index},2,Boards`).join(
-        "\n"
-      );
-    const prepared = await prepareStaffInventoryImport({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      file: new File([text], "inventory.csv", { type: "text/csv" }),
-    });
-    expect(prepared.status).toBe("PREPARED");
-    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
-    expect(prepared.proposal.rows).toHaveLength(65);
-    expect(
-      mockRequestImportHelperProposal.mock.calls.map(
-        ([request]) => request.document.pages.length
-      )
-    ).toEqual([30, 30, 5]);
-    expect(prepared.proposal.rows[0].sourceNotes).toContain(
-      "helper_unavailable"
-    );
-    expect(mockCreateAsset).not.toHaveBeenCalled();
-  });
-  it("joins semantic cleanup by source identity while preserving received quantities", async () => {
-    // why: isolate helper transport and database persistence while exercising shared proposal resolution.
-    vi.clearAllMocks();
-    mockStaffAccess.mockResolvedValue({
-      organizationId: "org-1",
-      userId: "staff-1",
-    });
-    database.asset.findMany.mockResolvedValue([]);
-    database.location.findMany.mockResolvedValue([
-      { id: "boards-shelf", name: "Board Shelf", parentId: null },
-    ]);
-    mockGetCategories.mockResolvedValue([{ id: "boards", name: "Boards" }]);
-    database.ioioWriteOperation.findUnique.mockResolvedValue(null);
-    database.ioioWriteOperation.findFirst.mockResolvedValue({
-      id: "semantic-sheet",
-    });
-    database.ioioImportItem.createMany.mockResolvedValue({ count: 1 });
-    database.ioioImportItem.findMany.mockResolvedValue([]);
-    const response = makeGenericHelperReadyResult({
-      pageText: "",
-      items: [
-        {
-          productName: "Seeed Studio XIAO ESP32-S3 Sense",
-          quantity: 99,
-          evidenceText: "development tool",
-        },
-      ],
-    });
-    response.proposal.rows[0].sourceRef = "spreadsheet-row-2";
-    response.proposal.rows[0].evidence[0].sourceRef = "spreadsheet-row-2";
-    response.proposal.rows[0].categorySuggestion = {
-      categoryId: "boards",
-      proposedName: null,
-      confidence: 0.95,
-    } as never;
-    mockRequestImportHelperProposal.mockResolvedValue(response);
-    const prepared = await prepareStaffInventoryImport({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      file: new File(
-        ["Name,Received,MPN\ndevelopment tool,2,ESP32-S3\n"],
-        "inventory.csv",
-        { type: "text/csv" }
-      ),
-    });
-    expect(prepared.status).toBe("PREPARED");
-    if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
-    expect(prepared.proposal.rows[0]).toMatchObject({
-      title: "Seeed Studio XIAO ESP32-S3 Sense",
-      quantity: 2,
-      manufacturerPartNumber: "ESP32-S3",
-      category: "Boards",
-    });
-    expect(mockCreateAsset).not.toHaveBeenCalled();
-  });
   it("uses formula cached values and rejects only cells without cached values", async () => {
     const zip = new JSZip();
     zip.file(
@@ -6226,89 +5987,6 @@ describe("spreadsheet manual table selection", () => {
     });
     expect(rows[1].uncertainFields).toContain("Spreadsheet row");
   });
-});
-
-describe("spreadsheet canonical category fallback", () => {
-  it.each(["csv", "xlsx"])(
-    "assigns obvious and source-hinted categories for %s when Claude returns null",
-    async (format) => {
-      // why: database and helper transport are external boundaries; actual parsers/resolvers build the proposal.
-      vi.clearAllMocks();
-      mockStaffAccess.mockResolvedValue({
-        organizationId: "org-1",
-        userId: "staff-1",
-      });
-      database.asset.findMany.mockResolvedValue([]);
-      database.location.findMany.mockResolvedValue([]);
-      mockGetCategories.mockResolvedValue([
-        { id: "cables", name: "Cables & adapters" },
-        { id: "electronics", name: "Electronics" },
-      ]);
-      database.ioioWriteOperation.findUnique.mockResolvedValue(null);
-      database.ioioWriteOperation.findFirst.mockResolvedValue({
-        id: "category-fallback",
-      });
-      database.ioioImportItem.createMany.mockResolvedValue({ count: 3 });
-      database.ioioImportItem.findMany.mockResolvedValue([]);
-      mockRequestImportHelperProposal.mockResolvedValue({
-        status: "manual",
-        reason: "helper_not_configured",
-      });
-      const matrix = [
-        ["Name", "Quantity", "Category"],
-        ["USB-C Cable", "20", ""],
-        ["Arduino Nano", "5", ""],
-        ["Part 42", "2", "Cables"],
-      ];
-      let buffer: Buffer<ArrayBufferLike> = Buffer.from(
-        matrix.map((row) => row.join(",")).join("\n")
-      );
-      if (format === "xlsx") {
-        const zip = new JSZip();
-        zip.file(
-          "xl/workbook.xml",
-          '<workbook><sheet name="Inventory" r:id="i"/></workbook>'
-        );
-        zip.file(
-          "xl/_rels/workbook.xml.rels",
-          '<Relationships><Relationship Id="i" Target="worksheets/data.xml"/></Relationships>'
-        );
-        zip.file(
-          "xl/worksheets/data.xml",
-          "<worksheet>" +
-            matrix
-              .map(
-                (row, index) =>
-                  "<row>" +
-                  row
-                    .map(
-                      (value, col) =>
-                        `<c r="${String.fromCharCode(65 + col)}${
-                          index + 1
-                        }" t="inlineStr"><is><t>${value}</t></is></c>`
-                    )
-                    .join("") +
-                  "</row>"
-              )
-              .join("") +
-            "</worksheet>"
-        );
-        buffer = await zip.generateAsync({ type: "nodebuffer" });
-      }
-      const prepared = await prepareStaffInventoryImport({
-        context: { getSession: () => ({ userId: "staff-1" }) } as never,
-        request: new Request("http://localhost/staff/import"),
-        file: new File([Uint8Array.from(buffer).buffer], `stock.${format}`),
-      });
-      if (prepared.status !== "PREPARED") throw new Error("Expected proposal");
-      expect(prepared.proposal.rows.map((row) => row.categoryId)).toEqual([
-        "cables",
-        "electronics",
-        "cables",
-      ]);
-      expect(mockCreateAsset).not.toHaveBeenCalled();
-    }
-  );
 });
 
 describe("staff inventory import revert", () => {
@@ -6559,5 +6237,34 @@ describe("staff inventory import revert", () => {
 
     expect(mockDeleteAsset).not.toHaveBeenCalled();
     expect(operation.status).toBe("SUCCEEDED");
+  });
+});
+
+describe("Staff Import PDF-only upload validation", () => {
+  it.each([
+    ["CSV", "inventory.csv", "text/csv", "Product,Quantity\nCable,4"],
+    [
+      "XLSX",
+      "inventory.xlsx",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "not a workbook",
+    ],
+  ])("rejects %s before inventory parsing", async (_, filename, type, body) => {
+    vi.clearAllMocks();
+    mockStaffAccess.mockResolvedValue({
+      organizationId: "org-1",
+      userId: "staff-1",
+    });
+
+    await expect(
+      prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File([body], filename, { type }),
+      })
+    ).rejects.toThrow("Only PDF files are supported for inventory import.");
+
+    expect(database.asset.findMany).not.toHaveBeenCalled();
+    expect(mockRequestImportHelperProposal).not.toHaveBeenCalled();
   });
 });

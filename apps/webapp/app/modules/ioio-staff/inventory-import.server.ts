@@ -919,6 +919,26 @@ function importError(message: string) {
   });
 }
 
+const STAFF_IMPORT_PDF_ONLY_MESSAGE =
+  "Only PDF files are supported for inventory import.";
+
+async function assertStaffInventoryPdfUpload(file: File) {
+  const contentType = (file.type ?? "").split(";")[0].trim().toLowerCase();
+  if (
+    !file.name.toLowerCase().endsWith(".pdf") ||
+    (contentType !== "" && contentType !== "application/pdf")
+  ) {
+    throw importError(STAFF_IMPORT_PDF_ONLY_MESSAGE);
+  }
+
+  const header = Buffer.from(await file.slice(0, 1024).arrayBuffer()).toString(
+    "latin1"
+  );
+  if (!/%PDF-\d\.\d/.test(header)) {
+    throw importError(STAFF_IMPORT_PDF_ONLY_MESSAGE);
+  }
+}
+
 function isStaffImportExpired(createdAt: Date, now = new Date()) {
   return (
     now.getTime() - createdAt.getTime() >= STAFF_IMPORT_REVIEW_RETENTION_MS
@@ -4707,6 +4727,10 @@ export async function prepareStaffInventoryImport({
     request,
   });
   if (!file.name) throw importError("The uploaded file has no filename.");
+  await assertStaffInventoryPdfUpload(file);
+  if (file.size > STAFF_IMPORT_MAX_BYTES) {
+    throw importError("The file is too large. The maximum is 5 MB.");
+  }
   const buffer = Buffer.from(await file.arrayBuffer());
   const parsed = await parseStaffImportFileWithSummary({
     filename: file.name,

@@ -3,7 +3,7 @@ import { Button } from "~/components/shared/button";
 const inventoryTools = [
   {
     title: "Import",
-    description: "Add inventory from PDF, CSV, or Excel files.",
+    description: "Add inventory from supplier and inventory PDF files.",
     href: "/staff/import",
     action: "Import inventory",
   },

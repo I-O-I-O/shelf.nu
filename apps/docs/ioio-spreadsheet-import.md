@@ -1,10 +1,17 @@
-# Staff spreadsheet inventory import
+# Dormant spreadsheet parser notes
 
-The staff CSV/XLSX path normalizes to `StaffImportRow`, then shares PDF category/location resolution, asset matching, `StaffImportProposal`, review, the import ledger and canonical Apply services. No schema changes are needed.
+Staff Import currently accepts PDF files only. The CSV/XLSX parser described
+here is retained as an internal development reference and is not invoked by
+active staff-facing routes. No spreadsheet import functionality is exposed to
+staff.
+
+Historically, the staff CSV/XLSX path normalized to `StaffImportRow` and shared
+category/location resolution, asset matching, `StaffImportProposal`, review,
+the import ledger and canonical Apply services. No schema changes were needed.
 
 CSV uses csv-parse for comma, semicolon and tab detection, BOM handling and quoted fields. XLSX reads stored XML values across sheets, including formula caches; formulas are never evaluated. Macros and external workbook links remain rejected.
 
-Header detection examines the first 40 rows for multiple known concepts and nearby data. Clear inventory tables are included automatically; Notes/Instructions sheets are skipped. Staff can specify a sheet and header row under Spreadsheet options before uploading again. Duplicate/ambiguous column layouts and invalid rows remain visible for review. Metadata, blanks, totals, VAT and freight are excluded.
+Header detection examined the first 40 rows for multiple known concepts and nearby data. Clear inventory tables were included automatically; Notes/Instructions sheets were skipped. The former spreadsheet UI allowed staff to specify a sheet and header row before uploading again. Duplicate/ambiguous column layouts and invalid rows remained visible for review. Metadata, blanks, totals, VAT and freight were excluded.
 
 Spreadsheet rows preserve source sheet/row, raw description, manufacturer, supplier SKU, MPN and quantities. Received/shipped quantities take precedence; ordered-only rows cannot become received stock. Negative/fractional quantities require correction. Duplicate SKU/MPN identities remain separate and require review; quantities are not silently combined.
 

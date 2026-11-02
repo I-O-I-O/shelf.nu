@@ -110,26 +110,6 @@ type StaffImportActionResponse =
     }
   | { error: { message: string } };
 
-const FORMAT_COPY = {
-  csv: {
-    label: "CSV",
-    accept: ".csv,text/csv",
-    description: "Structured comma-separated inventory data",
-  },
-  xlsx: {
-    label: "Excel",
-    accept:
-      ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    description: "Spreadsheet values from an .xlsx workbook",
-  },
-  pdf: {
-    label: "PDF",
-    accept: ".pdf,application/pdf",
-    description: "Extract inventory information for staff review",
-  },
-} as const;
-
-type ImportFormat = keyof typeof FORMAT_COPY;
 const IMPORT_REVIEW_PAGE_SIZE = 50;
 const IMPORT_REVIEW_SECTION_CLASS =
   "mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white";
@@ -268,10 +248,6 @@ function trackingLabel(type: ReviewDecision["type"]) {
   return "Needs review";
 }
 
-function isImportFormat(value: string | null): value is ImportFormat {
-  return value === "csv" || value === "xlsx" || value === "pdf";
-}
-
 export function StaffImportPanel({
   actionPath,
   initialProposal = null,
@@ -293,13 +269,6 @@ export function StaffImportPanel({
   const location = useLocation();
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { search } = location;
-  const searchParams = new URLSearchParams(search);
-  const formatParam = searchParams.get("format");
-  const format: ImportFormat = isImportFormat(formatParam)
-    ? formatParam
-    : "csv";
-  const copy = FORMAT_COPY[format];
   const fetcher = useFetcher<StaffImportActionResponse>();
   const response = fetcher.data;
   const responseProposal =
@@ -417,25 +386,9 @@ export function StaffImportPanel({
           Import inventory
         </h2>
         <p className="mt-1 text-sm text-gray-600">
-          Upload a file to prepare a review proposal. Nothing changes until a
-          staff member confirms it.
+          Upload a supplier invoice or inventory PDF to prepare a reviewed Shelf
+          import proposal. Nothing changes until staff applies approved rows.
         </p>
-      </div>
-
-      <div className="mt-4 flex flex-wrap gap-2" aria-label="Import format">
-        {(Object.keys(FORMAT_COPY) as ImportFormat[]).map((option) => (
-          <a
-            key={option}
-            href={`${actionPath}?format=${option}#staff-inventory-import`}
-            className={
-              option === format
-                ? "rounded-xl bg-red-700 px-3 py-2 text-sm font-bold text-white"
-                : "rounded-xl border border-gray-200 px-3 py-2 text-sm font-bold text-gray-700 hover:border-red-200 hover:bg-red-50 hover:text-red-800"
-            }
-          >
-            {FORMAT_COPY[option].label}
-          </a>
-        ))}
       </div>
 
       <fetcher.Form
@@ -445,42 +398,13 @@ export function StaffImportPanel({
         className="mt-4 flex flex-wrap items-center gap-3"
       >
         <input type="hidden" name="intent" value="analyze-file" />
-        {format !== "pdf" ? (
-          <details className="w-full text-sm text-gray-600">
-            <summary>Spreadsheet options</summary>
-            <p className="my-2">
-              Leave blank to detect inventory tables automatically. If a table
-              needs review, choose its sheet and header row here, then upload
-              the file again.
-            </p>
-            <label>
-              Sheet name{" "}
-              <input
-                name="spreadsheetSheet"
-                type="text"
-                maxLength={100}
-                className="mx-2 rounded border px-2 py-1"
-              />
-            </label>
-            <label>
-              Header row{" "}
-              <input
-                name="spreadsheetHeaderRow"
-                type="number"
-                min={1}
-                max={1000}
-                className="mx-2 w-24 rounded border px-2 py-1"
-              />
-            </label>
-          </details>
-        ) : null}
         <label className="inline-flex cursor-pointer items-center rounded-xl bg-red-700 px-4 py-2.5 text-sm font-bold text-white transition focus-within:ring-2 focus-within:ring-red-700 focus-within:ring-offset-2 hover:bg-red-800">
-          Choose {copy.label} file
+          Choose PDF file
           <input
             ref={fileInputRef}
             name="file"
             type="file"
-            accept={copy.accept}
+            accept="application/pdf,.pdf"
             className="sr-only"
             onChange={(event) => {
               pendingUploadPreviousProposalRef.current = storedProposal;
@@ -492,7 +416,9 @@ export function StaffImportPanel({
             }}
           />
         </label>
-        <span className="text-xs text-gray-500">{copy.description}</span>
+        <span className="text-xs text-gray-500">
+          Supplier invoice or inventory PDF
+        </span>
       </fetcher.Form>
 
       {fetcher.state !== "idle" ? (

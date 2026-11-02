@@ -51,11 +51,12 @@ retains up to three alternatives. Confidence selects Recommended, Suggested, or
 Possible presentation; it does not remove a valid alternative. Placement
 proposals remain preview-only.
 
-SHELF_LOCATIONS, SHELF_INVENTORY and uploaded PDF/CSV/XLSX sources are representable.
+SHELF_LOCATIONS, SHELF_INVENTORY and uploaded PDF sources are representable.
 This executor rejects uploaded-file execution until an adapter connects supplied,
-authorized upload references to the existing inventory-import parsers. It does
-not accept filenames as executable paths or invent upload contents. The existing
-PDF/CSV/XLSX import and bounded inventory recommendation workflows remain intact.
+authorized upload references to the existing inventory-import flow. It does
+not accept filenames as executable paths or invent upload contents. Staff Import
+currently accepts supplier invoice and inventory PDF files only; proposals still
+require staff review and explicit Apply.
 Future model/category resolution, comparisons, file matching, rename/move and
 ensure-count task capabilities require registered schemas, source validation and
 Shelf executors; they are rejected rather than guessed today.

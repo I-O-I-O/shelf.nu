@@ -176,7 +176,7 @@ export async function answerStaffAssistant({
   if (INVENTORY_CHANGE_PATTERN.test(normalizedQuestion)) {
     return {
       answer:
-        "I can prepare an inventory change proposal from an uploaded CSV, XLSX, or PDF file. Borrow, return, and problem-report actions still use their existing Shelf workflows.",
+        "I can prepare an inventory change proposal from an uploaded supplier invoice or inventory PDF. Borrow, return, and problem-report actions still use their existing Shelf workflows.",
       provider: "policy",
       toolsUsed: [],
       assets: [],
@@ -187,7 +187,7 @@ export async function answerStaffAssistant({
   if (PROCUREMENT_DOCUMENT_PATTERN.test(normalizedQuestion)) {
     return {
       answer:
-        "Upload the supplier PDF, CSV, or Excel file and I will extract possible inventory changes for staff review. Nothing will change until approved.",
+        "Upload a supplier invoice or inventory PDF and I will extract possible inventory changes for staff review. Nothing will change until approved.",
       provider: "policy",
       toolsUsed: [],
       assets: [],

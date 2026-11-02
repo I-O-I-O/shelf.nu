@@ -18,8 +18,9 @@ describe("staff dashboard inventory shortcuts", () => {
       screen.getByRole("heading", { name: "Import", level: 2 })
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Add inventory from PDF, CSV, or Excel files.")
+      screen.getByText("Add inventory from supplier and inventory PDF files.")
     ).toBeInTheDocument();
+    expect(screen.queryByText(/CSV|Excel|XLSX/i)).not.toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Import inventory" })
     ).toHaveAttribute("href", "/staff/import");

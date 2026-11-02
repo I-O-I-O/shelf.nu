@@ -170,7 +170,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
       if (!(file instanceof File)) {
         throw new ShelfError({
           cause: null,
-          message: "Choose a CSV, XLSX, or PDF file to review.",
+          message: "Choose a PDF file to review.",
           label: "Assets",
           status: 400,
           shouldBeCaptured: false,

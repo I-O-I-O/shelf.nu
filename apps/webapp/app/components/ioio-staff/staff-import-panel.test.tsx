@@ -80,6 +80,26 @@ function renderPanel(
 }
 
 describe("StaffImportPanel review gate", () => {
+  it("offers a PDF-only upload with the reviewed import explanation", () => {
+    const { container } = renderPanel({});
+
+    expect(
+      screen.getByText(
+        "Upload a supplier invoice or inventory PDF to prepare a reviewed Shelf import proposal. Nothing changes until staff applies approved rows."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Choose PDF file")).toHaveAttribute(
+      "accept",
+      "application/pdf,.pdf"
+    );
+    expect(
+      screen.queryByRole("link", { name: /CSV|Excel|XLSX/i })
+    ).not.toBeInTheDocument();
+    expect(container.querySelector('[name="spreadsheetSheet"]')).toBeNull();
+    expect(container.querySelector('[name="spreadsheetHeaderRow"]')).toBeNull();
+    expect(container.textContent).not.toMatch(/CSV|Excel|XLSX|spreadsheet/i);
+  });
+
   it("keeps the review controls compact and the edit panel structured", () => {
     renderPanel(
       {
