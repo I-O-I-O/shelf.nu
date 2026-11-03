@@ -5,15 +5,15 @@ import { db } from "~/database/db.server";
 import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   HandbookValidationError,
+  createHandbookCategory,
   publishHandbookArticle,
   saveHandbookDraft,
 } from "./service.server";
 
 const draftSchema = z.object({
   title: z.string().trim().min(1).max(180),
-  summary: z.string().max(700),
+  handbookCategoryId: z.string().trim().min(1).max(40),
   content: z.string().trim().min(1).max(30_000),
-  section: z.string().trim().max(80),
 });
 
 function strings(formData: FormData, key: string) {
@@ -39,6 +39,23 @@ export async function handbookEditorAction({
   }
   const formData = await request.formData();
   const intent = formData.get("intent");
+  if (intent === "create-category") {
+    try {
+      const category = await createHandbookCategory({
+        organizationId: auth.organizationId,
+        name: String(formData.get("categoryName") ?? ""),
+      });
+      return data({ ok: true as const, category });
+    } catch (cause) {
+      if (cause instanceof HandbookValidationError) {
+        return data(
+          { ok: false as const, message: cause.message },
+          { status: 400 }
+        );
+      }
+      throw cause;
+    }
+  }
   if (intent !== "save-draft" && intent !== "publish") {
     return data(
       {
@@ -50,15 +67,15 @@ export async function handbookEditorAction({
   }
   const parsed = draftSchema.safeParse({
     title: formData.get("title") ?? "",
-    summary: formData.get("summary") ?? "",
+    handbookCategoryId: formData.get("handbookCategoryId") ?? "",
     content: formData.get("content") ?? "",
-    section: formData.get("section") ?? "General",
   });
   if (!parsed.success) {
     return data(
       {
         ok: false as const,
-        message: "Add a title and content, and check the field length limits.",
+        message:
+          "Add a title, choose a category, add article content, and check the field length limits.",
       },
       { status: 400 }
     );
@@ -82,8 +99,6 @@ export async function handbookEditorAction({
       userId: auth.userId,
       articleId: current?.id,
       ...parsed.data,
-      assetModelIds: strings(formData, "assetModelIds"),
-      kitIds: strings(formData, "kitIds"),
       sourceUrls: strings(formData, "sourceUrls").join("\n").split(/\r?\n/),
     });
     if (intent === "publish") {

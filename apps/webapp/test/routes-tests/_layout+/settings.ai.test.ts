@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   saveGuidelines: vi.fn(),
   listArticles: vi.fn(),
   listObservations: vi.fn(),
+  listCategories: vi.fn(),
+  resolveProposal: vi.fn(),
   reviewObservation: vi.fn(),
 }));
 
@@ -21,7 +23,9 @@ vi.mock("~/modules/ioio-ai-guidelines/service.server", () => ({
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
   HandbookValidationError: class HandbookValidationError extends Error {},
   listHandbookArticlesForStaff: mocks.listArticles,
+  listHandbookCategories: mocks.listCategories,
   listHandbookObservations: mocks.listObservations,
+  resolveHandbookObservationCategoryProposal: mocks.resolveProposal,
   reviewHandbookObservation: mocks.reviewObservation,
 }));
 
@@ -60,6 +64,7 @@ describe("IOIO AI settings routes", () => {
     });
     mocks.listArticles.mockResolvedValue([]);
     mocks.listObservations.mockResolvedValue([]);
+    mocks.listCategories.mockResolvedValue([]);
   });
 
   it("loads empty guideline defaults and saves validated guidance", async () => {
@@ -129,6 +134,36 @@ describe("IOIO AI settings routes", () => {
         userId: "owner-1",
         observationId: "note-1",
         status,
+      });
+    }
+  });
+
+  it("lets Staff approve, rename, replace, or reject a student category proposal", async () => {
+    for (const [intent, resolution] of [
+      ["approve-category", "approve"],
+      ["replace-category", "replace"],
+      ["reject-category", "reject"],
+    ] as const) {
+      await knowledgeAction(
+        createActionArgs({
+          context,
+          request: new Request("http://localhost/settings/ai/knowledge", {
+            method: "POST",
+            body: new URLSearchParams({
+              observationId: "note-1",
+              intent,
+              categoryName: "Workshop Safety",
+              handbookCategoryId: "handbook-category-1",
+            }),
+          }),
+        })
+      );
+      expect(mocks.resolveProposal).toHaveBeenLastCalledWith({
+        organizationId: "team-1",
+        observationId: "note-1",
+        resolution,
+        handbookCategoryId: "handbook-category-1",
+        categoryName: "Workshop Safety",
       });
     }
   });

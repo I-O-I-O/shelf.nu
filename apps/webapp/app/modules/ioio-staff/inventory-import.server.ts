@@ -2517,6 +2517,13 @@ async function extractPdfText(buffer: Buffer) {
     .trim();
 }
 
+/** Shared low-level PDF text extraction for document review flows. This uses
+ * the same local PDF.js and OCR fallback as inventory import, without applying
+ * any inventory-specific parsing or normalization. */
+export async function extractPdfDocumentPageText(buffer: Buffer) {
+  return (await extractPdfPages(buffer)).pages.map(({ text }) => text);
+}
+
 /** Best-effort local text extraction for receipt review. No document data is
  * sent to an external provider; unreadable/scanned files use manual entry. */
 export async function extractPdfTextForReceiptReview(buffer: Buffer) {

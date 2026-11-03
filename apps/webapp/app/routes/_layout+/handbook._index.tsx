@@ -2,7 +2,10 @@ import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Form, Link, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
-import { listPublishedHandbookArticles } from "~/modules/ioio-handbook/service.server";
+import {
+  listHandbookCategories,
+  listPublishedHandbookArticles,
+} from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -13,23 +16,21 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const auth = await requireIoioHandbookRead({ context, request });
     const url = new URL(request.url);
     const query = url.searchParams.get("q")?.trim().slice(0, 120) ?? "";
-    const section =
-      url.searchParams.get("section")?.trim().slice(0, 80) || undefined;
-    const articles = await listPublishedHandbookArticles({
-      organizationId: auth.organizationId,
-      query,
-      section,
-    });
-    const sections = [
-      ...new Set(
-        articles.map(({ publishedVersion }) => publishedVersion.section)
-      ),
-    ].sort((a, b) => a.localeCompare(b));
+    const handbookCategoryId =
+      url.searchParams.get("handbookCategoryId")?.trim() || undefined;
+    const [articles, categories] = await Promise.all([
+      listPublishedHandbookArticles({
+        organizationId: auth.organizationId,
+        query,
+        handbookCategoryId,
+      }),
+      listHandbookCategories(auth.organizationId),
+    ]);
     return payload({
       articles,
-      sections,
+      categories,
       query,
-      section: section ?? "",
+      handbookCategoryId: handbookCategoryId ?? "",
       canEdit: auth.canEdit,
       isStudent: auth.isStudent,
     });
@@ -45,8 +46,14 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Handbook" };
 
 export default function HandbookIndexPage() {
-  const { articles, sections, query, section, canEdit, isStudent } =
-    useLoaderData<typeof loader>();
+  const {
+    articles,
+    categories,
+    query,
+    handbookCategoryId,
+    canEdit,
+    isStudent,
+  } = useLoaderData<typeof loader>();
   return (
     <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -64,6 +71,12 @@ export default function HandbookIndexPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Link
+            to="/handbook/import"
+            className="inline-flex h-10 items-center justify-center rounded-lg border border-red-700 bg-white px-4 text-sm font-semibold text-red-800 hover:bg-red-50"
+          >
+            Import PDF
+          </Link>
           {isStudent ? (
             <Link
               to="/handbook/contribute"
@@ -106,19 +119,19 @@ export default function HandbookIndexPage() {
           placeholder="Search procedures, equipment, troubleshooting…"
           className="h-10 rounded-lg border border-gray-300 px-3 text-sm focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
         />
-        <label className="sr-only" htmlFor="handbook-section">
-          Section
+        <label className="sr-only" htmlFor="handbook-category">
+          Category
         </label>
         <select
-          id="handbook-section"
-          name="section"
-          defaultValue={section}
+          id="handbook-category"
+          name="handbookCategoryId"
+          defaultValue={handbookCategoryId}
           className="h-10 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-800 focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
         >
-          <option value="">All sections</option>
-          {sections.map((item) => (
-            <option key={item} value={item}>
-              {item}
+          <option value="">All categories</option>
+          {categories.map((category) => (
+            <option key={category.id} value={category.id}>
+              {category.name}
             </option>
           ))}
         </select>
@@ -132,56 +145,29 @@ export default function HandbookIndexPage() {
 
       {articles.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {articles.map(({ id, slug, publishedVersion }) => {
-            const equipment = [
-              ...publishedVersion.assetModels,
-              ...publishedVersion.kits,
-            ];
-            const cover = equipment.find((item) => item.imageUrl)?.imageUrl;
-            return (
-              <article
-                key={id}
-                className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm"
-              >
-                {cover ? (
-                  <img
-                    src={cover}
-                    alt=""
-                    className="h-40 w-full object-cover"
-                  />
-                ) : null}
-                <div className="p-4">
+          {articles.map(({ id, slug, handbookCategory, publishedVersion }) => (
+            <article
+              key={id}
+              className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm"
+            >
+              <div className="p-4">
+                {handbookCategory ? (
                   <p className="text-xs font-semibold uppercase tracking-wide text-red-700">
-                    {publishedVersion.section}
+                    {handbookCategory.name}
                   </p>
-                  <h2 className="mt-1 text-lg font-semibold text-gray-950">
-                    <Link
-                      to={`/handbook/${slug}`}
-                      className="hover:text-red-800"
-                    >
-                      {publishedVersion.title}
-                    </Link>
-                  </h2>
-                  {publishedVersion.summary ? (
-                    <p className="mt-2 line-clamp-3 text-sm leading-6 text-gray-600">
-                      {publishedVersion.summary}
-                    </p>
-                  ) : null}
-                  {equipment.length ? (
-                    <p className="mt-3 text-xs text-gray-500">
-                      Related: {equipment.map(({ name }) => name).join(", ")}
-                    </p>
-                  ) : null}
-                  <p className="mt-3 text-xs text-gray-500">
-                    Updated{" "}
-                    {new Date(
-                      publishedVersion.publishedAt
-                    ).toLocaleDateString()}
-                  </p>
-                </div>
-              </article>
-            );
-          })}
+                ) : null}
+                <h2 className="mt-1 text-lg font-semibold text-gray-950">
+                  <Link to={`/handbook/${slug}`} className="hover:text-red-800">
+                    {publishedVersion.title}
+                  </Link>
+                </h2>
+                <p className="mt-3 text-xs text-gray-500">
+                  Updated{" "}
+                  {new Date(publishedVersion.publishedAt).toLocaleDateString()}
+                </p>
+              </div>
+            </article>
+          ))}
         </div>
       ) : (
         <section className="rounded-xl border border-dashed border-gray-300 bg-white px-5 py-10 text-center">

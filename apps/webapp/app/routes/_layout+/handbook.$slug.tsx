@@ -32,7 +32,6 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     return payload({
       article,
       canEdit: auth.canEdit,
-      isStudent: auth.isStudent,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -56,11 +55,10 @@ export const handle = {
 };
 
 export default function HandbookArticlePage() {
-  const { article, canEdit, isStudent } = useLoaderData<typeof loader>();
+  const { article, canEdit } = useLoaderData<typeof loader>();
   const version = article.publishedVersion;
   const currentVersion = article.versions[0]?.id;
   const viewingHistorical = currentVersion !== version.id;
-  const related = [...version.assetModels, ...version.kits];
   return (
     <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -99,71 +97,20 @@ export default function HandbookArticlePage() {
       ) : null}
       <article className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm sm:p-8">
         <header className="border-b border-gray-100 pb-5">
-          <p className="text-xs font-bold uppercase tracking-[0.16em] text-red-700">
-            {version.section}
-          </p>
+          {article.handbookCategory ? (
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-red-700">
+              {article.handbookCategory.name}
+            </p>
+          ) : null}
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-gray-950">
             {version.title}
           </h1>
-          {version.summary ? (
-            <p className="mt-3 max-w-3xl text-base leading-7 text-gray-600">
-              {version.summary}
-            </p>
-          ) : null}
           <p className="mt-4 text-xs text-gray-500">
             Version {version.versionNumber} · Published{" "}
             {new Date(version.publishedAt).toLocaleDateString()} by{" "}
             {version.publishedByName ?? "IOIO Staff"}
           </p>
         </header>
-
-        {related.length ? (
-          <section className="my-5 rounded-xl bg-gray-50 p-4">
-            <h2 className="text-sm font-semibold text-gray-900">
-              Related Shelf equipment
-            </h2>
-            <ul className="mt-3 grid gap-3 sm:grid-cols-2">
-              {related.map((item) => (
-                <li
-                  key={item.id}
-                  className="flex min-w-0 items-center gap-3 rounded-lg border border-gray-200 bg-white p-2.5"
-                >
-                  {item.imageUrl ? (
-                    <img
-                      src={item.imageUrl}
-                      alt=""
-                      className="size-14 shrink-0 rounded-md object-cover"
-                    />
-                  ) : (
-                    <div
-                      aria-hidden="true"
-                      className="size-14 shrink-0 rounded-md bg-gray-100"
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-gray-900">
-                      {item.name}
-                    </p>
-                    <Link
-                      to={
-                        item.kind === "kit"
-                          ? isStudent
-                            ? "/ioio/kits"
-                            : "/kits"
-                          : isStudent
-                          ? "/ioio"
-                          : "/assets"
-                      }
-                      className="text-xs font-medium text-red-800 hover:underline"
-                    >
-                      View in Shelf
-                    </Link>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
 
         <div className="py-5">
           <MarkdownViewer

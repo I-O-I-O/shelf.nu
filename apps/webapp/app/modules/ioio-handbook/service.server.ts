@@ -8,7 +8,6 @@ import type { Prisma as PrismaTypes } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { Logger } from "~/utils/logger";
-import { resolveStorageImageUrl } from "~/utils/storage.server";
 import { resolveUserDisplayName } from "~/utils/user";
 import {
   getKnowledgeOverlap,
@@ -34,28 +33,7 @@ async function getDisplayNamesByUserId(userIds: string[]) {
   return new Map(users.map((user) => [user.id, resolveUserDisplayName(user)]));
 }
 
-const assetRelations = {
-  assetModels: {
-    select: {
-      assetModel: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-          imageStoragePath: true,
-          thumbnailImage: true,
-          thumbnailImageStoragePath: true,
-        },
-      },
-    },
-  },
-  kits: {
-    select: {
-      kit: {
-        select: { id: true, name: true, image: true, imageStoragePath: true },
-      },
-    },
-  },
+const handbookReferences = {
   sources: {
     select: {
       source: { select: { id: true, title: true, url: true, kind: true } },
@@ -63,100 +41,23 @@ const assetRelations = {
   },
 } satisfies PrismaTypes.HandbookArticleVersionInclude;
 
-type CanonicalHandbookAsset = {
-  kind: "asset-model";
-  id: string;
-  name: string;
-  image: string | null;
-  imageStoragePath: string | null;
-  thumbnailImage: string | null;
-  thumbnailImageStoragePath: string | null;
-  imageUrl: string | null;
-  thumbnailUrl: string | null;
-};
-
-type CanonicalHandbookKit = {
-  kind: "kit";
-  id: string;
-  name: string;
-  image: string | null;
-  imageStoragePath: string | null;
-  imageUrl: string | null;
-};
-
-type CanonicalHandbookVersion<T> = Omit<T, "assetModels" | "kits"> & {
-  assetModels: CanonicalHandbookAsset[];
-  kits: CanonicalHandbookKit[];
-};
-
-async function withCanonicalImages<
-  T extends {
-    assetModels: Array<{
-      assetModel: {
-        image?: string | null;
-        imageStoragePath?: string | null;
-        thumbnailImage?: string | null;
-        thumbnailImageStoragePath?: string | null;
-      };
-    }>;
-    kits: Array<{
-      kit: { image?: string | null; imageStoragePath?: string | null };
-    }>;
-  },
->(version: T): Promise<CanonicalHandbookVersion<T>> {
-  const canonical = {
-    ...version,
-    assetModels: await Promise.all(
-      version.assetModels.map(async ({ assetModel }) => ({
-        kind: "asset-model" as const,
-        ...assetModel,
-        imageUrl: await resolveStorageImageUrl({
-          bucketName: "files",
-          objectPath: assetModel.imageStoragePath,
-          legacyUrl: assetModel.image,
-          isPublic: true,
-        }),
-        thumbnailUrl: await resolveStorageImageUrl({
-          bucketName: "files",
-          objectPath: assetModel.thumbnailImageStoragePath,
-          legacyUrl: assetModel.thumbnailImage,
-          isPublic: true,
-        }),
-      }))
-    ),
-    kits: await Promise.all(
-      version.kits.map(async ({ kit }) => ({
-        kind: "kit" as const,
-        ...kit,
-        imageUrl: await resolveStorageImageUrl({
-          bucketName: "kits",
-          objectPath: kit.imageStoragePath,
-          legacyUrl: kit.image,
-          isPublic: false,
-        }),
-      }))
-    ),
-  };
-  return canonical as unknown as CanonicalHandbookVersion<T>;
-}
-
 export async function listPublishedHandbookArticles({
   organizationId,
   query = "",
-  section,
+  handbookCategoryId,
 }: {
   organizationId: string;
   query?: string;
-  section?: string;
+  handbookCategoryId?: string;
 }) {
   const search = query.trim().slice(0, 120);
   const articles = await db.handbookArticle.findMany({
     where: {
       organizationId,
       status: HandbookArticleStatus.PUBLISHED,
+      ...(handbookCategoryId ? { handbookCategoryId } : {}),
       publishedVersion: {
         is: {
-          ...(section ? { section } : {}),
           ...(search
             ? {
                 OR: [
@@ -174,28 +75,15 @@ export async function listPublishedHandbookArticles({
       id: true,
       slug: true,
       updatedAt: true,
+      handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
         include: {
-          ...assetRelations,
+          ...handbookReferences,
         },
       },
     },
   });
-
-  const versions = await Promise.all(
-    articles.flatMap((article) =>
-      article.publishedVersion
-        ? [withCanonicalImages(article.publishedVersion)]
-        : []
-    )
-  );
-  const byId = new Map(versions.map((version) => [version.id, version]));
-  return articles.flatMap((article) => {
-    const version = article.publishedVersion
-      ? byId.get(article.publishedVersion.id)
-      : null;
-    return version ? [{ ...article, publishedVersion: version }] : [];
-  });
+  return articles;
 }
 
 export async function getPublishedHandbookArticle({
@@ -218,9 +106,10 @@ export async function getPublishedHandbookArticle({
       id: true,
       slug: true,
       updatedAt: true,
+      handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
         include: {
-          ...assetRelations,
+          ...handbookReferences,
         },
       },
       versions: {
@@ -241,7 +130,7 @@ export async function getPublishedHandbookArticle({
     ? await db.handbookArticleVersion.findFirst({
         where: { id: versionId, articleId: article.id },
         include: {
-          ...assetRelations,
+          ...handbookReferences,
         },
       })
     : article.publishedVersion;
@@ -253,7 +142,7 @@ export async function getPublishedHandbookArticle({
   return {
     ...article,
     publishedVersion: {
-      ...(await withCanonicalImages(selectedVersion)),
+      ...selectedVersion,
       publishedByName:
         authorNames.get(selectedVersion.publishedByUserId) ?? null,
     },
@@ -273,13 +162,19 @@ export async function getHandbookEditData({
   articleId?: string;
   slug?: string;
 }) {
-  const [article, assetModels, kits] = await Promise.all([
+  const [article, categories] = await Promise.all([
     articleId || slug
       ? db.handbookArticle.findFirst({
           where: articleId
             ? { id: articleId, organizationId }
             : { slug, organizationId },
-          include: {
+          select: {
+            id: true,
+            status: true,
+            draftTitle: true,
+            draftContent: true,
+            handbookCategoryId: true,
+            draftSourceUrls: true,
             versions: {
               orderBy: { versionNumber: "desc" },
               take: 10,
@@ -293,17 +188,10 @@ export async function getHandbookEditData({
           },
         })
       : null,
-    db.assetModel.findMany({
-      where: { organizationId },
-      orderBy: { name: "asc" },
+    db.handbookCategory.findMany({
+      where: { organizationId, archivedAt: null },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
       select: { id: true, name: true },
-      take: 500,
-    }),
-    db.kit.findMany({
-      where: { organizationId },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true },
-      take: 500,
     }),
   ]);
   const authorNames = await getDisplayNamesByUserId(
@@ -319,15 +207,96 @@ export async function getHandbookEditData({
           })),
         }
       : null,
-    assetModels,
-    kits,
+    categories,
   };
 }
 
-function uniqueIds(values: string[]) {
-  return [
-    ...new Set(values.map((value) => value.trim()).filter(Boolean)),
-  ].slice(0, 100);
+export async function listHandbookCategories(organizationId: string) {
+  return db.handbookCategory.findMany({
+    where: { organizationId, archivedAt: null },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+    select: { id: true, name: true },
+  });
+}
+
+export function normalizeHandbookCategoryName(value: string) {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
+function cleanHandbookCategoryName(value: string) {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ");
+}
+
+export async function createHandbookCategory({
+  organizationId,
+  name,
+}: {
+  organizationId: string;
+  name: string;
+}) {
+  const cleanedName = cleanHandbookCategoryName(name);
+  const normalizedName = normalizeHandbookCategoryName(cleanedName);
+  if (!normalizedName || cleanedName.length > 80) {
+    throw new HandbookValidationError(
+      "Enter a Handbook category name up to 80 characters."
+    );
+  }
+
+  try {
+    return await db.$transaction(async (tx) => {
+      const existing = await tx.handbookCategory.findUnique({
+        where: {
+          organizationId_normalizedName: { organizationId, normalizedName },
+        },
+        select: { id: true, name: true, archivedAt: true },
+      });
+      if (existing) {
+        if (existing.archivedAt) {
+          return tx.handbookCategory.update({
+            where: { id: existing.id, organizationId },
+            data: { name: cleanedName, archivedAt: null },
+            select: { id: true, name: true },
+          });
+        }
+        return { id: existing.id, name: existing.name };
+      }
+
+      const slugBase =
+        makeHandbookSlug(cleanedName).slice(0, 100) || "category";
+      let slug = slugBase;
+      let suffix = 2;
+      while (
+        await tx.handbookCategory.findUnique({
+          where: { organizationId_slug: { organizationId, slug } },
+          select: { id: true },
+        })
+      ) {
+        const suffixText = `-${suffix++}`;
+        slug = `${slugBase.slice(0, 100 - suffixText.length)}${suffixText}`;
+      }
+
+      return tx.handbookCategory.create({
+        data: { organizationId, name: cleanedName, slug, normalizedName },
+        select: { id: true, name: true },
+      });
+    });
+  } catch (cause) {
+    if (
+      cause instanceof Prisma.PrismaClientKnownRequestError &&
+      cause.code === "P2002"
+    ) {
+      const existing = await db.handbookCategory.findUnique({
+        where: {
+          organizationId_normalizedName: { organizationId, normalizedName },
+        },
+        select: { id: true, name: true, archivedAt: true },
+      });
+      if (existing && !existing.archivedAt) {
+        return { id: existing.id, name: existing.name };
+      }
+    }
+    throw cause;
+  }
 }
 
 function cleanSourceUrls(values: string[]) {
@@ -345,43 +314,39 @@ export async function saveHandbookDraft({
   userId,
   articleId,
   title,
-  summary,
+  handbookCategoryId,
   content,
-  section,
-  assetModelIds,
-  kitIds,
   sourceUrls,
 }: {
   organizationId: string;
   userId: string;
   articleId?: string;
   title: string;
-  summary: string;
+  handbookCategoryId: string;
   content: string;
-  section: string;
-  assetModelIds: string[];
-  kitIds: string[];
   sourceUrls: string[];
 }) {
   const normalizedTitle = title.trim();
   const normalizedContent = content.trim();
-  if (!normalizedTitle || !normalizedContent) {
+  if (!normalizedTitle || !handbookCategoryId.trim() || !normalizedContent) {
     throw new HandbookValidationError(
-      "Add a title and article content before saving."
+      "Add a title, choose a category, and add article content before saving."
     );
   }
-  if (
-    normalizedTitle.length > 180 ||
-    summary.length > 700 ||
-    section.length > 80 ||
-    normalizedContent.length > 30_000
-  ) {
+  if (normalizedTitle.length > 180 || normalizedContent.length > 30_000) {
     throw new HandbookValidationError(
       "One or more fields are longer than the allowed limit."
     );
   }
-  const validAssetModels = uniqueIds(assetModelIds);
-  const validKits = uniqueIds(kitIds);
+  const category = await db.handbookCategory.findFirst({
+    where: { id: handbookCategoryId, organizationId, archivedAt: null },
+    select: { id: true },
+  });
+  if (!category) {
+    throw new HandbookValidationError(
+      "Choose a category from this Handbook workspace."
+    );
+  }
   const submittedSources = sourceUrls.map((url) => url.trim()).filter(Boolean);
   const validSources = cleanSourceUrls(sourceUrls);
   if (
@@ -391,24 +356,6 @@ export async function saveHandbookDraft({
   ) {
     throw new HandbookValidationError(
       "References must be valid http(s) URLs up to 500 characters, with no more than 20 links."
-    );
-  }
-  const [assetModelCount, kitCount] = await Promise.all([
-    validAssetModels.length
-      ? db.assetModel.count({
-          where: { organizationId, id: { in: validAssetModels } },
-        })
-      : 0,
-    validKits.length
-      ? db.kit.count({ where: { organizationId, id: { in: validKits } } })
-      : 0,
-  ]);
-  if (
-    assetModelCount !== validAssetModels.length ||
-    kitCount !== validKits.length
-  ) {
-    throw new HandbookValidationError(
-      "One or more linked inventory products are not in this workspace."
     );
   }
 
@@ -426,11 +373,8 @@ export async function saveHandbookDraft({
       where: { id: current.id, organizationId },
       data: {
         draftTitle: normalizedTitle,
-        draftSummary: summary.trim(),
         draftContent: normalizedContent,
-        draftSection: section.trim() || "General",
-        draftAssetModelIds: validAssetModels,
-        draftKitIds: validKits,
+        handbookCategoryId: category.id,
         draftSourceUrls: validSources,
         updatedByUserId: userId,
       },
@@ -451,11 +395,8 @@ export async function saveHandbookDraft({
       organizationId,
       slug,
       draftTitle: normalizedTitle,
-      draftSummary: summary.trim(),
       draftContent: normalizedContent,
-      draftSection: section.trim() || "General",
-      draftAssetModelIds: validAssetModels,
-      draftKitIds: validKits,
+      handbookCategoryId: category.id,
       draftSourceUrls: validSources,
       createdByUserId: userId,
       updatedByUserId: userId,
@@ -481,24 +422,19 @@ export async function publishHandbookArticle({
       throw new HandbookValidationError(
         "That Handbook article could not be found."
       );
-    const [assetModelCount, kitCount] = await Promise.all([
-      article.draftAssetModelIds.length
-        ? tx.assetModel.count({
-            where: { organizationId, id: { in: article.draftAssetModelIds } },
-          })
-        : 0,
-      article.draftKitIds.length
-        ? tx.kit.count({
-            where: { organizationId, id: { in: article.draftKitIds } },
-          })
-        : 0,
-    ]);
-    if (
-      assetModelCount !== article.draftAssetModelIds.length ||
-      kitCount !== article.draftKitIds.length
-    ) {
+    const category = article.handbookCategoryId
+      ? await tx.handbookCategory.findFirst({
+          where: {
+            id: article.handbookCategoryId,
+            organizationId,
+            archivedAt: null,
+          },
+          select: { id: true },
+        })
+      : null;
+    if (!category) {
       throw new HandbookValidationError(
-        "A linked Shelf product has changed. Reopen the draft and review its links before publishing."
+        "Choose a category from this Shelf workspace before publishing."
       );
     }
     const max = await tx.handbookArticleVersion.aggregate({
@@ -510,30 +446,10 @@ export async function publishHandbookArticle({
         articleId,
         versionNumber: (max._max.versionNumber ?? 0) + 1,
         title: article.draftTitle,
-        summary: article.draftSummary,
         content: article.draftContent,
-        section: article.draftSection,
         publishedByUserId: userId,
       },
     });
-    if (article.draftAssetModelIds.length) {
-      await tx.handbookArticleAssetModel.createMany({
-        data: article.draftAssetModelIds.map((assetModelId) => ({
-          versionId: version.id,
-          assetModelId,
-        })),
-        skipDuplicates: true,
-      });
-    }
-    if (article.draftKitIds.length) {
-      await tx.handbookArticleKit.createMany({
-        data: article.draftKitIds.map((kitId) => ({
-          versionId: version.id,
-          kitId,
-        })),
-        skipDuplicates: true,
-      });
-    }
     const sourceIds: string[] = [];
     for (const sourceUrl of cleanSourceUrls(article.draftSourceUrls)) {
       const title = new URL(sourceUrl).hostname.replace(/^www\./, "");
@@ -596,6 +512,8 @@ export async function submitHandbookObservation({
   title,
   content,
   articleId,
+  handbookCategoryId,
+  proposedCategoryName,
   assetModelId,
   kitId,
 }: {
@@ -604,6 +522,8 @@ export async function submitHandbookObservation({
   title: string;
   content: string;
   articleId?: string;
+  handbookCategoryId?: string;
+  proposedCategoryName?: string;
   assetModelId?: string;
   kitId?: string;
 }) {
@@ -615,6 +535,45 @@ export async function submitHandbookObservation({
     throw new HandbookValidationError(
       "The contribution is longer than the allowed limit."
     );
+  const cleanedProposal = proposedCategoryName
+    ? cleanHandbookCategoryName(proposedCategoryName)
+    : "";
+  if (cleanedProposal.length > 80) {
+    throw new HandbookValidationError(
+      "Handbook category names can be up to 80 characters."
+    );
+  }
+  if (handbookCategoryId && cleanedProposal) {
+    throw new HandbookValidationError(
+      "Choose an existing Handbook category or propose a new one."
+    );
+  }
+  let selectedHandbookCategoryId = handbookCategoryId || null;
+  let pendingCategoryProposal: string | null = cleanedProposal || null;
+  if (handbookCategoryId) {
+    const category = await db.handbookCategory.findFirst({
+      where: { id: handbookCategoryId, organizationId, archivedAt: null },
+      select: { id: true },
+    });
+    if (!category) {
+      throw new HandbookValidationError(
+        "Choose a category from this Handbook workspace."
+      );
+    }
+  } else if (cleanedProposal) {
+    const existingCategory = await db.handbookCategory.findFirst({
+      where: {
+        organizationId,
+        archivedAt: null,
+        normalizedName: normalizeHandbookCategoryName(cleanedProposal),
+      },
+      select: { id: true },
+    });
+    if (existingCategory) {
+      selectedHandbookCategoryId = existingCategory.id;
+      pendingCategoryProposal = null;
+    }
+  }
   if (articleId) {
     const matchingArticle = await db.handbookArticle.findFirst({
       where: {
@@ -673,6 +632,8 @@ export async function submitHandbookObservation({
         title: normalizedTitle,
         content: normalizedContent,
         articleId: articleId || null,
+        handbookCategoryId: selectedHandbookCategoryId,
+        proposedCategoryName: pendingCategoryProposal,
         assetModelId: assetModelId || null,
         kitId: kitId || null,
       },
@@ -706,6 +667,7 @@ export async function listHandbookObservations(organizationId: string) {
       article: {
         select: { slug: true, publishedVersion: { select: { title: true } } },
       },
+      handbookCategory: { select: { id: true, name: true } },
       assetModel: { select: { name: true } },
       kit: { select: { name: true } },
     },
@@ -730,7 +692,7 @@ export async function listHandbookArticlesForStaff(organizationId: string) {
       slug: true,
       status: true,
       draftTitle: true,
-      draftSection: true,
+      handbookCategory: { select: { id: true, name: true } },
       updatedAt: true,
       publishedVersion: {
         select: { title: true, versionNumber: true, publishedAt: true },
@@ -740,7 +702,7 @@ export async function listHandbookArticlesForStaff(organizationId: string) {
 }
 
 export async function getHandbookContributionOptions(organizationId: string) {
-  const [articles, assetModels, kits] = await Promise.all([
+  const [articles, assetModels, kits, categories] = await Promise.all([
     db.handbookArticle.findMany({
       where: { organizationId, status: HandbookArticleStatus.PUBLISHED },
       orderBy: { slug: "asc" },
@@ -763,6 +725,7 @@ export async function getHandbookContributionOptions(organizationId: string) {
       select: { id: true, name: true },
       take: 300,
     }),
+    listHandbookCategories(organizationId),
   ]);
   return {
     articles: articles.flatMap(({ id, slug, publishedVersion }) =>
@@ -770,7 +733,96 @@ export async function getHandbookContributionOptions(organizationId: string) {
     ),
     assetModels,
     kits,
+    categories,
   };
+}
+
+export async function resolveHandbookObservationCategoryProposal({
+  organizationId,
+  observationId,
+  resolution,
+  handbookCategoryId,
+  categoryName,
+}: {
+  organizationId: string;
+  observationId: string;
+  resolution: "approve" | "replace" | "reject";
+  handbookCategoryId?: string;
+  categoryName?: string;
+}) {
+  const observation = await db.handbookObservation.findFirst({
+    where: {
+      id: observationId,
+      organizationId,
+      status: HandbookObservationStatus.PENDING_REVIEW,
+    },
+    select: { id: true, proposedCategoryName: true },
+  });
+  if (!observation || !observation.proposedCategoryName) {
+    throw new HandbookValidationError(
+      "This category proposal is no longer awaiting review."
+    );
+  }
+
+  if (resolution === "reject") {
+    const update = await db.handbookObservation.updateMany({
+      where: {
+        id: observation.id,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+      },
+      data: { proposedCategoryName: null, handbookCategoryId: null },
+    });
+    if (!update.count) {
+      throw new HandbookValidationError(
+        "This category proposal is no longer awaiting review."
+      );
+    }
+    return { resolution };
+  }
+
+  let selectedHandbookCategoryId: string;
+  if (resolution === "replace") {
+    if (!handbookCategoryId) {
+      throw new HandbookValidationError(
+        "Choose an existing Handbook category."
+      );
+    }
+    const category = await db.handbookCategory.findFirst({
+      where: { id: handbookCategoryId, organizationId, archivedAt: null },
+      select: { id: true },
+    });
+    if (!category) {
+      throw new HandbookValidationError(
+        "Choose a category from this Handbook workspace."
+      );
+    }
+    selectedHandbookCategoryId = category.id;
+  } else {
+    const category = await createHandbookCategory({
+      organizationId,
+      name: categoryName?.trim() || observation.proposedCategoryName,
+    });
+    selectedHandbookCategoryId = category.id;
+  }
+
+  const update = await db.handbookObservation.updateMany({
+    where: {
+      id: observation.id,
+      organizationId,
+      status: HandbookObservationStatus.PENDING_REVIEW,
+    },
+    data: {
+      handbookCategoryId: selectedHandbookCategoryId,
+      proposedCategoryName: null,
+    },
+  });
+  if (!update.count) {
+    throw new HandbookValidationError(
+      "This category proposal is no longer awaiting review."
+    );
+  }
+  return { resolution, handbookCategoryId: selectedHandbookCategoryId };
 }
 
 export async function reviewHandbookObservation({
@@ -805,7 +857,7 @@ export async function reviewHandbookObservation({
 type RelatedKnowledge = {
   kind: "article" | "observation";
   title: string;
-  section?: string;
+  category?: string;
   version?: number;
   status?: string;
   score: number;
@@ -847,11 +899,11 @@ export async function findRelatedHandbookKnowledge({
       },
       take: 40,
       select: {
+        handbookCategory: { select: { name: true } },
         publishedVersion: {
           select: {
             title: true,
             summary: true,
-            section: true,
             content: true,
             versionNumber: true,
           },
@@ -876,13 +928,13 @@ export async function findRelatedHandbookKnowledge({
     }),
   ]);
   const candidates: RelatedKnowledge[] = [
-    ...articles.flatMap(({ publishedVersion }) =>
+    ...articles.flatMap(({ handbookCategory, publishedVersion }) =>
       publishedVersion
         ? [
             {
               kind: "article" as const,
               title: publishedVersion.title,
-              section: publishedVersion.section,
+              category: handbookCategory?.name,
               version: publishedVersion.versionNumber,
               duplicate:
                 normalizeHandbookComparisonText(publishedVersion.content) ===
@@ -953,12 +1005,12 @@ async function queryHandbookContextForAssistant({
           select: {
             title: true,
             summary: true,
-            section: true,
             content: true,
             versionNumber: true,
             publishedAt: true,
           },
         },
+        handbookCategory: { select: { name: true } },
       },
     }),
     db.handbookObservation.findMany({
@@ -981,11 +1033,12 @@ async function queryHandbookContextForAssistant({
     }),
   ]);
   const rankedArticles = articles
-    .flatMap(({ slug, publishedVersion }) =>
+    .flatMap(({ slug, handbookCategory, publishedVersion }) =>
       publishedVersion
         ? [
             {
               slug,
+              handbookCategory,
               version: publishedVersion,
               score: getKnowledgeOverlap(
                 question,
@@ -1009,10 +1062,12 @@ async function queryHandbookContextForAssistant({
     .filter(({ score }) => score >= 0.2)
     .sort((a, b) => b.score - a.score)
     .slice(0, 2);
-  const sections = [
+  const entries = [
     ...rankedArticles.map(
-      ({ slug, version }) =>
-        `Published Handbook · ${version.section} · ${version.title} · version ${
+      ({ slug, version, handbookCategory }) =>
+        `Published Handbook · ${
+          handbookCategory?.name ? `${handbookCategory.name} · ` : ""
+        }${version.title} · version ${
           version.versionNumber
         } · /handbook/${slug}\n${version.content.slice(0, 1800)}`
     ),
@@ -1026,7 +1081,7 @@ async function queryHandbookContextForAssistant({
         )}`
     ),
   ];
-  return sections.length ? sections.join("\n\n").slice(0, 6500) : "";
+  return entries.length ? entries.join("\n\n").slice(0, 6500) : "";
 }
 
 let missingHandbookSchemaLogged = false;

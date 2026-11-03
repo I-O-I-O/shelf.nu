@@ -60,7 +60,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Edit article" };
 
 export default function EditHandbookArticlePage() {
-  const { article, assetModels, kits } = useLoaderData<typeof loader>();
+  const { article, categories } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const location = useLocation();
   const navigation = useNavigation();
@@ -69,8 +69,7 @@ export default function EditHandbookArticlePage() {
   return (
     <HandbookEditor
       article={article}
-      assetModels={assetModels}
-      kits={kits}
+      categories={categories}
       busy={navigation.state === "submitting"}
       saved={new URLSearchParams(location.search).has("saved")}
       errorMessage={

@@ -1,14 +1,13 @@
-import { Form, Link } from "react-router";
+import { useEffect, useState } from "react";
+import { Form, Link, useFetcher } from "react-router";
+import { HandbookCategoryPicker } from "./handbook-category-picker";
 
 type HandbookEditorArticle = {
   id: string;
   status: "DRAFT" | "PUBLISHED" | "ARCHIVED";
   draftTitle: string;
-  draftSummary: string;
   draftContent: string;
-  draftSection: string;
-  draftAssetModelIds: string[];
-  draftKitIds: string[];
+  handbookCategoryId: string | null;
   draftSourceUrls: string[];
   versions: Array<{
     versionNumber: number;
@@ -20,19 +19,55 @@ type HandbookEditorArticle = {
 
 export function HandbookEditor({
   article,
-  assetModels,
-  kits,
+  categories,
   busy = false,
   errorMessage,
   saved = false,
 }: {
   article: HandbookEditorArticle | null;
-  assetModels: Array<{ id: string; name: string }>;
-  kits: Array<{ id: string; name: string }>;
+  categories: Array<{ id: string; name: string }>;
   busy?: boolean;
   errorMessage?: string;
   saved?: boolean;
 }) {
+  const categoryFetcher = useFetcher<{
+    ok: boolean;
+    category?: { id: string; name: string };
+    message?: string;
+  }>();
+  const [availableCategories, setAvailableCategories] = useState(categories);
+  const [handbookCategoryId, setHandbookCategoryId] = useState(
+    article?.handbookCategoryId ?? ""
+  );
+
+  useEffect(() => {
+    setAvailableCategories((current) => {
+      const next = [...current];
+      for (const category of categories) {
+        if (!next.some((item) => item.id === category.id)) next.push(category);
+      }
+      return next;
+    });
+  }, [categories]);
+
+  useEffect(() => {
+    const category = categoryFetcher.data?.category;
+    if (!categoryFetcher.data?.ok || !category) return;
+    setAvailableCategories((current) =>
+      current.some((item) => item.id === category.id)
+        ? current
+        : [...current, category].sort((a, b) => a.name.localeCompare(b.name))
+    );
+    setHandbookCategoryId(category.id);
+  }, [categoryFetcher.data]);
+
+  function createCategory(name: string) {
+    void categoryFetcher.submit(
+      { intent: "create-category", categoryName: name },
+      { method: "post" }
+    );
+  }
+
   return (
     <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -86,27 +121,28 @@ export function HandbookEditor({
             className="mt-1 block h-10 w-full rounded-lg border border-gray-300 px-3 font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
           />
         </label>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="block text-sm font-semibold text-gray-800">
-            Section
-            <input
-              name="section"
-              maxLength={80}
-              defaultValue={article?.draftSection ?? "General"}
-              placeholder="Equipment & Kits, Procedures, Troubleshooting…"
-              className="mt-1 block h-10 w-full rounded-lg border border-gray-300 px-3 font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
-            />
-          </label>
-          <label className="block text-sm font-semibold text-gray-800">
-            Short summary
-            <textarea
-              name="summary"
-              maxLength={700}
-              rows={2}
-              defaultValue={article?.draftSummary ?? ""}
-              className="mt-1 block w-full rounded-lg border border-gray-300 p-3 font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
-            />
-          </label>
+        <div className="block text-sm font-semibold text-gray-800">
+          <span>Category</span>
+          <HandbookCategoryPicker
+            categories={availableCategories}
+            value={handbookCategoryId}
+            onChange={(id) => setHandbookCategoryId(id)}
+            mode="staff"
+            creating={categoryFetcher.state !== "idle"}
+            onCreateCategory={createCategory}
+          />
+          {categoryFetcher.data?.message ? (
+            <p
+              role={categoryFetcher.data.ok ? "status" : "alert"}
+              className={
+                categoryFetcher.data.ok
+                  ? "mt-1 text-sm text-green-800"
+                  : "mt-1 text-sm text-red-800"
+              }
+            >
+              {categoryFetcher.data.message}
+            </p>
+          ) : null}
         </div>
         <label className="block text-sm font-semibold text-gray-800">
           Article content{" "}
@@ -123,44 +159,6 @@ export function HandbookEditor({
             className="mt-1 block w-full rounded-lg border border-gray-300 p-3 font-mono text-sm font-normal leading-6 focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
           />
         </label>
-        <div className="grid gap-4 md:grid-cols-2">
-          <label className="block text-sm font-semibold text-gray-800">
-            Related Shelf products{" "}
-            <span className="font-normal text-gray-500">
-              (select any that apply)
-            </span>
-            <select
-              multiple
-              name="assetModelIds"
-              defaultValue={article?.draftAssetModelIds ?? []}
-              className="mt-1 block h-40 w-full rounded-lg border border-gray-300 bg-white p-2 text-sm font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
-            >
-              {assetModels.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block text-sm font-semibold text-gray-800">
-            Related Shelf Kits{" "}
-            <span className="font-normal text-gray-500">
-              (select any that apply)
-            </span>
-            <select
-              multiple
-              name="kitIds"
-              defaultValue={article?.draftKitIds ?? []}
-              className="mt-1 block h-40 w-full rounded-lg border border-gray-300 bg-white p-2 text-sm font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
-            >
-              {kits.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
         <label className="block text-sm font-semibold text-gray-800">
           External references{" "}
           <span className="font-normal text-gray-500">

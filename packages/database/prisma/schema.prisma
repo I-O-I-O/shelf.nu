@@ -1271,6 +1271,7 @@ model Organization {
   purchaseReceiptDrafts      PurchaseReceiptDraft[]
   taHoursPeriods             TAHoursPeriod[]
   taShifts                   TAShift[]
+  handbookCategories         HandbookCategory[]
   handbookArticles           HandbookArticle[]
   handbookSources            HandbookSource[]
   handbookObservations       HandbookObservation[]
@@ -1300,6 +1301,28 @@ enum HandbookSourceKind {
   STAFF_CONTRIBUTION
 }
 
+/// Organization-scoped categories for Handbook content. This is separate
+/// from Shelf's inventory Category model.
+model HandbookCategory {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String    @db.VarChar(80)
+  slug           String    @db.VarChar(100)
+  normalizedName String
+  archivedAt     DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  articles     HandbookArticle[]
+  observations HandbookObservation[]
+
+  @@unique([organizationId, normalizedName])
+  @@unique([organizationId, slug])
+  @@index([organizationId, name])
+  @@index([organizationId, archivedAt, name])
+}
+
 /// Human-facing knowledge page. Draft fields remain separate from published
 /// snapshots so readers never see unreviewed edits.
 model HandbookArticle {
@@ -1310,7 +1333,8 @@ model HandbookArticle {
   draftTitle         String                @db.VarChar(180)
   draftSummary       String                @default("") @db.VarChar(700)
   draftContent       String                @db.Text
-  draftSection       String                @default("General") @db.VarChar(80)
+  draftSection       String?               @db.VarChar(80)
+  handbookCategoryId String?
   draftAssetModelIds String[]              @default([])
   draftKitIds        String[]              @default([])
   draftSourceUrls    String[]              @default([])
@@ -1321,12 +1345,14 @@ model HandbookArticle {
   updatedAt          DateTime              @updatedAt
 
   organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  handbookCategory HandbookCategory?        @relation(fields: [handbookCategoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   versions         HandbookArticleVersion[] @relation("HandbookArticleVersions")
   publishedVersion HandbookArticleVersion?  @relation("HandbookPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
   observations     HandbookObservation[]
 
   @@unique([organizationId, slug])
   @@index([organizationId, status, updatedAt])
+  @@index([handbookCategoryId])
 }
 
 /// Append-only snapshot created by an explicit Staff publication.
@@ -1337,7 +1363,7 @@ model HandbookArticleVersion {
   title             String   @db.VarChar(180)
   summary           String   @default("") @db.VarChar(700)
   content           String   @db.Text
-  section           String   @db.VarChar(80)
+  section           String?  @db.VarChar(80)
   publishedByUserId String
   publishedAt       DateTime @default(now()) @db.Timestamptz(3)
 
@@ -1407,31 +1433,35 @@ model HandbookVersionSource {
 /// Human-submitted operational notes are reviewable evidence, never policy by
 /// themselves. A student can create only PENDING_REVIEW observations.
 model HandbookObservation {
-  id                 String                    @id @default(cuid())
-  organizationId     String
-  contributorUserId  String
-  status             HandbookObservationStatus @default(PENDING_REVIEW)
-  title              String                    @db.VarChar(180)
-  content            String                    @db.VarChar(4000)
-  articleId          String?
-  assetModelId       String?
-  kitId              String?
-  conversationId     String?
-  messageId          String?
-  reviewedByUserId   String?
-  reviewedAt         DateTime?                 @db.Timestamptz(3)
-  publishedVersionId String?
-  createdAt          DateTime                  @default(now()) @db.Timestamptz(3)
-  updatedAt          DateTime                  @updatedAt
+  id                   String                    @id @default(cuid())
+  organizationId       String
+  contributorUserId    String
+  status               HandbookObservationStatus @default(PENDING_REVIEW)
+  title                String                    @db.VarChar(180)
+  content              String                    @db.VarChar(4000)
+  articleId            String?
+  handbookCategoryId   String?
+  proposedCategoryName String?                   @db.VarChar(80)
+  assetModelId         String?
+  kitId                String?
+  conversationId       String?
+  messageId            String?
+  reviewedByUserId     String?
+  reviewedAt           DateTime?                 @db.Timestamptz(3)
+  publishedVersionId   String?
+  createdAt            DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime                  @updatedAt
 
   organization     Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   article          HandbookArticle?        @relation(fields: [articleId], references: [id], onDelete: SetNull)
+  handbookCategory HandbookCategory?       @relation(fields: [handbookCategoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   assetModel       AssetModel?             @relation(fields: [assetModelId], references: [id], onDelete: SetNull)
   kit              Kit?                    @relation(fields: [kitId], references: [id], onDelete: SetNull)
   publishedVersion HandbookArticleVersion? @relation("ObservationPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@index([articleId, createdAt(sort: Desc)])
+  @@index([handbookCategoryId])
   @@index([assetModelId, createdAt(sort: Desc)])
   @@index([kitId, createdAt(sort: Desc)])
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -12,6 +13,7 @@ import {
   useNavigation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { HandbookCategoryPicker } from "~/components/handbook/handbook-category-picker";
 import {
   getHandbookContributionOptions,
   HandbookValidationError,
@@ -38,10 +40,23 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const form = await request.formData();
   const title = String(form.get("title") ?? "").trim();
   const content = String(form.get("content") ?? "").trim();
+  const handbookCategoryId =
+    String(form.get("handbookCategoryId") ?? "").trim() || undefined;
+  const proposedCategoryName =
+    String(form.get("proposedCategoryName") ?? "").trim() || undefined;
   if (!title || !content || title.length > 180 || content.length > 4000) {
     return payload({
       success: false as const,
       message: "Add a short title and details (up to 4,000 characters).",
+    });
+  }
+  if (
+    (!handbookCategoryId && !proposedCategoryName) ||
+    (handbookCategoryId && proposedCategoryName)
+  ) {
+    return payload({
+      success: false as const,
+      message: "Choose a Handbook category or propose a new one.",
     });
   }
   try {
@@ -51,6 +66,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       title,
       content,
       articleId: String(form.get("articleId") ?? "") || undefined,
+      handbookCategoryId,
+      proposedCategoryName,
       assetModelId: String(form.get("assetModelId") ?? "") || undefined,
       kitId: String(form.get("kitId") ?? "") || undefined,
     });
@@ -75,9 +92,12 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Contribute knowledge" };
 
 export default function HandbookContributionPage() {
-  const { articles, assetModels, kits } = useLoaderData<typeof loader>();
+  const { articles, assetModels, kits, categories } =
+    useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const navigation = useNavigation();
+  const [handbookCategoryId, setHandbookCategoryId] = useState("");
+  const [proposedCategoryName, setProposedCategoryName] = useState("");
   const successful = Boolean(result && "success" in result && result.success);
   const related =
     result && "success" in result && result.success && "related" in result
@@ -124,7 +144,9 @@ export default function HandbookContributionPage() {
             {related.map((item, index) => (
               <li key={item.kind + "-" + item.title + "-" + index}>
                 {item.kind === "article"
-                  ? "Published Handbook · " + item.section + " · " + item.title
+                  ? `Published Handbook · ${
+                      item.category ? `${item.category} · ` : ""
+                    }${item.title}`
                   : "Observation · " + item.title + " · " + item.status}
               </li>
             ))}
@@ -145,6 +167,22 @@ export default function HandbookContributionPage() {
             placeholder="e.g. Grove cable connection issue"
           />
         </label>
+        <div className="block text-sm font-semibold text-gray-800">
+          <span>Category</span>
+          <HandbookCategoryPicker
+            categories={categories}
+            value={handbookCategoryId}
+            proposedName={proposedCategoryName}
+            mode="student"
+            onChange={(selectedHandbookCategoryId, proposal) => {
+              setHandbookCategoryId(selectedHandbookCategoryId);
+              setProposedCategoryName(proposal);
+            }}
+          />
+          <p className="mt-1 text-xs font-normal text-gray-500">
+            Choose an existing category or propose a new one for Staff review.
+          </p>
+        </div>
         <label className="block text-sm font-semibold text-gray-800">
           What did you observe or learn?
           <textarea

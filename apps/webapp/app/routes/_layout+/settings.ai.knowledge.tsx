@@ -15,7 +15,9 @@ import { ErrorContent } from "~/components/errors";
 import {
   HandbookValidationError,
   listHandbookArticlesForStaff,
+  listHandbookCategories,
   listHandbookObservations,
+  resolveHandbookObservationCategoryProposal,
   reviewHandbookObservation,
 } from "~/modules/ioio-handbook/service.server";
 import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
@@ -35,11 +37,12 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         status: 403,
         shouldBeCaptured: false,
       });
-    const [articles, observations] = await Promise.all([
+    const [articles, observations, categories] = await Promise.all([
       listHandbookArticlesForStaff(auth.organizationId),
       listHandbookObservations(auth.organizationId),
+      listHandbookCategories(auth.organizationId),
     ]);
-    return payload({ articles, observations });
+    return payload({ articles, observations, categories });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -51,6 +54,40 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const form = await request.formData();
   const observationId = String(form.get("observationId") ?? "");
   const intent = form.get("intent");
+  if (
+    observationId &&
+    (intent === "approve-category" ||
+      intent === "replace-category" ||
+      intent === "reject-category")
+  ) {
+    try {
+      await resolveHandbookObservationCategoryProposal({
+        organizationId: auth.organizationId,
+        observationId,
+        resolution:
+          intent === "approve-category"
+            ? "approve"
+            : intent === "replace-category"
+            ? "replace"
+            : "reject",
+        handbookCategoryId:
+          String(form.get("handbookCategoryId") ?? "") || undefined,
+        categoryName: String(form.get("categoryName") ?? "") || undefined,
+      });
+      return payload({
+        success: true as const,
+        message:
+          intent === "reject-category"
+            ? "Category proposal rejected. The contribution is still available for review."
+            : "Category proposal resolved for this contribution.",
+      });
+    } catch (cause) {
+      if (cause instanceof HandbookValidationError)
+        return payload({ success: false as const, message: cause.message });
+      const reason = makeShelfError(cause, { userId: auth.userId });
+      throw data(error(reason), { status: reason.status });
+    }
+  }
   if (!observationId || (intent !== "review" && intent !== "dismiss")) {
     return payload({
       success: false as const,
@@ -85,7 +122,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Knowledge" };
 
 export default function AiKnowledgePage() {
-  const { articles, observations } = useLoaderData<typeof loader>();
+  const { articles, observations, categories } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   return (
@@ -137,7 +174,7 @@ export default function AiKnowledgePage() {
                   <p className="mt-0.5 text-xs text-gray-500">
                     {article.publishedVersion
                       ? "Published v" + article.publishedVersion.versionNumber
-                      : article.draftSection}
+                      : article.handbookCategory?.name ?? "Draft"}
                     {" · "}
                     {article.status.toLowerCase()}
                     {" · Updated "}
@@ -204,6 +241,75 @@ export default function AiKnowledgePage() {
                         .filter(Boolean)
                         .join(" · ") || "none"}
                     </p>
+                    {item.proposedCategoryName ? (
+                      <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                        <p className="text-sm font-semibold text-amber-950">
+                          Proposed Handbook category:{" "}
+                          {item.proposedCategoryName}
+                        </p>
+                        <Form method="post" className="mt-2 space-y-2">
+                          <input
+                            type="hidden"
+                            name="observationId"
+                            value={item.id}
+                          />
+                          <label className="block text-xs font-medium text-gray-700">
+                            Approve or rename proposal
+                            <input
+                              name="categoryName"
+                              maxLength={80}
+                              defaultValue={item.proposedCategoryName}
+                              className="mt-1 block h-9 w-full rounded-md border border-gray-300 bg-white px-2 text-sm font-normal"
+                            />
+                          </label>
+                          <label className="block text-xs font-medium text-gray-700">
+                            Replace with an existing Handbook category
+                            <select
+                              name="handbookCategoryId"
+                              defaultValue=""
+                              className="mt-1 block h-9 w-full rounded-md border border-gray-300 bg-white px-2 text-sm font-normal"
+                            >
+                              <option value="">Choose a category</option>
+                              {categories.map((category) => (
+                                <option key={category.id} value={category.id}>
+                                  {category.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              name="intent"
+                              value="approve-category"
+                              disabled={navigation.state === "submitting"}
+                              className="inline-flex h-8 items-center rounded-md bg-red-700 px-3 text-xs font-semibold text-white disabled:opacity-60"
+                            >
+                              Approve category
+                            </button>
+                            <button
+                              name="intent"
+                              value="replace-category"
+                              disabled={navigation.state === "submitting"}
+                              className="inline-flex h-8 items-center rounded-md border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-800 disabled:opacity-60"
+                            >
+                              Use existing category
+                            </button>
+                            <button
+                              name="intent"
+                              value="reject-category"
+                              disabled={navigation.state === "submitting"}
+                              className="inline-flex h-8 items-center rounded-md px-3 text-xs font-semibold text-gray-600 hover:bg-white disabled:opacity-60"
+                            >
+                              Reject proposal
+                            </button>
+                          </div>
+                        </Form>
+                      </div>
+                    ) : item.handbookCategory ? (
+                      <p className="mt-2 text-xs text-gray-500">
+                        Handbook category: {item.handbookCategory.name}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex shrink-0 flex-wrap gap-2">
                     {item.article ? (
@@ -223,7 +329,10 @@ export default function AiKnowledgePage() {
                       <button
                         name="intent"
                         value="review"
-                        disabled={navigation.state === "submitting"}
+                        disabled={
+                          navigation.state === "submitting" ||
+                          Boolean(item.proposedCategoryName)
+                        }
                         className="inline-flex h-9 items-center rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-800 disabled:opacity-60"
                       >
                         Mark reviewed

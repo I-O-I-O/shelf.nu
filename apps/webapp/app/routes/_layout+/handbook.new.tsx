@@ -49,7 +49,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "New article" };
 
 export default function NewHandbookArticlePage() {
-  const { article, assetModels, kits } = useLoaderData<typeof loader>();
+  const { article, categories } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const message =
@@ -57,8 +57,7 @@ export default function NewHandbookArticlePage() {
   return (
     <HandbookEditor
       article={article}
-      assetModels={assetModels}
-      kits={kits}
+      categories={categories}
       busy={navigation.state === "submitting"}
       errorMessage={
         actionData && "ok" in actionData && !actionData.ok ? message : undefined
