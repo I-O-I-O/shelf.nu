@@ -5,7 +5,9 @@ import {
   Prisma,
 } from "@prisma/client";
 import type { Prisma as PrismaTypes } from "@prisma/client";
+import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import { db } from "~/database/db.server";
+import type { ExtendedPrismaClient } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { Logger } from "~/utils/logger";
 import { resolveUserDisplayName } from "~/utils/user";
@@ -22,6 +24,8 @@ export class HandbookValidationError extends Error {
     this.name = "HandbookValidationError";
   }
 }
+
+type HandbookTransactionClient = Omit<ExtendedPrismaClient, ITXClientDenyList>;
 
 async function getDisplayNamesByUserId(userIds: string[]) {
   const ids = [...new Set(userIds.filter(Boolean))];
@@ -70,7 +74,7 @@ export async function listPublishedHandbookArticles({
         },
       },
     },
-    orderBy: [{ updatedAt: "desc" }, { slug: "asc" }],
+    orderBy: [{ publishedVersion: { publishedAt: "desc" } }, { slug: "asc" }],
     select: {
       id: true,
       slug: true,
@@ -84,6 +88,43 @@ export async function listPublishedHandbookArticles({
     },
   });
   return articles;
+}
+
+export async function listHandbookArticleTitles({
+  organizationId,
+  handbookCategoryId,
+}: {
+  organizationId: string;
+  handbookCategoryId?: string;
+}) {
+  const articles = await db.handbookArticle.findMany({
+    where: {
+      organizationId,
+      status: HandbookArticleStatus.PUBLISHED,
+      ...(handbookCategoryId ? { handbookCategoryId } : {}),
+      publishedVersion: { is: {} },
+    },
+    orderBy: [{ publishedVersion: { title: "asc" } }, { slug: "asc" }],
+    take: 500,
+    select: {
+      slug: true,
+      handbookCategoryId: true,
+      handbookCategory: { select: { name: true } },
+      publishedVersion: { select: { title: true } },
+    },
+  });
+  return articles.flatMap((article) =>
+    article.publishedVersion
+      ? [
+          {
+            slug: article.slug,
+            title: article.publishedVersion.title,
+            handbookCategoryId: article.handbookCategoryId,
+            categoryName: article.handbookCategory?.name ?? "",
+          },
+        ]
+      : []
+  );
 }
 
 export async function getPublishedHandbookArticle({
@@ -114,7 +155,6 @@ export async function getPublishedHandbookArticle({
       },
       versions: {
         orderBy: { versionNumber: "desc" },
-        take: 20,
         select: {
           id: true,
           versionNumber: true,
@@ -157,24 +197,68 @@ export async function getHandbookEditData({
   organizationId,
   articleId,
   slug,
+  ownerUserId,
+  userId,
+  revisionMode = false,
 }: {
   organizationId: string;
   articleId?: string;
   slug?: string;
+  ownerUserId?: string;
+  userId?: string;
+  revisionMode?: boolean;
 }) {
   const [article, categories] = await Promise.all([
     articleId || slug
       ? db.handbookArticle.findFirst({
           where: articleId
-            ? { id: articleId, organizationId }
-            : { slug, organizationId },
+            ? {
+                id: articleId,
+                organizationId,
+                ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
+              }
+            : {
+                slug,
+                organizationId,
+                ...(revisionMode
+                  ? { status: HandbookArticleStatus.PUBLISHED }
+                  : ownerUserId
+                  ? {
+                      OR: [
+                        {
+                          createdByUserId: ownerUserId,
+                          status: HandbookArticleStatus.DRAFT,
+                        },
+                        ...(revisionMode
+                          ? [{ status: HandbookArticleStatus.PUBLISHED }]
+                          : []),
+                      ],
+                    }
+                  : {}),
+              },
           select: {
             id: true,
             status: true,
             draftTitle: true,
             draftContent: true,
-            handbookCategoryId: true,
             draftSourceUrls: true,
+            handbookCategoryId: true,
+            updatedByUserId: true,
+            publishedVersionId: true,
+            publishedVersion: {
+              include: { ...handbookReferences },
+            },
+            observations: {
+              where: { status: HandbookObservationStatus.PENDING_REVIEW },
+              orderBy: { createdAt: "desc" },
+              take: 10,
+              select: {
+                proposedCategoryName: true,
+                handbookCategoryId: true,
+                publishedVersionId: true,
+                contributorUserId: true,
+              },
+            },
             versions: {
               orderBy: { versionNumber: "desc" },
               take: 10,
@@ -201,6 +285,51 @@ export async function getHandbookEditData({
     article: article
       ? {
           ...article,
+          proposedCategoryName:
+            article.observations.find((item) => item.proposedCategoryName)
+              ?.proposedCategoryName ?? null,
+          revisionCategoryId:
+            article.observations.find((item) => item.publishedVersionId)
+              ?.handbookCategoryId ?? article.handbookCategoryId,
+          revisionBaseVersionId:
+            article.observations.find((item) => item.publishedVersionId)
+              ?.publishedVersionId ?? article.publishedVersionId,
+          revisionContributorUserId:
+            article.observations.find((item) => item.publishedVersionId)
+              ?.contributorUserId ?? null,
+          revisionSubmitted: article.observations.some((item) =>
+            Boolean(item.publishedVersionId)
+          ),
+          ...(revisionMode && article.status === HandbookArticleStatus.PUBLISHED
+            ? (() => {
+                const ownSavedRevision =
+                  userId && article.updatedByUserId === userId;
+                const published = article.publishedVersion;
+                const pendingRevision = Boolean(
+                  article.observations.some((item) => item.publishedVersionId)
+                );
+                return {
+                  draftTitle:
+                    ownSavedRevision || pendingRevision
+                      ? article.draftTitle
+                      : published?.title ?? article.draftTitle,
+                  draftContent:
+                    ownSavedRevision || pendingRevision
+                      ? article.draftContent
+                      : published?.content ?? article.draftContent,
+                  draftSourceUrls:
+                    ownSavedRevision || pendingRevision
+                      ? article.draftSourceUrls
+                      : published?.sources
+                          .map(({ source }) => source.url)
+                          .filter((url): url is string => Boolean(url)) ??
+                        article.draftSourceUrls,
+                  handbookCategoryId:
+                    article.observations.find((item) => item.publishedVersionId)
+                      ?.handbookCategoryId ?? article.handbookCategoryId,
+                };
+              })()
+            : {}),
           versions: article.versions.map((version) => ({
             ...version,
             publishedBy: authorNames.get(version.publishedByUserId) ?? null,
@@ -216,6 +345,20 @@ export async function listHandbookCategories(organizationId: string) {
     where: { organizationId, archivedAt: null },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     select: { id: true, name: true },
+  });
+}
+
+export async function listHandbookCategoriesForManagement(
+  organizationId: string
+) {
+  return db.handbookCategory.findMany({
+    where: { organizationId, archivedAt: null },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      name: true,
+      _count: { select: { articles: true } },
+    },
   });
 }
 
@@ -252,13 +395,14 @@ export async function createHandbookCategory({
       });
       if (existing) {
         if (existing.archivedAt) {
-          return tx.handbookCategory.update({
+          const category = await tx.handbookCategory.update({
             where: { id: existing.id, organizationId },
             data: { name: cleanedName, archivedAt: null },
             select: { id: true, name: true },
           });
+          return { ...category, alreadyExists: false };
         }
-        return { id: existing.id, name: existing.name };
+        return { id: existing.id, name: existing.name, alreadyExists: true };
       }
 
       const slugBase =
@@ -275,10 +419,11 @@ export async function createHandbookCategory({
         slug = `${slugBase.slice(0, 100 - suffixText.length)}${suffixText}`;
       }
 
-      return tx.handbookCategory.create({
+      const category = await tx.handbookCategory.create({
         data: { organizationId, name: cleanedName, slug, normalizedName },
         select: { id: true, name: true },
       });
+      return { ...category, alreadyExists: false };
     });
   } catch (cause) {
     if (
@@ -292,8 +437,69 @@ export async function createHandbookCategory({
         select: { id: true, name: true, archivedAt: true },
       });
       if (existing && !existing.archivedAt) {
-        return { id: existing.id, name: existing.name };
+        return {
+          id: existing.id,
+          name: existing.name,
+          alreadyExists: true,
+        };
       }
+    }
+    throw cause;
+  }
+}
+
+export async function renameHandbookCategory({
+  organizationId,
+  categoryId,
+  name,
+}: {
+  organizationId: string;
+  categoryId: string;
+  name: string;
+}) {
+  const cleanedName = cleanHandbookCategoryName(name);
+  const normalizedName = normalizeHandbookCategoryName(cleanedName);
+  if (!normalizedName || cleanedName.length > 80) {
+    throw new HandbookValidationError(
+      "Enter a Handbook category name up to 80 characters."
+    );
+  }
+  const current = await db.handbookCategory.findFirst({
+    where: { id: categoryId, organizationId, archivedAt: null },
+    select: { id: true, name: true, normalizedName: true },
+  });
+  if (!current) {
+    throw new HandbookValidationError(
+      "That Handbook category is not available in this workspace."
+    );
+  }
+  if (current.normalizedName === normalizedName) {
+    return { id: current.id, name: current.name, unchanged: true };
+  }
+  const duplicate = await db.handbookCategory.findFirst({
+    where: { organizationId, normalizedName },
+    select: { id: true },
+  });
+  if (duplicate && duplicate.id !== current.id) {
+    throw new HandbookValidationError(
+      "An equivalent Handbook category already exists."
+    );
+  }
+  try {
+    const category = await db.handbookCategory.update({
+      where: { id: current.id, organizationId },
+      data: { name: cleanedName, normalizedName },
+      select: { id: true, name: true },
+    });
+    return { ...category, unchanged: false };
+  } catch (cause) {
+    if (
+      cause instanceof Prisma.PrismaClientKnownRequestError &&
+      cause.code === "P2002"
+    ) {
+      throw new HandbookValidationError(
+        "An equivalent Handbook category already exists."
+      );
     }
     throw cause;
   }
@@ -313,6 +519,10 @@ export async function saveHandbookDraft({
   organizationId,
   userId,
   articleId,
+  ownerUserId,
+  revisionMode = false,
+  revisionBaseVersionId,
+  revisionOwnerUserId,
   title,
   handbookCategoryId,
   content,
@@ -321,16 +531,20 @@ export async function saveHandbookDraft({
   organizationId: string;
   userId: string;
   articleId?: string;
+  ownerUserId?: string;
+  revisionMode?: boolean;
+  revisionBaseVersionId?: string;
+  revisionOwnerUserId?: string;
   title: string;
-  handbookCategoryId: string;
+  handbookCategoryId?: string;
   content: string;
   sourceUrls: string[];
 }) {
   const normalizedTitle = title.trim();
   const normalizedContent = content.trim();
-  if (!normalizedTitle || !handbookCategoryId.trim() || !normalizedContent) {
+  if (!normalizedTitle || !normalizedContent) {
     throw new HandbookValidationError(
-      "Add a title, choose a category, and add article content before saving."
+      "Add a title and article content before saving."
     );
   }
   if (normalizedTitle.length > 180 || normalizedContent.length > 30_000) {
@@ -338,11 +552,13 @@ export async function saveHandbookDraft({
       "One or more fields are longer than the allowed limit."
     );
   }
-  const category = await db.handbookCategory.findFirst({
-    where: { id: handbookCategoryId, organizationId, archivedAt: null },
-    select: { id: true },
-  });
-  if (!category) {
+  const category = handbookCategoryId
+    ? await db.handbookCategory.findFirst({
+        where: { id: handbookCategoryId, organizationId, archivedAt: null },
+        select: { id: true },
+      })
+    : null;
+  if (handbookCategoryId && !category) {
     throw new HandbookValidationError(
       "Choose a category from this Handbook workspace."
     );
@@ -360,9 +576,102 @@ export async function saveHandbookDraft({
   }
 
   const slugBase = makeHandbookSlug(normalizedTitle) || "handbook-article";
+  if (articleId && revisionMode) {
+    if (!revisionBaseVersionId) {
+      throw new HandbookValidationError(
+        "Reopen the current published article before proposing an improvement."
+      );
+    }
+    const current = await db.handbookArticle.findFirst({
+      where: {
+        id: articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: revisionBaseVersionId,
+      },
+      select: {
+        id: true,
+        slug: true,
+        draftTitle: true,
+        draftContent: true,
+        draftSourceUrls: true,
+        updatedByUserId: true,
+        publishedVersion: {
+          select: {
+            title: true,
+            content: true,
+            sources: { select: { source: { select: { url: true } } } },
+          },
+        },
+        observations: {
+          where: {
+            status: HandbookObservationStatus.PENDING_REVIEW,
+            publishedVersionId: { not: null },
+          },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    if (!current?.publishedVersion) {
+      throw new HandbookValidationError(
+        "The published article changed. Reopen it before proposing an improvement."
+      );
+    }
+    if (current.observations.length) {
+      throw new HandbookValidationError(
+        "A revision of this article is already awaiting Staff review."
+      );
+    }
+    if (
+      revisionOwnerUserId &&
+      current.updatedByUserId !== revisionOwnerUserId &&
+      (current.draftTitle !== current.publishedVersion.title ||
+        current.draftContent !== current.publishedVersion.content ||
+        JSON.stringify(cleanSourceUrls(current.draftSourceUrls)) !==
+          JSON.stringify(
+            cleanSourceUrls(
+              current.publishedVersion.sources
+                .map(({ source }) => source.url)
+                .filter((url): url is string => Boolean(url))
+            )
+          ))
+    ) {
+      throw new HandbookValidationError(
+        "Another draft improvement is in progress for this article."
+      );
+    }
+    const updated = await db.handbookArticle.updateMany({
+      where: {
+        id: current.id,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: revisionBaseVersionId,
+        updatedByUserId: current.updatedByUserId,
+      },
+      data: {
+        draftTitle: normalizedTitle,
+        draftContent: normalizedContent,
+        draftSourceUrls: validSources,
+        updatedByUserId: userId,
+      },
+    });
+    if (!updated.count) {
+      throw new HandbookValidationError(
+        "Another contribution changed this article. Reopen it before saving your improvement."
+      );
+    }
+    return { id: current.id, slug: current.slug, status: "PUBLISHED" as const };
+  }
+
   if (articleId) {
     const current = await db.handbookArticle.findFirst({
-      where: { id: articleId, organizationId },
+      where: {
+        id: articleId,
+        organizationId,
+        ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
+        ...(ownerUserId ? { status: HandbookArticleStatus.DRAFT } : {}),
+      },
       select: { id: true, slug: true },
     });
     if (!current)
@@ -370,11 +679,16 @@ export async function saveHandbookDraft({
         "That Handbook draft could not be found."
       );
     return db.handbookArticle.update({
-      where: { id: current.id, organizationId },
+      where: {
+        id: current.id,
+        organizationId,
+        ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
+        ...(ownerUserId ? { status: HandbookArticleStatus.DRAFT } : {}),
+      },
       data: {
         draftTitle: normalizedTitle,
         draftContent: normalizedContent,
-        handbookCategoryId: category.id,
+        handbookCategoryId: category?.id ?? null,
         draftSourceUrls: validSources,
         updatedByUserId: userId,
       },
@@ -396,7 +710,7 @@ export async function saveHandbookDraft({
       slug,
       draftTitle: normalizedTitle,
       draftContent: normalizedContent,
-      handbookCategoryId: category.id,
+      handbookCategoryId: category?.id ?? null,
       draftSourceUrls: validSources,
       createdByUserId: userId,
       updatedByUserId: userId,
@@ -405,104 +719,236 @@ export async function saveHandbookDraft({
   });
 }
 
+async function publishHandbookArticleInTransaction(
+  tx: HandbookTransactionClient,
+  {
+    organizationId,
+    userId,
+    articleId,
+    handbookCategoryId,
+  }: {
+    organizationId: string;
+    userId: string;
+    articleId: string;
+    handbookCategoryId?: string;
+  }
+) {
+  const article = await tx.handbookArticle.findFirst({
+    where: { id: articleId, organizationId },
+  });
+  if (!article)
+    throw new HandbookValidationError(
+      "That Handbook article could not be found."
+    );
+  const targetCategoryId = handbookCategoryId ?? article.handbookCategoryId;
+  const category = targetCategoryId
+    ? await tx.handbookCategory.findFirst({
+        where: {
+          id: targetCategoryId,
+          organizationId,
+          archivedAt: null,
+        },
+        select: { id: true },
+      })
+    : null;
+  if (!category) {
+    throw new HandbookValidationError(
+      "Choose a category from this Shelf workspace before publishing."
+    );
+  }
+  if (article.handbookCategoryId !== category.id) {
+    await tx.handbookArticle.update({
+      where: { id: article.id, organizationId },
+      data: { handbookCategoryId: category.id },
+    });
+  }
+  const max = await tx.handbookArticleVersion.aggregate({
+    where: { articleId },
+    _max: { versionNumber: true },
+  });
+  const version = await tx.handbookArticleVersion.create({
+    data: {
+      articleId,
+      versionNumber: (max._max.versionNumber ?? 0) + 1,
+      title: article.draftTitle,
+      content: article.draftContent,
+      publishedByUserId: userId,
+    },
+  });
+  const sourceIds: string[] = [];
+  for (const sourceUrl of cleanSourceUrls(article.draftSourceUrls)) {
+    const title = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    const source = await tx.handbookSource.upsert({
+      where: { organizationId_url: { organizationId, url: sourceUrl } },
+      create: {
+        organizationId,
+        kind: HandbookSourceKind.EXTERNAL_REFERENCE,
+        title,
+        url: sourceUrl,
+        createdByUserId: userId,
+      },
+      update: { title },
+      select: { id: true },
+    });
+    sourceIds.push(source.id);
+  }
+  if (sourceIds.length) {
+    await tx.handbookVersionSource.createMany({
+      data: sourceIds.map((sourceId) => ({
+        versionId: version.id,
+        sourceId,
+      })),
+      skipDuplicates: true,
+    });
+  }
+  await tx.handbookArticle.update({
+    where: { id: article.id, organizationId },
+    data: {
+      status: HandbookArticleStatus.PUBLISHED,
+      publishedVersionId: version.id,
+      updatedByUserId: userId,
+    },
+  });
+  await recordEvent(
+    {
+      action: "IOIO_HANDBOOK_ARTICLE_PUBLISHED",
+      organizationId,
+      actorUserId: userId,
+      entityType: "HANDBOOK_ARTICLE",
+      entityId: article.id,
+      meta: {
+        versionId: version.id,
+        versionNumber: version.versionNumber,
+      } as PrismaTypes.InputJsonValue,
+    },
+    tx
+  );
+  return {
+    articleId: article.id,
+    slug: article.slug,
+    versionNumber: version.versionNumber,
+  };
+}
+
 export async function publishHandbookArticle({
   organizationId,
   userId,
   articleId,
+  handbookCategoryId,
 }: {
   organizationId: string;
   userId: string;
   articleId: string;
+  handbookCategoryId?: string;
+}) {
+  return db.$transaction((tx) =>
+    publishHandbookArticleInTransaction(tx, {
+      organizationId,
+      userId,
+      articleId,
+      handbookCategoryId,
+    })
+  );
+}
+
+export async function approveHandbookArticleRevision({
+  organizationId,
+  userId,
+  observationId,
+}: {
+  organizationId: string;
+  userId: string;
+  observationId: string;
 }) {
   return db.$transaction(async (tx) => {
-    const article = await tx.handbookArticle.findFirst({
-      where: { id: articleId, organizationId },
+    const observation = await tx.handbookObservation.findFirst({
+      where: {
+        id: observationId,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: { not: null },
+        articleId: { not: null },
+      },
+      select: {
+        id: true,
+        articleId: true,
+        publishedVersionId: true,
+        handbookCategoryId: true,
+        proposedCategoryName: true,
+      },
     });
-    if (!article)
+    if (
+      !observation?.articleId ||
+      !observation.publishedVersionId ||
+      observation.proposedCategoryName
+    ) {
       throw new HandbookValidationError(
-        "That Handbook article could not be found."
+        "Resolve the proposed category before approving this article improvement."
       );
-    const category = article.handbookCategoryId
-      ? await tx.handbookCategory.findFirst({
-          where: {
-            id: article.handbookCategoryId,
-            organizationId,
-            archivedAt: null,
-          },
-          select: { id: true },
-        })
-      : null;
+    }
+    const article = await tx.handbookArticle.findFirst({
+      where: {
+        id: observation.articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      select: { id: true, handbookCategoryId: true },
+    });
+    if (!article) {
+      throw new HandbookValidationError(
+        "The current published article changed. This proposed revision needs review against the latest version."
+      );
+    }
+    const categoryId =
+      observation.handbookCategoryId ?? article.handbookCategoryId;
+    if (!categoryId) {
+      throw new HandbookValidationError(
+        "Choose a Handbook category before approving this revision."
+      );
+    }
+    const category = await tx.handbookCategory.findFirst({
+      where: { id: categoryId, organizationId, archivedAt: null },
+      select: { id: true },
+    });
     if (!category) {
       throw new HandbookValidationError(
-        "Choose a category from this Shelf workspace before publishing."
+        "Choose a category from this Handbook workspace."
       );
     }
-    const max = await tx.handbookArticleVersion.aggregate({
-      where: { articleId },
-      _max: { versionNumber: true },
-    });
-    const version = await tx.handbookArticleVersion.create({
-      data: {
-        articleId,
-        versionNumber: (max._max.versionNumber ?? 0) + 1,
-        title: article.draftTitle,
-        content: article.draftContent,
-        publishedByUserId: userId,
-      },
-    });
-    const sourceIds: string[] = [];
-    for (const sourceUrl of cleanSourceUrls(article.draftSourceUrls)) {
-      const title = new URL(sourceUrl).hostname.replace(/^www\./, "");
-      const source = await tx.handbookSource.upsert({
-        where: { organizationId_url: { organizationId, url: sourceUrl } },
-        create: {
-          organizationId,
-          kind: HandbookSourceKind.EXTERNAL_REFERENCE,
-          title,
-          url: sourceUrl,
-          createdByUserId: userId,
-        },
-        update: { title },
-        select: { id: true },
-      });
-      sourceIds.push(source.id);
-    }
-    if (sourceIds.length) {
-      await tx.handbookVersionSource.createMany({
-        data: sourceIds.map((sourceId) => ({
-          versionId: version.id,
-          sourceId,
-        })),
-        skipDuplicates: true,
-      });
-    }
     await tx.handbookArticle.update({
-      where: { id: article.id, organizationId },
-      data: {
+      where: {
+        id: article.id,
+        organizationId,
         status: HandbookArticleStatus.PUBLISHED,
-        publishedVersionId: version.id,
-        updatedByUserId: userId,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      data: { handbookCategoryId: category.id },
+    });
+    const published = await publishHandbookArticleInTransaction(tx, {
+      organizationId,
+      userId,
+      articleId: article.id,
+    });
+    const reviewed = await tx.handbookObservation.updateMany({
+      where: {
+        id: observation.id,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      data: {
+        status: HandbookObservationStatus.REVIEWED,
+        reviewedByUserId: userId,
+        reviewedAt: new Date(),
       },
     });
-    await recordEvent(
-      {
-        action: "IOIO_HANDBOOK_ARTICLE_PUBLISHED",
-        organizationId,
-        actorUserId: userId,
-        entityType: "HANDBOOK_ARTICLE",
-        entityId: article.id,
-        meta: {
-          versionId: version.id,
-          versionNumber: version.versionNumber,
-        } as PrismaTypes.InputJsonValue,
-      },
-      tx
-    );
-    return {
-      articleId: article.id,
-      slug: article.slug,
-      versionNumber: version.versionNumber,
-    };
+    if (!reviewed.count) {
+      throw new HandbookValidationError(
+        "This article improvement is no longer awaiting review."
+      );
+    }
+    return published;
   });
 }
 
@@ -658,6 +1104,311 @@ export async function submitHandbookObservation({
   return { ...observation, duplicate: false as const, related };
 }
 
+export async function submitHandbookDraftForReview({
+  organizationId,
+  userId,
+  articleId,
+  proposedCategoryName,
+  handbookCategoryId: proposedHandbookCategoryId,
+  revisionMode = false,
+  revisionBaseVersionId,
+}: {
+  organizationId: string;
+  userId: string;
+  articleId: string;
+  proposedCategoryName?: string;
+  handbookCategoryId?: string;
+  revisionMode?: boolean;
+  revisionBaseVersionId?: string;
+}) {
+  if (revisionMode) {
+    if (!revisionBaseVersionId) {
+      throw new HandbookValidationError(
+        "Reopen the current published article before submitting an improvement."
+      );
+    }
+    const article = await db.handbookArticle.findFirst({
+      where: {
+        id: articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: revisionBaseVersionId,
+        updatedByUserId: userId,
+      },
+      select: {
+        id: true,
+        draftTitle: true,
+        draftContent: true,
+        draftSourceUrls: true,
+        handbookCategoryId: true,
+        publishedVersionId: true,
+        publishedVersion: {
+          select: {
+            versionNumber: true,
+            title: true,
+            content: true,
+            sources: { select: { source: { select: { url: true } } } },
+          },
+        },
+      },
+    });
+    if (!article?.publishedVersionId || !article.publishedVersion) {
+      throw new HandbookValidationError(
+        "That article improvement could not be found or the current version changed."
+      );
+    }
+    const pendingRevision = await db.handbookObservation.findFirst({
+      where: {
+        organizationId,
+        articleId: article.id,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: { not: null },
+      },
+      select: { id: true },
+    });
+    if (pendingRevision) {
+      throw new HandbookValidationError(
+        "A revision of this article is already awaiting Staff review."
+      );
+    }
+
+    const cleanedProposal = proposedCategoryName
+      ? cleanHandbookCategoryName(proposedCategoryName)
+      : "";
+    if (cleanedProposal.length > 80) {
+      throw new HandbookValidationError(
+        "Handbook category names can be up to 80 characters."
+      );
+    }
+    let selectedCategoryId: string | null =
+      proposedHandbookCategoryId ?? article.handbookCategoryId;
+    let pendingCategoryProposal = cleanedProposal || null;
+    if (cleanedProposal) {
+      const existingCategory = await db.handbookCategory.findFirst({
+        where: {
+          organizationId,
+          archivedAt: null,
+          normalizedName: normalizeHandbookCategoryName(cleanedProposal),
+        },
+        select: { id: true },
+      });
+      if (existingCategory) {
+        selectedCategoryId = existingCategory.id;
+        pendingCategoryProposal = null;
+      } else {
+        selectedCategoryId = null;
+      }
+    }
+    if (selectedCategoryId) {
+      const category = await db.handbookCategory.findFirst({
+        where: {
+          id: selectedCategoryId,
+          organizationId,
+          archivedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!category) {
+        throw new HandbookValidationError(
+          "Choose a category from this Handbook workspace."
+        );
+      }
+      selectedCategoryId = category.id;
+    }
+    if (!selectedCategoryId && !pendingCategoryProposal) {
+      throw new HandbookValidationError(
+        "Choose an existing Handbook category or propose a new one."
+      );
+    }
+    const currentSourceUrls = cleanSourceUrls(
+      article.publishedVersion.sources
+        .map(({ source }) => source.url)
+        .filter((url): url is string => Boolean(url))
+    );
+    const proposedSourceUrls = cleanSourceUrls(article.draftSourceUrls);
+    const revisionHasChanges =
+      article.draftTitle !== article.publishedVersion.title ||
+      article.draftContent !== article.publishedVersion.content ||
+      JSON.stringify(proposedSourceUrls) !==
+        JSON.stringify(currentSourceUrls) ||
+      Boolean(pendingCategoryProposal) ||
+      selectedCategoryId !== article.handbookCategoryId;
+    if (!revisionHasChanges) {
+      throw new HandbookValidationError(
+        "Make an improvement before submitting this revision."
+      );
+    }
+    const baseVersionNumber = article.publishedVersion.versionNumber;
+    const observation = await db.$transaction(async (tx) => {
+      const created = await tx.handbookObservation.create({
+        data: {
+          organizationId,
+          contributorUserId: userId,
+          title: `Proposed improvement: ${article.draftTitle}`.slice(0, 180),
+          content: `Proposed changes to Version ${baseVersionNumber}. The current published version remains live until Staff approval.`,
+          articleId: article.id,
+          handbookCategoryId: selectedCategoryId ?? null,
+          proposedCategoryName: pendingCategoryProposal,
+          publishedVersionId: article.publishedVersionId,
+        },
+        select: { id: true },
+      });
+      await recordEvent(
+        {
+          action: "IOIO_HANDBOOK_OBSERVATION_SUBMITTED",
+          organizationId,
+          actorUserId: userId,
+          entityType: "HANDBOOK_ARTICLE",
+          entityId: article.id,
+          meta: {
+            observationId: created.id,
+            linkedArticleId: article.id,
+            revisionOfVersionId: article.publishedVersionId,
+          } as PrismaTypes.InputJsonValue,
+        },
+        tx
+      );
+      return created;
+    });
+    return { ...observation, alreadyPending: false as const };
+  }
+
+  const article = await db.handbookArticle.findFirst({
+    where: {
+      id: articleId,
+      organizationId,
+      createdByUserId: userId,
+      status: HandbookArticleStatus.DRAFT,
+    },
+    select: {
+      id: true,
+      draftTitle: true,
+      handbookCategoryId: true,
+    },
+  });
+  if (!article) {
+    throw new HandbookValidationError(
+      "That Handbook draft could not be found."
+    );
+  }
+
+  const cleanedProposal = proposedCategoryName
+    ? cleanHandbookCategoryName(proposedCategoryName)
+    : "";
+  if (cleanedProposal.length > 80) {
+    throw new HandbookValidationError(
+      "Handbook category names can be up to 80 characters."
+    );
+  }
+  if (article.handbookCategoryId && cleanedProposal) {
+    throw new HandbookValidationError(
+      "Choose an existing Handbook category or propose a new one."
+    );
+  }
+
+  let handbookCategoryId = article.handbookCategoryId;
+  let pendingCategoryProposal = cleanedProposal || null;
+  if (cleanedProposal) {
+    const existingCategory = await db.handbookCategory.findFirst({
+      where: {
+        organizationId,
+        archivedAt: null,
+        normalizedName: normalizeHandbookCategoryName(cleanedProposal),
+      },
+      select: { id: true },
+    });
+    if (existingCategory) {
+      handbookCategoryId = existingCategory.id;
+      pendingCategoryProposal = null;
+    }
+  }
+  if (!handbookCategoryId && !pendingCategoryProposal) {
+    throw new HandbookValidationError(
+      "Choose an existing Handbook category or propose a new one."
+    );
+  }
+
+  const pending = await db.handbookObservation.findFirst({
+    where: {
+      organizationId,
+      contributorUserId: userId,
+      articleId: article.id,
+      status: HandbookObservationStatus.PENDING_REVIEW,
+    },
+    select: { id: true },
+  });
+  if (pending) {
+    await db.$transaction(async (tx) => {
+      if (handbookCategoryId !== article.handbookCategoryId) {
+        await tx.handbookArticle.update({
+          where: { id: article.id, organizationId },
+          data: { handbookCategoryId },
+          select: { id: true },
+        });
+      }
+      await tx.handbookObservation.updateMany({
+        where: {
+          id: pending.id,
+          organizationId,
+          contributorUserId: userId,
+          status: HandbookObservationStatus.PENDING_REVIEW,
+        },
+        data: {
+          title: `Draft submitted for review: ${article.draftTitle}`.slice(
+            0,
+            180
+          ),
+          handbookCategoryId,
+          proposedCategoryName: pendingCategoryProposal,
+        },
+      });
+    });
+    return { id: pending.id, alreadyPending: true as const };
+  }
+
+  const observation = await db.$transaction(async (tx) => {
+    if (handbookCategoryId !== article.handbookCategoryId) {
+      await tx.handbookArticle.update({
+        where: { id: article.id, organizationId },
+        data: { handbookCategoryId },
+        select: { id: true },
+      });
+    }
+    const created = await tx.handbookObservation.create({
+      data: {
+        organizationId,
+        contributorUserId: userId,
+        title: `Draft submitted for review: ${article.draftTitle}`.slice(
+          0,
+          180
+        ),
+        content:
+          "A student Handbook draft is ready for staff review. Open the linked draft to review its title, category, content, and external references.",
+        articleId: article.id,
+        handbookCategoryId,
+        proposedCategoryName: pendingCategoryProposal,
+      },
+      select: { id: true },
+    });
+    await recordEvent(
+      {
+        action: "IOIO_HANDBOOK_OBSERVATION_SUBMITTED",
+        organizationId,
+        actorUserId: userId,
+        entityType: "HANDBOOK_ARTICLE",
+        entityId: article.id,
+        meta: {
+          observationId: created.id,
+          linkedArticleId: article.id,
+        } as PrismaTypes.InputJsonValue,
+      },
+      tx
+    );
+    return created;
+  });
+  return { ...observation, alreadyPending: false as const };
+}
+
 export async function listHandbookObservations(organizationId: string) {
   const observations = await db.handbookObservation.findMany({
     where: { organizationId, status: HandbookObservationStatus.PENDING_REVIEW },
@@ -665,7 +1416,17 @@ export async function listHandbookObservations(organizationId: string) {
     take: 100,
     include: {
       article: {
-        select: { slug: true, publishedVersion: { select: { title: true } } },
+        select: {
+          id: true,
+          slug: true,
+          status: true,
+          draftTitle: true,
+          draftContent: true,
+          draftSourceUrls: true,
+          publishedVersion: {
+            select: { id: true, title: true, versionNumber: true },
+          },
+        },
       },
       handbookCategory: { select: { id: true, name: true } },
       assetModel: { select: { name: true } },
@@ -698,6 +1459,308 @@ export async function listHandbookArticlesForStaff(organizationId: string) {
         select: { title: true, versionNumber: true, publishedAt: true },
       },
     },
+  });
+}
+
+export async function listMyHandbookDrafts({
+  organizationId,
+  userId,
+}: {
+  organizationId: string;
+  userId: string;
+}) {
+  const [drafts, revisedArticles, pendingRevisions] = await Promise.all([
+    db.handbookArticle.findMany({
+      where: {
+        organizationId,
+        createdByUserId: userId,
+        status: HandbookArticleStatus.DRAFT,
+      },
+      orderBy: [{ updatedAt: "desc" }, { slug: "asc" }],
+      take: 200,
+      select: {
+        id: true,
+        slug: true,
+        draftTitle: true,
+        updatedAt: true,
+        handbookCategory: { select: { id: true, name: true } },
+        observations: {
+          where: {
+            status: HandbookObservationStatus.PENDING_REVIEW,
+            publishedVersionId: null,
+          },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    }),
+    db.handbookArticle.findMany({
+      where: {
+        organizationId,
+        updatedByUserId: userId,
+        status: HandbookArticleStatus.PUBLISHED,
+        observations: {
+          none: {
+            status: HandbookObservationStatus.PENDING_REVIEW,
+            publishedVersionId: { not: null },
+          },
+        },
+      },
+      orderBy: [{ updatedAt: "desc" }, { slug: "asc" }],
+      take: 200,
+      select: {
+        id: true,
+        slug: true,
+        draftTitle: true,
+        draftContent: true,
+        updatedAt: true,
+        handbookCategory: { select: { id: true, name: true } },
+        publishedVersion: {
+          select: { title: true, content: true, versionNumber: true },
+        },
+      },
+    }),
+    db.handbookObservation.findMany({
+      where: {
+        organizationId,
+        contributorUserId: userId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: { not: null },
+        articleId: { not: null },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      select: {
+        id: true,
+        createdAt: true,
+        handbookCategory: { select: { id: true, name: true } },
+        publishedVersion: { select: { versionNumber: true } },
+        article: {
+          select: {
+            id: true,
+            slug: true,
+            draftTitle: true,
+            handbookCategory: { select: { id: true, name: true } },
+          },
+        },
+      },
+    }),
+  ]);
+  const newArticleWork = drafts.map(({ observations, ...draft }) => ({
+    ...draft,
+    articleId: draft.id,
+    workType: "NEW_ARTICLE" as const,
+    submittedForReview: observations.length > 0,
+    baseVersionNumber: null,
+  }));
+  const improvementDrafts = revisedArticles
+    .filter(
+      (article) =>
+        article.publishedVersion &&
+        (article.draftTitle !== article.publishedVersion.title ||
+          article.draftContent !== article.publishedVersion.content)
+    )
+    .map((article) => ({
+      id: article.id,
+      articleId: article.id,
+      slug: article.slug,
+      draftTitle: article.draftTitle,
+      updatedAt: article.updatedAt,
+      handbookCategory: article.handbookCategory,
+      workType: "IMPROVEMENT_DRAFT" as const,
+      submittedForReview: false,
+      baseVersionNumber: article.publishedVersion!.versionNumber,
+    }));
+  const pendingImprovementWork = pendingRevisions.flatMap((observation) =>
+    observation.article && observation.publishedVersion
+      ? [
+          {
+            id: `revision:${observation.id}`,
+            articleId: observation.article.id,
+            slug: observation.article.slug,
+            draftTitle: observation.article.draftTitle,
+            updatedAt: observation.createdAt,
+            handbookCategory:
+              observation.handbookCategory ??
+              observation.article.handbookCategory,
+            workType: "IMPROVEMENT_PENDING" as const,
+            submittedForReview: true,
+            baseVersionNumber: observation.publishedVersion.versionNumber,
+          },
+        ]
+      : []
+  );
+  return [
+    ...newArticleWork,
+    ...improvementDrafts,
+    ...pendingImprovementWork,
+  ].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+}
+
+export async function deleteHandbookDraft({
+  organizationId,
+  articleId,
+  userId,
+  canManageAnyDraft = false,
+}: {
+  organizationId: string;
+  articleId: string;
+  userId: string;
+  canManageAnyDraft?: boolean;
+}) {
+  return db.$transaction(async (tx) => {
+    const scope = {
+      id: articleId,
+      organizationId,
+      ...(!canManageAnyDraft ? { createdByUserId: userId } : {}),
+    };
+    const article = await tx.handbookArticle.findFirst({
+      where: scope,
+      select: {
+        id: true,
+        status: true,
+        publishedVersionId: true,
+        _count: { select: { versions: true } },
+        observations: {
+          where: { status: HandbookObservationStatus.PENDING_REVIEW },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    if (!article) {
+      throw new HandbookValidationError(
+        "That Handbook draft could not be found or you do not have permission to delete it."
+      );
+    }
+    if (
+      article.status !== HandbookArticleStatus.DRAFT ||
+      article.publishedVersionId ||
+      article._count.versions > 0
+    ) {
+      throw new HandbookValidationError(
+        "Only unpublished Handbook drafts without published history can be deleted."
+      );
+    }
+    if (article.observations.length > 0) {
+      throw new HandbookValidationError(
+        "This draft has been submitted for Staff review and cannot be deleted."
+      );
+    }
+
+    const deleted = await tx.handbookArticle.deleteMany({
+      where: {
+        ...scope,
+        status: HandbookArticleStatus.DRAFT,
+        publishedVersionId: null,
+        versions: { none: {} },
+        observations: {
+          none: { status: HandbookObservationStatus.PENDING_REVIEW },
+        },
+      },
+    });
+    if (!deleted.count) {
+      throw new HandbookValidationError(
+        "This draft changed or was submitted for review before it could be deleted."
+      );
+    }
+    return { id: article.id };
+  });
+}
+
+export async function discardHandbookArticleRevisionDraft({
+  organizationId,
+  articleId,
+  userId,
+  canManageAnyDraft = false,
+}: {
+  organizationId: string;
+  articleId: string;
+  userId: string;
+  canManageAnyDraft?: boolean;
+}) {
+  return db.$transaction(async (tx) => {
+    const article = await tx.handbookArticle.findFirst({
+      where: {
+        id: articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        ...(!canManageAnyDraft ? { updatedByUserId: userId } : {}),
+      },
+      select: {
+        id: true,
+        updatedByUserId: true,
+        publishedVersionId: true,
+        draftTitle: true,
+        draftContent: true,
+        publishedVersion: {
+          select: {
+            id: true,
+            title: true,
+            content: true,
+            publishedByUserId: true,
+            sources: { select: { source: { select: { url: true } } } },
+          },
+        },
+        observations: {
+          where: {
+            status: HandbookObservationStatus.PENDING_REVIEW,
+            publishedVersionId: { not: null },
+          },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    if (!article?.publishedVersion || !article.publishedVersionId) {
+      throw new HandbookValidationError(
+        "That draft improvement could not be found or you do not have permission to discard it."
+      );
+    }
+    if (article.observations.length) {
+      throw new HandbookValidationError(
+        "This improvement is awaiting Staff review and cannot be discarded."
+      );
+    }
+    if (
+      article.draftTitle === article.publishedVersion.title &&
+      article.draftContent === article.publishedVersion.content
+    ) {
+      throw new HandbookValidationError(
+        "There is no draft improvement to discard."
+      );
+    }
+    const updated = await tx.handbookArticle.updateMany({
+      where: {
+        id: article.id,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: article.publishedVersionId,
+        ...(!canManageAnyDraft ? { updatedByUserId: userId } : {}),
+        observations: {
+          none: {
+            status: HandbookObservationStatus.PENDING_REVIEW,
+            publishedVersionId: { not: null },
+          },
+        },
+      },
+      data: {
+        draftTitle: article.publishedVersion.title,
+        draftContent: article.publishedVersion.content,
+        draftSourceUrls: cleanSourceUrls(
+          article.publishedVersion.sources
+            .map(({ source }) => source.url)
+            .filter((url): url is string => Boolean(url))
+        ),
+        updatedByUserId: article.publishedVersion.publishedByUserId,
+      },
+    });
+    if (!updated.count) {
+      throw new HandbookValidationError(
+        "This draft improvement changed before it could be discarded."
+      );
+    }
+    return { id: article.id };
   });
 }
 
@@ -756,7 +1819,12 @@ export async function resolveHandbookObservationCategoryProposal({
       organizationId,
       status: HandbookObservationStatus.PENDING_REVIEW,
     },
-    select: { id: true, proposedCategoryName: true },
+    select: {
+      id: true,
+      articleId: true,
+      proposedCategoryName: true,
+      publishedVersionId: true,
+    },
   });
   if (!observation || !observation.proposedCategoryName) {
     throw new HandbookValidationError(
@@ -806,22 +1874,30 @@ export async function resolveHandbookObservationCategoryProposal({
     selectedHandbookCategoryId = category.id;
   }
 
-  const update = await db.handbookObservation.updateMany({
-    where: {
-      id: observation.id,
-      organizationId,
-      status: HandbookObservationStatus.PENDING_REVIEW,
-    },
-    data: {
-      handbookCategoryId: selectedHandbookCategoryId,
-      proposedCategoryName: null,
-    },
+  await db.$transaction(async (tx) => {
+    const update = await tx.handbookObservation.updateMany({
+      where: {
+        id: observation.id,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+      },
+      data: {
+        handbookCategoryId: selectedHandbookCategoryId,
+        proposedCategoryName: null,
+      },
+    });
+    if (!update.count) {
+      throw new HandbookValidationError(
+        "This category proposal is no longer awaiting review."
+      );
+    }
+    if (observation.articleId && !observation.publishedVersionId) {
+      await tx.handbookArticle.updateMany({
+        where: { id: observation.articleId, organizationId },
+        data: { handbookCategoryId: selectedHandbookCategoryId },
+      });
+    }
   });
-  if (!update.count) {
-    throw new HandbookValidationError(
-      "This category proposal is no longer awaiting review."
-    );
-  }
   return { resolution, handbookCategoryId: selectedHandbookCategoryId };
 }
 
@@ -852,6 +1928,100 @@ export async function reviewHandbookObservation({
     throw new HandbookValidationError(
       "This contribution is no longer awaiting review."
     );
+}
+
+export async function rejectHandbookArticleRevision({
+  organizationId,
+  userId,
+  observationId,
+}: {
+  organizationId: string;
+  userId: string;
+  observationId: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const observation = await tx.handbookObservation.findFirst({
+      where: {
+        id: observationId,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: { not: null },
+        articleId: { not: null },
+      },
+      select: {
+        id: true,
+        articleId: true,
+        publishedVersionId: true,
+      },
+    });
+    if (!observation?.articleId || !observation.publishedVersionId) {
+      throw new HandbookValidationError(
+        "This article improvement is no longer awaiting review."
+      );
+    }
+    const article = await tx.handbookArticle.findFirst({
+      where: {
+        id: observation.articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      select: {
+        id: true,
+        publishedVersionId: true,
+        publishedVersion: {
+          select: {
+            title: true,
+            content: true,
+            publishedByUserId: true,
+            sources: { select: { source: { select: { url: true } } } },
+          },
+        },
+      },
+    });
+    if (!article?.publishedVersion) {
+      throw new HandbookValidationError(
+        "The current article version changed. Reopen the article before rejecting this revision."
+      );
+    }
+    await tx.handbookArticle.update({
+      where: {
+        id: article.id,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      data: {
+        draftTitle: article.publishedVersion.title,
+        draftContent: article.publishedVersion.content,
+        draftSourceUrls: cleanSourceUrls(
+          article.publishedVersion.sources
+            .map(({ source }) => source.url)
+            .filter((url): url is string => Boolean(url))
+        ),
+        updatedByUserId: article.publishedVersion.publishedByUserId,
+      },
+    });
+    const dismissed = await tx.handbookObservation.updateMany({
+      where: {
+        id: observation.id,
+        organizationId,
+        status: HandbookObservationStatus.PENDING_REVIEW,
+        publishedVersionId: observation.publishedVersionId,
+      },
+      data: {
+        status: HandbookObservationStatus.DISMISSED,
+        reviewedByUserId: userId,
+        reviewedAt: new Date(),
+      },
+    });
+    if (!dismissed.count) {
+      throw new HandbookValidationError(
+        "This article improvement is no longer awaiting review."
+      );
+    }
+    return { articleId: article.id };
+  });
 }
 
 type RelatedKnowledge = {

@@ -89,7 +89,7 @@ function collectSourceUrls(value: string, sourceUrls: Set<string>) {
 function headingLevel(value: string) {
   const numberedSection = value.match(/^(\d+(?:\.\d+){1,5})\s+(.{2,120})$/u);
   if (numberedSection) {
-    return Math.min(numberedSection[1]!.split(".").length + 1, 6);
+    return Math.min(numberedSection[1]!.split(".").length + 1, 3);
   }
   if (value.length > 100 || /[.!?;:]$/u.test(value)) return null;
   const letters = value.replace(/[^\p{L}]/gu, "");

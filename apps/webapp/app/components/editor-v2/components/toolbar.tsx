@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 
 import {
   Bold,
+  Code,
+  ImagePlus,
   Italic,
   Link2,
   List,
@@ -66,10 +68,23 @@ export function ToolbarButton({
 interface ParagraphSelectProps {
   value: ToolbarBlock;
   onChange: (value: ToolbarBlock) => void;
+  headingLevels?: number[];
 }
 
-export function ParagraphSelect({ value, onChange }: ParagraphSelectProps) {
+export function ParagraphSelect({
+  value,
+  onChange,
+  headingLevels = [1, 2, 3, 4],
+}: ParagraphSelectProps) {
   const normalized = value === "raw_block" ? "paragraph" : value;
+  const visibleHeadingLevels = [
+    ...new Set([
+      ...headingLevels,
+      ...(value.startsWith("heading")
+        ? [Number(value.slice("heading".length))]
+        : []),
+    ]),
+  ].sort((a, b) => a - b);
   return (
     <label className="text-muted-foreground inline-flex h-9 items-center gap-2 rounded border bg-white px-2 text-sm">
       <Type size={18} strokeWidth={1.5} aria-hidden="true" />
@@ -83,10 +98,11 @@ export function ParagraphSelect({ value, onChange }: ParagraphSelectProps) {
         disabled={value === "raw_block"}
       >
         <option value="paragraph">Paragraph</option>
-        <option value="heading1">Heading 1</option>
-        <option value="heading2">Heading 2</option>
-        <option value="heading3">Heading 3</option>
-        <option value="heading4">Heading 4</option>
+        {visibleHeadingLevels.map((level) => (
+          <option key={level} value={`heading${level}`}>
+            Heading {level}
+          </option>
+        ))}
         <option value="bullet_list">Bullet list</option>
         <option value="ordered_list">Numbered list</option>
         <option value="blockquote">Quote</option>
@@ -102,12 +118,17 @@ interface EditorToolbarProps {
   onParagraphChange: (value: ToolbarBlock) => void;
   onBold: () => void;
   onItalic: () => void;
+  onInlineCode: () => void;
   onToggleLink: () => void;
   onBulletList: () => void;
   onOrderedList: () => void;
   onQuote: () => void;
   onDivider?: () => void;
   hasDivider: boolean;
+  headingLevels?: number[];
+  codeActive?: boolean;
+  onRequestImage?: () => void;
+  imageBusy?: boolean;
 }
 
 export function EditorToolbar({
@@ -117,12 +138,17 @@ export function EditorToolbar({
   onParagraphChange,
   onBold,
   onItalic,
+  onInlineCode,
   onToggleLink,
   onBulletList,
   onOrderedList,
   onQuote,
   onDivider,
   hasDivider,
+  headingLevels,
+  codeActive = false,
+  onRequestImage,
+  imageBusy = false,
 }: EditorToolbarProps) {
   return (
     <div
@@ -146,7 +172,11 @@ export function EditorToolbar({
           disabled={!state.canRedo}
         />
       </div>
-      <ParagraphSelect value={state.block} onChange={onParagraphChange} />
+      <ParagraphSelect
+        value={state.block}
+        onChange={onParagraphChange}
+        headingLevels={headingLevels}
+      />
       <div className="flex items-center gap-2">
         <ToolbarButton
           label="Bold"
@@ -162,6 +192,14 @@ export function EditorToolbar({
           icon={<Italic size={18} strokeWidth={1.5} aria-hidden="true" />}
           onClick={onItalic}
           active={state.italic}
+          isToggle
+        />
+        <ToolbarButton
+          label="Inline code"
+          tooltip="Inline code"
+          icon={<Code size={18} strokeWidth={1.5} aria-hidden="true" />}
+          onClick={onInlineCode}
+          active={codeActive}
           isToggle
         />
         <ToolbarButton
@@ -206,6 +244,15 @@ export function EditorToolbar({
             tooltip="Divider (---)"
             icon={<Minus size={18} strokeWidth={1.5} aria-hidden="true" />}
             onClick={onDivider}
+          />
+        ) : null}
+        {onRequestImage ? (
+          <ToolbarButton
+            label="Insert image"
+            tooltip="Insert image"
+            icon={<ImagePlus size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onRequestImage}
+            disabled={imageBusy}
           />
         ) : null}
       </div>

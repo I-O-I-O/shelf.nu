@@ -26,11 +26,41 @@ The Editor V2 ProseMirror schema intentionally mirrors the Markdown/Markdoc node
 | `code`           | `` `inline code` ``     | styled inline node             |
 | `link`           | `[text](url)`           | sanitized URL, optional dialog |
 
+## Handbook Profile
+
+The Handbook uses this existing editor and keeps Markdown/Markdoc as its
+canonical revision content. The title stays outside the body. Its editor
+controls offer Heading 2 for article sections and Heading 3 for subsections;
+the shared schema continues to parse older Heading 1 and Heading 4 content.
+
+Handbook callouts use a normal blockquote with a deterministic marker at the
+start of its first paragraph:
+
+```md
+> [!WARNING] Stop the printer before clearing the nozzle.
+```
+
+The reader recognizes NOTE, TIP, WARNING, and IMPORTANT markers and styles the
+blockquote as a callout. Handbook images use ordinary Markdown image syntax,
+with the source pointing to an organization-scoped Shelf Storage object through
+the Handbook image route. Image bytes are never stored in article content.
+
+PDF import continues to produce this same Markdown content. No heading,
+section, or image database records are created. The Handbook editor preserves
+unsupported existing Markdoc blocks but disables their raw-source editor.
+
 ## Raw Blocks
 
-Unsupported Markdoc tags (callouts, custom components, etc.) are normalized into placeholder paragraphs during parsing. After the Markdown is parsed, placeholders are replaced with dedicated `raw_block` nodes whose `raw` attribute stores the original Markdoc snippet. Serializing the document writes the raw text back verbatim, preserving whitespace and structure.
+Unsupported Markdoc tags and custom components are normalized into placeholder
+paragraphs during parsing. After the Markdown is parsed, placeholders are
+replaced with dedicated `raw_block` nodes whose `raw` attribute stores the
+original Markdoc snippet. Serializing the document writes the raw text back
+verbatim, preserving whitespace and structure.
 
-Raw blocks are rendered in the editor as bordered, monospace boxes with an “Edit source” button. Editing the block opens a dialog where the raw Markdoc can be updated directly.
+Raw blocks are rendered in the shared editor as bordered, monospace boxes with
+an “Edit source” button. Editing the block opens a dialog where the raw Markdoc
+can be updated directly. The Handbook editor uses the same parser and preserves
+these blocks, but disables raw-source editing.
 
 ## Input Rules and Shortcuts
 

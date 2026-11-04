@@ -14,9 +14,11 @@ import {
 import { ErrorContent } from "~/components/errors";
 import {
   HandbookValidationError,
+  approveHandbookArticleRevision,
   listHandbookArticlesForStaff,
   listHandbookCategories,
   listHandbookObservations,
+  rejectHandbookArticleRevision,
   resolveHandbookObservationCategoryProposal,
   reviewHandbookObservation,
 } from "~/modules/ioio-handbook/service.server";
@@ -88,7 +90,49 @@ export async function action({ context, request }: ActionFunctionArgs) {
       throw data(error(reason), { status: reason.status });
     }
   }
-  if (!observationId || (intent !== "review" && intent !== "dismiss")) {
+  if (observationId && intent === "approve-revision") {
+    try {
+      const result = await approveHandbookArticleRevision({
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        observationId,
+      });
+      return payload({
+        success: true as const,
+        message: `Improvement approved and published as Version ${result.versionNumber}.`,
+      });
+    } catch (cause) {
+      if (cause instanceof HandbookValidationError)
+        return payload({ success: false as const, message: cause.message });
+      const reason = makeShelfError(cause, { userId: auth.userId });
+      throw data(error(reason), { status: reason.status });
+    }
+  }
+  if (observationId && intent === "reject-revision") {
+    try {
+      await rejectHandbookArticleRevision({
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        observationId,
+      });
+      return payload({
+        success: true as const,
+        message:
+          "Revision rejected. The published article and version history remain unchanged.",
+      });
+    } catch (cause) {
+      if (cause instanceof HandbookValidationError)
+        return payload({ success: false as const, message: cause.message });
+      const reason = makeShelfError(cause, { userId: auth.userId });
+      throw data(error(reason), { status: reason.status });
+    }
+  }
+  if (
+    !observationId ||
+    (intent !== "review" &&
+      intent !== "dismiss" &&
+      intent !== "return-for-changes")
+  ) {
     return payload({
       success: false as const,
       message: "That contribution could not be updated.",
@@ -106,6 +150,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
       message:
         intent === "review"
           ? "Marked reviewed. This did not publish or modify an article."
+          : intent === "return-for-changes"
+          ? "Revision returned to its author. The current published version remains live."
           : "Contribution dismissed.",
     });
   } catch (cause) {
@@ -134,7 +180,8 @@ export default function AiKnowledgePage() {
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-gray-600">
             Manage published Handbook knowledge and review contributions.
-            Reviewing a note is not the same as publishing it.
+            Observations can be reviewed without publication; approved article
+            improvements publish as a new version.
           </p>
         </div>
         <Link
@@ -191,10 +238,16 @@ export default function AiKnowledgePage() {
                     </Link>
                   ) : null}
                   <Link
-                    to={"/handbook/" + article.slug + "/edit"}
+                    to={
+                      article.status === "PUBLISHED"
+                        ? "/handbook/" + article.slug + "/edit?improve=1"
+                        : "/handbook/" + article.slug + "/edit"
+                    }
                     className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                   >
-                    Edit draft
+                    {article.status === "PUBLISHED"
+                      ? "Improve this article"
+                      : "Edit draft"}
                   </Link>
                 </div>
               </li>
@@ -219,6 +272,44 @@ export default function AiKnowledgePage() {
           <ul className="divide-y divide-gray-100">
             {observations.map((item) => (
               <li key={item.id} className="p-4">
+                {item.publishedVersionId && item.article ? (
+                  <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-950">
+                    <p className="font-semibold">
+                      Proposed improvement to Version{" "}
+                      {item.article.publishedVersion?.versionNumber ?? "?"}
+                    </p>
+                    <p className="mt-1">
+                      Current:{" "}
+                      {item.article.publishedVersion?.title ??
+                        "Published article"}
+                      {" · "}Proposed: {item.article.draftTitle}
+                    </p>
+                    <details className="mt-2">
+                      <summary className="cursor-pointer font-medium">
+                        Preview proposed content
+                      </summary>
+                      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-sans text-xs leading-5">
+                        {item.article.draftContent}
+                      </pre>
+                      {item.article.draftSourceUrls.length ? (
+                        <ul className="mt-2 space-y-1 text-xs">
+                          {item.article.draftSourceUrls.map((url) => (
+                            <li key={url}>
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-red-800 underline underline-offset-2"
+                              >
+                                {url}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </details>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <h3 className="font-semibold text-gray-950">
@@ -234,7 +325,8 @@ export default function AiKnowledgePage() {
                     <p className="mt-1 text-xs text-gray-500">
                       Linked context:{" "}
                       {[
-                        item.article?.publishedVersion?.title,
+                        item.article?.publishedVersion?.title ??
+                          item.article?.draftTitle,
                         item.assetModel?.name,
                         item.kit?.name,
                       ]
@@ -314,11 +406,51 @@ export default function AiKnowledgePage() {
                   <div className="flex shrink-0 flex-wrap gap-2">
                     {item.article ? (
                       <Link
-                        to={"/handbook/" + item.article.slug}
+                        to={
+                          item.article.status === "PUBLISHED"
+                            ? "/handbook/" + item.article.slug
+                            : "/handbook/" + item.article.slug + "/edit"
+                        }
                         className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                       >
-                        Open article
+                        {item.article.status === "PUBLISHED"
+                          ? "Open article"
+                          : "Review draft"}
                       </Link>
+                    ) : null}
+                    {item.publishedVersionId && !item.proposedCategoryName ? (
+                      <Form method="post">
+                        <input
+                          type="hidden"
+                          name="observationId"
+                          value={item.id}
+                        />
+                        <button
+                          name="intent"
+                          value="approve-revision"
+                          disabled={navigation.state === "submitting"}
+                          className="inline-flex h-9 items-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+                        >
+                          Approve revision
+                        </button>
+                      </Form>
+                    ) : null}
+                    {item.publishedVersionId ? (
+                      <Form method="post">
+                        <input
+                          type="hidden"
+                          name="observationId"
+                          value={item.id}
+                        />
+                        <button
+                          name="intent"
+                          value="reject-revision"
+                          disabled={navigation.state === "submitting"}
+                          className="inline-flex h-9 items-center rounded-lg px-3 text-sm font-semibold text-gray-600 hover:bg-gray-100 disabled:opacity-60"
+                        >
+                          Reject revision
+                        </button>
+                      </Form>
                     ) : null}
                     <Form method="post">
                       <input
@@ -331,7 +463,8 @@ export default function AiKnowledgePage() {
                         value="review"
                         disabled={
                           navigation.state === "submitting" ||
-                          Boolean(item.proposedCategoryName)
+                          Boolean(item.proposedCategoryName) ||
+                          Boolean(item.publishedVersionId)
                         }
                         className="inline-flex h-9 items-center rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-800 disabled:opacity-60"
                       >
@@ -346,11 +479,17 @@ export default function AiKnowledgePage() {
                       />
                       <button
                         name="intent"
-                        value="dismiss"
+                        value={
+                          item.publishedVersionId
+                            ? "return-for-changes"
+                            : "dismiss"
+                        }
                         disabled={navigation.state === "submitting"}
                         className="inline-flex h-9 items-center rounded-lg px-3 text-sm font-semibold text-gray-600 hover:bg-gray-100 disabled:opacity-60"
                       >
-                        Dismiss
+                        {item.publishedVersionId
+                          ? "Return for changes"
+                          : "Dismiss"}
                       </button>
                     </Form>
                   </div>

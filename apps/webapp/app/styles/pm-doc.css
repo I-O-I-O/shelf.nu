@@ -25,6 +25,29 @@
   color: #344054;
 }
 
+.pm-doc.handbook-document pre {
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  background: #101828;
+  padding: 1rem;
+  color: #f2f4f7;
+}
+
+.pm-doc.handbook-document pre code {
+  display: block;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 0.875rem;
+}
+
+.pm-doc.handbook-document img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+
 .pm-doc a {
   color: inherit;
   text-decoration: underline;
@@ -49,6 +72,38 @@
 
 .pm-doc blockquote p {
   margin: 0;
+}
+
+.pm-doc blockquote.handbook-callout {
+  border-left-width: 4px;
+  border-radius: 0 0.5rem 0.5rem 0;
+  background: #f9fafb;
+  padding: 0.75rem 1rem;
+  color: #344054;
+}
+
+.pm-doc blockquote[data-handbook-callout="tip"] {
+  border-left-color: #12b76a;
+  background: #ecfdf3;
+}
+
+.pm-doc blockquote[data-handbook-callout="warning"] {
+  border-left-color: #f79009;
+  background: #fffaeb;
+}
+
+.pm-doc blockquote[data-handbook-callout="important"] {
+  border-left-color: #2e90fa;
+  background: #eff8ff;
+}
+
+.pm-doc .handbook-callout-label {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: #344054;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .pm-doc > *,

@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
 import { HandbookEditor } from "./handbook-editor";
@@ -7,14 +8,21 @@ function renderEditor(
   article: Parameters<typeof HandbookEditor>[0]["article"] = null,
   categories: Array<{ id: string; name: string }> = [
     { id: "electronics", name: "Electronics" },
-  ]
+  ],
+  isStudent = false,
+  extraProps: Partial<Parameters<typeof HandbookEditor>[0]> = {}
 ) {
   const router = createMemoryRouter(
     [
       {
         path: "/handbook/new",
         Component: () => (
-          <HandbookEditor article={article} categories={categories} />
+          <HandbookEditor
+            article={article}
+            categories={categories}
+            isStudent={isStudent}
+            {...extraProps}
+          />
         ),
       },
     ],
@@ -28,15 +36,27 @@ describe("HandbookEditor", () => {
   it("shows only title, category, content, references, and the existing actions", () => {
     renderEditor();
 
+    expect(
+      screen.getByText(
+        "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Create”."
+      )
+    ).toBeTruthy();
     expect(screen.getByLabelText("Title")).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Category" })).toBeTruthy();
-    expect(screen.getByLabelText(/Article content/)).toBeTruthy();
+    expect(
+      screen.getByRole("textbox", { name: "Article content" })
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Inline code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Insert image" })).toBeTruthy();
     expect(screen.getByLabelText(/External references/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Cancel" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save draft" })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Publish article" })
     ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Submit for Staff review" })
+    ).toBeNull();
 
     expect(screen.queryByText("Section")).toBeNull();
     expect(screen.queryByText("Short summary")).toBeNull();
@@ -58,6 +78,18 @@ describe("HandbookEditor", () => {
     expect(
       screen.getByRole("combobox", { name: "Category" })
     ).toHaveTextContent("Electronics");
+    expect(screen.getByLabelText("Title")).toHaveValue("Soldering Basics");
+    expect(
+      screen.getByText(
+        "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Create”."
+      )
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("textbox", { name: "Article content" })
+    ).toHaveTextContent("Basic soldering guide.");
+    expect(screen.getByLabelText(/External references/)).toHaveValue(
+      "https://example.com/reference"
+    );
     expect(screen.queryByText("Section")).toBeNull();
     expect(screen.queryByText("Short summary")).toBeNull();
     expect(screen.queryByText(/Related Shelf products/)).toBeNull();
@@ -69,6 +101,202 @@ describe("HandbookEditor", () => {
 
     expect(screen.getByLabelText("Title")).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Category" })).toBeTruthy();
-    expect(screen.getByLabelText(/Article content/)).toBeTruthy();
+    expect(
+      screen.getByRole("textbox", { name: "Article content" })
+    ).toBeTruthy();
+  });
+
+  it("creates a Staff category inline and remains in the article form", async () => {
+    const user = userEvent.setup();
+    const savedDrafts: FormData[] = [];
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/new",
+          // why: the in-memory action returns a canonical category without a
+          // live database, so this test can verify the editor's inline flow.
+          action: async ({ request }) => {
+            const formData = await request.formData();
+            if (formData.get("intent") === "create-category") {
+              return {
+                ok: true,
+                category: {
+                  id: "category-2",
+                  name: String(formData.get("categoryName")),
+                },
+              };
+            }
+            savedDrafts.push(formData);
+            return { ok: true };
+          },
+          Component: () => (
+            <HandbookEditor article={null} categories={[]} isStudent={false} />
+          ),
+        },
+      ],
+      { initialEntries: ["/handbook/new"] }
+    );
+    render(<RouterProvider router={router} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Category" }));
+    await user.type(
+      await screen.findByRole("combobox", {
+        name: "Search Handbook categories",
+      }),
+      "Laser Cutting"
+    );
+    await user.click(
+      screen.getByRole("option", { name: 'Create "Laser Cutting"' })
+    );
+
+    expect(
+      await screen.findByRole("combobox", { name: "Category" })
+    ).toHaveTextContent("Laser Cutting");
+    await user.type(screen.getByLabelText("Title"), "Laser Cutter Basics");
+    await user.type(
+      screen.getByRole("textbox", { name: "Article content" }),
+      "Safe setup and cutting instructions."
+    );
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(savedDrafts).toHaveLength(1));
+    expect(savedDrafts[0]?.get("handbookCategoryId")).toBe("category-2");
+    expect(savedDrafts[0]?.get("title")).toBe("Laser Cutter Basics");
+    expect(router.state.location.pathname).toBe("/handbook/new");
+    expect(
+      screen.queryByRole("combobox", { name: "Search Handbook categories" })
+    ).toBeNull();
+  });
+
+  it("gives Students a review action and no publish action", () => {
+    renderEditor(null, [{ id: "electronics", name: "Electronics" }], true);
+
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Submit for Staff review" })
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Propose”."
+      )
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Publish/ })).toBeNull();
+  });
+
+  it("lets Students keep a missing category as a proposal", async () => {
+    const user = userEvent.setup();
+    renderEditor(null, [], true);
+
+    await user.click(screen.getByRole("combobox", { name: "Category" }));
+    await user.type(
+      await screen.findByRole("combobox", {
+        name: "Search Handbook categories",
+      }),
+      "Workshop Safety"
+    );
+    await user.click(
+      screen.getByRole("option", { name: 'Propose "Workshop Safety"' })
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Category" })
+    ).toHaveTextContent("Proposed: Workshop Safety");
+    expect(
+      screen.getByRole("button", { name: "Submit for Staff review" })
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Publish article" })
+    ).toBeNull();
+  });
+
+  it("shows relevant existing article titles while a new title is typed", async () => {
+    const user = userEvent.setup();
+    renderEditor(null, [{ id: "3d-printing", name: "3D Printing" }], false, {
+      initialCategoryId: "3d-printing",
+      titleMatches: [
+        {
+          slug: "change-filament",
+          title: "How to change filament",
+          handbookCategoryId: "3d-printing",
+          categoryName: "3D Printing",
+        },
+      ],
+    });
+
+    await user.type(screen.getByLabelText("Title"), "How to change filament");
+
+    expect(
+      screen.getByText("Similar knowledge already exists in this category")
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "View article" }).getAttribute("href")
+    ).toBe("/handbook/change-filament");
+    expect(
+      screen
+        .getByRole("link", { name: "Improve this article" })
+        .getAttribute("href")
+    ).toBe("/handbook/change-filament/edit?improve=1");
+    expect(
+      screen.getByRole("button", { name: "Publish article" })
+    ).toBeTruthy();
+  });
+
+  it("prefills a revision editor from the selected published snapshot", () => {
+    renderEditor(
+      {
+        id: "article-1",
+        status: "PUBLISHED",
+        draftTitle: "How to change filament",
+        draftContent: "Open the latch and remove the filament.",
+        handbookCategoryId: "electronics",
+        revisionBaseVersionId: "version-2",
+        draftSourceUrls: ["https://example.com/guide"],
+        versions: [],
+      },
+      [{ id: "electronics", name: "Electronics" }],
+      true,
+      { revisionMode: true }
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Improve Handbook article" })
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Title")).toHaveValue(
+      "How to change filament"
+    );
+    expect(
+      screen.getByRole("textbox", { name: "Article content" })
+    ).toHaveTextContent("Open the latch and remove the filament.");
+    expect(screen.getByLabelText(/External references/)).toHaveValue(
+      "https://example.com/guide"
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Submit improvement for Staff review",
+      })
+    ).toBeTruthy();
+  });
+
+  it("inserts a typed callout through the slash menu", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    const editor = screen.getByRole("textbox", { name: "Article content" });
+
+    await act(async () => {
+      await user.type(editor, "/warn");
+    });
+    const warningOption = await screen.findByRole("option", {
+      name: /Callout · Warning/,
+    });
+    await act(async () => {
+      await user.click(warningOption);
+    });
+
+    expect(editor).toHaveTextContent("[!WARNING]");
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("editor-v2-input") as HTMLTextAreaElement).value
+      ).toContain("\\[!WARNING\\]")
+    );
   });
 });

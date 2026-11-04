@@ -40,6 +40,38 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
+function groupArticlesByCategory<
+  T extends {
+    id: string;
+    handbookCategory: { id: string; name: string } | null;
+  },
+>(articles: T[], seedCategories: Array<{ id: string; name: string }>) {
+  const groups = new Map<
+    string,
+    { category: T["handbookCategory"]; articles: T[] }
+  >();
+  for (const category of seedCategories) {
+    groups.set(category.id, { category, articles: [] });
+  }
+  for (const article of articles) {
+    const key = article.handbookCategory?.id ?? "uncategorized";
+    const group: {
+      category: T["handbookCategory"];
+      articles: T[];
+    } = groups.get(key) ?? {
+      category: article.handbookCategory,
+      articles: [],
+    };
+    group.articles.push(article);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((left, right) =>
+    (left.category?.name ?? "Other knowledge").localeCompare(
+      right.category?.name ?? "Other knowledge"
+    )
+  );
+}
+
 export const meta: MetaFunction = () => [
   { title: appendToMetaTitle("Handbook") },
 ];
@@ -54,6 +86,12 @@ export default function HandbookIndexPage() {
     canEdit,
     isStudent,
   } = useLoaderData<typeof loader>();
+  const seedCategories = query
+    ? []
+    : handbookCategoryId
+    ? categories.filter((category) => category.id === handbookCategoryId)
+    : categories;
+  const articleGroups = groupArticlesByCategory(articles, seedCategories);
   return (
     <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -72,6 +110,12 @@ export default function HandbookIndexPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
+            to="/handbook/my-work"
+            className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+          >
+            My Work
+          </Link>
+          <Link
             to="/handbook/import"
             className="inline-flex h-10 items-center justify-center rounded-lg border border-red-700 bg-white px-4 text-sm font-semibold text-red-800 hover:bg-red-50"
           >
@@ -79,7 +123,7 @@ export default function HandbookIndexPage() {
           </Link>
           {isStudent ? (
             <Link
-              to="/handbook/contribute"
+              to="/handbook/new"
               className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
             >
               Contribute knowledge
@@ -143,30 +187,60 @@ export default function HandbookIndexPage() {
         </button>
       </Form>
 
-      {articles.length ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {articles.map(({ id, slug, handbookCategory, publishedVersion }) => (
-            <article
-              key={id}
-              className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm"
+      {articleGroups.length ? (
+        <div className="space-y-8">
+          {articleGroups.map(({ category, articles: groupArticles }) => (
+            <section
+              key={category?.id ?? "uncategorized"}
+              className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
             >
-              <div className="p-4">
-                {handbookCategory ? (
-                  <p className="text-xs font-semibold uppercase tracking-wide text-red-700">
-                    {handbookCategory.name}
+              <header className="mb-3 flex flex-wrap items-end justify-between gap-3 border-b border-gray-100 pb-3">
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-gray-900">
+                    {category?.name ?? "Other knowledge"}
+                  </h2>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {groupArticles.length}{" "}
+                    {groupArticles.length === 1 ? "article" : "articles"}
                   </p>
-                ) : null}
-                <h2 className="mt-1 text-lg font-semibold text-gray-950">
-                  <Link to={`/handbook/${slug}`} className="hover:text-red-800">
-                    {publishedVersion.title}
+                </div>
+                {category && (canEdit || isStudent) ? (
+                  <Link
+                    to={`/handbook/new?handbookCategoryId=${encodeURIComponent(
+                      category.id
+                    )}`}
+                    className="inline-flex h-9 items-center rounded-lg border border-red-700 bg-white px-3 text-sm font-semibold text-red-800 hover:bg-red-50"
+                  >
+                    Contribute to {category.name}
                   </Link>
-                </h2>
-                <p className="mt-3 text-xs text-gray-500">
-                  Updated{" "}
-                  {new Date(publishedVersion.publishedAt).toLocaleDateString()}
-                </p>
-              </div>
-            </article>
+                ) : null}
+              </header>
+              <ul className="divide-y divide-gray-100">
+                {groupArticles.map(({ id, slug, publishedVersion }) =>
+                  publishedVersion ? (
+                    <li
+                      key={id}
+                      className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0"
+                    >
+                      <h3 className="text-base font-semibold text-gray-950">
+                        <Link
+                          to={`/handbook/${slug}`}
+                          className="hover:text-red-800"
+                        >
+                          {publishedVersion.title}
+                        </Link>
+                      </h3>
+                      <p className="text-xs text-gray-500">
+                        Updated{" "}
+                        {new Date(
+                          publishedVersion.publishedAt
+                        ).toLocaleDateString()}
+                      </p>
+                    </li>
+                  ) : null
+                )}
+              </ul>
+            </section>
           ))}
         </div>
       ) : (

@@ -25,6 +25,8 @@ interface UseEditorViewOptions {
   disabled?: boolean;
   placeholder?: string;
   maxLength?: number;
+  allowRawBlockEditing?: boolean;
+  ariaLabel?: string;
   shouldAutoFocus?: boolean;
   onBlur?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onFocus?: (event: FocusEvent<HTMLTextAreaElement>) => void;
@@ -46,6 +48,8 @@ export function useEditorView(
     disabled,
     placeholder,
     maxLength,
+    allowRawBlockEditing = true,
+    ariaLabel,
     shouldAutoFocus,
     onBlur,
     onFocus,
@@ -103,6 +107,9 @@ export function useEditorView(
           isDisabled ? EDITOR_DISABLED_CLASS : "",
           "cursor-text"
         ),
+        role: "textbox",
+        "aria-label": ariaLabel ?? "Text editor",
+        "aria-multiline": "true",
       },
       editable: () => !disabledRef.current,
       dispatchTransaction: (tr) => {
@@ -138,22 +145,27 @@ export function useEditorView(
             "overflow-x-auto whitespace-pre-wrap p-3 text-xs font-mono text-gray-700";
           pre.textContent = node.attrs.raw ?? "";
           dom.appendChild(pre);
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className =
-            "absolute right-3 top-3 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-100";
-          button.textContent = "Edit source";
-          button.addEventListener("mousedown", (event) =>
-            event.preventDefault()
-          );
-          button.addEventListener("click", () => {
-            const resolvedPos =
-              typeof getPos === "function" ? getPos() : getPos;
-            if (typeof resolvedPos === "number") {
-              openRawBlockEditorRef.current(resolvedPos, node.attrs.raw ?? "");
-            }
-          });
-          dom.appendChild(button);
+          if (allowRawBlockEditing) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className =
+              "absolute right-3 top-3 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-100";
+            button.textContent = "Edit source";
+            button.addEventListener("mousedown", (event) =>
+              event.preventDefault()
+            );
+            button.addEventListener("click", () => {
+              const resolvedPos =
+                typeof getPos === "function" ? getPos() : getPos;
+              if (typeof resolvedPos === "number") {
+                openRawBlockEditorRef.current(
+                  resolvedPos,
+                  node.attrs.raw ?? ""
+                );
+              }
+            });
+            dom.appendChild(button);
+          }
           return {
             dom,
             update(updatedNode) {
@@ -250,7 +262,12 @@ export function useEditorView(
     );
     view.setProps({
       editable: () => !disabled,
-      attributes: { class: nextClass },
+      attributes: {
+        class: nextClass,
+        role: "textbox",
+        "aria-label": ariaLabel ?? "Text editor",
+        "aria-multiline": "true",
+      },
     });
     const dom = view.dom as HTMLElement;
     dom.className = nextClass;
@@ -259,7 +276,7 @@ export function useEditorView(
     } else {
       dom.removeAttribute("aria-disabled");
     }
-  }, [disabled, viewRef]);
+  }, [ariaLabel, disabled, viewRef]);
 
   // Update content when defaultValue changes
   useEffect(() => {

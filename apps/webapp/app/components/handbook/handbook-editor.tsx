@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Form, Link, useFetcher } from "react-router";
+import { EditorV2 } from "~/components/editor-v2/editor-v2";
 import { HandbookCategoryPicker } from "./handbook-category-picker";
+
+const HANDBOOK_HEADING_LEVELS = [2, 3];
 
 type HandbookEditorArticle = {
   id: string;
@@ -8,6 +11,9 @@ type HandbookEditorArticle = {
   draftTitle: string;
   draftContent: string;
   handbookCategoryId: string | null;
+  proposedCategoryName?: string | null;
+  revisionBaseVersionId?: string | null;
+  revisionSubmitted?: boolean;
   draftSourceUrls: string[];
   versions: Array<{
     versionNumber: number;
@@ -17,18 +23,66 @@ type HandbookEditorArticle = {
   }>;
 };
 
+type HandbookTitleMatch = {
+  slug: string;
+  title: string;
+  handbookCategoryId: string | null;
+  categoryName: string;
+};
+
+function normalizeTitle(value: string) {
+  return value
+    .normalize("NFKD")
+    .toLocaleLowerCase("en")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function findSimilarTitles(value: string, titles: HandbookTitleMatch[]) {
+  const query = normalizeTitle(value);
+  if (query.length < 3) return [];
+  const queryTokens = new Set(query.split(/\s+/));
+  return titles
+    .map((item) => {
+      const normalizedTitle = normalizeTitle(item.title);
+      const titleTokens = new Set(normalizedTitle.split(/\s+/));
+      const overlap = [...queryTokens].filter((token) =>
+        titleTokens.has(token)
+      ).length;
+      const score =
+        normalizedTitle.includes(query) || query.includes(normalizedTitle)
+          ? 1
+          : overlap / Math.max(queryTokens.size, titleTokens.size);
+      return { ...item, score };
+    })
+    .filter((item) => item.score >= 0.5)
+    .sort(
+      (left, right) =>
+        right.score - left.score || left.title.localeCompare(right.title)
+    )
+    .slice(0, 4);
+}
+
 export function HandbookEditor({
   article,
   categories,
   busy = false,
   errorMessage,
   saved = false,
+  isStudent = false,
+  revisionMode = false,
+  initialCategoryId = "",
+  titleMatches = [],
 }: {
   article: HandbookEditorArticle | null;
   categories: Array<{ id: string; name: string }>;
   busy?: boolean;
   errorMessage?: string;
   saved?: boolean;
+  isStudent?: boolean;
+  revisionMode?: boolean;
+  initialCategoryId?: string;
+  titleMatches?: HandbookTitleMatch[];
 }) {
   const categoryFetcher = useFetcher<{
     ok: boolean;
@@ -37,8 +91,47 @@ export function HandbookEditor({
   }>();
   const [availableCategories, setAvailableCategories] = useState(categories);
   const [handbookCategoryId, setHandbookCategoryId] = useState(
-    article?.handbookCategoryId ?? ""
+    article?.handbookCategoryId ?? initialCategoryId
   );
+  const [proposedCategoryName, setProposedCategoryName] = useState(
+    article?.proposedCategoryName ?? ""
+  );
+  const [title, setTitle] = useState(article?.draftTitle ?? "");
+
+  const uploadArticleImage = useCallback(async (file: File) => {
+    const formData = new FormData();
+    formData.set("image", file);
+    const response = await fetch("/api/handbook-image-upload", {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin",
+    });
+    const result = (await response.json()) as {
+      ok?: boolean;
+      src?: string;
+      message?: string;
+    };
+    if (!response.ok || !result.ok || !result.src) {
+      throw new Error(result.message ?? "The image could not be uploaded.");
+    }
+    return { src: result.src, alt: file.name.replace(/\.[^.]+$/u, "") };
+  }, []);
+
+  useEffect(() => {
+    setHandbookCategoryId(article?.handbookCategoryId ?? "");
+    setProposedCategoryName(article?.proposedCategoryName ?? "");
+    setTitle(article?.draftTitle ?? "");
+  }, [
+    article?.id,
+    article?.handbookCategoryId,
+    article?.proposedCategoryName,
+    article?.draftTitle,
+    revisionMode,
+  ]);
+
+  useEffect(() => {
+    if (!article) setHandbookCategoryId(initialCategoryId);
+  }, [article, initialCategoryId]);
 
   useEffect(() => {
     setAvailableCategories((current) => {
@@ -59,6 +152,7 @@ export function HandbookEditor({
         : [...current, category].sort((a, b) => a.name.localeCompare(b.name))
     );
     setHandbookCategoryId(category.id);
+    setProposedCategoryName("");
   }, [categoryFetcher.data]);
 
   function createCategory(name: string) {
@@ -67,6 +161,17 @@ export function HandbookEditor({
       { method: "post" }
     );
   }
+
+  const similarTitles = useMemo(
+    () =>
+      findSimilarTitles(
+        title,
+        titleMatches.filter(
+          (item) => item.handbookCategoryId === handbookCategoryId
+        )
+      ),
+    [handbookCategoryId, title, titleMatches]
+  );
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
@@ -79,12 +184,18 @@ export function HandbookEditor({
             ← Handbook
           </Link>
           <h1 className="mt-2 text-2xl font-semibold text-gray-950">
-            {article ? "Edit Handbook draft" : "New Handbook article"}
+            {revisionMode
+              ? "Improve Handbook article"
+              : article
+              ? "Edit Handbook draft"
+              : "New Handbook article"}
           </h1>
         </div>
         {article ? (
           <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700">
-            {article.status === "PUBLISHED"
+            {revisionMode
+              ? "Proposed revision · current version stays live"
+              : article.status === "PUBLISHED"
               ? "Published · draft edits are private"
               : article.status}
           </span>
@@ -94,6 +205,20 @@ export function HandbookEditor({
         method="post"
         className="space-y-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6"
       >
+        {revisionMode ? (
+          <>
+            <input type="hidden" name="revisionMode" value="1" />
+            <input
+              type="hidden"
+              name="revisionBaseVersionId"
+              value={article?.revisionBaseVersionId ?? ""}
+            />
+            <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-950">
+              This proposal is based on the current published version. Readers
+              will continue to see it until the new version is published.
+            </p>
+          </>
+        ) : null}
         {errorMessage ? (
           <p
             role="alert"
@@ -117,19 +242,60 @@ export function HandbookEditor({
             required
             name="title"
             maxLength={180}
-            defaultValue={article?.draftTitle ?? ""}
+            value={title}
+            onChange={(event) => setTitle(event.currentTarget.value)}
             className="mt-1 block h-10 w-full rounded-lg border border-gray-300 px-3 font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
           />
         </label>
+        {!article && similarTitles.length ? (
+          <aside className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <p className="text-sm font-semibold text-amber-950">
+              Similar knowledge already exists in this category
+            </p>
+            <ul className="mt-2 space-y-2">
+              {similarTitles.map((match) => (
+                <li
+                  key={match.slug}
+                  className="flex flex-wrap items-center justify-between gap-2 text-sm"
+                >
+                  <span className="font-medium text-gray-900">
+                    {match.title}
+                  </span>
+                  <span className="flex gap-3">
+                    <Link
+                      to={`/handbook/${encodeURIComponent(match.slug)}`}
+                      className="font-semibold text-red-800 hover:underline"
+                    >
+                      View article
+                    </Link>
+                    <Link
+                      to={`/handbook/${encodeURIComponent(
+                        match.slug
+                      )}/edit?improve=1`}
+                      className="font-semibold text-red-800 hover:underline"
+                    >
+                      Improve this article
+                    </Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </aside>
+        ) : null}
         <div className="block text-sm font-semibold text-gray-800">
           <span>Category</span>
           <HandbookCategoryPicker
             categories={availableCategories}
             value={handbookCategoryId}
-            onChange={(id) => setHandbookCategoryId(id)}
-            mode="staff"
+            proposedName={proposedCategoryName}
+            onChange={(id, proposal) => {
+              setHandbookCategoryId(id);
+              setProposedCategoryName(proposal);
+            }}
+            mode={isStudent ? "student" : "staff"}
             creating={categoryFetcher.state !== "idle"}
-            onCreateCategory={createCategory}
+            createSucceeded={Boolean(categoryFetcher.data?.ok)}
+            onCreateCategory={isStudent ? undefined : createCategory}
           />
           {categoryFetcher.data?.message ? (
             <p
@@ -143,22 +309,27 @@ export function HandbookEditor({
               {categoryFetcher.data.message}
             </p>
           ) : null}
+          <p className="mt-1 text-xs font-normal text-gray-500">
+            {isStudent
+              ? "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Propose”."
+              : "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Create”."}
+          </p>
         </div>
-        <label className="block text-sm font-semibold text-gray-800">
-          Article content{" "}
-          <span className="font-normal text-gray-500">
-            (Markdown supported)
-          </span>
-          <textarea
-            required
+        <div className="block text-sm font-semibold text-gray-800">
+          <span>Article content</span>
+          <EditorV2
             name="content"
-            maxLength={30000}
-            rows={16}
+            label="Article content"
             defaultValue={article?.draftContent ?? ""}
-            placeholder="# What it is&#10;&#10;Practical instructions, component lists, common problems, or tips…"
-            className="mt-1 block w-full rounded-lg border border-gray-300 p-3 font-mono text-sm font-normal leading-6 focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+            placeholder="Write practical instructions, lists, warnings, and tips."
+            maxLength={30000}
+            headingLevels={HANDBOOK_HEADING_LEVELS}
+            enableHandbookBlocks
+            allowRawBlockEditing={false}
+            onUploadImage={uploadArticleImage}
+            helpText="Use Heading 2 for sections and Heading 3 for subsections. Type / to add blocks. Images may be up to 2 MB. Add HTTPS video links with Link."
           />
-        </label>
+        </div>
         <label className="block text-sm font-semibold text-gray-800">
           External references{" "}
           <span className="font-normal text-gray-500">
@@ -203,16 +374,29 @@ export function HandbookEditor({
           >
             {busy ? "Saving…" : "Save draft"}
           </button>
-          <button
-            disabled={busy}
-            name="intent"
-            value="publish"
-            className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
-          >
-            {article?.status === "PUBLISHED"
-              ? "Publish new version"
-              : "Publish article"}
-          </button>
+          {isStudent ? (
+            <button
+              disabled={busy}
+              name="intent"
+              value="submit-for-review"
+              className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+            >
+              {revisionMode
+                ? "Submit improvement for Staff review"
+                : "Submit for Staff review"}
+            </button>
+          ) : (
+            <button
+              disabled={busy}
+              name="intent"
+              value="publish"
+              className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+            >
+              {revisionMode || article?.status === "PUBLISHED"
+                ? "Publish new version"
+                : "Publish article"}
+            </button>
+          )}
         </div>
       </Form>
     </main>

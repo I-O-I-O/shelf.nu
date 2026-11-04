@@ -821,7 +821,7 @@ export default function IoioAsk() {
         />
         <div className="mt-5 flex shrink-0 gap-2">
           <Link
-            to="/handbook/contribute"
+            to="/handbook/new"
             className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
           >
             Contribute knowledge

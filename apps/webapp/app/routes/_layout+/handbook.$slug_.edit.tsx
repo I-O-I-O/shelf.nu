@@ -9,12 +9,13 @@ import {
   useLoaderData,
   useLocation,
   useNavigation,
+  redirect,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { HandbookEditor } from "~/components/handbook/handbook-editor";
+import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import { handbookEditorAction } from "~/modules/ioio-handbook/editor.server";
 import { getHandbookEditData } from "~/modules/ioio-handbook/service.server";
-import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -22,7 +23,9 @@ import { error, payload } from "~/utils/http.server";
 export async function loader({ context, request, params }: LoaderFunctionArgs) {
   const { userId } = context.getSession();
   try {
-    const auth = await requireIoioStaffAccess({ context, request });
+    const auth = await requireIoioHandbookRead({ context, request });
+    const revisionMode =
+      new URL(request.url).searchParams.get("improve") === "1";
     if (auth.currentOrganization.type === "PERSONAL")
       throw new ShelfError({
         cause: null,
@@ -34,6 +37,9 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const result = await getHandbookEditData({
       organizationId: auth.organizationId,
       slug: params.slug,
+      ownerUserId: auth.isStudent && !revisionMode ? auth.userId : undefined,
+      userId: auth.userId,
+      revisionMode,
     });
     if (!result.article)
       throw new ShelfError({
@@ -43,7 +49,14 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         status: 404,
         shouldBeCaptured: false,
       });
-    return payload(result);
+    if (revisionMode && result.article?.revisionSubmitted) {
+      return redirect(
+        result.article.revisionContributorUserId === auth.userId
+          ? "/handbook/my-work?submitted=1"
+          : `/handbook/${encodeURIComponent(params.slug ?? "")}`
+      );
+    }
+    return payload({ ...result, isStudent: auth.isStudent, revisionMode });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -60,7 +73,8 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Edit article" };
 
 export default function EditHandbookArticlePage() {
-  const { article, categories } = useLoaderData<typeof loader>();
+  const { article, categories, isStudent, revisionMode } =
+    useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const location = useLocation();
   const navigation = useNavigation();
@@ -68,8 +82,11 @@ export default function EditHandbookArticlePage() {
     actionData && "message" in actionData ? actionData.message : undefined;
   return (
     <HandbookEditor
+      key={article?.id ?? "missing"}
       article={article}
       categories={categories}
+      isStudent={isStudent}
+      revisionMode={revisionMode}
       busy={navigation.state === "submitting"}
       saved={new URLSearchParams(location.search).has("saved")}
       errorMessage={

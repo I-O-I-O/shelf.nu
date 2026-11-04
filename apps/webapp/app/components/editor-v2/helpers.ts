@@ -13,7 +13,7 @@ import {
   wrappingInputRule,
 } from "prosemirror-inputrules";
 import { keymap } from "prosemirror-keymap";
-import type { MarkType, Schema } from "prosemirror-model";
+import { Fragment, type MarkType, type Schema } from "prosemirror-model";
 import {
   wrapInList,
   liftListItem,
@@ -21,7 +21,12 @@ import {
   splitListItem,
 } from "prosemirror-schema-list";
 import { Plugin } from "prosemirror-state";
-import type { Command as PMCommand, EditorState } from "prosemirror-state";
+import {
+  Selection,
+  type Command as PMCommand,
+  type EditorState,
+} from "prosemirror-state";
+import type { EditorView } from "prosemirror-view";
 import { Decoration, DecorationSet } from "prosemirror-view";
 
 import type { SlashCommandItem, ToolbarBlock } from "./types";
@@ -238,7 +243,17 @@ export function buildKeymap(schema: Schema, openLinkDialog: () => void) {
   return [keymap(bindings), keymap(baseKeymap)];
 }
 
-export function createSlashCommands(schema: Schema): SlashCommandItem[] {
+export interface SlashCommandOptions {
+  headingLevels?: number[];
+  enableHandbookBlocks?: boolean;
+  onRequestImage?: () => void;
+}
+
+export function createSlashCommands(
+  schema: Schema,
+  options: SlashCommandOptions = {}
+): SlashCommandItem[] {
+  const headingLevels = options.headingLevels ?? [1, 2, 3, 4];
   const commands: SlashCommandItem[] = [
     {
       id: "paragraph",
@@ -247,34 +262,18 @@ export function createSlashCommands(schema: Schema): SlashCommandItem[] {
       aliases: ["p", "text"],
       command: setBlockType(schema.nodes.paragraph),
     },
-    {
-      id: "heading1",
-      label: "Heading 1",
-      description: "Large section heading",
-      aliases: ["h1"],
-      command: setBlockType(schema.nodes.heading, { level: 1 }),
-    },
-    {
-      id: "heading2",
-      label: "Heading 2",
-      description: "Medium section heading",
-      aliases: ["h2"],
-      command: setBlockType(schema.nodes.heading, { level: 2 }),
-    },
-    {
-      id: "heading3",
-      label: "Heading 3",
-      description: "Small section heading",
-      aliases: ["h3"],
-      command: setBlockType(schema.nodes.heading, { level: 3 }),
-    },
-    {
-      id: "heading4",
-      label: "Heading 4",
-      description: "Tiny section heading",
-      aliases: ["h4"],
-      command: setBlockType(schema.nodes.heading, { level: 4 }),
-    },
+    ...headingLevels.map((level) => ({
+      id: `heading${level}`,
+      label:
+        level === 2
+          ? "Heading 2"
+          : level === 3
+          ? "Heading 3"
+          : `Heading ${level}`,
+      description: level === 2 ? "Main article section" : "Article subsection",
+      aliases: [`h${level}`],
+      command: setBlockType(schema.nodes.heading, { level }),
+    })),
     {
       id: "bullet_list",
       label: "Bulleted list",
@@ -308,7 +307,89 @@ export function createSlashCommands(schema: Schema): SlashCommandItem[] {
     });
   }
 
+  if (options.enableHandbookBlocks) {
+    commands.push(
+      ...(["NOTE", "TIP", "WARNING", "IMPORTANT"] as const).map((kind) => ({
+        id: `callout_${kind.toLocaleLowerCase("en")}`,
+        label: `Callout · ${kind[0]}${kind.slice(1).toLocaleLowerCase("en")}`,
+        description: `Insert a ${kind.toLocaleLowerCase("en")} callout block`,
+        aliases: ["callout", kind.toLocaleLowerCase("en")],
+        command: createCalloutCommand(schema, kind),
+      })),
+      {
+        id: "code_block",
+        label: "Code block",
+        description: "Insert formatted code or commands",
+        aliases: ["code", "snippet"],
+        command: setBlockType(schema.nodes.code_block),
+      }
+    );
+  }
+
+  if (options.onRequestImage) {
+    commands.push({
+      id: "image",
+      label: "Image",
+      description: "Upload an image into the article",
+      aliases: ["photo", "picture"],
+      command: () => {
+        options.onRequestImage?.();
+        return true;
+      },
+    });
+  }
+
   return commands;
+}
+
+export function createCalloutCommand(
+  schema: Schema,
+  kind: "NOTE" | "TIP" | "WARNING" | "IMPORTANT" = "NOTE"
+): PMCommand {
+  return (state, dispatch) => {
+    const parent = state.selection.$from.parent;
+    const depth = state.selection.$from.depth;
+    if (!parent.isTextblock || depth < 1) return false;
+
+    const marker = `[!${kind}] `;
+    const paragraph = schema.nodes.paragraph.create(
+      null,
+      Fragment.fromArray([schema.text(marker), ...parent.content.content])
+    );
+    const callout = schema.nodes.blockquote.create(null, paragraph);
+    const from = state.selection.$from.before(depth);
+    const tr = state.tr.replaceWith(from, from + parent.nodeSize, callout);
+    const cursor = Math.min(from + 2 + marker.length, tr.doc.content.size);
+    tr.setSelection(Selection.near(tr.doc.resolve(cursor)));
+    dispatch?.(tr.scrollIntoView());
+    return true;
+  };
+}
+
+export function insertImageBlock(view: EditorView, src: string, alt: string) {
+  const { state } = view;
+  const depth = state.selection.$from.depth;
+  if (depth < 1) return false;
+
+  const currentBlock = state.selection.$from.node(depth);
+  const blockPosition = state.selection.$from.before(depth);
+  const image = state.schema.nodes.image.create({
+    src,
+    alt,
+    title: alt,
+  });
+  const imageParagraph = state.schema.nodes.paragraph.create(null, image);
+  const blankParagraph = state.schema.nodes.paragraph.create();
+  const tr = state.tr.insert(
+    blockPosition + currentBlock.nodeSize,
+    Fragment.fromArray([imageParagraph, blankParagraph])
+  );
+  const cursor =
+    blockPosition + currentBlock.nodeSize + imageParagraph.nodeSize + 1;
+  tr.setSelection(Selection.near(tr.doc.resolve(cursor)));
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+  return true;
 }
 
 export function filterSlashCommands(

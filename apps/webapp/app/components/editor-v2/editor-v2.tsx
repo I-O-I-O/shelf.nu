@@ -1,12 +1,14 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
-import type { TextareaHTMLAttributes } from "react";
+import type { ChangeEvent, TextareaHTMLAttributes } from "react";
 import "prosemirror-view/style/prosemirror.css";
 import { toggleMark, wrapIn } from "prosemirror-commands";
 import { redo, undo } from "prosemirror-history";
@@ -15,14 +17,17 @@ import type { EditorState } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
 import { createEditorSchema } from "~/modules/editor-v2/markdoc-utils";
-import { handleActivationKeyPress } from "~/utils/keyboard";
 import { tw } from "~/utils/tw";
 
 import { BubbleMenu } from "./components/bubble-menu";
 import { LinkDialog, RawBlockDialog } from "./components/dialogs";
 import { SlashCommandMenu } from "./components/slash-command-menu";
 import { EditorToolbar } from "./components/toolbar";
-import { createHorizontalRuleCommand, createSlashCommands } from "./helpers";
+import {
+  createHorizontalRuleCommand,
+  createSlashCommands,
+  insertImageBlock,
+} from "./helpers";
 import { useBubbleMenu } from "./hooks/use-bubble-menu";
 import { useEditorCommands } from "./hooks/use-editor-commands";
 import { useEditorView } from "./hooks/use-editor-view";
@@ -40,9 +45,15 @@ interface EditorV2Props
   name: string;
   defaultValue: string;
   onChange?: (value: string) => void;
+  headingLevels?: number[];
+  enableHandbookBlocks?: boolean;
+  allowRawBlockEditing?: boolean;
+  helpText?: string;
+  onUploadImage?: (file: File) => Promise<{ src: string; alt?: string }>;
 }
 
 const HINT_TEXT = "Use / to access commands.";
+const MAX_EDITOR_IMAGE_SIZE = 2 * 1024 * 1024;
 
 export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
   function EditorV2(
@@ -54,6 +65,11 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       disabled,
       className,
       maxLength,
+      headingLevels,
+      enableHandbookBlocks = false,
+      allowRawBlockEditing = true,
+      helpText,
+      onUploadImage,
       onBlur,
       onFocus,
       onChange,
@@ -67,9 +83,25 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
     const schema = useMemo(() => createEditorSchema(), []);
     const editorContainerRef = useRef<HTMLDivElement | null>(null);
     const hiddenTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const imageInputRef = useRef<HTMLInputElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const [imageBusy, setImageBusy] = useState(false);
+    const [imageError, setImageError] = useState("");
 
-    const commands = useMemo(() => createSlashCommands(schema), [schema]);
+    const requestImage = useCallback(() => {
+      setImageError("");
+      imageInputRef.current?.click();
+    }, []);
+
+    const commands = useMemo(
+      () =>
+        createSlashCommands(schema, {
+          headingLevels,
+          enableHandbookBlocks,
+          onRequestImage: onUploadImage ? requestImage : undefined,
+        }),
+      [enableHandbookBlocks, headingLevels, onUploadImage, requestImage, schema]
+    );
 
     // Initialize hooks (all hooks share the same viewRef)
     const { toolbarState, applyToolbarState } = useToolbarState();
@@ -107,6 +139,39 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       viewRef
     );
 
+    const handleImageFile = async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (!file || !onUploadImage) return;
+      if (file.size > MAX_EDITOR_IMAGE_SIZE) {
+        setImageError("Images must be 2 MB or smaller.");
+        return;
+      }
+
+      setImageBusy(true);
+      setImageError("");
+      try {
+        const uploaded = await onUploadImage(file);
+        const alt = uploaded.alt ?? file.name.replace(/\.[^.]+$/u, "").trim();
+        if (
+          !viewRef.current ||
+          !insertImageBlock(viewRef.current, uploaded.src, alt)
+        ) {
+          throw new Error(
+            "Place the cursor in the article before inserting an image."
+          );
+        }
+      } catch (cause) {
+        setImageError(
+          cause instanceof Error
+            ? cause.message
+            : "The image could not be uploaded."
+        );
+      } finally {
+        setImageBusy(false);
+      }
+    };
+
     // Extract onKeyDown from restTextareaProps if it exists
     const parentOnKeyDown = restTextareaProps.onKeyDown as
       | ((event: KeyboardEvent) => boolean)
@@ -118,6 +183,8 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       disabled,
       placeholder,
       maxLength,
+      allowRawBlockEditing,
+      ariaLabel: label,
       shouldAutoFocus,
       onBlur: (event) => {
         // The slash menu is portaled to the body and positioned against the
@@ -185,6 +252,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
               onParagraphChange={handleParagraphChange}
               onBold={() => runCommand(toggleMark(schema.marks.strong))}
               onItalic={() => runCommand(toggleMark(schema.marks.em))}
+              onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
               onToggleLink={openLinkDialog}
               onBulletList={() =>
                 runCommand(wrapInList(schema.nodes.bullet_list))
@@ -199,24 +267,13 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
                   : undefined
               }
               hasDivider={Boolean(schema.nodes.horizontal_rule)}
+              headingLevels={headingLevels}
+              codeActive={toolbarState.code}
+              onRequestImage={onUploadImage ? requestImage : undefined}
+              imageBusy={imageBusy}
             />
           </div>
-          <div
-            className="relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300"
-            role="textbox"
-            tabIndex={0}
-            onMouseDown={(event) => {
-              if (!(event.target instanceof HTMLElement)) {
-                return;
-              }
-              if (event.target.closest('[contenteditable="true"]')) {
-                return;
-              }
-              event.preventDefault();
-              viewRef.current?.focus();
-            }}
-            onKeyDown={handleActivationKeyPress(() => viewRef.current?.focus())}
-          >
+          <div className="relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300">
             <div
               ref={editorContainerRef}
               className="min-h-[200px]"
@@ -238,9 +295,11 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
               state={bubbleState}
               onBold={() => runCommand(toggleMark(schema.marks.strong))}
               onItalic={() => runCommand(toggleMark(schema.marks.em))}
+              onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
               onLink={openLinkDialog}
               boldActive={toolbarState.bold}
               italicActive={toolbarState.italic}
+              codeActive={toolbarState.code}
               linkActive={toolbarState.link}
             />
             <SlashCommandMenu
@@ -263,10 +322,23 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           data-testid="editor-v2-input"
           {...restTextareaProps}
         />
+        {onUploadImage ? (
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            aria-label="Choose an article image"
+            onChange={handleImageFile}
+            disabled={disabled || imageBusy}
+          />
+        ) : null}
         <div className="flex flex-col gap-1 text-xs text-gray-500">
           <span>
-            {label} supports Markdown and Markdoc. {HINT_TEXT}
+            {helpText ?? `${label} supports Markdown and Markdoc. ${HINT_TEXT}`}
           </span>
+          {imageBusy ? <span role="status">Uploading image…</span> : null}
+          {imageError ? <span role="alert">{imageError}</span> : null}
           {maxLength ? (
             <span
               className={
@@ -283,12 +355,14 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           onHrefChange={setLinkHref}
           onApply={applyLink}
         />
-        <RawBlockDialog
-          state={rawBlockDialog}
-          onClose={closeRawBlockEditor}
-          onChange={setRawBlockContent}
-          onSave={applyRawBlockEdit}
-        />
+        {allowRawBlockEditing ? (
+          <RawBlockDialog
+            state={rawBlockDialog}
+            onClose={closeRawBlockEditor}
+            onChange={setRawBlockContent}
+            onSave={applyRawBlockEdit}
+          />
+        ) : null}
       </div>
     );
   }

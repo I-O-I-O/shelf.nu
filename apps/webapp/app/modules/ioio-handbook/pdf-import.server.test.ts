@@ -127,6 +127,17 @@ describe("Handbook PDF import normalization", () => {
     expect(result.content).not.toContain("Page 1");
   });
 
+  it("keeps deeply numbered PDF sections within the article H2/H3 hierarchy", () => {
+    const result = normalizeHandbookPdfPages([
+      "Filament Guide\n1.1 Changing filament\nStep one.\n1.1.1 Prepare the printer\nCheck the display.\n1.1.1.1 Deep instruction\nContinue carefully.",
+    ]);
+
+    expect(result.content).toContain("## 1.1 Changing filament");
+    expect(result.content).toContain("### 1.1.1 Prepare the printer");
+    expect(result.content).toContain("### 1.1.1.1 Deep instruction");
+    expect(result.content).not.toContain("####");
+  });
+
   it("rejects an invalid or unreadable PDF without returning an empty draft", async () => {
     await expect(importHandbookPdf(Buffer.from("not a PDF"))).rejects.toThrow(
       "Upload a valid PDF file."

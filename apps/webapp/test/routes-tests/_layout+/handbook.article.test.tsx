@@ -5,7 +5,19 @@ import { describe, expect, it, vi } from "vitest";
 // why: the article-page test covers visible fields; Markdown parsing and route
 // access are separate behaviors and are not needed to verify metadata output.
 vi.mock("~/components/markdown/markdown-viewer", () => ({
-  MarkdownViewer: ({ content }: { content: string }) => <div>{content}</div>,
+  MarkdownViewer: ({ content }: { content: string }) => (
+    <div>
+      {content.split(/\r?\n/u).map((line, index) => {
+        if (line.startsWith("### ")) {
+          return <h3 key={index}>{line.slice(4)}</h3>;
+        }
+        if (line.startsWith("## ")) {
+          return <h2 key={index}>{line.slice(3)}</h2>;
+        }
+        return line ? <p key={index}>{line}</p> : null;
+      })}
+    </div>
+  ),
 }));
 // why: this component test supplies loader data directly and must not access
 // the database or perform authorization queries.
@@ -84,5 +96,62 @@ describe("published Handbook article page", () => {
     expect(screen.queryByText("Legacy summary should not appear")).toBeNull();
     expect(screen.queryByText("Legacy section should not appear")).toBeNull();
     expect(screen.queryByText("Related Shelf equipment")).toBeNull();
+  });
+
+  it("shows a generated contents panel that links to article headings", async () => {
+    const article = {
+      id: "article-2",
+      slug: "filament-guide",
+      updatedAt: new Date("2026-11-03T10:00:00.000Z"),
+      handbookCategory: { id: "category-1", name: "3D Printing" },
+      publishedVersion: {
+        id: "version-2",
+        versionNumber: 2,
+        title: "How to change filament",
+        summary: null,
+        section: null,
+        content:
+          "## Before you start\n\n### Check the display\n\n## Changing the filament\n\n### Remove the old filament\n\n## Safety",
+        publishedAt: new Date("2026-11-03T10:00:00.000Z"),
+        publishedByName: "IOIO Staff",
+        sources: [],
+      },
+      versions: [
+        {
+          id: "version-2",
+          versionNumber: 2,
+          title: "How to change filament",
+          publishedAt: new Date("2026-11-03T10:00:00.000Z"),
+          publishedBy: "IOIO Staff",
+        },
+      ],
+    };
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/filament-guide",
+          loader: () => ({ article, canEdit: false }),
+          Component: HandbookArticlePage,
+        },
+      ],
+      { initialEntries: ["/handbook/filament-guide"] }
+    );
+
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findAllByText("Contents")).toHaveLength(2);
+    expect(
+      screen
+        .getAllByRole("link", { name: "Before you start" })
+        .some((link) => link.getAttribute("href") === "#before-you-start")
+    ).toBe(true);
+    expect(screen.getByRole("heading", { name: "Before you start" }).id).toBe(
+      "before-you-start"
+    );
+    expect(
+      screen
+        .getAllByRole("link", { name: "Check the display" })
+        .some((link) => link.getAttribute("href") === "#check-the-display")
+    ).toBe(true);
   });
 });

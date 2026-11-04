@@ -1,5 +1,5 @@
 import type { ChangeEvent, KeyboardEvent } from "react";
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Popover,
   PopoverContent,
@@ -27,6 +27,7 @@ export function HandbookCategoryPicker({
   proposedName = "",
   mode = "staff",
   creating = false,
+  createSucceeded = false,
   onChange,
   onCreateCategory,
 }: {
@@ -35,6 +36,7 @@ export function HandbookCategoryPicker({
   proposedName?: string;
   mode?: PickerMode;
   creating?: boolean;
+  createSucceeded?: boolean;
   onChange: (categoryId: string, proposedCategoryName: string) => void;
   onCreateCategory?: (name: string) => void;
 }) {
@@ -42,6 +44,7 @@ export function HandbookCategoryPicker({
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const wasCreating = useRef(false);
   const baseId = useId();
   const listboxId = `${baseId}-listbox`;
   const getOptionId = (index: number) => `${baseId}-option-${index}`;
@@ -70,6 +73,20 @@ export function HandbookCategoryPicker({
   const actionIndex = filteredCategories.length;
   const optionCount = filteredCategories.length + (canOfferAction ? 1 : 0);
 
+  useEffect(() => {
+    if (creating) {
+      wasCreating.current = true;
+      return;
+    }
+    if (!wasCreating.current) return;
+    wasCreating.current = false;
+    if (createSucceeded) {
+      setSearchQuery("");
+      setSelectedIndex(0);
+      setIsOpen(false);
+    }
+  }, [creating, createSucceeded]);
+
   function handleSearch(event: ChangeEvent<HTMLInputElement>) {
     setSearchQuery(event.target.value);
     setSelectedIndex(0);
@@ -87,10 +104,13 @@ export function HandbookCategoryPicker({
   }
 
   function handleAction() {
-    if (!canOfferAction) return;
-    if (mode === "staff") onCreateCategory?.(cleanedQuery);
-    else onChange("", cleanedQuery);
-    closePicker();
+    if (!canOfferAction || creating) return;
+    if (mode === "staff") {
+      onCreateCategory?.(cleanedQuery);
+    } else {
+      onChange("", cleanedQuery);
+      closePicker();
+    }
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
@@ -124,7 +144,7 @@ export function HandbookCategoryPicker({
     ? selectedCategory.name
     : proposedName
     ? `Proposed: ${proposedName}`
-    : "Search or select a Handbook category...";
+    : "Search or type a new category...";
 
   return (
     <>
@@ -184,7 +204,7 @@ export function HandbookCategoryPicker({
                   optionCount ? getOptionId(selectedIndex) : undefined
                 }
                 aria-autocomplete="list"
-                placeholder="Search Handbook categories..."
+                placeholder="Search or type a new category..."
                 className="h-10 w-full border-0 px-2 text-sm outline-none focus:ring-0"
                 value={searchQuery}
                 onChange={handleSearch}
@@ -214,33 +234,43 @@ export function HandbookCategoryPicker({
                   {category.name}
                 </div>
               ))}
-              {canOfferAction ? (
-                <div
-                  id={getOptionId(actionIndex)}
-                  role="option"
-                  aria-selected={selectedIndex === actionIndex}
-                  tabIndex={-1}
-                  aria-disabled={creating}
-                  className={tw(
-                    "cursor-pointer rounded-md px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50",
-                    selectedIndex === actionIndex && "bg-red-50",
-                    creating && "cursor-wait opacity-60"
-                  )}
-                  onClick={() => !creating && handleAction()}
-                >
-                  {creating
-                    ? "Creating category…"
-                    : `${
-                        mode === "staff" ? "Create" : "Propose"
-                      } “${cleanedQuery}”`}
-                </div>
-              ) : null}
-              {!filteredCategories.length && !canOfferAction ? (
+              {!filteredCategories.length ? (
                 <p role="status" className="px-3 py-2 text-sm text-gray-500">
                   {categories.length
                     ? "No matching Handbook categories. Enter a new name to continue."
                     : "No Handbook categories yet. Enter a name to create or propose one."}
                 </p>
+              ) : null}
+              {canOfferAction ? (
+                <div
+                  role="group"
+                  aria-label="Can't find the right category?"
+                  className="mt-1 border-t border-gray-200 px-2 pb-1 pt-2"
+                >
+                  <p className="px-1 pb-1 text-xs font-medium text-gray-500">
+                    Can&apos;t find the right category?
+                  </p>
+                  <div
+                    id={getOptionId(actionIndex)}
+                    role="option"
+                    aria-selected={selectedIndex === actionIndex}
+                    tabIndex={-1}
+                    aria-disabled={creating}
+                    className={tw(
+                      "cursor-pointer rounded-md px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50",
+                      selectedIndex === actionIndex && "bg-red-50",
+                      creating && "cursor-wait opacity-60"
+                    )}
+                    onClick={() => !creating && handleAction()}
+                  >
+                    {creating
+                      ? "Creating Handbook category…"
+                      : (mode === "staff" ? "Create" : "Propose") +
+                        ' "' +
+                        cleanedQuery +
+                        '"'}
+                  </div>
+                </div>
               ) : null}
             </div>
           </PopoverContent>

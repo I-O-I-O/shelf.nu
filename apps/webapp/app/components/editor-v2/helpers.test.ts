@@ -10,14 +10,21 @@
  * @see {@link file://./helpers.ts}
  */
 import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
 import { describe, expect, it } from "vitest";
 
 import {
   createEditorSchema,
   parseMarkdoc,
+  serializeMarkdoc,
 } from "~/modules/editor-v2/markdoc-utils";
 
-import { findLinkRange } from "./helpers";
+import {
+  createCalloutCommand,
+  createSlashCommands,
+  findLinkRange,
+  insertImageBlock,
+} from "./helpers";
 
 const schema = createEditorSchema();
 
@@ -72,5 +79,80 @@ describe("findLinkRange", () => {
     const markdoc = "[alpha](https://one.test)[beta](https://one.test)\n";
 
     expect(rangeTextAt(markdoc, 3)).toBe("alphabeta");
+  });
+});
+
+describe("Handbook editor commands", () => {
+  it("offers only Heading 2 and Heading 3 with the Handbook block set", () => {
+    const commands = createSlashCommands(schema, {
+      headingLevels: [2, 3],
+      enableHandbookBlocks: true,
+      onRequestImage: () => undefined,
+    });
+
+    expect(commands.map(({ label }) => label)).toEqual(
+      expect.arrayContaining([
+        "Heading 2",
+        "Heading 3",
+        "Callout · Note",
+        "Callout · Tip",
+        "Callout · Warning",
+        "Callout · Important",
+        "Code block",
+        "Image",
+      ])
+    );
+    expect(commands.some(({ label }) => label === "Heading 1")).toBe(false);
+    expect(commands.some(({ label }) => label === "Heading 4")).toBe(false);
+  });
+
+  it("creates a typed callout using the normal Markdown document format", () => {
+    const doc = parseMarkdoc("Make sure the printer is stopped.\n", schema);
+    const state = EditorState.create({ doc, schema });
+    let transaction = state.tr;
+
+    expect(
+      createCalloutCommand(schema, "WARNING")(state, (next) => {
+        transaction = next;
+      })
+    ).toBe(true);
+
+    expect(serializeMarkdoc(transaction.doc, schema)).toContain(
+      "> \\[!WARNING\\] Make sure the printer is stopped."
+    );
+    expect(transaction.selection.$from.parentOffset).toBe("[!WARNING] ".length);
+  });
+
+  it("inserts an uploaded image as its own document block", () => {
+    const doc = parseMarkdoc("First paragraph.\n\nNext paragraph.\n", schema);
+    const state = EditorState.create({ doc, schema });
+    const container = document.createElement("div");
+    let view: EditorView;
+    view = new EditorView(container, {
+      state,
+      dispatchTransaction(transaction) {
+        view.updateState(view.state.apply(transaction));
+      },
+    });
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, 4))
+    );
+
+    expect(
+      insertImageBlock(
+        view,
+        "/api/handbook-image?path=handbook/org/image.png",
+        "Laser cutter"
+      )
+    ).toBe(true);
+
+    const content = serializeMarkdoc(view.state.doc, schema);
+    expect(content.indexOf("First paragraph.")).toBeLessThan(
+      content.indexOf("![Laser cutter](/api/handbook-image")
+    );
+    expect(content.indexOf("![Laser cutter](/api/handbook-image")).toBeLessThan(
+      content.indexOf("Next paragraph.")
+    );
+    view.destroy();
   });
 });

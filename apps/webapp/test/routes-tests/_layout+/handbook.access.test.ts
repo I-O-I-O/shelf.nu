@@ -4,6 +4,7 @@ import { loader as handbookIndexLoader } from "~/routes/_layout+/handbook._index
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
+  listHandbookCategories: vi.fn(),
   listPublishedHandbookArticles: vi.fn(),
   getPublishedHandbookArticle: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock("~/utils/roles.server", () => ({
 // why: these route tests verify role access and organization scoping, not the
 // Handbook database query implementation.
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
+  listHandbookCategories: mocks.listHandbookCategories,
   listPublishedHandbookArticles: mocks.listPublishedHandbookArticles,
   getPublishedHandbookArticle: mocks.getPublishedHandbookArticle,
 }));
@@ -57,6 +59,7 @@ describe("IOIO Handbook read access", () => {
       Promise.resolve(handbookPermission("ADMIN"))
     );
     mocks.listPublishedHandbookArticles.mockResolvedValue([]);
+    mocks.listHandbookCategories.mockResolvedValue([]);
     mocks.getPublishedHandbookArticle.mockResolvedValue({
       id: "article-1",
       slug: "equipment-care",
@@ -88,8 +91,8 @@ describe("IOIO Handbook read access", () => {
       expect(mocks.listPublishedHandbookArticles).toHaveBeenCalledWith({
         organizationId: "ioio-team-1",
         query: "",
-        section: undefined,
       });
+      expect(mocks.listHandbookCategories).toHaveBeenCalledWith("ioio-team-1");
       expect(mocks.getPublishedHandbookArticle).toHaveBeenCalledWith({
         organizationId: "ioio-team-1",
         slug: "equipment-care",
