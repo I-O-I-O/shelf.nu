@@ -2517,11 +2517,36 @@ async function extractPdfText(buffer: Buffer) {
     .trim();
 }
 
-/** Shared low-level PDF text extraction for document review flows. This uses
- * the same local PDF.js and OCR fallback as inventory import, without applying
- * any inventory-specific parsing or normalization. */
+/** Shared low-level PDF extraction for document review flows. This uses the
+ * same local PDF.js and OCR fallback as inventory import, without applying any
+ * inventory-specific parsing or normalization. Positioned text is returned
+ * when PDF.js can provide it so document importers can use font-size cues. */
+export async function extractPdfDocumentPageData(buffer: Buffer) {
+  const extracted = await extractPdfPages(buffer);
+  let positionedPages = extracted.positionedPages;
+  if (!positionedPages?.length) {
+    try {
+      const positioned = await extractPdfPagesWithPdfJs(buffer);
+      if (positioned.diagnostics.meaningfulText) {
+        positionedPages = positioned.positionedPages;
+      }
+    } catch {
+      // Text import remains usable if the optional layout pass is unavailable.
+    }
+  }
+  return {
+    pages: extracted.pages.map(({ text }) => text),
+    pageNumbers: extracted.pages.map(({ page }) => page),
+    positionedPages: (positionedPages ?? []).map(({ page, items }) => ({
+      page,
+      items,
+    })),
+  };
+}
+
+/** Backward-compatible page text helper for document review flows. */
 export async function extractPdfDocumentPageText(buffer: Buffer) {
-  return (await extractPdfPages(buffer)).pages.map(({ text }) => text);
+  return (await extractPdfDocumentPageData(buffer)).pages;
 }
 
 /** Best-effort local text extraction for receipt review. No document data is

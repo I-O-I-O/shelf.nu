@@ -48,6 +48,16 @@ describe("HandbookEditor", () => {
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inline code" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Insert image" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ Add section" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "+ Add subsection" })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "Text style" })
+    ).toHaveTextContent("Section");
+    expect(
+      screen.getByRole("combobox", { name: "Text style" })
+    ).toHaveTextContent("Subsection");
     expect(screen.getByLabelText(/External references/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Cancel" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save draft" })).toBeTruthy();
@@ -58,10 +68,37 @@ describe("HandbookEditor", () => {
       screen.queryByRole("button", { name: "Submit for Staff review" })
     ).toBeNull();
 
-    expect(screen.queryByText("Section")).toBeNull();
     expect(screen.queryByText("Short summary")).toBeNull();
     expect(screen.queryByText(/Related Shelf products/)).toBeNull();
     expect(screen.queryByText(/Related Shelf Kits/)).toBeNull();
+  });
+
+  it("adds a section and nested subsection using the visible editor actions", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+
+    const editor = screen.getByTestId("editor-v2-content");
+    await user.click(screen.getByRole("button", { name: "+ Add section" }));
+    expect(editor.querySelector("h2")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "+ Add subsection" })
+    ).not.toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "+ Add subsection" }));
+    expect(editor.querySelector("h3")).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Subsection controls" })
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Rename" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Rename subsection" }),
+      "Additive manufacturing"
+    );
+    await user.click(screen.getByRole("button", { name: "Save name" }));
+    expect(editor.querySelector("h3")?.textContent).toBe(
+      "Additive manufacturing"
+    );
   });
 
   it("uses the same reduced fields when editing a draft", () => {
@@ -90,7 +127,6 @@ describe("HandbookEditor", () => {
     expect(screen.getByLabelText(/External references/)).toHaveValue(
       "https://example.com/reference"
     );
-    expect(screen.queryByText("Section")).toBeNull();
     expect(screen.queryByText("Short summary")).toBeNull();
     expect(screen.queryByText(/Related Shelf products/)).toBeNull();
     expect(screen.queryByText(/Related Shelf Kits/)).toBeNull();

@@ -13,27 +13,34 @@ import {
   data,
   Form,
   Link,
+  redirect,
   useActionData,
   useLoaderData,
   useNavigation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
-import {
-  HandbookImportReview,
-  type HandbookImportDraft,
-} from "~/components/handbook/handbook-import-review";
+import { HandbookImportReview } from "~/components/handbook/handbook-import-review";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
-import { handbookEditorAction } from "~/modules/ioio-handbook/editor.server";
 import {
   HANDBOOK_PDF_MAX_BYTES,
   HandbookPdfImportError,
   importHandbookPdf,
 } from "~/modules/ioio-handbook/pdf-import.server";
+import type {
+  HandbookImportArticle,
+  HandbookImportDraft,
+} from "~/modules/ioio-handbook/pdf-import.shared";
 import {
+  createHandbookImportDrafts,
   HandbookValidationError,
+  listHandbookArticleTitles,
   listHandbookCategories,
-  submitHandbookObservation,
 } from "~/modules/ioio-handbook/service.server";
+import {
+  HandbookStructureAnalysisError,
+  improveHandbookStructureWithClaude,
+  isHandbookStructureAnalysisAvailable,
+} from "~/modules/ioio-handbook/structure-analysis.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -53,12 +60,15 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         shouldBeCaptured: false,
       });
     }
-    const categories = await listHandbookCategories(auth.organizationId);
+    const [categories, existingArticles] = await Promise.all([
+      listHandbookCategories(auth.organizationId),
+      listHandbookArticleTitles({ organizationId: auth.organizationId }),
+    ]);
     return payload({
       categories,
+      existingArticles,
       isStudent: auth.isStudent,
-      organizationId: auth.organizationId,
-      userId: auth.userId,
+      claudeAvailable: isHandbookStructureAnalysisAvailable(),
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -74,27 +84,79 @@ function isUploadedFile(value: FormDataEntryValue | null): value is File {
   );
 }
 
-function normalizedReferences(value: string) {
-  const references = value
-    .split(/\r?\n/u)
-    .map((url) => url.trim())
-    .filter(Boolean);
-  if (references.length > 20) return null;
-  const unique = [...new Set(references)];
-  if (
-    unique.some((url) => {
-      if (url.length > 500) return true;
-      try {
-        const parsed = new URL(url);
-        return parsed.protocol !== "http:" && parsed.protocol !== "https:";
-      } catch {
-        return true;
-      }
-    })
-  ) {
-    return null;
-  }
-  return unique;
+function safeImportName(value: string) {
+  const basename = value.replace(/\\/gu, "/").split("/").pop()?.trim() ?? "";
+  return (
+    basename
+      .replace(/[\p{Cc}<>:"|?*]/gu, "")
+      .replace(/\s+/gu, " ")
+      .slice(0, 180) || "Imported PDF"
+  );
+}
+
+function isImportSection(value: unknown) {
+  if (!value || typeof value !== "object") return false;
+  const section = value as Record<string, unknown>;
+  return (
+    typeof section.id === "string" &&
+    typeof section.sourceOrder === "number" &&
+    typeof section.title === "string" &&
+    (section.level === 2 || section.level === 3) &&
+    typeof section.markdown === "string" &&
+    Array.isArray(section.sourceUrls) &&
+    section.sourceUrls.every((url) => typeof url === "string") &&
+    (section.sourceHeadingIds === undefined ||
+      (Array.isArray(section.sourceHeadingIds) &&
+        section.sourceHeadingIds.every((id) => typeof id === "string"))) &&
+    (section.sourcePage === undefined ||
+      (typeof section.sourcePage === "number" && section.sourcePage > 0))
+  );
+}
+
+function isSourceOutlineHeading(value: unknown) {
+  if (!value || typeof value !== "object") return false;
+  const heading = value as Record<string, unknown>;
+  return (
+    typeof heading.id === "string" &&
+    typeof heading.sourceOrder === "number" &&
+    typeof heading.title === "string" &&
+    (heading.level === 2 || heading.level === 3) &&
+    (heading.sourcePage === undefined ||
+      (typeof heading.sourcePage === "number" && heading.sourcePage > 0))
+  );
+}
+
+function isSavedImportDraft(value: unknown): value is HandbookImportDraft {
+  if (!value || typeof value !== "object") return false;
+  const draft = value as Partial<HandbookImportDraft>;
+  return (
+    typeof draft.title === "string" &&
+    draft.title.length <= 180 &&
+    typeof draft.content === "string" &&
+    draft.content.length <= 300_000 &&
+    Array.isArray(draft.sourceUrls) &&
+    draft.sourceUrls.every((url) => typeof url === "string") &&
+    typeof draft.sourceName === "string" &&
+    typeof draft.categorySuggestion === "string" &&
+    draft.referencesByHeading !== null &&
+    typeof draft.referencesByHeading === "object" &&
+    Array.isArray(draft.sourceOutline) &&
+    draft.sourceOutline.every(isSourceOutlineHeading) &&
+    Array.isArray(draft.sections) &&
+    draft.sections.every(isImportSection) &&
+    Array.isArray(draft.articles) &&
+    draft.articles.every(
+      (article) =>
+        Boolean(article) &&
+        typeof article === "object" &&
+        typeof (article as HandbookImportArticle).id === "string" &&
+        typeof (article as HandbookImportArticle).title === "string" &&
+        Array.isArray((article as HandbookImportArticle).sections) &&
+        (article as HandbookImportArticle).sections.every(isImportSection)
+    ) &&
+    typeof draft.hierarchyDetected === "boolean" &&
+    typeof draft.fallback === "boolean"
+  );
 }
 
 function importErrorMessage(cause: unknown) {
@@ -107,19 +169,68 @@ function importErrorMessage(cause: unknown) {
   return "This PDF could not be read. Try exporting it again as a standard PDF and retry.";
 }
 
-function isSavedImportDraft(value: unknown): value is HandbookImportDraft {
-  if (!value || typeof value !== "object") return false;
-  const draft = value as Partial<HandbookImportDraft>;
-  return (
-    typeof draft.title === "string" &&
-    typeof draft.content === "string" &&
-    Array.isArray(draft.sourceUrls) &&
-    draft.sourceUrls.every((url) => typeof url === "string") &&
-    (draft.handbookCategoryId === undefined ||
-      typeof draft.handbookCategoryId === "string") &&
-    (draft.proposedCategoryName === undefined ||
-      typeof draft.proposedCategoryName === "string")
-  );
+function parseImportDraft(value: FormDataEntryValue | null) {
+  if (typeof value !== "string" || value.length > 1_400_000) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isSavedImportDraft(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+type ApprovedImportArticle = {
+  title: string;
+  content: string;
+  sourceUrls: string[];
+  existingArticleSlug?: string;
+  revisionBaseVersionId?: string;
+};
+
+function parseApprovedArticles(
+  value: FormDataEntryValue | null
+): ApprovedImportArticle[] | null {
+  if (typeof value !== "string" || value.length > 1_000_000) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 30) {
+      return null;
+    }
+    const articles: Array<ApprovedImportArticle | null> = parsed.map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const article = item as Record<string, unknown>;
+      if (
+        typeof article.title !== "string" ||
+        typeof article.content !== "string" ||
+        !Array.isArray(article.sourceUrls) ||
+        !article.sourceUrls.every((url) => typeof url === "string") ||
+        (article.existingArticleSlug !== undefined &&
+          typeof article.existingArticleSlug !== "string") ||
+        (article.revisionBaseVersionId !== undefined &&
+          typeof article.revisionBaseVersionId !== "string")
+      ) {
+        return null;
+      }
+      return {
+        title: article.title,
+        content: article.content,
+        sourceUrls: article.sourceUrls as string[],
+        ...(typeof article.existingArticleSlug === "string"
+          ? {
+              existingArticleSlug: article.existingArticleSlug,
+              revisionBaseVersionId:
+                typeof article.revisionBaseVersionId === "string"
+                  ? article.revisionBaseVersionId
+                  : undefined,
+            }
+          : {}),
+      };
+    });
+    if (articles.some((article) => article === null)) return null;
+    return articles as ApprovedImportArticle[];
+  } catch {
+    return null;
+  }
 }
 
 export async function action(args: ActionFunctionArgs) {
@@ -183,23 +294,6 @@ export async function action(args: ActionFunctionArgs) {
   }
   const intent = String(form.get("intent") ?? "");
 
-  if (
-    intent === "create-category" ||
-    intent === "save-draft" ||
-    intent === "publish"
-  ) {
-    if (!auth.canEdit) {
-      return data(
-        payload({
-          kind: "error" as const,
-          message: "Only Staff can save or publish Handbook articles.",
-        }),
-        { status: 403 }
-      );
-    }
-    return handbookEditorAction(args);
-  }
-
   if (intent === "upload-pdf") {
     const file = form.get("file");
     if (!isUploadedFile(file) || !file.name) {
@@ -231,7 +325,7 @@ export async function action(args: ActionFunctionArgs) {
           { status: 400 }
         );
       }
-      const imported = await importHandbookPdf(bytes);
+      const imported = await importHandbookPdf(bytes, file.name);
       return data(payload({ kind: "preview" as const, draft: imported }));
     } catch (cause) {
       return data(
@@ -241,106 +335,81 @@ export async function action(args: ActionFunctionArgs) {
     }
   }
 
-  if (intent === "submit-review") {
-    if (!auth.isStudent) {
+  if (intent === "improve-structure") {
+    const draft = parseImportDraft(form.get("draft"));
+    if (!draft) {
       return data(
         payload({
           kind: "error" as const,
-          keepEditor: true,
           message:
-            "Only Students can submit an imported article for Staff review.",
-        }),
-        { status: 403 }
-      );
-    }
-    const title = String(form.get("title") ?? "").trim();
-    const content = String(form.get("content") ?? "").trim();
-    const handbookCategoryId = String(
-      form.get("handbookCategoryId") ?? ""
-    ).trim();
-    const proposedCategoryName = String(
-      form.get("proposedCategoryName") ?? ""
-    ).trim();
-    const references = normalizedReferences(
-      String(form.get("sourceUrls") ?? "")
-    );
-    if (!title || title.length > 180 || !content || content.length > 30_000) {
-      return data(
-        payload({
-          kind: "error" as const,
-          keepEditor: true,
-          message:
-            "Add a title and article content within the Handbook field limits.",
-        }),
-        { status: 400 }
-      );
-    }
-    if (references === null) {
-      return data(
-        payload({
-          kind: "error" as const,
-          keepEditor: true,
-          message:
-            "References must be up to 20 valid http(s) URLs, each no longer than 500 characters.",
-        }),
-        { status: 400 }
-      );
-    }
-    if (
-      (!handbookCategoryId && !proposedCategoryName) ||
-      (handbookCategoryId && proposedCategoryName)
-    ) {
-      return data(
-        payload({
-          kind: "error" as const,
-          keepEditor: true,
-          message:
-            "Choose a Handbook category or propose a new one before submitting.",
-        }),
-        { status: 400 }
-      );
-    }
-    const reviewContent = references.length
-      ? `${content}\n\nExternal references:\n${references
-          .map((url) => `- ${url}`)
-          .join("\n")}`
-      : content;
-    if (reviewContent.length > 4000) {
-      return data(
-        payload({
-          kind: "error" as const,
-          keepEditor: true,
-          message:
-            "Student review submissions support up to 4,000 characters, including references. Shorten the imported article before submitting.",
+            "The extracted structure is unavailable. Upload the PDF again.",
         }),
         { status: 400 }
       );
     }
     try {
-      const result = await submitHandbookObservation({
-        organizationId: auth.organizationId,
-        userId: auth.userId,
-        title,
-        content: reviewContent,
-        handbookCategoryId: handbookCategoryId || undefined,
-        proposedCategoryName: proposedCategoryName || undefined,
-      });
+      const suggestion = await improveHandbookStructureWithClaude(draft);
       return data(
         payload({
-          kind: "submitted" as const,
-          message: result.duplicate
-            ? `This matches existing Handbook knowledge, “${result.duplicateTitle}”. No duplicate contribution was created.`
-            : "Saved as a contribution for Staff review. It has not changed the Handbook.",
+          kind: "structure-suggestion" as const,
+          ...suggestion,
         })
       );
     } catch (cause) {
+      const message =
+        cause instanceof HandbookStructureAnalysisError
+          ? cause.message
+          : "Claude is unavailable. The deterministic proposal is still available.";
+      return data(payload({ kind: "error" as const, message }), {
+        status: 400,
+      });
+    }
+  }
+
+  if (intent === "approve-structure") {
+    const articles = parseApprovedArticles(form.get("articles"));
+    if (!articles) {
+      return data(
+        payload({
+          kind: "error" as const,
+          message: "Review the suggested articles and try again.",
+        }),
+        { status: 400 }
+      );
+    }
+    const newCategoryName = String(form.get("newCategoryName") ?? "").trim();
+    if (newCategoryName && !auth.canEdit) {
+      return data(
+        payload({
+          kind: "error" as const,
+          message: "Only Staff can create a Handbook category during import.",
+        }),
+        { status: 403 }
+      );
+    }
+    const sourceName = safeImportName(
+      String(form.get("sourceName") ?? "Imported PDF")
+    );
+    const provenance = `> [!NOTE] Imported from: ${sourceName}`;
+    try {
+      const result = await createHandbookImportDrafts({
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        handbookCategoryId:
+          String(form.get("handbookCategoryId") ?? "").trim() || undefined,
+        newCategoryName: auth.canEdit
+          ? newCategoryName || undefined
+          : undefined,
+        articles: articles.map((article) => ({
+          ...article,
+          content: `${article.content.trim()}\n\n${provenance}`,
+        })),
+      });
+      return redirect(`/handbook/my-work?imported=${result.created.length}`);
+    } catch (cause) {
       if (cause instanceof HandbookValidationError) {
         return data(
-          payload({
-            kind: "error" as const,
-            keepEditor: true,
-            message: cause.message,
-          }),
+          payload({ kind: "error" as const, message: cause.message }),
           { status: 400 }
         );
       }
@@ -364,7 +433,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Import PDF" };
 
 export default function HandbookPdfImportPage() {
-  const { categories, isStudent, organizationId, userId } =
+  const { categories, existingArticles, isStudent, claudeAvailable } =
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
@@ -373,66 +442,19 @@ export default function HandbookPdfImportPage() {
       ? actionData.draft
       : null;
   const [draft, setDraft] = useState<HandbookImportDraft | null>(preview);
-  const [submittedMessage, setSubmittedMessage] = useState("");
-  const localDraftKey = `handbook-import-draft:${organizationId}:${userId}`;
 
   useEffect(() => {
-    if (preview) {
-      setDraft(preview);
-      setSubmittedMessage("");
-      return;
-    }
-    if (actionData && "kind" in actionData && actionData.kind === "submitted") {
-      window.localStorage.removeItem(localDraftKey);
-      setSubmittedMessage(actionData.message);
-      setDraft(null);
-      return;
-    }
-    if (!draft && !actionData) {
-      try {
-        const saved = window.localStorage.getItem(localDraftKey);
-        if (saved) {
-          const parsed: unknown = JSON.parse(saved);
-          if (isSavedImportDraft(parsed)) setDraft(parsed);
-          else window.localStorage.removeItem(localDraftKey);
-        }
-      } catch {
-        window.localStorage.removeItem(localDraftKey);
-      }
-    }
-  }, [actionData, draft, localDraftKey, preview]);
+    if (preview) setDraft(preview);
+  }, [preview]);
 
-  const pageError =
-    actionData && "kind" in actionData && actionData.kind === "error"
-      ? actionData.message
-      : actionData &&
-        "ok" in actionData &&
-        !actionData.ok &&
-        "message" in actionData
+  const errorCandidate =
+    actionData && typeof actionData === "object" && "message" in actionData
       ? actionData.message
       : undefined;
+  const pageError =
+    typeof errorCandidate === "string" ? errorCandidate : undefined;
   function importAnother() {
-    window.localStorage.removeItem(localDraftKey);
     window.location.assign("/handbook/import");
-  }
-
-  if (submittedMessage) {
-    return (
-      <main className="mx-auto max-w-3xl px-4 py-8 sm:px-6">
-        <section className="rounded-xl border border-green-200 bg-green-50 p-6">
-          <h1 className="text-xl font-semibold text-green-950">
-            Sent for Staff review
-          </h1>
-          <p className="mt-2 text-sm text-green-900">{submittedMessage}</p>
-          <Link
-            to="/handbook"
-            className="mt-4 inline-flex font-semibold text-green-950 underline"
-          >
-            Return to Handbook
-          </Link>
-        </section>
-      </main>
-    );
   }
 
   if (draft) {
@@ -440,9 +462,9 @@ export default function HandbookPdfImportPage() {
       <HandbookImportReview
         draft={draft}
         categories={categories}
+        existingArticles={existingArticles}
         isStudent={isStudent}
-        organizationId={organizationId}
-        userId={userId}
+        claudeAvailable={claudeAvailable}
         errorMessage={pageError}
         onImportAnother={importAnother}
       />
@@ -461,9 +483,10 @@ export default function HandbookPdfImportPage() {
         Import a PDF to the Handbook
       </h1>
       <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600">
-        Extract document text and structure into an editable article. Importing
-        never publishes it. Text PDFs up to 5 MB and 50 pages are supported; OCR
-        for scanned PDFs is limited to 20 pages.
+        Extract headings, sections, lists, and references, then review the
+        proposed article structure. No article or category is created until you
+        approve the structure. Staff and Students can save drafts; publishing
+        remains part of the normal Handbook workflow.
       </p>
       {pageError ? (
         <p
@@ -491,6 +514,8 @@ export default function HandbookPdfImportPage() {
         </label>
         <p className="text-xs text-gray-500">
           Text PDFs and scanned PDFs are supported when local OCR is available.
+          Text PDFs up to 5 MB and 50 pages are supported; OCR for scanned PDFs
+          is limited to 20 pages.
         </p>
         <div className="flex justify-end">
           <button

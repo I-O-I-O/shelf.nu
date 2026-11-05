@@ -327,7 +327,7 @@ export function HandbookEditor({
             enableHandbookBlocks
             allowRawBlockEditing={false}
             onUploadImage={uploadArticleImage}
-            helpText="Use Heading 2 for sections and Heading 3 for subsections. Type / to add blocks. Images may be up to 2 MB. Add HTTPS video links with Link."
+            helpText="Use Section for a main article part and Subsection for a nested part. Type / to add blocks. Images may be up to 2 MB. Add HTTPS video links with Link."
           />
         </div>
         <label className="block text-sm font-semibold text-gray-800">

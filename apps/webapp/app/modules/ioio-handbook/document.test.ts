@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assignHandbookHeadingIds, getHandbookOutline } from "./document";
+import {
+  assignHandbookHeadingIds,
+  compareHandbookVersions,
+  findHandbookSearchMatch,
+  getHandbookDocument,
+  getHandbookOutline,
+} from "./document";
 
 describe("Handbook article documents", () => {
   it("derives a stable outline from H2 and H3 Markdown headings only", () => {
@@ -55,5 +61,118 @@ describe("Handbook article documents", () => {
     expect(container.querySelector("blockquote p")?.textContent).toBe(
       "WARNING: Stop the printer first."
     );
+  });
+
+  it("keeps H2 sections and H3 subsections as nested canonical Markdown blocks", () => {
+    const document = getHandbookDocument(
+      [
+        "Opening paragraph.",
+        "",
+        "## Introduction",
+        "",
+        "Overview text.",
+        "",
+        "## Terminology",
+        "",
+        "### Additive manufacturing",
+        "",
+        "Layered process.",
+        "",
+        "### Subtractive manufacturing",
+        "",
+        "Material removal.",
+        "",
+        "## References",
+        "- [Guide](https://example.test)",
+      ].join("\n")
+    );
+
+    expect(document.introduction).toBe("");
+    expect(document.sections.map(({ title }) => title)).toEqual([
+      "Introduction",
+      "Terminology",
+      "References",
+    ]);
+    expect(document.sections[1]).toMatchObject({
+      id: "terminology",
+      content: "",
+      subsections: [
+        {
+          id: "additive-manufacturing",
+          title: "Additive manufacturing",
+          content: "Layered process.",
+        },
+        {
+          id: "subtractive-manufacturing",
+          title: "Subtractive manufacturing",
+          content: "Material removal.",
+        },
+      ],
+    });
+    expect(document.sections[0]?.content).toContain("Opening paragraph.");
+    expect(document.sections[2]?.content).toContain("https://example.test");
+  });
+
+  it("shows unheaded opening content as a navigable Introduction when sections follow", () => {
+    const document = getHandbookDocument(
+      "Opening paragraph.\n\n## Terminology\nDefinitions."
+    );
+    const match = findHandbookSearchMatch(
+      "Opening paragraph.\n\n## Terminology\nDefinitions.",
+      "opening paragraph"
+    );
+
+    expect(document.introduction).toBe("Opening paragraph.");
+    expect(document.introductionId).toBe("introduction");
+    expect(match).toEqual({ id: "introduction", title: "Introduction" });
+  });
+
+  it("reports deterministic section changes and resolves structured search hits", () => {
+    const before = [
+      "## Terminology",
+      "Old definition.",
+      "### Additive manufacturing",
+      "Layers are added.",
+      "## References",
+      "Old link.",
+    ].join("\n");
+    const after = [
+      "## Terminology",
+      "Expanded definition.",
+      "### Additive manufacturing",
+      "Layers are added.",
+      "## FDM",
+      "Filament is deposited.",
+      "## References",
+      "Updated link.",
+    ].join("\n");
+    const differences = compareHandbookVersions(before, after);
+
+    expect(differences.map(({ title, status }) => [title, status])).toEqual([
+      ["Terminology", "Modified"],
+      ["Additive manufacturing", "Unchanged"],
+      ["FDM", "Added"],
+      ["References", "Modified"],
+    ]);
+    expect(findHandbookSearchMatch(after, "filament")).toEqual({
+      id: "fdm",
+      title: "FDM",
+    });
+    expect(findHandbookSearchMatch(after, "terminology")).toEqual({
+      id: "terminology",
+      title: "Terminology",
+    });
+  });
+
+  it("marks stable sections as modified when their order changes", () => {
+    const differences = compareHandbookVersions(
+      "## Introduction\nStart here.\n## References\nUseful links.",
+      "## References\nUseful links.\n## Introduction\nStart here."
+    );
+
+    expect(differences.map(({ title, status }) => [title, status])).toEqual([
+      ["References", "Modified"],
+      ["Introduction", "Modified"],
+    ]);
   });
 });

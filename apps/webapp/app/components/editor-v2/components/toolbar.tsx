@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import {
   Bold,
@@ -69,12 +69,14 @@ interface ParagraphSelectProps {
   value: ToolbarBlock;
   onChange: (value: ToolbarBlock) => void;
   headingLevels?: number[];
+  enableHandbookBlocks?: boolean;
 }
 
 export function ParagraphSelect({
   value,
   onChange,
   headingLevels = [1, 2, 3, 4],
+  enableHandbookBlocks = false,
 }: ParagraphSelectProps) {
   const normalized = value === "raw_block" ? "paragraph" : value;
   const visibleHeadingLevels = [
@@ -97,10 +99,16 @@ export function ParagraphSelect({
         onChange={(event) => onChange(event.target.value as ToolbarBlock)}
         disabled={value === "raw_block"}
       >
-        <option value="paragraph">Paragraph</option>
+        <option value="paragraph">
+          {enableHandbookBlocks ? "Text" : "Paragraph"}
+        </option>
         {visibleHeadingLevels.map((level) => (
           <option key={level} value={`heading${level}`}>
-            Heading {level}
+            {enableHandbookBlocks && level === 2
+              ? "Section"
+              : enableHandbookBlocks && level === 3
+              ? "Subsection"
+              : `Heading ${level}`}
           </option>
         ))}
         <option value="bullet_list">Bullet list</option>
@@ -129,6 +137,13 @@ interface EditorToolbarProps {
   codeActive?: boolean;
   onRequestImage?: () => void;
   imageBusy?: boolean;
+  enableHandbookBlocks?: boolean;
+  onAddSection?: () => void;
+  onAddSubsection?: () => void;
+  onRenameHeading?: (title: string) => void;
+  onMoveHeadingUp?: () => void;
+  onMoveHeadingDown?: () => void;
+  onDeleteHeading?: () => void;
 }
 
 export function EditorToolbar({
@@ -149,7 +164,21 @@ export function EditorToolbar({
   codeActive = false,
   onRequestImage,
   imageBusy = false,
+  enableHandbookBlocks = false,
+  onAddSection,
+  onAddSubsection,
+  onRenameHeading,
+  onMoveHeadingUp,
+  onMoveHeadingDown,
+  onDeleteHeading,
 }: EditorToolbarProps) {
+  const [renamingHeading, setRenamingHeading] = useState(false);
+  const [renameValue, setRenameValue] = useState(state.headingTitle ?? "");
+  useEffect(() => {
+    setRenamingHeading(false);
+    setRenameValue(state.headingTitle ?? "");
+  }, [state.headingLevel, state.headingTitle]);
+
   return (
     <div
       className="flex flex-wrap items-center gap-x-4 gap-y-2"
@@ -176,7 +205,34 @@ export function EditorToolbar({
         value={state.block}
         onChange={onParagraphChange}
         headingLevels={headingLevels}
+        enableHandbookBlocks={enableHandbookBlocks}
       />
+      {enableHandbookBlocks && onAddSection && onAddSubsection ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onAddSection}
+            className="inline-flex h-9 items-center rounded-md border border-red-200 bg-red-50 px-3 text-sm font-semibold text-red-800 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+          >
+            + Add section
+          </button>
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onAddSubsection}
+            disabled={!state.canAddSubsection}
+            title={
+              state.canAddSubsection
+                ? undefined
+                : "Add a section before adding a subsection."
+            }
+            className="inline-flex h-9 items-center rounded-md border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            + Add subsection
+          </button>
+        </div>
+      ) : null}
       <div className="flex items-center gap-2">
         <ToolbarButton
           label="Bold"
@@ -256,6 +312,104 @@ export function EditorToolbar({
           />
         ) : null}
       </div>
+      {enableHandbookBlocks &&
+      state.headingLevel &&
+      onRenameHeading &&
+      onMoveHeadingUp &&
+      onMoveHeadingDown &&
+      onDeleteHeading ? (
+        <div
+          className="flex flex-wrap items-center gap-2 border-l border-gray-200 pl-3"
+          role="group"
+          aria-label={`${
+            state.headingLevel === 2 ? "Section" : "Subsection"
+          } controls`}
+        >
+          <span className="max-w-48 truncate text-xs font-medium text-gray-500">
+            {state.headingLevel === 2 ? "Section" : "Subsection"}:{" "}
+            {state.headingTitle}
+          </span>
+          {renamingHeading ? (
+            <>
+              <input
+                type="text"
+                aria-label={`Rename ${
+                  state.headingLevel === 2 ? "section" : "subsection"
+                }`}
+                value={renameValue}
+                onChange={(event) => setRenameValue(event.currentTarget.value)}
+                className="h-8 w-40 rounded border border-gray-300 px-2 text-sm focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (!renameValue.trim()) return;
+                  onRenameHeading(renameValue);
+                  setRenamingHeading(false);
+                }}
+                className="text-xs font-semibold text-red-800 hover:underline"
+              >
+                Save name
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRenameValue(state.headingTitle ?? "");
+                  setRenamingHeading(false);
+                }}
+                className="text-xs font-semibold text-gray-600 hover:underline"
+              >
+                Cancel rename
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setRenamingHeading(true)}
+              className="text-xs font-semibold text-red-800 hover:underline"
+            >
+              Rename
+            </button>
+          )}
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onMoveHeadingUp}
+            disabled={!state.canMoveHeadingUp}
+            className="text-xs font-semibold text-gray-700 hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Move up
+          </button>
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onMoveHeadingDown}
+            disabled={!state.canMoveHeadingDown}
+            className="text-xs font-semibold text-gray-700 hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Move down
+          </button>
+          {state.headingLevel === 2 ? (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onAddSubsection}
+              className="text-xs font-semibold text-gray-700 hover:underline"
+            >
+              Add subsection
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onDeleteHeading}
+            className="text-xs font-semibold text-red-700 hover:underline"
+          >
+            Delete {state.headingLevel === 2 ? "section" : "subsection"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

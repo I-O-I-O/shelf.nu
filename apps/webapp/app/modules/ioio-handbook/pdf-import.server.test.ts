@@ -20,6 +20,7 @@ import {
   importHandbookPdf,
   normalizeHandbookPdfPages,
 } from "./pdf-import.server";
+import { suggestHandbookArticles } from "./pdf-import.shared";
 
 function makePdfFromPages(pages: readonly string[]) {
   const objects = pages.flatMap((text, index) => {
@@ -136,6 +137,185 @@ describe("Handbook PDF import normalization", () => {
     expect(result.content).toContain("### 1.1.1 Prepare the printer");
     expect(result.content).toContain("### 1.1.1.1 Deep instruction");
     expect(result.content).not.toContain("####");
+  });
+
+  it("groups the laser cutting hierarchy into semantic articles in source order", () => {
+    const result = normalizeHandbookPdfPages(
+      [
+        [
+          "Challenge 6 Laser cutting done right",
+          "Table of Contents",
+          "1 Introduction to laser cutting .... 2",
+          "1.1 Vector graphics .... 3",
+          "1.2 Cutting .... 4",
+          "1.3 Engraving and rastering .... 5",
+          "2 Finger joints .... 6",
+          "2.1 Friction fitting .... 7",
+          "3 Software overview .... 8",
+          "3.1 Illustrator .... 9",
+          "3.2 Inkscape .... 10",
+          "3.3 File formats .... 11",
+          "4 Inkscape configuration .... 12",
+          "4.1 Document setup .... 12",
+          "4.2 Geometric bounding box .... 13",
+          "4.3 Keyboard shortcuts .... 13",
+          "5 Parametric generators .... 14",
+          "6 CAD for laser cutting .... 17",
+          "7 Tutorials and references .... 20",
+        ].join("\n"),
+        [
+          "Introduction to laser cutting",
+          "Laser cutting removes material with a focused beam.",
+          "Vector graphics",
+          "Vector paths describe the cut geometry.",
+          "Cutting",
+          "The beam follows vector paths to cut through stock.",
+          "Engraving and rastering",
+          "Raster engraving marks a filled image.",
+          "Finger joints",
+          "Finger joints connect two panels.",
+          "Friction fitting",
+          "A friction fit depends on kerf and material thickness.",
+          "https://example.com/finger-joints",
+          "Software overview",
+          "Choosing software depends on the drawing task.",
+          "Illustrator",
+          "Adobe Illustrator can prepare vector files.",
+          "Inkscape",
+          "Inkscape is a free vector editor.",
+          "File formats",
+          "Use SVG or DXF when supported by the cutter.",
+          "Inkscape configuration",
+          "Document setup",
+          "Set the page size and units.",
+          "https://example.com/inkscape-tutorial",
+          "Geometric bounding box",
+          "Use geometric bounds for precise layouts.",
+          "Keyboard shortcuts",
+          "Shortcuts speed up repetitive work.",
+          "Parametric generators",
+          "MakerCase",
+          "Generate a box with editable dimensions.",
+          "Gear generator",
+          "Generate gears for a project.",
+          "Maker.js",
+          "Create parametric paths in JavaScript.",
+          "CAD for laser cutting",
+          "CAD overview",
+          "Use CAD to build accurate models.",
+          "Onshape",
+          "Onshape supports collaborative CAD workflows.",
+          "Fusion 360",
+          "Fusion 360 supports 2D and 3D design workflows.",
+          "Exporting",
+          "Export a 2D profile for cutting.",
+          "Tutorials and references",
+          "Tutorials",
+          "Follow the setup tutorial.",
+          "References",
+          "https://example.com/laser-resources",
+        ].join("\n"),
+      ],
+      {
+        sourceName: "/private/uploads/Challenge 6 Laser cutting done right.pdf",
+      }
+    );
+
+    expect(result.categorySuggestion).toBe("Laser Cutting");
+    expect(result.sourceName).toBe("Challenge 6 Laser cutting done right.pdf");
+    expect(result.sourceOutline[0]).toMatchObject({
+      id: "source-section-1",
+      title: "Introduction to laser cutting",
+      level: 2,
+      sourcePage: 2,
+    });
+    expect(
+      result.sourceOutline.find(({ title }) => title === "Friction fitting")
+    ).toMatchObject({ level: 3, sourcePage: 2 });
+    expect(result.articles.map(({ title }) => title)).toEqual([
+      "Laser Cutting Basics",
+      "Finger Joints and Friction Fits",
+      "Choosing Software for Laser Cutting",
+      "Inkscape for Laser Cutting",
+      "Parametric Generators for Laser Cutting",
+      "CAD for Laser Cutting",
+      "Laser Cutting Resources",
+    ]);
+    expect(result.articles[1]?.sections[0]?.sourceUrls).toContain(
+      "https://example.com/finger-joints"
+    );
+    expect(
+      result.articles[6]?.sections.flatMap((section) => section.sourceUrls)
+    ).toContain("https://example.com/laser-resources");
+    expect(
+      result.articles[3]?.sections.flatMap((section) => section.sourceUrls)
+    ).toContain("https://example.com/inkscape-tutorial");
+    expect(result.content).not.toContain("Table of Contents");
+    const inkscapeMarkdown = result.articles[3]?.sections
+      .map((section) => section.markdown)
+      .join("\n");
+    expect(inkscapeMarkdown).toContain("### Document setup");
+    expect(inkscapeMarkdown).toContain("### Keyboard shortcuts");
+    const allImportedMarkdown = result.articles
+      .flatMap((article) => article.sections)
+      .map((section) => section.markdown)
+      .join("\n");
+    expect(allImportedMarkdown).toContain(
+      "Raster engraving marks a filled image."
+    );
+    expect(allImportedMarkdown).toContain(
+      "Create parametric paths in JavaScript."
+    );
+    expect(allImportedMarkdown).toContain(
+      "Fusion 360 supports 2D and 3D design workflows."
+    );
+  });
+
+  it("accepts a multi-article PDF whose total text exceeds the old article limit", async () => {
+    const body = Array.from(
+      { length: 100 },
+      () =>
+        "The laser beam follows a carefully prepared path for the selected material."
+    ).join("\n");
+    const content = [
+      "Challenge 6 Laser cutting done right",
+      "Introduction to laser cutting",
+      body,
+      "Finger joints",
+      body,
+      "Software overview",
+      body,
+      "Inkscape configuration",
+      body,
+      "Parametric generators",
+      body,
+      "CAD for laser cutting",
+      body,
+      "Tutorials and references",
+      body,
+    ].join("\n");
+    const imported = await importHandbookPdf(makePdfFromPages([content]));
+
+    expect(imported.content.length).toBeGreaterThan(30_000);
+    expect(imported.articles.length).toBeGreaterThan(1);
+    expect(
+      imported.articles.every((article) =>
+        article.sections.some((section) => section.markdown.trim())
+      )
+    ).toBe(true);
+  });
+
+  it("keeps all extracted headings and blocks when Claude groups source sections", () => {
+    const base = suggestHandbookArticles({
+      title: "Workshop handbook",
+      content:
+        "## Setup\n\nPrepare the workspace.\n\n## Operation\n\nFollow the procedure.",
+    });
+    expect(base.articles).toHaveLength(1);
+    expect(base.sections.map(({ title }) => title)).toEqual([
+      "Setup",
+      "Operation",
+    ]);
   });
 
   it("rejects an invalid or unreadable PDF without returning an empty draft", async () => {

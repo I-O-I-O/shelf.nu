@@ -1335,6 +1335,8 @@ model HandbookArticle {
   draftContent       String                @db.Text
   draftSection       String?               @db.VarChar(80)
   handbookCategoryId String?
+  isStartHere        Boolean               @default(false)
+  position           Int                   @default(0)
   draftAssetModelIds String[]              @default([])
   draftKitIds        String[]              @default([])
   draftSourceUrls    String[]              @default([])

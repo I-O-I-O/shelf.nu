@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import { data, Link, useLoaderData, useLocation } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   assignHandbookHeadingIds,
+  compareHandbookVersions,
+  getHandbookDocument,
   getHandbookOutline,
 } from "~/modules/ioio-handbook/document";
 import { getPublishedHandbookArticle } from "~/modules/ioio-handbook/service.server";
@@ -20,10 +23,13 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     const slug = params.slug ?? "";
     const versionId =
       new URL(request.url).searchParams.get("version") ?? undefined;
+    const compareVersionId =
+      new URL(request.url).searchParams.get("compare") ?? undefined;
     const article = await getPublishedHandbookArticle({
       organizationId: auth.organizationId,
       slug,
       versionId,
+      compareVersionId,
     });
     if (!article) {
       throw new ShelfError({
@@ -62,21 +68,124 @@ export const handle = {
 
 export default function HandbookArticlePage() {
   const { article, canEdit, isStudent } = useLoaderData<typeof loader>();
+  const location = useLocation();
   const version = article.publishedVersion;
   const currentVersion = article.versions[0]?.id;
   const viewingHistorical = currentVersion !== version.id;
-  const outline = useMemo(
+  const document = useMemo(
+    () => getHandbookDocument(version.content),
+    [version.content]
+  );
+  const headingOutline = useMemo(
     () => getHandbookOutline(version.content),
     [version.content]
   );
+  const outline = useMemo(
+    () => [
+      ...(document.introduction &&
+      (document.sections.length > 0 || version.sources.length > 0)
+        ? [
+            {
+              level: 2 as const,
+              title: "Introduction",
+              id: document.introductionId ?? "introduction",
+            },
+          ]
+        : []),
+      ...headingOutline,
+      ...(version.sources.length &&
+      !headingOutline.some((item) => /^references?$/iu.test(item.title.trim()))
+        ? [
+            {
+              level: 2 as const,
+              title: "References",
+              id: (() => {
+                const usedIds = new Set([
+                  ...(document.introductionId ? [document.introductionId] : []),
+                  ...headingOutline.map((item) => item.id),
+                ]);
+                let id = "references";
+                let suffix = 2;
+                while (usedIds.has(id)) id = `references-${suffix++}`;
+                return id;
+              })(),
+            },
+          ]
+        : []),
+    ],
+    [document, headingOutline, version.sources.length]
+  );
   const contentRef = useRef<HTMLDivElement | null>(null);
-  const showOutline = outline.length >= 3;
+  const showOutline = outline.length > 1;
+  const [activeOutlineId, setActiveOutlineId] = useState(outline[0]?.id ?? "");
+  const differences = useMemo(
+    () =>
+      article.comparisonVersion
+        ? compareHandbookVersions(
+            article.comparisonVersion.content,
+            version.content
+          )
+        : [],
+    [article.comparisonVersion, version.content]
+  );
+
+  useEffect(() => {
+    setActiveOutlineId(outline[0]?.id ?? "");
+    if (!contentRef.current || !outline.length) return;
+    const targets = outline
+      .map((item) => window.document.getElementById(item.id))
+      .filter((target): target is HTMLElement => Boolean(target));
+    const Observer = window.IntersectionObserver;
+    if (typeof Observer !== "function") return;
+    const observer = new Observer(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort(
+            (left, right) =>
+              left.boundingClientRect.top - right.boundingClientRect.top
+          );
+        const active = visible[0]?.target;
+        if (active instanceof HTMLElement) setActiveOutlineId(active.id);
+      },
+      { rootMargin: "-96px 0px -68% 0px", threshold: 0 }
+    );
+    targets.forEach((target) => observer.observe(target));
+    return () => observer.disconnect();
+  }, [outline]);
 
   useEffect(() => {
     if (contentRef.current) {
-      assignHandbookHeadingIds(contentRef.current, outline);
+      assignHandbookHeadingIds(contentRef.current, headingOutline);
     }
-  }, [outline]);
+    if (!location.hash) return;
+    const id = decodeURIComponent(location.hash.slice(1));
+    const target = window.document.getElementById(id);
+    if (!target) return;
+    setActiveOutlineId(id);
+    window.requestAnimationFrame(() => {
+      if (typeof target.scrollIntoView === "function") {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }, [headingOutline, location.hash]);
+
+  function goToOutlineItem(event: MouseEvent<HTMLAnchorElement>, id: string) {
+    event.preventDefault();
+    const target = window.document.getElementById(id);
+    if (!target) return;
+    setActiveOutlineId(id);
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}#${id}`
+    );
+    window.requestAnimationFrame(() => {
+      if (typeof target.scrollIntoView === "function") {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
@@ -139,70 +248,171 @@ export default function HandbookArticlePage() {
               <summary className="cursor-pointer text-sm font-semibold text-gray-800">
                 Contents
               </summary>
-              <HandbookContents outline={outline} className="mt-3" />
+              <HandbookContents
+                outline={outline}
+                className="mt-3"
+                onNavigate={goToOutlineItem}
+                activeId={activeOutlineId}
+              />
             </details>
           ) : null}
-          <div ref={contentRef} className="py-5">
-            <MarkdownViewer
-              content={version.content}
-              className="handbook-document prose max-w-none"
-              allowExternalLinks
-            />
+          <div ref={contentRef} className="handbook-document space-y-8 py-6">
+            {document.introduction ? (
+              <section className="scroll-mt-28">
+                {outline.some((item) => item.title === "Introduction") ? (
+                  <h2
+                    id={
+                      outline.find((item) => item.title === "Introduction")?.id
+                    }
+                    className="mb-3 scroll-mt-28 text-2xl font-semibold tracking-tight text-gray-950"
+                  >
+                    Introduction
+                  </h2>
+                ) : null}
+                <MarkdownViewer
+                  content={document.introduction}
+                  className="prose max-w-none"
+                  allowExternalLinks
+                />
+              </section>
+            ) : null}
+            {document.sections.map((section) => {
+              const includesReferences = /^references?$/iu.test(
+                section.title.trim()
+              );
+              return (
+                <section
+                  key={section.id}
+                  className="scroll-mt-28 border-t border-gray-200 pt-6"
+                >
+                  <h2
+                    id={section.id}
+                    className="mb-3 scroll-mt-28 text-2xl font-semibold tracking-tight text-gray-950"
+                  >
+                    {section.title}
+                  </h2>
+                  {section.content ? (
+                    <MarkdownViewer
+                      content={section.content}
+                      className="prose max-w-none"
+                      allowExternalLinks
+                    />
+                  ) : null}
+                  {section.subsections.map((subsection) => (
+                    <section
+                      key={subsection.id}
+                      className="mt-6 border-l-2 border-gray-200 pl-4 sm:pl-5"
+                    >
+                      <h3
+                        id={subsection.id}
+                        className="mb-2 scroll-mt-28 text-lg font-semibold text-gray-900"
+                      >
+                        {subsection.title}
+                      </h3>
+                      {subsection.content ? (
+                        <MarkdownViewer
+                          content={subsection.content}
+                          className="prose max-w-none"
+                          allowExternalLinks
+                        />
+                      ) : null}
+                    </section>
+                  ))}
+                  {includesReferences && version.sources.length ? (
+                    <HandbookSourceList sources={version.sources} />
+                  ) : null}
+                </section>
+              );
+            })}
+            {version.sources.length &&
+            !headingOutline.some((item) =>
+              /^references?$/iu.test(item.title.trim())
+            ) ? (
+              <section className="scroll-mt-28 border-t border-gray-200 pt-6">
+                <h2
+                  id={outline.find((item) => item.title === "References")?.id}
+                  className="mb-3 scroll-mt-28 text-2xl font-semibold tracking-tight text-gray-950"
+                >
+                  References
+                </h2>
+                <HandbookSourceList sources={version.sources} />
+              </section>
+            ) : null}
           </div>
 
-          {version.sources.length ? (
-            <section className="border-t border-gray-100 pt-5">
-              <h2 className="text-sm font-semibold text-gray-900">
-                References
-              </h2>
-              <ul className="mt-2 space-y-1">
-                {version.sources.map(({ source }) => (
-                  <li key={source.id}>
-                    <a
-                      href={source.url ?? undefined}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-sm text-red-800 underline underline-offset-2"
-                    >
-                      {source.title}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-
-          {article.versions.length > 1 ? (
+          {article.versions.length > 0 ? (
             <details className="mt-5 border-t border-gray-100 pt-4">
               <summary className="cursor-pointer text-sm font-semibold text-gray-700">
                 Version history
               </summary>
-              <ul className="mt-3 space-y-2">
-                {article.versions.map((item) => (
-                  <li key={item.id}>
-                    <Link
-                      to={`/handbook/${article.slug}?version=${item.id}`}
-                      className={`text-sm ${
-                        item.id === version.id
-                          ? "font-semibold text-gray-950"
-                          : "text-red-800 hover:underline"
-                      }`}
+              <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Current version: v{article.versions[0]?.versionNumber}
+              </p>
+              <ul className="mt-2 space-y-3">
+                {article.versions.map((item, index) => {
+                  const older = article.versions[index + 1];
+                  const isCurrent = item.id === currentVersion;
+                  return (
+                    <li
+                      key={item.id}
+                      className="rounded-lg border border-gray-200 p-3"
                     >
-                      Version {item.versionNumber} · {item.title} ·{" "}
-                      {new Date(item.publishedAt).toLocaleDateString()}
-                    </Link>
-                  </li>
-                ))}
+                      <p className="text-sm font-semibold text-gray-900">
+                        v{item.versionNumber}
+                        {isCurrent ? " — Current" : ""}
+                        {index === article.versions.length - 1
+                          ? " — Original version"
+                          : ""}
+                      </p>
+                      <p className="mt-1 text-sm text-gray-800">{item.title}</p>
+                      <p className="mt-1 text-xs text-gray-600">
+                        {new Date(item.publishedAt).toLocaleDateString()} ·{" "}
+                        {item.publishedBy ?? "IOIO Staff"}
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-3 text-sm">
+                        {!isCurrent ? (
+                          <Link
+                            to={`/handbook/${article.slug}?version=${item.id}`}
+                            className="font-semibold text-red-800 hover:underline"
+                          >
+                            View
+                          </Link>
+                        ) : null}
+                        {older ? (
+                          <Link
+                            to={`/handbook/${article.slug}?version=${item.id}&compare=${older.id}`}
+                            className="font-semibold text-red-800 hover:underline"
+                          >
+                            Compare with v{older.versionNumber}
+                          </Link>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </details>
           ) : null}
+
+          {article.comparisonVersion ? (
+            <HandbookVersionComparison
+              fromVersion={article.comparisonVersion.versionNumber}
+              toVersion={version.versionNumber}
+              differences={differences}
+            />
+          ) : null}
         </article>
         {showOutline ? (
-          <aside className="sticky top-6 hidden h-fit max-h-[calc(100vh-3rem)] overflow-auto rounded-xl border border-gray-200 bg-white p-4 shadow-sm lg:block">
+          <aside className="sticky top-24 hidden h-fit max-h-[calc(100vh-7rem)] overflow-auto border-l border-gray-200 pl-4 lg:block">
             <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-gray-500">
               Contents
             </h2>
-            <HandbookContents outline={outline} className="mt-3" />
+            <HandbookContents
+              outline={outline}
+              className="mt-3"
+              onNavigate={goToOutlineItem}
+              activeId={activeOutlineId}
+            />
           </aside>
         ) : null}
       </div>
@@ -213,9 +423,13 @@ export default function HandbookArticlePage() {
 function HandbookContents({
   outline,
   className = "",
+  onNavigate,
+  activeId,
 }: {
   outline: ReturnType<typeof getHandbookOutline>;
   className?: string;
+  onNavigate: (event: MouseEvent<HTMLAnchorElement>, id: string) => void;
+  activeId: string;
 }) {
   return (
     <nav aria-label="Article contents" className={className}>
@@ -224,7 +438,13 @@ function HandbookContents({
           <li key={item.id} className={item.level === 3 ? "pl-3" : undefined}>
             <a
               href={`#${item.id}`}
-              className="block text-sm text-gray-700 hover:text-red-800 hover:underline"
+              onClick={(event) => onNavigate(event, item.id)}
+              aria-current={item.id === activeId ? "location" : undefined}
+              className={`block rounded px-2 py-1 text-sm hover:text-red-800 hover:underline ${
+                item.id === activeId
+                  ? "border-l-2 border-red-700 bg-red-50 font-semibold text-red-900"
+                  : "text-gray-700"
+              }`}
             >
               {item.title}
             </a>
@@ -232,6 +452,120 @@ function HandbookContents({
         ))}
       </ol>
     </nav>
+  );
+}
+
+function HandbookSourceList({
+  sources,
+}: {
+  sources: Array<{
+    source: { id: string; title: string; url: string | null };
+  }>;
+}) {
+  return (
+    <ul className="mt-4 list-disc space-y-1 pl-6 text-sm">
+      {sources.map(({ source }) => (
+        <li key={source.id}>
+          {source.url ? (
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-red-800 underline underline-offset-2"
+            >
+              {source.title}
+            </a>
+          ) : (
+            source.title
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function HandbookVersionComparison({
+  fromVersion,
+  toVersion,
+  differences,
+}: {
+  fromVersion: number;
+  toVersion: number;
+  differences: ReturnType<typeof compareHandbookVersions>;
+}) {
+  return (
+    <section className="mt-5 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+      <h2 className="text-sm font-bold text-gray-900">
+        v{fromVersion} → v{toVersion} comparison
+      </h2>
+      {differences.length ? (
+        <ul className="mt-3 divide-y divide-blue-100">
+          {differences.map((difference) => (
+            <li key={difference.key} className="py-2 first:pt-0 last:pb-0">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span
+                  className={
+                    difference.level === 3
+                      ? "pl-4 text-sm"
+                      : "text-sm font-semibold"
+                  }
+                >
+                  {difference.path}
+                </span>
+                <span className="text-xs font-semibold text-gray-600">
+                  {difference.status}
+                </span>
+              </div>
+              {difference.status !== "Unchanged" ? (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-xs font-medium text-red-800 hover:underline">
+                    Show text change
+                  </summary>
+                  <div className="mt-2 grid gap-3 md:grid-cols-2">
+                    {difference.status !== "Added" ? (
+                      <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+                        <p className="mb-2 text-xs font-bold uppercase text-red-900">
+                          Before
+                        </p>
+                        {difference.beforeContent ? (
+                          <MarkdownViewer
+                            content={difference.beforeContent}
+                            className="prose prose-sm max-w-none"
+                            allowExternalLinks
+                          />
+                        ) : (
+                          <p className="text-sm text-gray-500">Empty</p>
+                        )}
+                      </div>
+                    ) : null}
+                    {difference.status !== "Removed" ? (
+                      <div className="rounded-lg border border-green-200 bg-green-50 p-3">
+                        <p className="mb-2 text-xs font-bold uppercase text-green-900">
+                          After
+                        </p>
+                        {difference.afterContent ? (
+                          <MarkdownViewer
+                            content={difference.afterContent}
+                            className="prose prose-sm max-w-none"
+                            allowExternalLinks
+                          />
+                        ) : (
+                          <p className="text-sm text-gray-500">Empty</p>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-sm text-gray-600">
+          No section-level changes were found.
+        </p>
+      )}
+    </section>
   );
 }
 

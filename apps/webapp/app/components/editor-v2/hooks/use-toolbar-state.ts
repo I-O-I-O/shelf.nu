@@ -2,7 +2,12 @@ import { useCallback, useState } from "react";
 import { redoDepth, undoDepth } from "prosemirror-history";
 import type { EditorState } from "prosemirror-state";
 
-import { getBlockFromState, markIsActive } from "../helpers";
+import {
+  canAddHandbookSubsection,
+  getBlockFromState,
+  getHandbookHeadingContext,
+  markIsActive,
+} from "../helpers";
 import type { ToolbarState } from "../types";
 
 const INITIAL_TOOLBAR_STATE: ToolbarState = {
@@ -26,6 +31,7 @@ export function useToolbarState() {
     const italic = markIsActive(state, "em");
     const code = markIsActive(state, "code");
     const link = markIsActive(state, "link");
+    const heading = getHandbookHeadingContext(state);
     const next: ToolbarState = {
       block,
       bold,
@@ -34,6 +40,15 @@ export function useToolbarState() {
       link,
       canUndo: undoDepth(state) > 0,
       canRedo: redoDepth(state) > 0,
+      ...(heading
+        ? {
+            headingLevel: heading.level,
+            headingTitle: heading.title,
+            canMoveHeadingUp: heading.canMoveUp,
+            canMoveHeadingDown: heading.canMoveDown,
+          }
+        : {}),
+      canAddSubsection: canAddHandbookSubsection(state),
     };
     setToolbarState(next);
   }, []);

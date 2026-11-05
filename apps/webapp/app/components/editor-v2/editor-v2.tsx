@@ -26,7 +26,11 @@ import { EditorToolbar } from "./components/toolbar";
 import {
   createHorizontalRuleCommand,
   createSlashCommands,
+  deleteHandbookHeadingCommand,
+  insertHandbookHeadingCommand,
   insertImageBlock,
+  moveHandbookHeadingCommand,
+  renameHandbookHeadingCommand,
 } from "./helpers";
 import { useBubbleMenu } from "./hooks/use-bubble-menu";
 import { useEditorCommands } from "./hooks/use-editor-commands";
@@ -268,9 +272,26 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
               }
               hasDivider={Boolean(schema.nodes.horizontal_rule)}
               headingLevels={headingLevels}
+              enableHandbookBlocks={enableHandbookBlocks}
               codeActive={toolbarState.code}
               onRequestImage={onUploadImage ? requestImage : undefined}
               imageBusy={imageBusy}
+              onAddSection={() =>
+                runCommand(insertHandbookHeadingCommand(schema, 2))
+              }
+              onAddSubsection={() =>
+                runCommand(insertHandbookHeadingCommand(schema, 3))
+              }
+              onRenameHeading={(title) =>
+                runCommand(renameHandbookHeadingCommand(schema, title))
+              }
+              onMoveHeadingUp={() =>
+                runCommand(moveHandbookHeadingCommand("up"))
+              }
+              onMoveHeadingDown={() =>
+                runCommand(moveHandbookHeadingCommand("down"))
+              }
+              onDeleteHeading={() => runCommand(deleteHandbookHeadingCommand())}
             />
           </div>
           <div className="relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300">

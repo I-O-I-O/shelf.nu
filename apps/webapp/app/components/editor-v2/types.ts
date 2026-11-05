@@ -19,6 +19,11 @@ export interface ToolbarState {
   link: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  headingLevel?: 2 | 3;
+  headingTitle?: string;
+  canMoveHeadingUp?: boolean;
+  canMoveHeadingDown?: boolean;
+  canAddSubsection?: boolean;
 }
 
 export interface BubbleState {

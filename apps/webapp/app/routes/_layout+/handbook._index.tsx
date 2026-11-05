@@ -1,10 +1,24 @@
-import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, Form, Link, useLoaderData } from "react-router";
+import type {
+  ActionFunctionArgs,
+  LoaderFunctionArgs,
+  MetaFunction,
+} from "react-router";
+import {
+  data,
+  Form,
+  Link,
+  redirect,
+  useLoaderData,
+  useLocation,
+} from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
+import { findHandbookSearchMatch } from "~/modules/ioio-handbook/document";
 import {
+  HandbookValidationError,
   listHandbookCategories,
   listPublishedHandbookArticles,
+  updateHandbookArticleNavigation,
 } from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
@@ -40,10 +54,70 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
+export async function action({ context, request }: ActionFunctionArgs) {
+  const { userId } = context.getSession();
+  try {
+    const auth = await requireIoioHandbookRead({ context, request });
+    if (!auth.canEdit) {
+      return data(
+        { ok: false as const, message: "Only Staff can organize articles." },
+        { status: 403 }
+      );
+    }
+    const formData = await request.formData();
+    const intent = String(formData.get("intent") ?? "");
+    if (
+      !["set-start-here", "unset-start-here", "move-up", "move-down"].includes(
+        intent
+      )
+    ) {
+      return data(
+        { ok: false as const, message: "Choose an article ordering action." },
+        { status: 400 }
+      );
+    }
+    const articleId = String(formData.get("articleId") ?? "").trim();
+    if (!articleId || articleId.length > 40) {
+      return data(
+        { ok: false as const, message: "Choose a valid Handbook article." },
+        { status: 400 }
+      );
+    }
+    await updateHandbookArticleNavigation({
+      organizationId: auth.organizationId,
+      articleId,
+      intent: intent as
+        | "set-start-here"
+        | "unset-start-here"
+        | "move-up"
+        | "move-down",
+    });
+    const requestedReturnTo = String(formData.get("returnTo") ?? "/handbook");
+    const returnUrl = new URL(requestedReturnTo, request.url);
+    const destination =
+      returnUrl.origin === new URL(request.url).origin &&
+      returnUrl.pathname === "/handbook"
+        ? `${returnUrl.pathname}${returnUrl.search}`
+        : "/handbook";
+    return redirect(destination);
+  } catch (cause) {
+    if (cause instanceof HandbookValidationError) {
+      return data(
+        { ok: false as const, message: cause.message },
+        { status: 400 }
+      );
+    }
+    const reason = makeShelfError(cause, { userId });
+    throw data(error(reason), { status: reason.status });
+  }
+}
+
 function groupArticlesByCategory<
   T extends {
     id: string;
     handbookCategory: { id: string; name: string } | null;
+    isStartHere: boolean;
+    position: number;
   },
 >(articles: T[], seedCategories: Array<{ id: string; name: string }>) {
   const groups = new Map<
@@ -72,6 +146,85 @@ function groupArticlesByCategory<
   );
 }
 
+function HandbookArticleRow({
+  article,
+  query,
+  canEdit,
+  returnTo,
+  canMoveUp,
+  canMoveDown,
+}: {
+  article: {
+    id: string;
+    slug: string;
+    isStartHere: boolean;
+    publishedVersion: {
+      title: string;
+      content: string;
+      publishedAt: Date | string;
+    } | null;
+  };
+  query: string;
+  canEdit: boolean;
+  returnTo: string;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+}) {
+  if (!article.publishedVersion) return null;
+  const match = query
+    ? findHandbookSearchMatch(article.publishedVersion.content, query)
+    : null;
+  const target = match ? `#${match.id}` : "";
+  const action = (intent: string, label: string, disabled = false) => (
+    <Form method="post" action={returnTo}>
+      <input type="hidden" name="articleId" value={article.id} />
+      <input type="hidden" name="intent" value={intent} />
+      <input type="hidden" name="returnTo" value={returnTo} />
+      <button
+        type="submit"
+        disabled={disabled}
+        className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        {label}
+      </button>
+    </Form>
+  );
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
+      <div>
+        <h3 className="text-base font-semibold text-gray-950">
+          <Link
+            to={`/handbook/${article.slug}${target}`}
+            className="hover:text-red-800"
+          >
+            {article.publishedVersion.title}
+          </Link>
+        </h3>
+        {match ? (
+          <p className="mt-1 text-xs text-gray-600">
+            →{" "}
+            <Link to={`/handbook/${article.slug}${target}`}>{match.title}</Link>
+          </p>
+        ) : null}
+        <p className="mt-1 text-xs text-gray-500">
+          Updated{" "}
+          {new Date(article.publishedVersion.publishedAt).toLocaleDateString()}
+        </p>
+      </div>
+      {canEdit ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {action(
+            article.isStartHere ? "unset-start-here" : "set-start-here",
+            article.isStartHere ? "Remove Start here" : "Start here"
+          )}
+          {canMoveUp ? action("move-up", "Move up") : null}
+          {canMoveDown ? action("move-down", "Move down") : null}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 export const meta: MetaFunction = () => [
   { title: appendToMetaTitle("Handbook") },
 ];
@@ -86,6 +239,8 @@ export default function HandbookIndexPage() {
     canEdit,
     isStudent,
   } = useLoaderData<typeof loader>();
+  const location = useLocation();
+  const returnTo = `${location.pathname}${location.search}`;
   const seedCategories = query
     ? []
     : handbookCategoryId
@@ -216,29 +371,50 @@ export default function HandbookIndexPage() {
                 ) : null}
               </header>
               <ul className="divide-y divide-gray-100">
-                {groupArticles.map(({ id, slug, publishedVersion }) =>
-                  publishedVersion ? (
-                    <li
-                      key={id}
-                      className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0"
+                {groupArticles.some((article) => article.isStartHere) ? (
+                  <li className="list-none py-3 first:pt-0">
+                    <section
+                      aria-labelledby={`start-here-${category?.id ?? "other"}`}
                     >
-                      <h3 className="text-base font-semibold text-gray-950">
-                        <Link
-                          to={`/handbook/${slug}`}
-                          className="hover:text-red-800"
-                        >
-                          {publishedVersion.title}
-                        </Link>
+                      <h3
+                        id={`start-here-${category?.id ?? "other"}`}
+                        className="mb-2 text-xs font-bold uppercase tracking-[0.12em] text-red-800"
+                      >
+                        Start here
                       </h3>
-                      <p className="text-xs text-gray-500">
-                        Updated{" "}
-                        {new Date(
-                          publishedVersion.publishedAt
-                        ).toLocaleDateString()}
-                      </p>
-                    </li>
-                  ) : null
-                )}
+                      <ul className="divide-y divide-gray-100">
+                        {groupArticles
+                          .filter((article) => article.isStartHere)
+                          .map((article, index, articlesInGroup) => (
+                            <HandbookArticleRow
+                              key={article.id}
+                              article={article}
+                              query={query}
+                              canEdit={canEdit}
+                              returnTo={returnTo}
+                              canMoveUp={!query && index > 0}
+                              canMoveDown={
+                                !query && index < articlesInGroup.length - 1
+                              }
+                            />
+                          ))}
+                      </ul>
+                    </section>
+                  </li>
+                ) : null}
+                {groupArticles
+                  .filter((article) => !article.isStartHere)
+                  .map((article, index, articlesInGroup) => (
+                    <HandbookArticleRow
+                      key={article.id}
+                      article={article}
+                      query={query}
+                      canEdit={canEdit}
+                      returnTo={returnTo}
+                      canMoveUp={!query && index > 0}
+                      canMoveDown={!query && index < articlesInGroup.length - 1}
+                    />
+                  ))}
               </ul>
             </section>
           ))}

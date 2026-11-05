@@ -13,29 +13,38 @@ describe("Handbook category groups", () => {
           loader: () => ({
             articles: [
               {
-                id: "article-1",
-                slug: "what-3d-printing-is",
-                handbookCategory: { id: "3d", name: "3D Printing" },
-                publishedVersion: {
-                  title: "What 3D printing is",
-                  publishedAt: new Date("2026-10-01T00:00:00.000Z"),
-                },
-              },
-              {
                 id: "article-2",
                 slug: "change-filament",
                 handbookCategory: { id: "3d", name: "3D Printing" },
+                isStartHere: false,
+                position: 2,
                 publishedVersion: {
                   title: "How to change filament",
+                  content: "Replace filament safely.",
                   publishedAt: new Date("2026-10-02T00:00:00.000Z"),
+                },
+              },
+              {
+                id: "article-1",
+                slug: "what-3d-printing-is",
+                handbookCategory: { id: "3d", name: "3D Printing" },
+                isStartHere: true,
+                position: 1,
+                publishedVersion: {
+                  title: "What 3D printing is",
+                  content: "## Introduction\nBasic concepts.",
+                  publishedAt: new Date("2026-10-01T00:00:00.000Z"),
                 },
               },
               {
                 id: "article-3",
                 slug: "soldering-basics",
                 handbookCategory: { id: "soldering", name: "Soldering" },
+                isStartHere: false,
+                position: 1,
                 publishedVersion: {
                   title: "Soldering Basics",
+                  content: "Soldering introduction.",
                   publishedAt: new Date("2026-10-03T00:00:00.000Z"),
                 },
               },
@@ -43,8 +52,8 @@ describe("Handbook category groups", () => {
             categories: [],
             query: "",
             handbookCategoryId: "",
-            canEdit: false,
-            isStudent: true,
+            canEdit: true,
+            isStudent: false,
           }),
           Component: HandbookIndexPage,
         },
@@ -65,6 +74,24 @@ describe("Handbook category groups", () => {
     expect(
       screen.getByRole("heading", { name: "How to change filament" })
     ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start here" })).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "What 3D printing is" }).closest("li")
+        ?.parentElement?.previousElementSibling?.textContent
+    ).toContain("Start here");
+    expect(
+      screen
+        .getByRole("link", { name: "What 3D printing is" })
+        .compareDocumentPosition(
+          screen.getByRole("link", { name: "How to change filament" })
+        ) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove Start here" })
+    ).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", { name: "Start here" }).length
+    ).toBeGreaterThan(0);
     expect(
       screen.getByRole("heading", { name: "Soldering Basics" })
     ).toBeTruthy();

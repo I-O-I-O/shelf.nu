@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loader as handbookArticleLoader } from "~/routes/_layout+/handbook.$slug";
-import { loader as handbookIndexLoader } from "~/routes/_layout+/handbook._index";
+import {
+  action as handbookIndexAction,
+  loader as handbookIndexLoader,
+} from "~/routes/_layout+/handbook._index";
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
   listHandbookCategories: vi.fn(),
   listPublishedHandbookArticles: vi.fn(),
   getPublishedHandbookArticle: vi.fn(),
+  updateHandbookArticleNavigation: vi.fn(),
 }));
 
 // why: access is controlled by Shelf's permission service, which is the input
@@ -21,6 +25,7 @@ vi.mock("~/modules/ioio-handbook/service.server", () => ({
   listHandbookCategories: mocks.listHandbookCategories,
   listPublishedHandbookArticles: mocks.listPublishedHandbookArticles,
   getPublishedHandbookArticle: mocks.getPublishedHandbookArticle,
+  updateHandbookArticleNavigation: mocks.updateHandbookArticleNavigation,
 }));
 
 // why: ErrorContent and MarkdownViewer are not rendered by loader tests.
@@ -97,6 +102,7 @@ describe("IOIO Handbook read access", () => {
         organizationId: "ioio-team-1",
         slug: "equipment-care",
         versionId: undefined,
+        compareVersionId: undefined,
       });
     }
   );
@@ -110,5 +116,68 @@ describe("IOIO Handbook read access", () => {
 
     expect((result as { init: { status: number } }).init.status).toBe(403);
     expect(mocks.listPublishedHandbookArticles).not.toHaveBeenCalled();
+  });
+
+  it("loads an explicit article version comparison", async () => {
+    await handbookArticleLoader(
+      loaderArgs(
+        "/handbook/equipment-care?version=version-3&compare=version-2",
+        { slug: "equipment-care" }
+      )
+    );
+
+    expect(mocks.getPublishedHandbookArticle).toHaveBeenCalledWith({
+      organizationId: "ioio-team-1",
+      slug: "equipment-care",
+      versionId: "version-3",
+      compareVersionId: "version-2",
+    });
+  });
+
+  it("lets Staff update category order while blocking Students", async () => {
+    const createRequest = () => {
+      const formData = new FormData();
+      formData.set("intent", "set-start-here");
+      formData.set("articleId", "article-1");
+      return new Request("http://localhost/handbook", {
+        method: "POST",
+        body: formData,
+      });
+    };
+    const createActionArgs = (request: Request) =>
+      ({
+        context: { getSession: () => ({ userId: "user-1" }) },
+        request,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/handbook",
+      }) as never;
+    mocks.updateHandbookArticleNavigation.mockResolvedValue({
+      articleId: "article-1",
+    });
+
+    const staffResult = await handbookIndexAction(
+      createActionArgs(createRequest())
+    );
+
+    expect(mocks.updateHandbookArticleNavigation).toHaveBeenCalledWith({
+      organizationId: "ioio-team-1",
+      articleId: "article-1",
+      intent: "set-start-here",
+    });
+    expect((staffResult as Response).headers.get("Location")).toBe("/handbook");
+
+    vi.clearAllMocks();
+    mocks.requirePermission.mockResolvedValue(
+      handbookPermission("SELF_SERVICE")
+    );
+    const studentResult = await handbookIndexAction(
+      createActionArgs(createRequest())
+    );
+
+    expect(mocks.updateHandbookArticleNavigation).not.toHaveBeenCalled();
+    expect((studentResult as { init: { status: number } }).init.status).toBe(
+      403
+    );
   });
 });

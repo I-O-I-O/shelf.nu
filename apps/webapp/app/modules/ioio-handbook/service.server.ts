@@ -25,6 +25,281 @@ export class HandbookValidationError extends Error {
   }
 }
 
+export type HandbookImportDraftInput = {
+  title: string;
+  content: string;
+  sourceUrls: string[];
+  existingArticleSlug?: string;
+  revisionBaseVersionId?: string;
+};
+
+/** Save an approved PDF proposal as drafts in one transaction. */
+export async function createHandbookImportDrafts({
+  organizationId,
+  userId,
+  handbookCategoryId,
+  newCategoryName,
+  articles,
+}: {
+  organizationId: string;
+  userId: string;
+  handbookCategoryId?: string;
+  newCategoryName?: string;
+  articles: HandbookImportDraftInput[];
+}) {
+  if (!articles.length || articles.length > 30) {
+    throw new HandbookValidationError(
+      "Choose between 1 and 30 articles before importing."
+    );
+  }
+  for (const article of articles) {
+    if (
+      !article.title.trim() ||
+      article.title.trim().length > 180 ||
+      !article.content.trim() ||
+      article.content.trim().length > 30_000
+    ) {
+      throw new HandbookValidationError(
+        "Every imported article needs a title and content within the Handbook limits."
+      );
+    }
+    const references = cleanSourceUrls(article.sourceUrls);
+    if (
+      references.length !==
+        article.sourceUrls.filter((value) => value.trim()).length ||
+      references.length > 20 ||
+      references.some((url) => url.length > 500)
+    ) {
+      throw new HandbookValidationError(
+        "Each imported article supports up to 20 valid http(s) references."
+      );
+    }
+  }
+  const selectedExistingSlugs = articles
+    .map((article) => article.existingArticleSlug)
+    .filter((slug): slug is string => Boolean(slug));
+  if (new Set(selectedExistingSlugs).size !== selectedExistingSlugs.length) {
+    throw new HandbookValidationError(
+      "Choose an existing article only once in an import structure."
+    );
+  }
+
+  return db.$transaction(async (tx) => {
+    let categoryId = handbookCategoryId?.trim() || undefined;
+    if (newCategoryName?.trim()) {
+      if (categoryId) {
+        throw new HandbookValidationError(
+          "Choose an existing category or create a new one, not both."
+        );
+      }
+      const cleanedName = cleanHandbookCategoryName(newCategoryName);
+      const normalizedName = normalizeHandbookCategoryName(cleanedName);
+      if (!normalizedName || cleanedName.length > 80) {
+        throw new HandbookValidationError(
+          "Enter a Handbook category name up to 80 characters."
+        );
+      }
+      const existing = await tx.handbookCategory.findUnique({
+        where: {
+          organizationId_normalizedName: { organizationId, normalizedName },
+        },
+        select: { id: true, archivedAt: true },
+      });
+      if (existing?.archivedAt) {
+        const restored = await tx.handbookCategory.update({
+          where: { id: existing.id, organizationId },
+          data: { name: cleanedName, archivedAt: null },
+          select: { id: true },
+        });
+        categoryId = restored.id;
+      } else if (existing) {
+        categoryId = existing.id;
+      } else {
+        const slugBase =
+          makeHandbookSlug(cleanedName).slice(0, 100) || "category";
+        let slug = slugBase;
+        let suffix = 2;
+        while (
+          await tx.handbookCategory.findUnique({
+            where: { organizationId_slug: { organizationId, slug } },
+            select: { id: true },
+          })
+        ) {
+          const suffixText = `-${suffix++}`;
+          slug = `${slugBase.slice(0, 100 - suffixText.length)}${suffixText}`;
+        }
+        const category = await tx.handbookCategory.create({
+          data: { organizationId, name: cleanedName, slug, normalizedName },
+          select: { id: true },
+        });
+        categoryId = category.id;
+      }
+    }
+
+    if (categoryId) {
+      const category = await tx.handbookCategory.findFirst({
+        where: { id: categoryId, organizationId, archivedAt: null },
+        select: { id: true },
+      });
+      if (!category) {
+        throw new HandbookValidationError(
+          "Choose a category from this Handbook workspace."
+        );
+      }
+    }
+
+    const created: Array<{
+      slug: string;
+      title: string;
+      revision: boolean;
+    }> = [];
+    for (const proposal of articles) {
+      const importedSources = cleanSourceUrls(proposal.sourceUrls);
+      if (proposal.existingArticleSlug) {
+        const current = await tx.handbookArticle.findFirst({
+          where: {
+            organizationId,
+            slug: proposal.existingArticleSlug,
+            status: HandbookArticleStatus.PUBLISHED,
+          },
+          select: {
+            id: true,
+            slug: true,
+            updatedByUserId: true,
+            publishedVersionId: true,
+            handbookCategoryId: true,
+            draftTitle: true,
+            draftContent: true,
+            draftSourceUrls: true,
+            publishedVersion: {
+              select: {
+                title: true,
+                content: true,
+                sources: { select: { source: { select: { url: true } } } },
+              },
+            },
+            observations: {
+              where: {
+                status: HandbookObservationStatus.PENDING_REVIEW,
+                publishedVersionId: { not: null },
+              },
+              take: 1,
+              select: { id: true },
+            },
+          },
+        });
+        if (
+          !current?.publishedVersion ||
+          !proposal.revisionBaseVersionId ||
+          current.publishedVersionId !== proposal.revisionBaseVersionId
+        ) {
+          throw new HandbookValidationError(
+            "The selected existing article changed. Review the import structure and choose it again."
+          );
+        }
+        if (current.observations.length) {
+          throw new HandbookValidationError(
+            `“${current.publishedVersion.title}” already has an improvement awaiting review.`
+          );
+        }
+        const existingSources = current.publishedVersion.sources
+          .map(({ source }) => source.url)
+          .filter((url): url is string => Boolean(url));
+        const draftSources = cleanSourceUrls(current.draftSourceUrls);
+        const hasExistingDraftChanges =
+          current.draftTitle !== current.publishedVersion.title ||
+          current.draftContent !== current.publishedVersion.content ||
+          JSON.stringify(draftSources) !==
+            JSON.stringify(cleanSourceUrls(existingSources));
+        if (hasExistingDraftChanges && current.updatedByUserId !== userId) {
+          throw new HandbookValidationError(
+            `Another draft improvement is in progress for “${current.publishedVersion.title}”.`
+          );
+        }
+        const baseTitle = hasExistingDraftChanges
+          ? current.draftTitle
+          : current.publishedVersion.title;
+        const baseContent = hasExistingDraftChanges
+          ? current.draftContent
+          : current.publishedVersion.content;
+        const revisedContent = `${baseContent.trim()}\n\n${proposal.content.trim()}`;
+        if (revisedContent.length > 30_000) {
+          throw new HandbookValidationError(
+            `The proposed revision for “${current.publishedVersion.title}” exceeds the 30,000-character article limit. Shorten the imported content or create a new article.`
+          );
+        }
+        const baseSources = hasExistingDraftChanges
+          ? draftSources
+          : existingSources;
+        const mergedSourceCandidates = [...baseSources, ...importedSources]
+          .map((url) => normalizeSourceUrl(url))
+          .filter((url): url is string => Boolean(url));
+        const uniqueMergedSourceCandidates = [
+          ...new Set(mergedSourceCandidates),
+        ];
+        if (uniqueMergedSourceCandidates.length > 20) {
+          throw new HandbookValidationError(
+            `The proposed revision for “${current.publishedVersion.title}” exceeds the 20-reference limit.`
+          );
+        }
+        const mergedSources = uniqueMergedSourceCandidates;
+        const updated = await tx.handbookArticle.updateMany({
+          where: {
+            id: current.id,
+            organizationId,
+            status: HandbookArticleStatus.PUBLISHED,
+            publishedVersionId: proposal.revisionBaseVersionId,
+            updatedByUserId: current.updatedByUserId,
+          },
+          data: {
+            draftTitle: baseTitle,
+            draftContent: revisedContent,
+            draftSourceUrls: mergedSources,
+            handbookCategoryId: categoryId ?? current.handbookCategoryId,
+            updatedByUserId: userId,
+          },
+        });
+        if (!updated.count) {
+          throw new HandbookValidationError(
+            `“${current.publishedVersion.title}” changed while the import was being saved. Try again.`
+          );
+        }
+        created.push({
+          slug: current.slug,
+          title: current.publishedVersion.title,
+          revision: true,
+        });
+        continue;
+      }
+
+      const slugBase =
+        makeHandbookSlug(proposal.title.trim()) || "handbook-article";
+      const siblings = await tx.handbookArticle.findMany({
+        where: { organizationId, slug: { startsWith: slugBase } },
+        select: { slug: true },
+      });
+      const taken = new Set(siblings.map(({ slug }) => slug));
+      let slug = slugBase;
+      let suffix = 2;
+      while (taken.has(slug)) slug = `${slugBase}-${suffix++}`;
+      await tx.handbookArticle.create({
+        data: {
+          organizationId,
+          slug,
+          draftTitle: proposal.title.trim(),
+          draftContent: proposal.content.trim(),
+          handbookCategoryId: categoryId ?? null,
+          draftSourceUrls: importedSources,
+          createdByUserId: userId,
+          updatedByUserId: userId,
+        },
+      });
+      created.push({ slug, title: proposal.title.trim(), revision: false });
+    }
+    return { categoryId: categoryId ?? null, created };
+  });
+}
+
 type HandbookTransactionClient = Omit<ExtendedPrismaClient, ITXClientDenyList>;
 
 async function getDisplayNamesByUserId(userIds: string[]) {
@@ -74,11 +349,13 @@ export async function listPublishedHandbookArticles({
         },
       },
     },
-    orderBy: [{ publishedVersion: { publishedAt: "desc" } }, { slug: "asc" }],
+    orderBy: [{ isStartHere: "desc" }, { position: "asc" }, { slug: "asc" }],
     select: {
       id: true,
       slug: true,
       updatedAt: true,
+      isStartHere: true,
+      position: true,
       handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
         include: {
@@ -88,6 +365,71 @@ export async function listPublishedHandbookArticles({
     },
   });
   return articles;
+}
+
+export async function updateHandbookArticleNavigation({
+  organizationId,
+  articleId,
+  intent,
+}: {
+  organizationId: string;
+  articleId: string;
+  intent: "set-start-here" | "unset-start-here" | "move-up" | "move-down";
+}) {
+  return db.$transaction(async (tx) => {
+    const article = await tx.handbookArticle.findFirst({
+      where: {
+        id: articleId,
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        handbookCategoryId: { not: null },
+      },
+      select: {
+        id: true,
+        handbookCategoryId: true,
+        isStartHere: true,
+        position: true,
+      },
+    });
+    if (!article?.handbookCategoryId) {
+      throw new HandbookValidationError(
+        "That published Handbook article could not be found in a category."
+      );
+    }
+
+    if (intent === "set-start-here" || intent === "unset-start-here") {
+      await tx.handbookArticle.update({
+        where: { id: article.id, organizationId },
+        data: { isStartHere: intent === "set-start-here" },
+      });
+      return { articleId: article.id };
+    }
+
+    const siblings = await tx.handbookArticle.findMany({
+      where: {
+        organizationId,
+        handbookCategoryId: article.handbookCategoryId,
+        status: HandbookArticleStatus.PUBLISHED,
+        isStartHere: article.isStartHere,
+      },
+      orderBy: [{ position: "asc" }, { slug: "asc" }],
+      select: { id: true, position: true },
+    });
+    const index = siblings.findIndex((sibling) => sibling.id === article.id);
+    const targetIndex = intent === "move-up" ? index - 1 : index + 1;
+    const target = siblings[targetIndex];
+    if (index < 0 || !target) return { articleId: article.id };
+
+    await tx.handbookArticle.update({
+      where: { id: article.id, organizationId },
+      data: { position: target.position },
+    });
+    await tx.handbookArticle.update({
+      where: { id: target.id, organizationId },
+      data: { position: article.position },
+    });
+    return { articleId: article.id };
+  });
 }
 
 export async function listHandbookArticleTitles({
@@ -107,8 +449,10 @@ export async function listHandbookArticleTitles({
     orderBy: [{ publishedVersion: { title: "asc" } }, { slug: "asc" }],
     take: 500,
     select: {
+      id: true,
       slug: true,
       handbookCategoryId: true,
+      publishedVersionId: true,
       handbookCategory: { select: { name: true } },
       publishedVersion: { select: { title: true } },
     },
@@ -117,9 +461,11 @@ export async function listHandbookArticleTitles({
     article.publishedVersion
       ? [
           {
+            id: article.id,
             slug: article.slug,
             title: article.publishedVersion.title,
             handbookCategoryId: article.handbookCategoryId,
+            publishedVersionId: article.publishedVersionId,
             categoryName: article.handbookCategory?.name ?? "",
           },
         ]
@@ -131,10 +477,12 @@ export async function getPublishedHandbookArticle({
   organizationId,
   slug,
   versionId,
+  compareVersionId,
 }: {
   organizationId: string;
   slug: string;
   versionId?: string;
+  compareVersionId?: string;
 }) {
   const article = await db.handbookArticle.findFirst({
     where: {
@@ -166,17 +514,25 @@ export async function getPublishedHandbookArticle({
     },
   });
   if (!article?.publishedVersion) return null;
-  const selectedVersion = versionId
-    ? await db.handbookArticleVersion.findFirst({
-        where: { id: versionId, articleId: article.id },
-        include: {
-          ...handbookReferences,
-        },
-      })
-    : article.publishedVersion;
+  const [selectedVersion, comparisonVersion] = await Promise.all([
+    versionId
+      ? db.handbookArticleVersion.findFirst({
+          where: { id: versionId, articleId: article.id },
+          include: { ...handbookReferences },
+        })
+      : Promise.resolve(article.publishedVersion),
+    compareVersionId
+      ? db.handbookArticleVersion.findFirst({
+          where: { id: compareVersionId, articleId: article.id },
+          include: { ...handbookReferences },
+        })
+      : Promise.resolve(null),
+  ]);
   if (!selectedVersion) return null;
+  if (compareVersionId && !comparisonVersion) return null;
   const authorNames = await getDisplayNamesByUserId([
     selectedVersion.publishedByUserId,
+    ...(comparisonVersion ? [comparisonVersion.publishedByUserId] : []),
     ...article.versions.map((version) => version.publishedByUserId),
   ]);
   return {
@@ -186,6 +542,13 @@ export async function getPublishedHandbookArticle({
       publishedByName:
         authorNames.get(selectedVersion.publishedByUserId) ?? null,
     },
+    comparisonVersion: comparisonVersion
+      ? {
+          ...comparisonVersion,
+          publishedByName:
+            authorNames.get(comparisonVersion.publishedByUserId) ?? null,
+        }
+      : null,
     versions: article.versions.map((version) => ({
       ...version,
       publishedBy: authorNames.get(version.publishedByUserId) ?? null,
@@ -756,10 +1119,23 @@ async function publishHandbookArticleInTransaction(
       "Choose a category from this Shelf workspace before publishing."
     );
   }
-  if (article.handbookCategoryId !== category.id) {
+  const categoryChanged = article.handbookCategoryId !== category.id;
+  const needsPosition = categoryChanged || article.position <= 0;
+  if (needsPosition) {
+    const maxPosition = await tx.handbookArticle.aggregate({
+      where: {
+        organizationId,
+        handbookCategoryId: category.id,
+        id: { not: article.id },
+      },
+      _max: { position: true },
+    });
     await tx.handbookArticle.update({
       where: { id: article.id, organizationId },
-      data: { handbookCategoryId: category.id },
+      data: {
+        ...(categoryChanged ? { handbookCategoryId: category.id } : {}),
+        position: (maxPosition._max.position ?? 0) + 1,
+      },
     });
   }
   const max = await tx.handbookArticleVersion.aggregate({

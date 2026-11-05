@@ -22,8 +22,12 @@ import {
 import {
   createCalloutCommand,
   createSlashCommands,
+  deleteHandbookHeadingCommand,
   findLinkRange,
+  insertHandbookHeadingCommand,
   insertImageBlock,
+  moveHandbookHeadingCommand,
+  renameHandbookHeadingCommand,
 } from "./helpers";
 
 const schema = createEditorSchema();
@@ -36,6 +40,43 @@ function stateFor(markdoc: string, cursor: number) {
   return state.apply(
     state.tr.setSelection(TextSelection.create(state.doc, cursor))
   );
+}
+
+function selectHeading(state: EditorState, title: string) {
+  let position = -1;
+  state.doc.forEach((node, offset) => {
+    if (node.type.name === "heading" && node.textContent === title) {
+      position = offset + 1;
+    }
+  });
+  if (position < 0) throw new Error(`Could not find heading: ${title}`);
+  return state.apply(
+    state.tr.setSelection(TextSelection.create(state.doc, position))
+  );
+}
+
+function executeCommand(
+  state: EditorState,
+  command: (
+    state: EditorState,
+    dispatch?: (transaction: any) => void
+  ) => boolean
+) {
+  let nextState = state;
+  const handled = command(state, (transaction) => {
+    nextState = state.apply(transaction);
+  });
+  return { handled, state: nextState };
+}
+
+function headingsIn(state: EditorState) {
+  const headings: Array<{ level: number; title: string }> = [];
+  state.doc.forEach((node) => {
+    if (node.type.name === "heading") {
+      headings.push({ level: node.attrs.level, title: node.textContent });
+    }
+  });
+  return headings;
 }
 
 /** The text a link edit would rewrite, for the cursor at `cursor`. */
@@ -83,7 +124,7 @@ describe("findLinkRange", () => {
 });
 
 describe("Handbook editor commands", () => {
-  it("offers only Heading 2 and Heading 3 with the Handbook block set", () => {
+  it("offers clear Section and Subsection commands with the Handbook block set", () => {
     const commands = createSlashCommands(schema, {
       headingLevels: [2, 3],
       enableHandbookBlocks: true,
@@ -92,8 +133,9 @@ describe("Handbook editor commands", () => {
 
     expect(commands.map(({ label }) => label)).toEqual(
       expect.arrayContaining([
-        "Heading 2",
-        "Heading 3",
+        "Text",
+        "Section",
+        "Subsection",
         "Callout · Note",
         "Callout · Tip",
         "Callout · Warning",
@@ -104,6 +146,88 @@ describe("Handbook editor commands", () => {
     );
     expect(commands.some(({ label }) => label === "Heading 1")).toBe(false);
     expect(commands.some(({ label }) => label === "Heading 4")).toBe(false);
+  });
+
+  it("adds a Subsection inside its current Section and appends a new Section", () => {
+    let state = stateFor(
+      "## Introduction\nOverview.\n\n## Terminology\nDefinitions.\n",
+      1
+    );
+    state = selectHeading(state, "Terminology");
+
+    const subsection = executeCommand(
+      state,
+      insertHandbookHeadingCommand(schema, 3)
+    );
+    expect(subsection.handled).toBe(true);
+    expect(headingsIn(subsection.state)).toEqual([
+      { level: 2, title: "Introduction" },
+      { level: 2, title: "Terminology" },
+      { level: 3, title: "" },
+    ]);
+    expect(subsection.state.doc.textContent).toContain("Definitions.");
+
+    const section = executeCommand(
+      subsection.state,
+      insertHandbookHeadingCommand(schema, 2)
+    );
+    expect(headingsIn(section.state)).toEqual([
+      { level: 2, title: "Introduction" },
+      { level: 2, title: "Terminology" },
+      { level: 3, title: "" },
+      { level: 2, title: "" },
+    ]);
+  });
+
+  it("renames and reorders a complete section with its content", () => {
+    let state = stateFor(
+      "## Introduction\nOverview.\n\n## Terminology\nDefinitions.\n\n### Additive manufacturing\nLayers are added.\n\n## History\nHistorical context.\n",
+      1
+    );
+    state = selectHeading(state, "History");
+    state = executeCommand(state, moveHandbookHeadingCommand("up")).state;
+
+    expect(headingsIn(state).map(({ title }) => title)).toEqual([
+      "Introduction",
+      "History",
+      "Terminology",
+      "Additive manufacturing",
+    ]);
+    expect(state.doc.textContent).toContain("Historical context.");
+    expect(state.doc.textContent).toContain("Layers are added.");
+
+    state = selectHeading(state, "History");
+    state = executeCommand(
+      state,
+      renameHandbookHeadingCommand(schema, "Background")
+    ).state;
+    expect(headingsIn(state).map(({ title }) => title)).toContain("Background");
+
+    state = selectHeading(state, "Terminology");
+    state = executeCommand(state, deleteHandbookHeadingCommand()).state;
+    expect(headingsIn(state).map(({ title }) => title)).toEqual([
+      "Introduction",
+      "Background",
+    ]);
+    expect(state.doc.textContent).not.toContain("Definitions.");
+    expect(state.doc.textContent).not.toContain("Layers are added.");
+  });
+
+  it("moves a Subsection within its parent Section", () => {
+    let state = stateFor(
+      "## Terminology\nDefinitions.\n\n### Additive manufacturing\nLayers are added.\n\n### Subtractive manufacturing\nMaterial is removed.\n",
+      1
+    );
+    state = selectHeading(state, "Additive manufacturing");
+    state = executeCommand(state, moveHandbookHeadingCommand("down")).state;
+
+    expect(headingsIn(state)).toEqual([
+      { level: 2, title: "Terminology" },
+      { level: 3, title: "Subtractive manufacturing" },
+      { level: 3, title: "Additive manufacturing" },
+    ]);
+    expect(state.doc.textContent).toContain("Layers are added.");
+    expect(state.doc.textContent).toContain("Material is removed.");
   });
 
   it("creates a typed callout using the normal Markdown document format", () => {

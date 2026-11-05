@@ -13,7 +13,12 @@ import {
   wrappingInputRule,
 } from "prosemirror-inputrules";
 import { keymap } from "prosemirror-keymap";
-import { Fragment, type MarkType, type Schema } from "prosemirror-model";
+import {
+  Fragment,
+  type MarkType,
+  type Node as ProseMirrorNode,
+  type Schema,
+} from "prosemirror-model";
 import {
   wrapInList,
   liftListItem,
@@ -23,6 +28,7 @@ import {
 import { Plugin } from "prosemirror-state";
 import {
   Selection,
+  TextSelection,
   type Command as PMCommand,
   type EditorState,
 } from "prosemirror-state";
@@ -142,6 +148,326 @@ export function createHorizontalRuleCommand(schema: Schema): PMCommand {
   };
 }
 
+type HandbookHeadingContext = {
+  level: 2 | 3;
+  title: string;
+  index: number;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  canAddSubsection: boolean;
+};
+
+function isHandbookHeading(node: ProseMirrorNode | undefined) {
+  return (
+    node?.type.name === "heading" &&
+    (node.attrs.level === 2 || node.attrs.level === 3)
+  );
+}
+
+function getTopLevelNodes(doc: ProseMirrorNode) {
+  const nodes: ProseMirrorNode[] = [];
+  doc.forEach((node) => nodes.push(node));
+  return nodes;
+}
+
+function findPreviousHeading(
+  nodes: ProseMirrorNode[],
+  start: number,
+  level: 2 | 3,
+  lowerBound = 0
+) {
+  for (let index = start - 1; index >= lowerBound; index -= 1) {
+    if (
+      isHandbookHeading(nodes[index]) &&
+      nodes[index]?.attrs.level === level
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findNextHeading(
+  nodes: ProseMirrorNode[],
+  start: number,
+  level: 2 | 3,
+  upperBound = nodes.length
+) {
+  for (let index = start + 1; index < upperBound; index += 1) {
+    if (
+      isHandbookHeading(nodes[index]) &&
+      nodes[index]?.attrs.level === level
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function getSectionBounds(nodes: ProseMirrorNode[], index: number) {
+  const sectionIndex =
+    nodes[index]?.attrs.level === 2
+      ? index
+      : findPreviousHeading(nodes, index + 1, 2);
+  if (sectionIndex < 0) return null;
+  const nextSection = findNextHeading(nodes, sectionIndex, 2);
+  return {
+    start: sectionIndex,
+    end: nextSection < 0 ? nodes.length : nextSection,
+  };
+}
+
+function getHeadingAtSelection(state: EditorState) {
+  const { $from } = state.selection;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth);
+    if (
+      node.type.name === "heading" &&
+      (node.attrs.level === 2 || node.attrs.level === 3)
+    ) {
+      return { node, depth, index: $from.index(0) };
+    }
+  }
+  return null;
+}
+
+/** Returns controls for the H2/H3 block under the editor selection. */
+export function getHandbookHeadingContext(
+  state: EditorState
+): HandbookHeadingContext | null {
+  const selected = getHeadingAtSelection(state);
+  if (!selected || selected.depth !== 1) return null;
+  const nodes = getTopLevelNodes(state.doc);
+  const level = selected.node.attrs.level as 2 | 3;
+  const section = getSectionBounds(nodes, selected.index);
+  if (level === 2) {
+    const previous = findPreviousHeading(nodes, selected.index, 2);
+    const next = findNextHeading(nodes, selected.index, 2);
+    return {
+      level,
+      title: selected.node.textContent,
+      index: selected.index,
+      canMoveUp: previous >= 0,
+      canMoveDown: next >= 0,
+      canAddSubsection: true,
+    };
+  }
+  if (!section) return null;
+  const previous = findPreviousHeading(
+    nodes,
+    selected.index,
+    3,
+    section.start + 1
+  );
+  const next = findNextHeading(nodes, selected.index, 3, section.end);
+  return {
+    level,
+    title: selected.node.textContent,
+    index: selected.index,
+    canMoveUp: previous >= 0,
+    canMoveDown: next >= 0,
+    canAddSubsection: true,
+  };
+}
+
+export function canAddHandbookSubsection(state: EditorState) {
+  const nodes = getTopLevelNodes(state.doc);
+  const index = state.selection.$from.index(0);
+  return Boolean(getSectionBounds(nodes, index));
+}
+
+function applyDocumentChildren(
+  state: EditorState,
+  dispatch: ((transaction: any) => void) | undefined,
+  nodes: ProseMirrorNode[],
+  focusNode?: ProseMirrorNode
+) {
+  if (!dispatch) return true;
+  const content = nodes.length ? Fragment.fromArray(nodes) : null;
+  const nextContent =
+    content ?? Fragment.from(state.schema.nodes.paragraph.create());
+  const transaction = state.tr.replaceWith(
+    0,
+    state.doc.content.size,
+    nextContent
+  );
+  if (focusNode) {
+    const index = nodes.indexOf(focusNode);
+    let position = 0;
+    for (let cursor = 0; cursor < index; cursor += 1) {
+      position += nodes[cursor]!.nodeSize;
+    }
+    transaction.setSelection(
+      TextSelection.near(transaction.doc.resolve(position + 1))
+    );
+  }
+  dispatch(transaction.scrollIntoView());
+  return true;
+}
+
+function swapDocumentRanges(
+  nodes: ProseMirrorNode[],
+  firstStart: number,
+  firstEnd: number,
+  secondEnd: number
+) {
+  return [
+    ...nodes.slice(0, firstStart),
+    ...nodes.slice(firstEnd, secondEnd),
+    ...nodes.slice(firstStart, firstEnd),
+    ...nodes.slice(secondEnd),
+  ];
+}
+
+/** Appends a Section, or adds a Subsection at the end of the current section. */
+export function insertHandbookHeadingCommand(
+  schema: Schema,
+  level: 2 | 3
+): PMCommand {
+  return (state, dispatch) => {
+    const nodes = getTopLevelNodes(state.doc);
+    let insertIndex = nodes.length;
+    if (
+      level === 2 &&
+      nodes.length === 1 &&
+      nodes[0]?.type.name === "paragraph" &&
+      nodes[0].content.size === 0
+    ) {
+      const heading = schema.nodes.heading.create({ level });
+      nodes[0] = heading;
+      if (!dispatch) return true;
+      const transaction = state.tr.replaceWith(
+        0,
+        state.doc.content.size,
+        Fragment.fromArray(nodes)
+      );
+      transaction.setSelection(TextSelection.create(transaction.doc, 1));
+      dispatch(transaction.scrollIntoView());
+      return true;
+    }
+    if (level === 3) {
+      const selectedIndex = state.selection.$from.index(0);
+      const section = getSectionBounds(nodes, selectedIndex);
+      if (!section) return false;
+      insertIndex = section.end;
+    }
+    const heading = schema.nodes.heading.create({ level });
+    nodes.splice(insertIndex, 0, heading);
+    if (!dispatch) return true;
+    const transaction = state.tr.replaceWith(
+      0,
+      state.doc.content.size,
+      Fragment.fromArray(nodes)
+    );
+    let position = 0;
+    for (let index = 0; index < insertIndex; index += 1) {
+      position += nodes[index]!.nodeSize;
+    }
+    transaction.setSelection(
+      TextSelection.create(transaction.doc, position + 1)
+    );
+    dispatch(transaction.scrollIntoView());
+    return true;
+  };
+}
+
+/** Renames the selected Section or Subsection without changing its content. */
+export function renameHandbookHeadingCommand(
+  schema: Schema,
+  title: string
+): PMCommand {
+  return (state, dispatch) => {
+    const selected = getHeadingAtSelection(state);
+    if (!selected || selected.depth !== 1 || !title.trim()) return false;
+    const nodes = getTopLevelNodes(state.doc);
+    const replacement = schema.nodes.heading.create(
+      { level: selected.node.attrs.level },
+      schema.text(title.trim())
+    );
+    nodes[selected.index] = replacement;
+    return applyDocumentChildren(state, dispatch, nodes, replacement);
+  };
+}
+
+/** Moves the selected heading together with all blocks that belong to it. */
+export function moveHandbookHeadingCommand(
+  direction: "up" | "down"
+): PMCommand {
+  return (state, dispatch) => {
+    const selected = getHeadingAtSelection(state);
+    if (!selected || selected.depth !== 1) return false;
+    const nodes = getTopLevelNodes(state.doc);
+    const level = selected.node.attrs.level as 2 | 3;
+    const section = getSectionBounds(nodes, selected.index);
+    const unitStart = selected.index;
+    const unitEndHeading =
+      level === 2
+        ? findNextHeading(nodes, unitStart, 2)
+        : section
+        ? findNextHeading(nodes, unitStart, 3, section.end)
+        : -1;
+    const unitEnd =
+      unitEndHeading < 0
+        ? level === 3 && section
+          ? section.end
+          : nodes.length
+        : unitEndHeading;
+    let moved: ProseMirrorNode[] | null = null;
+    if (direction === "up") {
+      const previousStart = findPreviousHeading(
+        nodes,
+        unitStart,
+        level,
+        level === 3 && section ? section.start + 1 : 0
+      );
+      if (previousStart < 0) return false;
+      moved = swapDocumentRanges(nodes, previousStart, unitStart, unitEnd);
+    } else {
+      const nextStart = unitEndHeading;
+      if (nextStart < 0) return false;
+      const nextEndHeading =
+        level === 2
+          ? findNextHeading(nodes, nextStart, 2)
+          : section
+          ? findNextHeading(nodes, nextStart, 3, section.end)
+          : -1;
+      const nextEnd =
+        nextEndHeading < 0
+          ? level === 3 && section
+            ? section.end
+            : nodes.length
+          : nextEndHeading;
+      moved = swapDocumentRanges(nodes, unitStart, unitEnd, nextEnd);
+    }
+    return applyDocumentChildren(state, dispatch, moved, selected.node);
+  };
+}
+
+/** Deletes the selected heading and its body (or its subsection body). */
+export function deleteHandbookHeadingCommand(): PMCommand {
+  return (state, dispatch) => {
+    const selected = getHeadingAtSelection(state);
+    if (!selected || selected.depth !== 1) return false;
+    const nodes = getTopLevelNodes(state.doc);
+    const level = selected.node.attrs.level as 2 | 3;
+    const section = getSectionBounds(nodes, selected.index);
+    const nextHeading =
+      level === 2
+        ? findNextHeading(nodes, selected.index, 2)
+        : section
+        ? findNextHeading(nodes, selected.index, 3, section.end)
+        : -1;
+    const end =
+      nextHeading < 0
+        ? level === 3 && section
+          ? section.end
+          : nodes.length
+        : nextHeading;
+    nodes.splice(selected.index, end - selected.index);
+    return applyDocumentChildren(state, dispatch, nodes);
+  };
+}
+
 export function sanitizeHref(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return "";
@@ -257,7 +583,7 @@ export function createSlashCommands(
   const commands: SlashCommandItem[] = [
     {
       id: "paragraph",
-      label: "Paragraph",
+      label: options.enableHandbookBlocks ? "Text" : "Paragraph",
       description: "Normal text",
       aliases: ["p", "text"],
       command: setBlockType(schema.nodes.paragraph),
@@ -265,7 +591,11 @@ export function createSlashCommands(
     ...headingLevels.map((level) => ({
       id: `heading${level}`,
       label:
-        level === 2
+        options.enableHandbookBlocks && level === 2
+          ? "Section"
+          : options.enableHandbookBlocks && level === 3
+          ? "Subsection"
+          : level === 2
           ? "Heading 2"
           : level === 3
           ? "Heading 3"

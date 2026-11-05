@@ -29,9 +29,13 @@ The Editor V2 ProseMirror schema intentionally mirrors the Markdown/Markdoc node
 ## Handbook Profile
 
 The Handbook uses this existing editor and keeps Markdown/Markdoc as its
-canonical revision content. The title stays outside the body. Its editor
-controls offer Heading 2 for article sections and Heading 3 for subsections;
-the shared schema continues to parse older Heading 1 and Heading 4 content.
+canonical revision content. The title stays outside the body. Authors use the
+visible **Add section** and **Add subsection** actions, or choose **Section**
+and **Subsection** from the slash menu. These serialize as Heading 2 and Heading
+3; the shared schema continues to parse older Heading 1 and Heading 4 content.
+When the cursor is on a section heading, the toolbar also offers rename, move,
+add-subsection, and delete actions. Subsection controls include rename, move,
+and delete.
 
 Handbook callouts use a normal blockquote with a deterministic marker at the
 start of its first paragraph:
@@ -45,9 +49,13 @@ blockquote as a callout. Handbook images use ordinary Markdown image syntax,
 with the source pointing to an organization-scoped Shelf Storage object through
 the Handbook image route. Image bytes are never stored in article content.
 
-PDF import continues to produce this same Markdown content. No heading,
-section, or image database records are created. The Handbook editor preserves
-unsupported existing Markdoc blocks but disables their raw-source editor.
+PDF import produces the same Markdown content used by manual articles and
+revisions. It first proposes article boundaries from the extracted table of
+contents, heading cues, and source order. After a person approves the proposal,
+each selected source section is written into the article body at its original
+H2/H3 depth. No heading, section, or image database records are created. The
+Handbook editor preserves unsupported existing Markdoc blocks but disables
+their raw-source editor.
 
 ## Raw Blocks
 
@@ -76,7 +84,9 @@ Common Markdown triggers map to their respective node transformations:
 - `Cmd/Ctrl+I` → italic mark
 - `Cmd/Ctrl+K` → link dialog
 
-Slash commands (`/h1`, `/h2`, `/ul`, `/ol`, `/quote`, `/divider`) execute the same ProseMirror commands, ensuring identical serialization output.
+Slash commands (including **Section**, **Subsection**, text, lists, quote, and
+divider) execute the same ProseMirror commands, ensuring identical
+serialization output.
 
 ## Serialization
 

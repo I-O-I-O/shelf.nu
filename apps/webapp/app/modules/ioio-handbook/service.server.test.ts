@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     handbookArticle: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
+      aggregate: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -63,9 +64,11 @@ vi.mock("~/modules/activity-event/service.server", () => ({
 import {
   approveHandbookArticleRevision,
   createHandbookCategory,
+  createHandbookImportDrafts,
   discardHandbookArticleRevisionDraft,
   deleteHandbookDraft,
   getHandbookEditData,
+  listPublishedHandbookArticles,
   listMyHandbookDrafts,
   listHandbookCategoriesForManagement,
   normalizeHandbookCategoryName,
@@ -76,7 +79,229 @@ import {
   saveHandbookDraft,
   submitHandbookDraftForReview,
   submitHandbookObservation,
+  updateHandbookArticleNavigation,
 } from "./service.server";
+
+describe("Handbook PDF import drafts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.tx.handbookCategory.findFirst.mockResolvedValue({
+      id: "category-1",
+    });
+    mocks.tx.handbookCategory.findUnique.mockResolvedValue(null);
+    mocks.tx.handbookCategory.create.mockResolvedValue({ id: "category-1" });
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([]);
+    mocks.tx.handbookArticle.create.mockResolvedValue({
+      id: "article-1",
+      slug: "laser-cutting-basics",
+    });
+    mocks.tx.handbookArticle.updateMany.mockResolvedValue({ count: 1 });
+  });
+
+  it("creates a selected category and all imported articles as drafts in one transaction", async () => {
+    const result = await createHandbookImportDrafts({
+      organizationId: "org-1",
+      userId: "staff-1",
+      newCategoryName: "Laser Cutting",
+      articles: [
+        {
+          title: "Laser Cutting Basics",
+          content: "## Vector graphics\n\nUse paths.",
+          sourceUrls: ["https://example.com/guide"],
+        },
+        {
+          title: "Inkscape for Laser Cutting",
+          content: "## Document setup\n\nSet units.",
+          sourceUrls: [],
+        },
+      ],
+    });
+
+    expect(result.created).toEqual([
+      {
+        slug: "laser-cutting-basics",
+        title: "Laser Cutting Basics",
+        revision: false,
+      },
+      {
+        slug: "inkscape-for-laser-cutting",
+        title: "Inkscape for Laser Cutting",
+        revision: false,
+      },
+    ]);
+    expect(mocks.tx.handbookCategory.create).toHaveBeenCalledWith({
+      data: {
+        organizationId: "org-1",
+        name: "Laser Cutting",
+        slug: "laser-cutting",
+        normalizedName: "laser cutting",
+      },
+      select: { id: true },
+    });
+    expect(mocks.tx.handbookArticle.create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          draftTitle: "Laser Cutting Basics",
+          handbookCategoryId: "category-1",
+          draftContent: "## Vector graphics\n\nUse paths.",
+          draftSourceUrls: ["https://example.com/guide"],
+          createdByUserId: "staff-1",
+        }),
+      })
+    );
+    expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("appends imported material to an existing article revision draft", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "existing-article",
+      slug: "inkscape-basics",
+      updatedByUserId: "staff-1",
+      publishedVersionId: "version-4",
+      handbookCategoryId: "category-1",
+      draftTitle: "Inkscape Basics for Laser Cutting",
+      draftContent: "## Overview\n\nExisting workflow.",
+      draftSourceUrls: ["https://example.com/old"],
+      publishedVersion: {
+        title: "Inkscape Basics for Laser Cutting",
+        content: "## Overview\n\nExisting workflow.",
+        sources: [{ source: { url: "https://example.com/old" } }],
+      },
+      observations: [],
+    });
+
+    const result = await createHandbookImportDrafts({
+      organizationId: "org-1",
+      userId: "student-1",
+      handbookCategoryId: "category-1",
+      articles: [
+        {
+          title: "Inkscape for Laser Cutting",
+          content: "## Keyboard shortcuts\n\nUse Ctrl+D.",
+          sourceUrls: ["https://example.com/shortcuts"],
+          existingArticleSlug: "inkscape-basics",
+          revisionBaseVersionId: "version-4",
+        },
+      ],
+    });
+
+    expect(result.created).toEqual([
+      {
+        slug: "inkscape-basics",
+        title: "Inkscape Basics for Laser Cutting",
+        revision: true,
+      },
+    ]);
+    expect(mocks.tx.handbookArticle.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          publishedVersionId: "version-4",
+        }),
+        data: expect.objectContaining({
+          draftTitle: "Inkscape Basics for Laser Cutting",
+          draftContent:
+            "## Overview\n\nExisting workflow.\n\n## Keyboard shortcuts\n\nUse Ctrl+D.",
+          draftSourceUrls: [
+            "https://example.com/old",
+            "https://example.com/shortcuts",
+          ],
+        }),
+      })
+    );
+    expect(mocks.tx.handbookArticle.create).not.toHaveBeenCalled();
+    expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("preserves the same Student's existing revision draft when adding an import", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "existing-article",
+      slug: "inkscape-basics",
+      updatedByUserId: "student-1",
+      publishedVersionId: "version-4",
+      handbookCategoryId: "category-1",
+      draftTitle: "Inkscape Basics for Laser Cutting",
+      draftContent:
+        "## Overview\n\nPublished workflow.\n\n## My notes\n\nKeep these notes.",
+      draftSourceUrls: [
+        "https://example.com/old",
+        "https://example.com/student-note",
+      ],
+      publishedVersion: {
+        title: "Inkscape Basics for Laser Cutting",
+        content: "## Overview\n\nPublished workflow.",
+        sources: [{ source: { url: "https://example.com/old" } }],
+      },
+      observations: [],
+    });
+
+    await createHandbookImportDrafts({
+      organizationId: "org-1",
+      userId: "student-1",
+      handbookCategoryId: "category-1",
+      articles: [
+        {
+          title: "Inkscape for Laser Cutting",
+          content: "## Keyboard shortcuts\n\nUse Ctrl+D.",
+          sourceUrls: ["https://example.com/shortcuts"],
+          existingArticleSlug: "inkscape-basics",
+          revisionBaseVersionId: "version-4",
+        },
+      ],
+    });
+
+    expect(mocks.tx.handbookArticle.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          draftContent:
+            "## Overview\n\nPublished workflow.\n\n## My notes\n\nKeep these notes.\n\n## Keyboard shortcuts\n\nUse Ctrl+D.",
+          draftSourceUrls: [
+            "https://example.com/old",
+            "https://example.com/student-note",
+            "https://example.com/shortcuts",
+          ],
+        }),
+      })
+    );
+  });
+
+  it("rejects an imported revision that would exceed the article content limit", async () => {
+    const publishedContent = `## Existing\n\n${"x".repeat(29_990)}`;
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "existing-article",
+      slug: "inkscape-basics",
+      updatedByUserId: "staff-1",
+      publishedVersionId: "version-4",
+      handbookCategoryId: "category-1",
+      draftTitle: "Inkscape Basics",
+      draftContent: publishedContent,
+      draftSourceUrls: [],
+      publishedVersion: {
+        title: "Inkscape Basics",
+        content: publishedContent,
+        sources: [],
+      },
+      observations: [],
+    });
+
+    await expect(
+      createHandbookImportDrafts({
+        organizationId: "org-1",
+        userId: "staff-1",
+        articles: [
+          {
+            title: "Inkscape shortcuts",
+            content: "## Shortcuts\n\nUse Ctrl+D.",
+            sourceUrls: [],
+            existingArticleSlug: "inkscape-basics",
+            revisionBaseVersionId: "version-4",
+          },
+        ],
+      })
+    ).rejects.toThrow("exceeds the 30,000-character article limit");
+    expect(mocks.tx.handbookArticle.updateMany).not.toHaveBeenCalled();
+  });
+});
 
 describe("Handbook categories", () => {
   beforeEach(() => {
@@ -112,13 +337,19 @@ describe("Handbook categories", () => {
       id: "article-1",
       organizationId: "org-1",
       slug: "soldering-basics",
+      position: 0,
+      isStartHere: false,
       handbookCategoryId: "handbook-category-1",
       draftTitle: "Soldering Basics",
       draftContent: "Basic soldering guide.",
       draftSourceUrls: [],
     });
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([]);
     mocks.tx.handbookArticleVersion.aggregate.mockResolvedValue({
       _max: { versionNumber: 0 },
+    });
+    mocks.tx.handbookArticle.aggregate.mockResolvedValue({
+      _max: { position: 0 },
     });
     mocks.tx.handbookArticleVersion.create.mockResolvedValue({
       id: "version-1",
@@ -129,6 +360,56 @@ describe("Handbook categories", () => {
       id: "observation-1",
       title: "Safety note",
     });
+  });
+
+  it("orders Handbook articles by Start here and stable position", async () => {
+    mocks.handbookArticle.findMany.mockResolvedValue([]);
+
+    await listPublishedHandbookArticles({ organizationId: "org-1" });
+
+    expect(mocks.handbookArticle.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [
+          { isStartHere: "desc" },
+          { position: "asc" },
+          { slug: "asc" },
+        ],
+      })
+    );
+  });
+
+  it("moves an article inside its Start here or normal ordering group", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-b",
+      handbookCategoryId: "category-1",
+      isStartHere: false,
+      position: 2,
+    });
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([
+      { id: "article-a", position: 1 },
+      { id: "article-b", position: 2 },
+    ]);
+
+    await updateHandbookArticleNavigation({
+      organizationId: "org-1",
+      articleId: "article-b",
+      intent: "move-up",
+    });
+
+    expect(mocks.tx.handbookArticle.update).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: { id: "article-b", organizationId: "org-1" },
+        data: { position: 1 },
+      })
+    );
+    expect(mocks.tx.handbookArticle.update).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: { id: "article-a", organizationId: "org-1" },
+        data: { position: 2 },
+      })
+    );
   });
 
   it("normalizes capitalization and repeated whitespace to one category identity", async () => {
@@ -729,6 +1010,9 @@ describe("Handbook categories", () => {
     mocks.tx.handbookArticleVersion.aggregate.mockResolvedValue({
       _max: { versionNumber: 2 },
     });
+    mocks.tx.handbookArticle.aggregate.mockResolvedValue({
+      _max: { position: 1 },
+    });
     mocks.tx.handbookArticleVersion.create.mockResolvedValue({
       id: "version-3",
       versionNumber: 3,
@@ -907,6 +1191,34 @@ describe("Handbook categories", () => {
       select: { id: true },
     });
     expect(mocks.tx.handbookArticleVersion.create).toHaveBeenCalled();
+  });
+
+  it("keeps a published article position when publishing a new version", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-1",
+      organizationId: "org-1",
+      slug: "change-filament",
+      status: "PUBLISHED",
+      position: 7,
+      isStartHere: false,
+      handbookCategoryId: "handbook-category-1",
+      draftTitle: "How to change filament",
+      draftContent: "Updated steps.",
+      draftSourceUrls: [],
+    });
+
+    await publishHandbookArticle({
+      organizationId: "org-1",
+      userId: "staff-1",
+      articleId: "article-1",
+    });
+
+    expect(mocks.tx.handbookArticle.aggregate).not.toHaveBeenCalled();
+    expect(mocks.tx.handbookArticle.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ position: expect.anything() }),
+      })
+    );
   });
 
   it("lets Staff approve and rename a proposal as a canonical Handbook category", async () => {
