@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   listDrafts: vi.fn(),
   deleteDraft: vi.fn(),
   discardRevision: vi.fn(),
+  withdrawSubmission: vi.fn(),
   HandbookValidationError: class HandbookValidationError extends Error {},
 }));
 
@@ -23,6 +24,7 @@ vi.mock("~/modules/ioio-handbook/service.server", () => ({
   discardHandbookArticleRevisionDraft: mocks.discardRevision,
   deleteHandbookDraft: mocks.deleteDraft,
   listMyHandbookDrafts: mocks.listDrafts,
+  withdrawHandbookSubmission: mocks.withdrawSubmission,
 }));
 
 import HandbookMyWorkPage, {
@@ -131,6 +133,32 @@ describe("Handbook My Work route", () => {
     expect(mocks.deleteDraft).not.toHaveBeenCalled();
   });
 
+  it("withdraws only the authenticated contributor's submission", async () => {
+    mocks.withdrawSubmission.mockResolvedValue({ id: "submission-1" });
+    const result = await action(
+      createActionArgs({
+        context: mockContext,
+        request: new Request("http://localhost/handbook/my-work", {
+          method: "POST",
+          body: new URLSearchParams({
+            intent: "withdraw-submission",
+            observationId: "submission-1",
+          }),
+        }),
+      })
+    );
+    expect(mocks.withdrawSubmission).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      observationId: "submission-1",
+      userId: "student-1",
+      canManageAnySubmission: false,
+    });
+    expect((result as Response).headers.get("Location")).toBe(
+      "/handbook/my-work?withdrawn=1"
+    );
+    expect(mocks.deleteDraft).not.toHaveBeenCalled();
+  });
+
   it("forwards the existing Staff draft-management permission to the service", async () => {
     mocks.requireRead.mockResolvedValue({
       userId: "staff-1",
@@ -219,7 +247,9 @@ describe("Handbook My Work route", () => {
     expect(
       screen.getByRole("heading", { name: "Delete this draft?" })
     ).toBeTruthy();
-    expect(screen.getByText("This draft will be removed.")).toBeTruthy();
+    expect(
+      screen.getByText("This will permanently remove the unpublished draft.")
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
     expect(
       screen.getAllByRole("button", { name: "Delete draft" })
@@ -246,6 +276,7 @@ describe("Handbook My Work route", () => {
                 updatedAt: new Date("2026-11-04T00:00:00.000Z"),
                 handbookCategory: null,
                 submittedForReview: true,
+                submissionId: "submission-1",
                 workType: "NEW_ARTICLE",
                 baseVersionNumber: null,
               },
@@ -262,7 +293,68 @@ describe("Handbook My Work route", () => {
       await screen.findByText(/Pending review · New article/)
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Delete draft" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Withdraw submission" })
+    ).toBeTruthy();
   });
+
+  it.each(["NEW_ARTICLE", "IMPROVEMENT_PENDING"])(
+    "confirms withdrawal for %s and retains the draft",
+    async (workType) => {
+      const user = userEvent.setup();
+      let pending = true;
+      mocks.withdrawSubmission.mockImplementation(() => {
+        pending = false;
+        return Promise.resolve({ id: "submission-1" });
+      });
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/handbook/my-work",
+            loader: () => ({
+              isStudent: true,
+              drafts: [
+                {
+                  id: "work-1",
+                  articleId: "article-1",
+                  submissionId: pending ? "submission-1" : null,
+                  slug: "example",
+                  draftTitle: "My proposal",
+                  updatedAt: "2026-11-06T00:00:00Z",
+                  handbookCategory: null,
+                  submittedForReview: pending,
+                  baseVersionNumber: workType === "NEW_ARTICLE" ? null : 1,
+                  workType: pending
+                    ? workType
+                    : workType === "NEW_ARTICLE"
+                    ? "NEW_ARTICLE"
+                    : "IMPROVEMENT_DRAFT",
+                },
+              ],
+            }),
+            action: (routeArgs) =>
+              action({ ...routeArgs, context: mockContext }),
+            Component: HandbookMyWorkPage,
+          },
+        ],
+        { initialEntries: ["/handbook/my-work"] }
+      );
+      render(createElement(RouterProvider, { router }));
+      await user.click(
+        await screen.findByRole("button", { name: "Withdraw submission" })
+      );
+      expect(screen.getByRole("alertdialog")).toHaveTextContent(
+        "submission record will be retained"
+      );
+      expect(mocks.withdrawSubmission).not.toHaveBeenCalled();
+      await user.click(
+        screen.getByRole("button", { name: "Withdraw submission" })
+      );
+      expect(await screen.findByText(/Submission withdrawn/)).toBeTruthy();
+      expect(screen.getByText("My proposal")).toBeTruthy();
+      expect(mocks.deleteDraft).not.toHaveBeenCalled();
+    }
+  );
 
   it("removes a deleted draft from My Work and shows success feedback", async () => {
     const user = userEvent.setup();

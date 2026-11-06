@@ -10,25 +10,13 @@ import {
   useActionData,
   useLoaderData,
   useLocation,
-  useNavigation,
 } from "react-router";
-import { Form } from "~/components/custom-form";
 import { ErrorContent } from "~/components/errors";
-import { Button } from "~/components/shared/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "~/components/shared/modal";
+import { HandbookRemovalButton } from "~/components/handbook/handbook-removal-button";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   discardHandbookArticleRevisionDraft,
+  withdrawHandbookSubmission,
   deleteHandbookDraft,
   HandbookValidationError,
   listMyHandbookDrafts,
@@ -58,11 +46,30 @@ export async function action({ context, request }: ActionFunctionArgs) {
     const auth = await requireIoioHandbookRead({ context, request });
     const formData = await request.formData();
     const intent = formData.get("intent");
-    if (intent !== "delete-draft" && intent !== "discard-revision") {
+    if (
+      intent !== "delete-draft" &&
+      intent !== "discard-revision" &&
+      intent !== "withdraw-submission"
+    ) {
       return data(
         { ok: false as const, message: "Choose a draft action." },
         { status: 400 }
       );
+    }
+    if (intent === "withdraw-submission") {
+      const observationId = String(formData.get("observationId") ?? "").trim();
+      if (!observationId || observationId.length > 40)
+        return data(
+          { ok: false as const, message: "Choose a valid submission." },
+          { status: 400 }
+        );
+      await withdrawHandbookSubmission({
+        organizationId: auth.organizationId,
+        observationId,
+        userId: auth.userId,
+        canManageAnySubmission: auth.canEdit,
+      });
+      return redirect("/handbook/my-work?withdrawn=1");
     }
     const articleId = String(formData.get("articleId") ?? "").trim();
     if (!articleId || articleId.length > 40) {
@@ -111,7 +118,7 @@ export default function HandbookMyWorkPage() {
   const { drafts, isStudent } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const location = useLocation();
-  const navigation = useNavigation();
+  const withdrawn = new URLSearchParams(location.search).has("withdrawn");
   const submitted = new URLSearchParams(location.search).has("submitted");
   const deleted = new URLSearchParams(location.search).has("deleted");
   const discarded = new URLSearchParams(location.search).has("discarded");
@@ -141,6 +148,14 @@ export default function HandbookMyWorkPage() {
         </Link>
       </div>
 
+      {withdrawn ? (
+        <p
+          role="status"
+          className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
+        >
+          Submission withdrawn. Your draft and review record have been retained.
+        </p>
+      ) : null}
       {submitted ? (
         <p
           role="status"
@@ -218,119 +233,29 @@ export default function HandbookMyWorkPage() {
                 >
                   {draft.workType === "IMPROVEMENT_PENDING"
                     ? "View current article"
+                    : draft.submittedForReview
+                    ? "View submission"
                     : "Edit draft"}
                 </Link>
-                {draft.workType === "NEW_ARTICLE" &&
-                !draft.submittedForReview ? (
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="danger"
-                        size="sm"
-                        disabled={navigation.state === "submitting"}
-                      >
-                        Delete draft
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Delete this draft?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          This draft will be removed.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel asChild>
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={navigation.state === "submitting"}
-                          >
-                            Cancel
-                          </Button>
-                        </AlertDialogCancel>
-                        <Form method="post">
-                          <input
-                            type="hidden"
-                            name="intent"
-                            value="delete-draft"
-                          />
-                          <input
-                            type="hidden"
-                            name="articleId"
-                            value={draft.id}
-                          />
-                          <AlertDialogAction asChild>
-                            <Button
-                              type="submit"
-                              variant="danger"
-                              disabled={navigation.state === "submitting"}
-                            >
-                              Delete draft
-                            </Button>
-                          </AlertDialogAction>
-                        </Form>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                ) : null}
-                {draft.workType === "IMPROVEMENT_DRAFT" ? (
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="danger"
-                        size="sm"
-                        disabled={navigation.state === "submitting"}
-                      >
-                        Discard draft improvement
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>
-                          Discard this draft improvement?
-                        </AlertDialogTitle>
-                        <AlertDialogDescription>
-                          The draft changes will be removed. The published
-                          article and version history will stay unchanged.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel asChild>
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={navigation.state === "submitting"}
-                          >
-                            Cancel
-                          </Button>
-                        </AlertDialogCancel>
-                        <Form method="post">
-                          <input
-                            type="hidden"
-                            name="intent"
-                            value="discard-revision"
-                          />
-                          <input
-                            type="hidden"
-                            name="articleId"
-                            value={draft.articleId}
-                          />
-                          <AlertDialogAction asChild>
-                            <Button
-                              type="submit"
-                              variant="danger"
-                              disabled={navigation.state === "submitting"}
-                            >
-                              Discard draft improvement
-                            </Button>
-                          </AlertDialogAction>
-                        </Form>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
+                {draft.submittedForReview && draft.submissionId ? (
+                  <HandbookRemovalButton
+                    intent="withdraw-submission"
+                    observationId={draft.submissionId}
+                    actionPath="/handbook/my-work"
+                  />
+                ) : draft.workType === "NEW_ARTICLE" &&
+                  !draft.submittedForReview ? (
+                  <HandbookRemovalButton
+                    intent="delete-draft"
+                    articleId={draft.id}
+                    actionPath="/handbook/my-work"
+                  />
+                ) : draft.workType === "IMPROVEMENT_DRAFT" ? (
+                  <HandbookRemovalButton
+                    intent="discard-revision"
+                    articleId={draft.articleId}
+                    actionPath="/handbook/my-work"
+                  />
                 ) : null}
               </li>
             ))}

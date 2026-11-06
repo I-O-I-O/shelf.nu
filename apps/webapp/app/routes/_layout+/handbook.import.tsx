@@ -105,6 +105,8 @@ function isImportSection(value: unknown) {
     typeof section.markdown === "string" &&
     Array.isArray(section.sourceUrls) &&
     section.sourceUrls.every((url) => typeof url === "string") &&
+    (section.possibleAuthorNote === undefined ||
+      typeof section.possibleAuthorNote === "boolean") &&
     (section.sourceHeadingIds === undefined ||
       (Array.isArray(section.sourceHeadingIds) &&
         section.sourceHeadingIds.every((id) => typeof id === "string"))) &&
@@ -155,7 +157,12 @@ function isSavedImportDraft(value: unknown): value is HandbookImportDraft {
         (article as HandbookImportArticle).sections.every(isImportSection)
     ) &&
     typeof draft.hierarchyDetected === "boolean" &&
-    typeof draft.fallback === "boolean"
+    typeof draft.fallback === "boolean" &&
+    (draft.imageDetectedPages === undefined ||
+      (Array.isArray(draft.imageDetectedPages) &&
+        draft.imageDetectedPages.every(
+          (page) => typeof page === "number" && page > 0
+        )))
   );
 }
 

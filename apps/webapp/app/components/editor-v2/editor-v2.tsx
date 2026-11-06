@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { ChangeEvent, TextareaHTMLAttributes } from "react";
 import "prosemirror-view/style/prosemirror.css";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toggleMark, wrapIn } from "prosemirror-commands";
 import { redo, undo } from "prosemirror-history";
 import { wrapInList } from "prosemirror-schema-list";
@@ -89,6 +90,26 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
     const hiddenTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const imageInputRef = useRef<HTMLInputElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const [toolsCollapsed, setToolsCollapsed] = useState(false);
+    useEffect(() => {
+      if (!enableHandbookBlocks) return;
+      try {
+        setToolsCollapsed(
+          localStorage.getItem("handbook.editor.tools.collapsed") === "true"
+        );
+      } catch {
+        // Editing remains available when browser storage is disabled.
+      }
+    }, [enableHandbookBlocks]);
+    function toggleTools() {
+      const next = !toolsCollapsed;
+      setToolsCollapsed(next);
+      try {
+        localStorage.setItem("handbook.editor.tools.collapsed", String(next));
+      } catch {
+        // Keep the in-memory preference when storage is unavailable.
+      }
+    }
     const [imageBusy, setImageBusy] = useState(false);
     const [imageError, setImageError] = useState("");
 
@@ -189,6 +210,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       maxLength,
       allowRawBlockEditing,
       ariaLabel: label,
+      enableImageBlockDrop: enableHandbookBlocks,
       shouldAutoFocus,
       onBlur: (event) => {
         // The slash menu is portaled to the body and positioned against the
@@ -247,54 +269,115 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
 
     return (
       <div className={tw("flex flex-col gap-2", className)}>
-        <div className="isolate overflow-hidden rounded-lg border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 bg-white px-3 py-2">
-            <EditorToolbar
-              state={toolbarState}
-              onUndo={() => runCommand(undo)}
-              onRedo={() => runCommand(redo)}
-              onParagraphChange={handleParagraphChange}
-              onBold={() => runCommand(toggleMark(schema.marks.strong))}
-              onItalic={() => runCommand(toggleMark(schema.marks.em))}
-              onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
-              onToggleLink={openLinkDialog}
-              onBulletList={() =>
-                runCommand(wrapInList(schema.nodes.bullet_list))
+        <div
+          className={tw(
+            "isolate rounded-lg border border-gray-200 bg-white",
+            enableHandbookBlocks
+              ? tw(
+                  "flex max-h-[75vh] flex-col xl:grid xl:max-h-none xl:items-start xl:gap-4",
+                  toolsCollapsed
+                    ? "xl:grid-cols-[minmax(0,1fr)_2.5rem]"
+                    : "xl:grid-cols-[minmax(0,1fr)_13rem]"
+                )
+              : "overflow-hidden"
+          )}
+        >
+          <div
+            className={tw(
+              "border-b border-gray-100 bg-white px-3 py-2",
+              enableHandbookBlocks
+                ? "sticky top-0 z-20 shrink-0 shadow-sm xl:top-24 xl:order-2 xl:max-h-[calc(100dvh-7rem)] xl:overflow-y-auto xl:border-b-0 xl:border-l xl:shadow-none"
+                : ""
+            )}
+          >
+            {enableHandbookBlocks ? (
+              <div className="mb-1 hidden items-center justify-between gap-1 xl:flex">
+                {!toolsCollapsed ? (
+                  <span className="text-xs font-semibold text-gray-600">
+                    Editor tools
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={
+                    toolsCollapsed ? "Show editor tools" : "Hide editor tools"
+                  }
+                  title={
+                    toolsCollapsed ? "Show editor tools" : "Hide editor tools"
+                  }
+                  aria-expanded={!toolsCollapsed}
+                  onClick={toggleTools}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded text-gray-600 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300"
+                >
+                  {toolsCollapsed ? (
+                    <ChevronRight size={16} />
+                  ) : (
+                    <ChevronLeft size={16} />
+                  )}
+                </button>
+              </div>
+            ) : null}
+            <div
+              className={
+                enableHandbookBlocks && toolsCollapsed ? "xl:hidden" : undefined
               }
-              onOrderedList={() =>
-                runCommand(wrapInList(schema.nodes.ordered_list))
-              }
-              onQuote={() => runCommand(wrapIn(schema.nodes.blockquote))}
-              onDivider={
-                schema.nodes.horizontal_rule
-                  ? () => runCommand(createHorizontalRuleCommand(schema))
-                  : undefined
-              }
-              hasDivider={Boolean(schema.nodes.horizontal_rule)}
-              headingLevels={headingLevels}
-              enableHandbookBlocks={enableHandbookBlocks}
-              codeActive={toolbarState.code}
-              onRequestImage={onUploadImage ? requestImage : undefined}
-              imageBusy={imageBusy}
-              onAddSection={() =>
-                runCommand(insertHandbookHeadingCommand(schema, 2))
-              }
-              onAddSubsection={() =>
-                runCommand(insertHandbookHeadingCommand(schema, 3))
-              }
-              onRenameHeading={(title) =>
-                runCommand(renameHandbookHeadingCommand(schema, title))
-              }
-              onMoveHeadingUp={() =>
-                runCommand(moveHandbookHeadingCommand("up"))
-              }
-              onMoveHeadingDown={() =>
-                runCommand(moveHandbookHeadingCommand("down"))
-              }
-              onDeleteHeading={() => runCommand(deleteHandbookHeadingCommand())}
-            />
+            >
+              <EditorToolbar
+                state={toolbarState}
+                onUndo={() => runCommand(undo)}
+                onRedo={() => runCommand(redo)}
+                onParagraphChange={handleParagraphChange}
+                onBold={() => runCommand(toggleMark(schema.marks.strong))}
+                onItalic={() => runCommand(toggleMark(schema.marks.em))}
+                onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
+                onToggleLink={openLinkDialog}
+                onBulletList={() =>
+                  runCommand(wrapInList(schema.nodes.bullet_list))
+                }
+                onOrderedList={() =>
+                  runCommand(wrapInList(schema.nodes.ordered_list))
+                }
+                onQuote={() => runCommand(wrapIn(schema.nodes.blockquote))}
+                onDivider={
+                  schema.nodes.horizontal_rule
+                    ? () => runCommand(createHorizontalRuleCommand(schema))
+                    : undefined
+                }
+                hasDivider={Boolean(schema.nodes.horizontal_rule)}
+                headingLevels={headingLevels}
+                enableHandbookBlocks={enableHandbookBlocks}
+                codeActive={toolbarState.code}
+                onRequestImage={onUploadImage ? requestImage : undefined}
+                imageBusy={imageBusy}
+                onAddSection={() =>
+                  runCommand(insertHandbookHeadingCommand(schema, 2))
+                }
+                onAddSubsection={() =>
+                  runCommand(insertHandbookHeadingCommand(schema, 3))
+                }
+                onRenameHeading={(title) =>
+                  runCommand(renameHandbookHeadingCommand(schema, title))
+                }
+                onMoveHeadingUp={() =>
+                  runCommand(moveHandbookHeadingCommand("up"))
+                }
+                onMoveHeadingDown={() =>
+                  runCommand(moveHandbookHeadingCommand("down"))
+                }
+                onDeleteHeading={() =>
+                  runCommand(deleteHandbookHeadingCommand())
+                }
+              />
+            </div>
           </div>
-          <div className="relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300">
+          <div
+            className={tw(
+              "relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300",
+              enableHandbookBlocks
+                ? "min-h-0 overflow-auto xl:order-1 xl:min-w-0 xl:overflow-visible"
+                : ""
+            )}
+          >
             <div
               ref={editorContainerRef}
               className="min-h-[200px]"

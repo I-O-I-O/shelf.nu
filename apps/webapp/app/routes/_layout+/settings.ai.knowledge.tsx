@@ -12,6 +12,7 @@ import {
   useNavigation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { HandbookRemovalButton } from "~/components/handbook/handbook-removal-button";
 import {
   HandbookValidationError,
   approveHandbookArticleRevision,
@@ -237,18 +238,34 @@ export default function AiKnowledgePage() {
                       View
                     </Link>
                   ) : null}
-                  <Link
-                    to={
-                      article.status === "PUBLISHED"
-                        ? "/handbook/" + article.slug + "/edit?improve=1"
-                        : "/handbook/" + article.slug + "/edit"
-                    }
-                    className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-                  >
-                    {article.status === "PUBLISHED"
-                      ? "Improve this article"
-                      : "Edit draft"}
-                  </Link>
+                  {article.status === "ARCHIVED" ? (
+                    <>
+                      <HandbookRemovalButton
+                        intent="restore-article"
+                        articleId={article.id}
+                      />
+                      <HandbookRemovalButton
+                        intent="delete-permanently"
+                        articleId={article.id}
+                        articleTitle={
+                          article.publishedVersion?.title ?? article.draftTitle
+                        }
+                      />
+                    </>
+                  ) : (
+                    <Link
+                      to={
+                        article.status === "PUBLISHED"
+                          ? "/handbook/" + article.slug + "/edit?improve=1"
+                          : "/handbook/" + article.slug + "/edit"
+                      }
+                      className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+                    >
+                      {article.status === "PUBLISHED"
+                        ? "Improve this article"
+                        : "Edit draft"}
+                    </Link>
+                  )}
                 </div>
               </li>
             ))}

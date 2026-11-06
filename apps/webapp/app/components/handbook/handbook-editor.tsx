@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Form, Link, useFetcher } from "react-router";
 import { EditorV2 } from "~/components/editor-v2/editor-v2";
 import { HandbookCategoryPicker } from "./handbook-category-picker";
+import { HandbookRemovalButton } from "./handbook-removal-button";
 
 const HANDBOOK_HEADING_LEVELS = [2, 3];
 
@@ -14,6 +15,7 @@ type HandbookEditorArticle = {
   proposedCategoryName?: string | null;
   revisionBaseVersionId?: string | null;
   revisionSubmitted?: boolean;
+  pendingSubmissionId?: string | null;
   draftSourceUrls: string[];
   versions: Array<{
     versionNumber: number;
@@ -174,7 +176,7 @@ export function HandbookEditor({
   );
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+    <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <Link
@@ -192,13 +194,40 @@ export function HandbookEditor({
           </h1>
         </div>
         {article ? (
-          <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700">
-            {revisionMode
-              ? "Proposed revision · current version stays live"
-              : article.status === "PUBLISHED"
-              ? "Published · draft edits are private"
-              : article.status}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700">
+              {revisionMode
+                ? "Proposed revision · current version stays live"
+                : article.status === "PUBLISHED"
+                ? "Published · draft edits are private"
+                : article.status}
+            </span>
+            {article.status === "DRAFT" && article.versions.length === 0 ? (
+              <details className="relative">
+                <summary
+                  aria-label="Draft actions"
+                  className="flex size-9 cursor-pointer list-none items-center justify-center rounded text-gray-600 hover:bg-gray-100"
+                >
+                  ⋯
+                </summary>
+                <div className="absolute right-0 z-30 mt-1 w-48 rounded border border-gray-200 bg-white p-1 shadow-sm">
+                  {article.pendingSubmissionId ? (
+                    <HandbookRemovalButton
+                      intent="withdraw-submission"
+                      observationId={article.pendingSubmissionId}
+                      actionPath="/handbook/my-work"
+                    />
+                  ) : (
+                    <HandbookRemovalButton
+                      intent="delete-draft"
+                      articleId={article.id}
+                      actionPath="/handbook/my-work"
+                    />
+                  )}
+                </div>
+              </details>
+            ) : null}
+          </div>
         ) : null}
       </div>
       <Form

@@ -33,6 +33,29 @@ function renderEditor(
 }
 
 describe("HandbookEditor", () => {
+  it("remembers the editing tools preference and can restore the tools", async () => {
+    const user = userEvent.setup();
+    window.localStorage.removeItem("handbook.editor.tools.collapsed");
+    const view = renderEditor();
+    await user.click(screen.getByRole("button", { name: "Hide editor tools" }));
+    expect(
+      screen.getByRole("button", { name: "Show editor tools" })
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(window.localStorage.getItem("handbook.editor.tools.collapsed")).toBe(
+      "true"
+    );
+    view.unmount();
+    renderEditor();
+    await user.click(
+      await screen.findByRole("button", { name: "Show editor tools" })
+    );
+    expect(
+      screen.getByRole("button", { name: "Hide editor tools" })
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "+ Section" })).toBeTruthy();
+    window.localStorage.removeItem("handbook.editor.tools.collapsed");
+  });
+
   it("shows only title, category, content, references, and the existing actions", () => {
     renderEditor();
 
@@ -48,10 +71,8 @@ describe("HandbookEditor", () => {
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inline code" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Insert image" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "+ Add section" })).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "+ Add subsection" })
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "+ Section" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ Subsection" })).toBeDisabled();
     expect(
       screen.getByRole("combobox", { name: "Text style" })
     ).toHaveTextContent("Section");
@@ -78,13 +99,13 @@ describe("HandbookEditor", () => {
     renderEditor();
 
     const editor = screen.getByTestId("editor-v2-content");
-    await user.click(screen.getByRole("button", { name: "+ Add section" }));
+    await user.click(screen.getByRole("button", { name: "+ Section" }));
     expect(editor.querySelector("h2")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "+ Add subsection" })
+      screen.getByRole("button", { name: "+ Subsection" })
     ).not.toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "+ Add subsection" }));
+    await user.click(screen.getByRole("button", { name: "+ Subsection" }));
     expect(editor.querySelector("h3")).toBeTruthy();
     expect(
       screen.getByRole("group", { name: "Subsection controls" })

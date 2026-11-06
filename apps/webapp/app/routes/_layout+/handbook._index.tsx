@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { GripVertical } from "lucide-react";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -8,10 +10,12 @@ import {
   Form,
   Link,
   redirect,
+  useFetcher,
   useLoaderData,
   useLocation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import { findHandbookSearchMatch } from "~/modules/ioio-handbook/document";
 import {
@@ -67,9 +71,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
     const formData = await request.formData();
     const intent = String(formData.get("intent") ?? "");
     if (
-      !["set-start-here", "unset-start-here", "move-up", "move-down"].includes(
-        intent
-      )
+      !["move-before", "move-after", "move-up", "move-down"].includes(intent)
     ) {
       return data(
         { ok: false as const, message: "Choose an article ordering action." },
@@ -83,14 +85,23 @@ export async function action({ context, request }: ActionFunctionArgs) {
         { status: 400 }
       );
     }
+    const targetArticleId = String(
+      formData.get("targetArticleId") ?? ""
+    ).trim();
+    if (
+      (intent === "move-before" || intent === "move-after") &&
+      (!targetArticleId || targetArticleId.length > 40)
+    ) {
+      return data(
+        { ok: false as const, message: "Choose a valid target article." },
+        { status: 400 }
+      );
+    }
     await updateHandbookArticleNavigation({
       organizationId: auth.organizationId,
       articleId,
-      intent: intent as
-        | "set-start-here"
-        | "unset-start-here"
-        | "move-up"
-        | "move-down",
+      intent: intent as "move-before" | "move-after" | "move-up" | "move-down",
+      ...(targetArticleId ? { targetArticleId } : {}),
     });
     const requestedReturnTo = String(formData.get("returnTo") ?? "/handbook");
     const returnUrl = new URL(requestedReturnTo, request.url);
@@ -116,7 +127,6 @@ function groupArticlesByCategory<
   T extends {
     id: string;
     handbookCategory: { id: string; name: string } | null;
-    isStartHere: boolean;
     position: number;
   },
 >(articles: T[], seedCategories: Array<{ id: string; name: string }>) {
@@ -146,82 +156,190 @@ function groupArticlesByCategory<
   );
 }
 
-function HandbookArticleRow({
-  article,
+type NavigationArticle = ReturnType<
+  typeof useLoaderData<typeof loader>
+>["articles"][number];
+
+function HandbookCategoryArticles({
+  articles,
   query,
   canEdit,
   returnTo,
-  canMoveUp,
-  canMoveDown,
 }: {
-  article: {
-    id: string;
-    slug: string;
-    isStartHere: boolean;
-    publishedVersion: {
-      title: string;
-      content: string;
-      publishedAt: Date | string;
-    } | null;
-  };
+  articles: NavigationArticle[];
   query: string;
   canEdit: boolean;
   returnTo: string;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
 }) {
-  if (!article.publishedVersion) return null;
-  const match = query
-    ? findHandbookSearchMatch(article.publishedVersion.content, query)
-    : null;
-  const target = match ? `#${match.id}` : "";
-  const action = (intent: string, label: string, disabled = false) => (
-    <Form method="post" action={returnTo}>
-      <input type="hidden" name="articleId" value={article.id} />
-      <input type="hidden" name="intent" value={intent} />
-      <input type="hidden" name="returnTo" value={returnTo} />
-      <button
-        type="submit"
-        disabled={disabled}
-        className="rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {label}
-      </button>
-    </Form>
-  );
+  const fetcher = useFetcher<typeof action>();
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    id: string;
+    after: boolean;
+  } | null>(null);
+  const busy = fetcher.state !== "idle";
+  const canReorder =
+    canEdit && !query && Boolean(articles[0]?.handbookCategory);
+  function move(
+    articleId: string,
+    intent: "move-up" | "move-down" | "move-before" | "move-after",
+    targetArticleId?: string
+  ) {
+    if (busy) return;
+    void fetcher.submit(
+      {
+        articleId,
+        intent,
+        returnTo,
+        ...(targetArticleId ? { targetArticleId } : {}),
+      },
+      { method: "post", action: returnTo, preventScrollReset: true }
+    );
+  }
   return (
-    <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
-      <div>
-        <h3 className="text-base font-semibold text-gray-950">
-          <Link
-            to={`/handbook/${article.slug}${target}`}
-            className="hover:text-red-800"
-          >
-            {article.publishedVersion.title}
-          </Link>
-        </h3>
-        {match ? (
-          <p className="mt-1 text-xs text-gray-600">
-            →{" "}
-            <Link to={`/handbook/${article.slug}${target}`}>{match.title}</Link>
-          </p>
-        ) : null}
-        <p className="mt-1 text-xs text-gray-500">
-          Updated{" "}
-          {new Date(article.publishedVersion.publishedAt).toLocaleDateString()}
+    <>
+      {fetcher.data && "message" in fetcher.data ? (
+        <p role="alert" className="mb-2 text-sm text-red-800">
+          {fetcher.data.message}
         </p>
-      </div>
-      {canEdit ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {action(
-            article.isStartHere ? "unset-start-here" : "set-start-here",
-            article.isStartHere ? "Remove Start here" : "Start here"
-          )}
-          {canMoveUp ? action("move-up", "Move up") : null}
-          {canMoveDown ? action("move-down", "Move down") : null}
-        </div>
       ) : null}
-    </li>
+      <ol className="divide-y divide-gray-100" aria-busy={busy}>
+        {articles.map((article, index) => {
+          if (!article.publishedVersion) return null;
+          const match = query
+            ? findHandbookSearchMatch(article.publishedVersion.content, query)
+            : null;
+          const target = match ? `#${match.id}` : "";
+          return (
+            <li
+              key={article.id}
+              className={`flex flex-wrap items-center gap-2 py-3 first:pt-0 last:pb-0 ${
+                draggedId === article.id ? "opacity-50" : ""
+              } ${
+                dropTarget?.id === article.id
+                  ? dropTarget.after
+                    ? "border-b-2 border-b-gray-500"
+                    : "border-t-2 border-t-gray-500"
+                  : ""
+              }`}
+              onDragOver={(event) => {
+                if (
+                  !canReorder ||
+                  !draggedId ||
+                  busy ||
+                  draggedId === article.id
+                )
+                  return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                const bounds = event.currentTarget.getBoundingClientRect();
+                setDropTarget({
+                  id: article.id,
+                  after: event.clientY > bounds.top + bounds.height / 2,
+                });
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (canReorder && draggedId && draggedId !== article.id) {
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  move(
+                    draggedId,
+                    event.clientY > bounds.top + bounds.height / 2
+                      ? "move-after"
+                      : "move-before",
+                    article.id
+                  );
+                }
+                setDraggedId(null);
+                setDropTarget(null);
+              }}
+            >
+              {canReorder ? (
+                <button
+                  type="button"
+                  draggable={!busy}
+                  disabled={busy}
+                  aria-label={`Drag to reorder ${article.publishedVersion.title}`}
+                  title="Drag to reorder; or use the ordering menu."
+                  onDragStart={(event) => {
+                    setDraggedId(article.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", article.id);
+                  }}
+                  onDragEnd={() => {
+                    setDraggedId(null);
+                    setDropTarget(null);
+                  }}
+                  className="hidden h-9 w-7 cursor-grab items-center justify-center rounded text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-gray-500 sm:inline-flex"
+                >
+                  <GripVertical size={16} aria-hidden="true" />
+                </button>
+              ) : null}
+              <span className="w-6 shrink-0 self-start pt-0.5 text-sm tabular-nums text-gray-500">
+                {index + 1}.
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-base font-semibold text-gray-950">
+                  <Link
+                    to={`/handbook/${article.slug}${target}`}
+                    className="hover:text-red-800"
+                  >
+                    {article.publishedVersion.title}
+                  </Link>
+                </h3>
+                {match ? (
+                  <p className="mt-1 text-xs text-gray-600">
+                    →{" "}
+                    <Link to={`/handbook/${article.slug}${target}`}>
+                      {match.title}
+                    </Link>
+                  </p>
+                ) : null}
+                <p className="mt-1 text-xs text-gray-500">
+                  Updated{" "}
+                  {new Date(
+                    article.publishedVersion.publishedAt
+                  ).toLocaleDateString()}
+                </p>
+              </div>
+              {canEdit ? (
+                <HandbookArticleActions
+                  articleId={article.id}
+                  slug={article.slug}
+                  articleTitle={article.publishedVersion.title}
+                  menuLabel={`Article actions for ${article.publishedVersion.title}`}
+                >
+                  {canReorder ? (
+                    <div
+                      role="group"
+                      aria-label={`Reorder ${article.publishedVersion.title}`}
+                      className="border-t border-gray-100 pt-1"
+                    >
+                      <button
+                        type="button"
+                        disabled={busy || index === 0}
+                        onClick={() => move(article.id, "move-up")}
+                        className="block min-h-9 w-full rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40"
+                      >
+                        Move up
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || index === articles.length - 1}
+                        onClick={() => move(article.id, "move-down")}
+                        className="block min-h-9 w-full rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40"
+                      >
+                        Move down
+                      </button>
+                    </div>
+                  ) : null}
+                </HandbookArticleActions>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+    </>
   );
 }
 
@@ -269,12 +387,6 @@ export default function HandbookIndexPage() {
             className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
           >
             My Work
-          </Link>
-          <Link
-            to="/handbook/import"
-            className="inline-flex h-10 items-center justify-center rounded-lg border border-red-700 bg-white px-4 text-sm font-semibold text-red-800 hover:bg-red-50"
-          >
-            Import PDF
           </Link>
           {isStudent ? (
             <Link
@@ -366,56 +478,16 @@ export default function HandbookIndexPage() {
                     )}`}
                     className="inline-flex h-9 items-center rounded-lg border border-red-700 bg-white px-3 text-sm font-semibold text-red-800 hover:bg-red-50"
                   >
-                    Contribute to {category.name}
+                    Contribute
                   </Link>
                 ) : null}
               </header>
-              <ul className="divide-y divide-gray-100">
-                {groupArticles.some((article) => article.isStartHere) ? (
-                  <li className="list-none py-3 first:pt-0">
-                    <section
-                      aria-labelledby={`start-here-${category?.id ?? "other"}`}
-                    >
-                      <h3
-                        id={`start-here-${category?.id ?? "other"}`}
-                        className="mb-2 text-xs font-bold uppercase tracking-[0.12em] text-red-800"
-                      >
-                        Start here
-                      </h3>
-                      <ul className="divide-y divide-gray-100">
-                        {groupArticles
-                          .filter((article) => article.isStartHere)
-                          .map((article, index, articlesInGroup) => (
-                            <HandbookArticleRow
-                              key={article.id}
-                              article={article}
-                              query={query}
-                              canEdit={canEdit}
-                              returnTo={returnTo}
-                              canMoveUp={!query && index > 0}
-                              canMoveDown={
-                                !query && index < articlesInGroup.length - 1
-                              }
-                            />
-                          ))}
-                      </ul>
-                    </section>
-                  </li>
-                ) : null}
-                {groupArticles
-                  .filter((article) => !article.isStartHere)
-                  .map((article, index, articlesInGroup) => (
-                    <HandbookArticleRow
-                      key={article.id}
-                      article={article}
-                      query={query}
-                      canEdit={canEdit}
-                      returnTo={returnTo}
-                      canMoveUp={!query && index > 0}
-                      canMoveDown={!query && index < articlesInGroup.length - 1}
-                    />
-                  ))}
-              </ul>
+              <HandbookCategoryArticles
+                articles={groupArticles}
+                query={query}
+                canEdit={canEdit}
+                returnTo={returnTo}
+              />
             </section>
           ))}
         </div>

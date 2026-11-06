@@ -134,50 +134,60 @@ describe("IOIO Handbook read access", () => {
     });
   });
 
-  it("lets Staff update category order while blocking Students", async () => {
-    const createRequest = () => {
-      const formData = new FormData();
-      formData.set("intent", "set-start-here");
-      formData.set("articleId", "article-1");
-      return new Request("http://localhost/handbook", {
-        method: "POST",
-        body: formData,
+  it.each(["move-up", "move-down", "move-before", "move-after"])(
+    "lets Staff %s while blocking Students",
+    async (intent) => {
+      const createRequest = () => {
+        const formData = new FormData();
+        formData.set("intent", intent);
+        if (intent.startsWith("move-b") || intent === "move-after")
+          formData.set("targetArticleId", "article-2");
+        formData.set("articleId", "article-1");
+        return new Request("http://localhost/handbook", {
+          method: "POST",
+          body: formData,
+        });
+      };
+      const createActionArgs = (request: Request) =>
+        ({
+          context: { getSession: () => ({ userId: "user-1" }) },
+          request,
+          params: {},
+          url: new URL(request.url),
+          pattern: "/handbook",
+        }) as never;
+      mocks.updateHandbookArticleNavigation.mockResolvedValue({
+        articleId: "article-1",
       });
-    };
-    const createActionArgs = (request: Request) =>
-      ({
-        context: { getSession: () => ({ userId: "user-1" }) },
-        request,
-        params: {},
-        url: new URL(request.url),
-        pattern: "/handbook",
-      }) as never;
-    mocks.updateHandbookArticleNavigation.mockResolvedValue({
-      articleId: "article-1",
-    });
 
-    const staffResult = await handbookIndexAction(
-      createActionArgs(createRequest())
-    );
+      const staffResult = await handbookIndexAction(
+        createActionArgs(createRequest())
+      );
 
-    expect(mocks.updateHandbookArticleNavigation).toHaveBeenCalledWith({
-      organizationId: "ioio-team-1",
-      articleId: "article-1",
-      intent: "set-start-here",
-    });
-    expect((staffResult as Response).headers.get("Location")).toBe("/handbook");
+      expect(mocks.updateHandbookArticleNavigation).toHaveBeenCalledWith({
+        organizationId: "ioio-team-1",
+        articleId: "article-1",
+        intent,
+        ...(intent === "move-before" || intent === "move-after"
+          ? { targetArticleId: "article-2" }
+          : {}),
+      });
+      expect((staffResult as Response).headers.get("Location")).toBe(
+        "/handbook"
+      );
 
-    vi.clearAllMocks();
-    mocks.requirePermission.mockResolvedValue(
-      handbookPermission("SELF_SERVICE")
-    );
-    const studentResult = await handbookIndexAction(
-      createActionArgs(createRequest())
-    );
+      vi.clearAllMocks();
+      mocks.requirePermission.mockResolvedValue(
+        handbookPermission("SELF_SERVICE")
+      );
+      const studentResult = await handbookIndexAction(
+        createActionArgs(createRequest())
+      );
 
-    expect(mocks.updateHandbookArticleNavigation).not.toHaveBeenCalled();
-    expect((studentResult as { init: { status: number } }).init.status).toBe(
-      403
-    );
-  });
+      expect(mocks.updateHandbookArticleNavigation).not.toHaveBeenCalled();
+      expect((studentResult as { init: { status: number } }).init.status).toBe(
+        403
+      );
+    }
+  );
 });

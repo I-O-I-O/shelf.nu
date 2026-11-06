@@ -654,6 +654,21 @@ export function HandbookImportReview({
               } pages.`
             : "No reliable headings were detected. The source text remains available in the article preview and editor."}
         </p>
+        {draft.imageDetectedPages?.length ? (
+          <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+            Images detected but not imported on pages{" "}
+            {draft.imageDetectedPages.join(", ")}. The PDF text remains
+            available; review the source pages for visual context.
+          </p>
+        ) : null}
+        {draft.articles.some((article) =>
+          article.sections.some((section) => section.possibleAuthorNote)
+        ) ? (
+          <p className="mt-2 text-xs text-gray-600">
+            Possible author note tags are advisory. Source text remains included
+            until you exclude it.
+          </p>
+        ) : null}
       </section>
 
       <section className="mb-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
@@ -1124,6 +1139,14 @@ export function HandbookImportReview({
                                     {!section.included ? (
                                       <span className="text-[11px] font-semibold text-gray-500">
                                         Excluded from import · still detected
+                                      </span>
+                                    ) : null}
+                                    {section.possibleAuthorNote ? (
+                                      <span
+                                        title="Review this source text before importing; it has not been removed."
+                                        className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-950"
+                                      >
+                                        Possible author note
                                       </span>
                                     ) : null}
                                   </div>

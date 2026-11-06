@@ -320,6 +320,11 @@ const handbookReferences = {
   },
 } satisfies PrismaTypes.HandbookArticleVersionInclude;
 
+const handbookArticleNavigationOrder = [
+  { position: "asc" },
+  { slug: "asc" },
+] satisfies Prisma.HandbookArticleOrderByWithRelationInput[];
+
 export async function listPublishedHandbookArticles({
   organizationId,
   query = "",
@@ -349,12 +354,11 @@ export async function listPublishedHandbookArticles({
         },
       },
     },
-    orderBy: [{ isStartHere: "desc" }, { position: "asc" }, { slug: "asc" }],
+    orderBy: handbookArticleNavigationOrder,
     select: {
       id: true,
       slug: true,
       updatedAt: true,
-      isStartHere: true,
       position: true,
       handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
@@ -367,69 +371,123 @@ export async function listPublishedHandbookArticles({
   return articles;
 }
 
+/** Same navigation order as the Handbook category list; fetch one extra for overflow. */
+export async function listRelatedHandbookArticles({
+  organizationId,
+  handbookCategoryId,
+  articleId,
+}: {
+  organizationId: string;
+  handbookCategoryId: string;
+  articleId: string;
+}) {
+  const articles = await db.handbookArticle.findMany({
+    where: {
+      organizationId,
+      handbookCategoryId,
+      id: { not: articleId },
+      status: HandbookArticleStatus.PUBLISHED,
+      publishedVersion: { isNot: null },
+    },
+    orderBy: handbookArticleNavigationOrder,
+    take: 8,
+    select: {
+      id: true,
+      slug: true,
+      publishedVersion: { select: { title: true } },
+    },
+  });
+  return {
+    articles: articles.slice(0, 7).flatMap((article) =>
+      article.publishedVersion
+        ? [
+            {
+              id: article.id,
+              slug: article.slug,
+              title: article.publishedVersion.title,
+            },
+          ]
+        : []
+    ),
+    hasMore: articles.length > 7,
+  };
+}
+
+/** Persist one category's reading order, including legacy rows with tied positions. */
 export async function updateHandbookArticleNavigation({
   organizationId,
   articleId,
   intent,
+  targetArticleId,
 }: {
   organizationId: string;
   articleId: string;
-  intent: "set-start-here" | "unset-start-here" | "move-up" | "move-down";
+  intent: "move-up" | "move-down" | "move-before" | "move-after";
+  targetArticleId?: string;
 }) {
-  return db.$transaction(async (tx) => {
-    const article = await tx.handbookArticle.findFirst({
-      where: {
-        id: articleId,
-        organizationId,
-        status: HandbookArticleStatus.PUBLISHED,
-        handbookCategoryId: { not: null },
-      },
-      select: {
-        id: true,
-        handbookCategoryId: true,
-        isStartHere: true,
-        position: true,
-      },
-    });
-    if (!article?.handbookCategoryId) {
-      throw new HandbookValidationError(
-        "That published Handbook article could not be found in a category."
-      );
-    }
-
-    if (intent === "set-start-here" || intent === "unset-start-here") {
-      await tx.handbookArticle.update({
-        where: { id: article.id, organizationId },
-        data: { isStartHere: intent === "set-start-here" },
+  return db.$transaction(
+    async (tx) => {
+      const article = await tx.handbookArticle.findFirst({
+        where: {
+          id: articleId,
+          organizationId,
+          status: HandbookArticleStatus.PUBLISHED,
+          publishedVersion: { isNot: null },
+          handbookCategoryId: { not: null },
+        },
+        select: { id: true, handbookCategoryId: true },
       });
+      if (!article?.handbookCategoryId) {
+        throw new HandbookValidationError(
+          "That published Handbook article could not be found in a category."
+        );
+      }
+      const siblings = await tx.handbookArticle.findMany({
+        where: {
+          organizationId,
+          handbookCategoryId: article.handbookCategoryId,
+          status: HandbookArticleStatus.PUBLISHED,
+          publishedVersion: { isNot: null },
+        },
+        orderBy: handbookArticleNavigationOrder,
+        select: { id: true, position: true },
+      });
+      const index = siblings.findIndex((sibling) => sibling.id === article.id);
+      if (index < 0)
+        throw new HandbookValidationError(
+          "That article is no longer available."
+        );
+      let destination: number;
+      if (intent === "move-before" || intent === "move-after") {
+        const targetIndex = siblings.findIndex(
+          (sibling) => sibling.id === targetArticleId
+        );
+        if (targetIndex < 0) {
+          throw new HandbookValidationError(
+            "Choose an article in the same category."
+          );
+        }
+        if (targetIndex === index) return { articleId: article.id };
+        destination = targetIndex + (intent === "move-after" ? 1 : 0);
+        if (index < destination) destination -= 1;
+      } else {
+        destination = index + (intent === "move-up" ? -1 : 1);
+        if (destination < 0 || destination >= siblings.length)
+          return { articleId: article.id };
+      }
+      const [moved] = siblings.splice(index, 1);
+      siblings.splice(destination, 0, moved!);
+      for (const [position, sibling] of siblings.entries()) {
+        if (sibling.position === position + 1) continue;
+        await tx.handbookArticle.update({
+          where: { id: sibling.id, organizationId },
+          data: { position: position + 1 },
+        });
+      }
       return { articleId: article.id };
-    }
-
-    const siblings = await tx.handbookArticle.findMany({
-      where: {
-        organizationId,
-        handbookCategoryId: article.handbookCategoryId,
-        status: HandbookArticleStatus.PUBLISHED,
-        isStartHere: article.isStartHere,
-      },
-      orderBy: [{ position: "asc" }, { slug: "asc" }],
-      select: { id: true, position: true },
-    });
-    const index = siblings.findIndex((sibling) => sibling.id === article.id);
-    const targetIndex = intent === "move-up" ? index - 1 : index + 1;
-    const target = siblings[targetIndex];
-    if (index < 0 || !target) return { articleId: article.id };
-
-    await tx.handbookArticle.update({
-      where: { id: article.id, organizationId },
-      data: { position: target.position },
-    });
-    await tx.handbookArticle.update({
-      where: { id: target.id, organizationId },
-      data: { position: article.position },
-    });
-    return { articleId: article.id };
-  });
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
 }
 
 export async function listHandbookArticleTitles({
@@ -578,11 +636,13 @@ export async function getHandbookEditData({
             ? {
                 id: articleId,
                 organizationId,
+                status: { not: HandbookArticleStatus.ARCHIVED },
                 ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
               }
             : {
                 slug,
                 organizationId,
+                status: { not: HandbookArticleStatus.ARCHIVED },
                 ...(revisionMode
                   ? { status: HandbookArticleStatus.PUBLISHED }
                   : ownerUserId
@@ -616,6 +676,7 @@ export async function getHandbookEditData({
               orderBy: { createdAt: "desc" },
               take: 10,
               select: {
+                id: true,
                 proposedCategoryName: true,
                 handbookCategoryId: true,
                 publishedVersionId: true,
@@ -648,6 +709,7 @@ export async function getHandbookEditData({
     article: article
       ? {
           ...article,
+          pendingSubmissionId: article.observations[0]?.id ?? null,
           proposedCategoryName:
             article.observations.find((item) => item.proposedCategoryName)
               ?.proposedCategoryName ?? null,
@@ -1032,6 +1094,7 @@ export async function saveHandbookDraft({
       where: {
         id: articleId,
         organizationId,
+        status: { not: HandbookArticleStatus.ARCHIVED },
         ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
         ...(ownerUserId ? { status: HandbookArticleStatus.DRAFT } : {}),
       },
@@ -1045,6 +1108,7 @@ export async function saveHandbookDraft({
       where: {
         id: current.id,
         organizationId,
+        status: { not: HandbookArticleStatus.ARCHIVED },
         ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
         ...(ownerUserId ? { status: HandbookArticleStatus.DRAFT } : {}),
       },
@@ -1097,7 +1161,11 @@ async function publishHandbookArticleInTransaction(
   }
 ) {
   const article = await tx.handbookArticle.findFirst({
-    where: { id: articleId, organizationId },
+    where: {
+      id: articleId,
+      organizationId,
+      status: { not: HandbookArticleStatus.ARCHIVED },
+    },
   });
   if (!article)
     throw new HandbookValidationError(
@@ -1120,7 +1188,10 @@ async function publishHandbookArticleInTransaction(
     );
   }
   const categoryChanged = article.handbookCategoryId !== category.id;
-  const needsPosition = categoryChanged || article.position <= 0;
+  const needsPosition =
+    categoryChanged ||
+    (article.position <= 0 &&
+      article.status !== HandbookArticleStatus.PUBLISHED);
   if (needsPosition) {
     const maxPosition = await tx.handbookArticle.aggregate({
       where: {
@@ -1131,7 +1202,11 @@ async function publishHandbookArticleInTransaction(
       _max: { position: true },
     });
     await tx.handbookArticle.update({
-      where: { id: article.id, organizationId },
+      where: {
+        id: article.id,
+        organizationId,
+        status: { not: HandbookArticleStatus.ARCHIVED },
+      },
       data: {
         ...(categoryChanged ? { handbookCategoryId: category.id } : {}),
         position: (maxPosition._max.position ?? 0) + 1,
@@ -1178,7 +1253,11 @@ async function publishHandbookArticleInTransaction(
     });
   }
   await tx.handbookArticle.update({
-    where: { id: article.id, organizationId },
+    where: {
+      id: article.id,
+      organizationId,
+      status: { not: HandbookArticleStatus.ARCHIVED },
+    },
     data: {
       status: HandbookArticleStatus.PUBLISHED,
       publishedVersionId: version.id,
@@ -1925,6 +2004,7 @@ export async function listMyHandbookDrafts({
   const newArticleWork = drafts.map(({ observations, ...draft }) => ({
     ...draft,
     articleId: draft.id,
+    submissionId: observations[0]?.id ?? null,
     workType: "NEW_ARTICLE" as const,
     submittedForReview: observations.length > 0,
     baseVersionNumber: null,
@@ -1943,6 +2023,7 @@ export async function listMyHandbookDrafts({
       draftTitle: article.draftTitle,
       updatedAt: article.updatedAt,
       handbookCategory: article.handbookCategory,
+      submissionId: null,
       workType: "IMPROVEMENT_DRAFT" as const,
       submittedForReview: false,
       baseVersionNumber: article.publishedVersion!.versionNumber,
@@ -1959,6 +2040,7 @@ export async function listMyHandbookDrafts({
             handbookCategory:
               observation.handbookCategory ??
               observation.article.handbookCategory,
+            submissionId: observation.id,
             workType: "IMPROVEMENT_PENDING" as const,
             submittedForReview: true,
             baseVersionNumber: observation.publishedVersion.versionNumber,
@@ -1971,6 +2053,263 @@ export async function listMyHandbookDrafts({
     ...improvementDrafts,
     ...pendingImprovementWork,
   ].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+}
+
+/** Archive/restore only changes visibility; immutable published versions stay intact. */
+export async function archiveHandbookArticle({
+  organizationId,
+  articleId,
+  userId,
+  canManageArticles = false,
+  restore = false,
+}: {
+  organizationId: string;
+  articleId: string;
+  userId: string;
+  canManageArticles?: boolean;
+  restore?: boolean;
+}) {
+  if (!userId || !canManageArticles)
+    throw new HandbookValidationError(
+      "Only Staff can archive or restore Handbook articles."
+    );
+  const result = await db.handbookArticle.updateMany({
+    where: {
+      id: articleId,
+      organizationId,
+      status: restore
+        ? HandbookArticleStatus.ARCHIVED
+        : HandbookArticleStatus.PUBLISHED,
+      publishedVersionId: { not: null },
+    },
+    data: {
+      status: restore
+        ? HandbookArticleStatus.PUBLISHED
+        : HandbookArticleStatus.ARCHIVED,
+    },
+  });
+  if (!result.count)
+    throw new HandbookValidationError(
+      "That article is no longer available for this action."
+    );
+  return { id: articleId };
+}
+
+/**
+ * Permanently delete a published or archived article and only the records owned by it.
+ * Shared Handbook sources and submissions linked to another resource survive.
+ */
+export async function deleteHandbookArticlePermanently({
+  organizationId,
+  articleId,
+  userId,
+  canManageArticles = false,
+  confirmationTitle,
+}: {
+  organizationId: string;
+  articleId: string;
+  userId: string;
+  canManageArticles?: boolean;
+  confirmationTitle: string;
+}) {
+  if (!userId || !canManageArticles)
+    throw new HandbookValidationError(
+      "Only Staff can permanently delete Handbook articles."
+    );
+
+  return db.$transaction(
+    async (tx) => {
+      const article = await tx.handbookArticle.findFirst({
+        where: {
+          id: articleId,
+          organizationId,
+          status: {
+            in: [
+              HandbookArticleStatus.PUBLISHED,
+              HandbookArticleStatus.ARCHIVED,
+            ],
+          },
+          publishedVersionId: { not: null },
+        },
+        select: {
+          id: true,
+          slug: true,
+          status: true,
+          handbookCategoryId: true,
+          publishedVersionId: true,
+          publishedVersion: { select: { title: true } },
+          versions: {
+            select: {
+              sources: { select: { sourceId: true } },
+            },
+          },
+          observations: {
+            select: {
+              id: true,
+              assetModelId: true,
+              kitId: true,
+              conversationId: true,
+              messageId: true,
+            },
+          },
+        },
+      });
+      const articleTitle = article?.publishedVersion?.title;
+      if (!article || !articleTitle)
+        throw new HandbookValidationError(
+          "Only published or archived articles can be permanently deleted."
+        );
+      if (confirmationTitle.trim() !== articleTitle)
+        throw new HandbookValidationError(
+          "Type the article title exactly to confirm permanent deletion."
+        );
+
+      const independentObservations = article.observations.filter(
+        (observation) =>
+          observation.assetModelId ||
+          observation.kitId ||
+          observation.conversationId ||
+          observation.messageId
+      );
+      const articleOnlyObservationIds = article.observations
+        .filter(
+          (observation) =>
+            !observation.assetModelId &&
+            !observation.kitId &&
+            !observation.conversationId &&
+            !observation.messageId
+        )
+        .map(({ id }) => id);
+
+      if (articleOnlyObservationIds.length) {
+        await tx.handbookObservation.deleteMany({
+          where: {
+            organizationId,
+            articleId: article.id,
+            id: { in: articleOnlyObservationIds },
+          },
+        });
+      }
+      if (independentObservations.length) {
+        await tx.handbookObservation.updateMany({
+          where: {
+            organizationId,
+            articleId: article.id,
+            id: { in: independentObservations.map(({ id }) => id) },
+          },
+          data: { articleId: null },
+        });
+      }
+
+      const deleted = await tx.handbookArticle.deleteMany({
+        where: {
+          id: article.id,
+          organizationId,
+          status: article.status,
+          publishedVersionId: article.publishedVersionId,
+        },
+      });
+      if (!deleted.count)
+        throw new HandbookValidationError(
+          "That article is no longer available for deletion."
+        );
+
+      const sourceIds = [
+        ...new Set(
+          article.versions.flatMap((version) =>
+            version.sources.map(({ sourceId }) => sourceId)
+          )
+        ),
+      ];
+      if (sourceIds.length) {
+        // A source may be deduplicated across articles. Remove only unreferenced
+        // database records without storage objects; uploaded files are retained.
+        await tx.handbookSource.deleteMany({
+          where: {
+            organizationId,
+            id: { in: sourceIds },
+            storageObjectPath: null,
+            versions: { none: {} },
+          },
+        });
+      }
+
+      if (article.handbookCategoryId) {
+        const remainingArticles = await tx.handbookArticle.findMany({
+          where: {
+            organizationId,
+            handbookCategoryId: article.handbookCategoryId,
+            status: HandbookArticleStatus.PUBLISHED,
+            publishedVersion: { isNot: null },
+          },
+          orderBy: handbookArticleNavigationOrder,
+          select: { id: true, position: true },
+        });
+        for (const [index, remaining] of remainingArticles.entries()) {
+          const position = index + 1;
+          if (remaining.position === position) continue;
+          await tx.handbookArticle.updateMany({
+            where: {
+              id: remaining.id,
+              organizationId,
+              status: HandbookArticleStatus.PUBLISHED,
+            },
+            data: { position },
+          });
+        }
+      }
+
+      await recordEvent(
+        {
+          action: "IOIO_HANDBOOK_ARTICLE_DELETED",
+          organizationId,
+          actorUserId: userId,
+          entityType: "HANDBOOK_ARTICLE",
+          entityId: article.id,
+          meta: {
+            slug: article.slug,
+            title: articleTitle,
+          } as PrismaTypes.InputJsonValue,
+        },
+        tx
+      );
+
+      return { id: article.id, slug: article.slug, title: articleTitle };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
+}
+
+/** Withdraw from review while retaining both the request and editable draft. */
+export async function withdrawHandbookSubmission({
+  organizationId,
+  observationId,
+  userId,
+  canManageAnySubmission = false,
+}: {
+  organizationId: string;
+  observationId: string;
+  userId: string;
+  canManageAnySubmission?: boolean;
+}) {
+  const result = await db.handbookObservation.updateMany({
+    where: {
+      id: observationId,
+      organizationId,
+      status: HandbookObservationStatus.PENDING_REVIEW,
+      ...(!canManageAnySubmission ? { contributorUserId: userId } : {}),
+    },
+    data: {
+      status: HandbookObservationStatus.DISMISSED,
+      reviewedByUserId: userId,
+      reviewedAt: new Date(),
+    },
+  });
+  if (!result.count)
+    throw new HandbookValidationError(
+      "That submission is no longer pending or you do not have permission to withdraw it."
+    );
+  return { id: observationId };
 }
 
 export async function deleteHandbookDraft({

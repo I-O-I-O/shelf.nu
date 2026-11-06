@@ -88,6 +88,7 @@ describe("Handbook PDF import normalization", () => {
     expect(imported.content).toContain(
       "Wear eye protection before starting the machine."
     );
+    expect(imported.imageDetectedPages).toEqual([1]);
     expect(mocks.ocrPdfPages).toHaveBeenCalledTimes(1);
   });
 
@@ -114,6 +115,19 @@ describe("Handbook PDF import normalization", () => {
     expect(result.content).not.toContain("https://example.com/soldering-guide");
   });
 
+  it("keeps more than twenty source URLs available for multi-article review", () => {
+    const references = Array.from(
+      { length: 21 },
+      (_, index) => `https://example.com/reference-${index + 1}`
+    );
+    const result = normalizeHandbookPdfPages([
+      ["Laser Cutting Guide", "References", ...references].join("\n"),
+    ]);
+
+    expect(result.sourceUrls).toHaveLength(21);
+    expect(result.sourceUrls).toEqual(references);
+  });
+
   it("removes only repeated page-edge headers, footers and standalone page numbers", () => {
     const result = normalizeHandbookPdfPages([
       "IOIO Lab Manual\nWorkshop Safety\nPut on safety glasses.\nIOIO Lab | Page 1",
@@ -126,6 +140,55 @@ describe("Handbook PDF import normalization", () => {
     expect(result.content).toContain("Keep the work area clear.");
     expect(result.content).not.toContain("IOIO Lab Manual");
     expect(result.content).not.toContain("Page 1");
+  });
+
+  it("removes a repeated unpaginated contents block and numbered page footers", () => {
+    const result = normalizeHandbookPdfPages(
+      [
+        [
+          "Laser cutter guide",
+          "Table of content",
+          "Table of content",
+          "Introduction to laser cutting",
+          "What are vector graphics?",
+          "Finger joints",
+          "Laser cutter guide 1",
+        ].join("\n"),
+        [
+          "Introduction to laser cutting",
+          "The laser follows a vector path.",
+          "What are vector graphics?",
+          "Vectors describe paths.",
+          "Laser cutter guide 2",
+        ].join("\n"),
+      ],
+      { pageNumbers: [1, 2] }
+    );
+
+    expect(result.content).toContain("## Introduction to laser cutting");
+    expect(result.content).toContain("## What are vector graphics?");
+    expect(result.content).not.toContain("Table of content");
+    expect(result.content).not.toContain("Laser cutter guide 1");
+    expect(result.content).not.toContain("Laser cutter guide 2");
+  });
+
+  it("marks possible author notes while preserving their source text", () => {
+    const result = normalizeHandbookPdfPages([
+      [
+        "Maker Guide",
+        "Installation",
+        "Install the software.",
+        "Personal comment",
+        "I haven't tested this yet.",
+        "TODO: add screenshot",
+      ].join("\n"),
+    ]);
+
+    expect(result.content).toContain("I haven't tested this yet.");
+    expect(result.content).toContain("TODO: add screenshot");
+    expect(result.sections.some((section) => section.possibleAuthorNote)).toBe(
+      true
+    );
   });
 
   it("keeps deeply numbered PDF sections within the article H2/H3 hierarchy", () => {

@@ -3,11 +3,17 @@ import {
   inferHandbookCategoryName,
   suggestHandbookArticles,
 } from "./pdf-import.shared";
-import type { HandbookImportDraft } from "./pdf-import.shared";
+import type {
+  HandbookImportDraft,
+  HandbookImportSection,
+} from "./pdf-import.shared";
 
 export const HANDBOOK_PDF_MAX_BYTES = 5 * 1024 * 1024;
 const HANDBOOK_PDF_MAX_CONTENT_LENGTH = 300_000;
-const HANDBOOK_PDF_MAX_REFERENCES = 20;
+// The Handbook article limit applies per proposal, not to the source PDF as a
+// whole. Keep a generous document-level guard while allowing multi-article
+// guides to retain their references for review and distribution.
+const HANDBOOK_PDF_MAX_REFERENCES = 300;
 
 export type HandbookPdfImport = HandbookImportDraft;
 
@@ -35,10 +41,30 @@ function normalizedForComparison(value: string) {
     .replace(/\b\d+\s*\/\s*\d+\b/gu, "#/#");
 }
 
+function normalizedPageEdgeLine(value: string) {
+  return normalizedForComparison(value).replace(
+    /\s+(?:page\s+)?\d{1,4}(?:\s*\/\s*\d{1,4})?\s*$/iu,
+    " #"
+  );
+}
+
 function pageNumberLine(value: string) {
   return /^(?:(?:page|p\.)\s*)?\d{1,4}(?:\s*(?:of|\/)\s*\d{1,4})?$/iu.test(
     value.trim()
   );
+}
+
+function possibleAuthorNote(value: string) {
+  return [
+    /\b(?:TODO|TBD|FIXME|WIP)\b/iu,
+    /\b(?:insert|add|replace)\s+(?:a|an|the\s+)?(?:picture|image|screenshot|photo|diagram|figure)\b/iu,
+    /\b(?:personal|author|internal|editor)\s+(?:comment|note|reminder|experience)\b/iu,
+    /^\s*(?:comment|note to self|P\.?\s*S\.?|TODO)\s*[:(]/imu,
+    /\b(?:don['’]t|do not) quote me\b/iu,
+    /\bI left (?:a )?comment\b/iu,
+    /\bI (?:haven['’]t|have not) tested\b/iu,
+    /\bI am not amazing at this\b/iu,
+  ].some((pattern) => pattern.test(value));
 }
 
 function findRepeatedPageEdgeLines(pages: string[][]) {
@@ -49,7 +75,7 @@ function findRepeatedPageEdgeLines(pages: string[][]) {
     const edgeLines = new Set([...nonempty.slice(0, 2), ...nonempty.slice(-2)]);
     for (const line of edgeLines) {
       if (line.length <= 120 && !pageNumberLine(line)) {
-        const key = normalizedForComparison(line);
+        const key = normalizedPageEdgeLine(line);
         appearances.set(key, (appearances.get(key) ?? 0) + 1);
       }
     }
@@ -101,26 +127,29 @@ function headingLevel(
   if (tocLevel) return tocLevel;
   const fontCueLevel = headingCues.get(comparison);
   if (fontCueLevel) return fontCueLevel;
-  if (value.length > 100 || /[.!?;:]$/u.test(value)) return null;
-  const letters = value.replace(/[^\p{L}]/gu, "");
+  const headingCandidate = value.replace(/\s*\?$/u, "").trim();
+  if (headingCandidate.length > 100 || /[.!;:]$/u.test(headingCandidate)) {
+    return null;
+  }
+  const letters = headingCandidate.replace(/[^\p{L}]/gu, "");
   const isUppercase =
     letters.length > 2 && letters === letters.toLocaleUpperCase();
-  const wordCount = value.split(/\s+/u).length;
+  const wordCount = headingCandidate.split(/\s+/u).length;
   const isTitleCase =
     wordCount <= 10 &&
     /^[\p{Lu}\d][\p{L}\p{N}'’()/-]*(?:\s+[\p{Lu}\d][\p{L}\p{N}'’()/-]*)*$/u.test(
-      value
+      headingCandidate
     );
   const isShortStandaloneHeading =
     wordCount <= 9 &&
-    value.length <= 72 &&
-    /^[\p{Lu}\p{N}][\p{L}\p{N}'’() /&+-]*$/u.test(value);
+    headingCandidate.length <= 72 &&
+    /^[\p{Lu}\p{N}][\p{L}\p{N}'’() /&+-]*$/u.test(headingCandidate);
   return isUppercase || isTitleCase || isShortStandaloneHeading ? 2 : null;
 }
 
 function extractTableOfContents(lines: string[], linePages: number[]) {
   const start = lines.findIndex((line) =>
-    /^(?:table\s+of\s+)?contents$/iu.test(line.trim())
+    /^(?:table\s+of\s+)?contents?$/iu.test(line.trim())
   );
   if (start < 0) {
     return {
@@ -162,6 +191,34 @@ function extractTableOfContents(lines: string[], linePages: number[]) {
   }
 
   if (!seenEntry) {
+    const contentsPage = linePages[start] ?? 1;
+    for (
+      let index = start + 1;
+      index < Math.min(lines.length, start + 121);
+      index += 1
+    ) {
+      const line = lines[index]?.trim() ?? "";
+      if (!line || /^(?:table\s+of\s+)?contents?$/iu.test(line)) continue;
+      if (line.length > 160 || /https?:\/\//iu.test(line)) break;
+
+      const comparison = normalizedForComparison(line);
+      const repeatedBodyIndex = lines.findIndex(
+        (candidate, candidateIndex) =>
+          candidateIndex > index &&
+          (linePages[candidateIndex] ?? contentsPage) > contentsPage &&
+          normalizedForComparison(candidate) === comparison
+      );
+      if (repeatedBodyIndex >= 0) {
+        return {
+          lines: [...lines.slice(0, start), ...lines.slice(repeatedBodyIndex)],
+          linePages: [
+            ...linePages.slice(0, start),
+            ...linePages.slice(repeatedBodyIndex),
+          ],
+          levels: new Map<string, 2 | 3>(),
+        };
+      }
+    }
     return {
       lines,
       linePages,
@@ -254,9 +311,11 @@ export function normalizeHandbookPdfPages(
     const lastEdgeLines = new Set(nonempty.slice(-2));
     return lines.map((line) => {
       if (!line) return "";
-      const comparison = normalizedForComparison(line);
       const atEdge = firstEdgeLines.has(line) || lastEdgeLines.has(line);
-      if (pageNumberLine(line) || (atEdge && repeatedEdges.has(comparison))) {
+      if (
+        pageNumberLine(line) ||
+        (atEdge && repeatedEdges.has(normalizedPageEdgeLine(line)))
+      ) {
         return "";
       }
       return line;
@@ -315,7 +374,8 @@ export function normalizeHandbookPdfPages(
     const hasExplicitHeadingCue =
       toc.levels.has(normalizedForComparison(line)) ||
       headingCues.has(normalizedForComparison(line)) ||
-      /^\d+(?:\.\d+){1,5}\s+/u.test(line);
+      /^\d+(?:\.\d+){1,5}\s+/u.test(line) ||
+      (/\?\s*$/u.test(line) && line.split(/\s+/u).length <= 10);
     const shortHeading =
       level !== null &&
       (hasExplicitHeadingCue ||
@@ -375,7 +435,7 @@ export function normalizeHandbookPdfPages(
   }
   if (references.length > HANDBOOK_PDF_MAX_REFERENCES) {
     throw new HandbookPdfImportError(
-      "This PDF contains more than 20 external URLs. Remove some links from the document and try again."
+      "This PDF contains more than 300 external URLs, which exceeds the import review limit."
     );
   }
   const referenceIndex = Object.fromEntries(
@@ -411,6 +471,15 @@ export function normalizeHandbookPdfPages(
       fallback: true,
     };
   }
+  const annotatePossibleAuthorNotes = (section: HandbookImportSection) =>
+    possibleAuthorNote(section.markdown)
+      ? { ...section, possibleAuthorNote: true }
+      : section;
+  const annotatedSections = suggested.sections.map(annotatePossibleAuthorNotes);
+  const annotatedArticles = suggested.articles.map((article) => ({
+    ...article,
+    sections: article.sections.map(annotatePossibleAuthorNotes),
+  }));
   return {
     title,
     content,
@@ -420,6 +489,8 @@ export function normalizeHandbookPdfPages(
     referencesByHeading: referenceIndex,
     sourceOutline,
     ...suggested,
+    sections: annotatedSections,
+    articles: annotatedArticles,
   };
 }
 
@@ -434,9 +505,10 @@ export async function importHandbookPdf(
     throw new HandbookPdfImportError("Upload a valid PDF file.");
   }
   const extracted = await extractPdfDocumentPageData(buffer);
-  return normalizeHandbookPdfPages(extracted.pages, {
+  const imported = normalizeHandbookPdfPages(extracted.pages, {
     sourceName,
     headingCues: positionedHeadingCues(extracted.positionedPages),
     pageNumbers: extracted.pageNumbers,
   });
+  return { ...imported, imageDetectedPages: extracted.imagePages };
 }

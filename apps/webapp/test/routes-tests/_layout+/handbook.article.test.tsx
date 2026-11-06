@@ -1,20 +1,48 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // why: this component test supplies loader data directly and must not access
 // the database or perform authorization queries.
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
   getPublishedHandbookArticle: vi.fn(),
+  listRelatedHandbookArticles: vi.fn(),
 }));
+// why: authorization is exercised separately; these tests render supplied loader data.
 vi.mock("~/modules/ioio-handbook/access.server", () => ({
   requireIoioHandbookRead: vi.fn(),
 }));
 
-import HandbookArticlePage from "~/routes/_layout+/handbook.$slug";
+import HandbookArticlePage, {
+  loader as handbookArticleLoader,
+} from "~/routes/_layout+/handbook.$slug";
 
 describe("published Handbook article page", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.clearAllMocks();
+  });
+  it("returns not found when the published article lookup is empty", async () => {
+    const service = await import("~/modules/ioio-handbook/service.server");
+    const access = await import("~/modules/ioio-handbook/access.server");
+    vi.mocked(service.getPublishedHandbookArticle).mockResolvedValue(null);
+    vi.mocked(access.requireIoioHandbookRead).mockResolvedValue({
+      userId: "student-1",
+      organizationId: "org-1",
+      canEdit: false,
+      isStudent: true,
+    } as never);
+
+    await expect(
+      handbookArticleLoader({
+        context: { getSession: () => ({ userId: "student-1" }) },
+        request: new Request("http://localhost/handbook/deleted-article"),
+        params: { slug: "deleted-article" },
+      } as never)
+    ).rejects.toMatchObject({ init: { status: 404 } });
+    expect(service.listRelatedHandbookArticles).not.toHaveBeenCalled();
+  });
   it("shows category, content, references, and version details without legacy metadata", async () => {
     const article = {
       id: "article-1",
@@ -80,6 +108,9 @@ describe("published Handbook article page", () => {
     expect(screen.queryByText("Legacy summary should not appear")).toBeNull();
     expect(screen.queryByText("Legacy section should not appear")).toBeNull();
     expect(screen.queryByText("Related Shelf equipment")).toBeNull();
+    expect(
+      screen.queryByRole("navigation", { name: "Related articles" })
+    ).toBeNull();
   });
 
   it("shows a generated contents panel that links to article headings", async () => {
@@ -123,7 +154,7 @@ describe("published Handbook article page", () => {
 
     render(<RouterProvider router={router} />);
 
-    expect(await screen.findAllByText("Contents")).toHaveLength(2);
+    expect(await screen.findAllByText("Contents")).toHaveLength(1);
     expect(
       screen
         .getAllByRole("link", { name: "Before you start" })
@@ -195,14 +226,63 @@ describe("published Handbook article page", () => {
       [
         {
           path: "/handbook/what-3d-printing-is",
-          loader: () => ({ article, canEdit: false }),
+          loader: () => ({
+            article,
+            canEdit: false,
+            related: {
+              articles: [
+                {
+                  id: "other-article",
+                  slug: "why-this-art-is-not-working",
+                  title: "Why this piece of art is not working?",
+                },
+              ],
+              hasMore: true,
+            },
+          }),
           Component: HandbookArticlePage,
         },
       ],
       { initialEntries: ["/handbook/what-3d-printing-is"] }
     );
 
-    render(<RouterProvider router={router} />);
+    const view = render(<RouterProvider router={router} />);
+
+    const relatedToggle = await screen.findByRole("button", {
+      name: "Related in 3D Printing",
+    });
+    const contentsToggle = screen.getByRole("button", { name: "Contents" });
+    expect(contentsToggle).toHaveAttribute("aria-expanded", "true");
+    expect(relatedToggle).toHaveAttribute("aria-expanded", "true");
+    const relatedNav = screen.getByRole("navigation", {
+      name: "Related articles",
+    });
+    expect(
+      within(relatedNav).queryByRole("link", { name: "What 3D printing is" })
+    ).toBeNull();
+    expect(
+      within(relatedNav).getByRole("link", {
+        name: "Why this piece of art is not working?",
+      })
+    ).toHaveAttribute("href", "/handbook/why-this-art-is-not-working");
+    expect(
+      within(relatedNav).getByRole("link", { name: "View all in 3D Printing" })
+    ).toHaveAttribute("href", "/handbook?handbookCategoryId=category-1");
+    await user.click(contentsToggle);
+    expect(contentsToggle).toHaveAttribute("aria-expanded", "false");
+    expect(relatedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(window.localStorage.getItem("handbook.contents.collapsed")).toBe(
+      "true"
+    );
+    relatedToggle.focus();
+    await user.keyboard("{Enter}");
+    expect(relatedToggle).toHaveAttribute("aria-expanded", "false");
+    expect(window.localStorage.getItem("handbook.related.collapsed")).toBe(
+      "true"
+    );
+    await user.click(contentsToggle);
+    expect(contentsToggle).toHaveAttribute("aria-expanded", "true");
+    expect(relatedToggle).toHaveAttribute("aria-expanded", "false");
 
     const terminology = await screen.findByRole("heading", {
       name: "Terminology",
@@ -249,6 +329,53 @@ describe("published Handbook article page", () => {
               `#${title.toLowerCase().replaceAll(" ", "-")}`
           )
       ).toBe(true);
+    }
+    view.unmount();
+    const restored = render(<RouterProvider router={router} />);
+    expect(
+      await screen.findByRole("button", { name: "Related in 3D Printing" })
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Contents" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    restored.unmount();
+    window.localStorage.clear();
+    // why: emulate a small viewport to verify the responsive initial preference.
+    const media = vi
+      .spyOn(window, "matchMedia")
+      .mockImplementation((query) => ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => true,
+      }));
+    try {
+      render(<RouterProvider router={router} />);
+      expect(
+        await screen.findByRole("button", { name: "Contents" })
+      ).toHaveAttribute("aria-expanded", "false");
+      expect(
+        screen.getByRole("button", { name: "Related in 3D Printing" })
+      ).toHaveAttribute("aria-expanded", "false");
+      await user.click(
+        screen.getByRole("button", { name: "Related in 3D Printing" })
+      );
+      expect(
+        screen.getByRole("link", {
+          name: "Why this piece of art is not working?",
+        })
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Contents" })).toHaveAttribute(
+        "aria-expanded",
+        "false"
+      );
+    } finally {
+      media.mockRestore();
     }
   });
 

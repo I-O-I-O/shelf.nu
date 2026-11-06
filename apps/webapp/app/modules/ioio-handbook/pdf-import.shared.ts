@@ -7,6 +7,7 @@ export type HandbookImportSection = {
   sourceUrls: string[];
   sourcePage?: number;
   sourceHeadingIds?: string[];
+  possibleAuthorNote?: boolean;
 };
 
 export type HandbookImportOutlineHeading = {
@@ -39,6 +40,7 @@ export type HandbookImportDraft = {
   articles: HandbookImportArticle[];
   hierarchyDetected: boolean;
   fallback: boolean;
+  imageDetectedPages?: number[];
 };
 
 type MarkdownNode = {

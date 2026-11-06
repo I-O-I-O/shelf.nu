@@ -181,7 +181,12 @@ export function EditorToolbar({
 
   return (
     <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2"
+      className={tw(
+        "flex items-center gap-y-2",
+        enableHandbookBlocks
+          ? "flex-wrap gap-x-2 py-1 xl:flex-col xl:items-start [&>div:first-child_button]:border-transparent xl:[&>div]:flex-wrap xl:[&>div]:border-l-0 xl:[&>div]:pl-0"
+          : "flex-wrap gap-x-4"
+      )}
       role="toolbar"
       aria-label="Editor formatting toolbar"
     >
@@ -201,117 +206,129 @@ export function EditorToolbar({
           disabled={!state.canRedo}
         />
       </div>
-      <ParagraphSelect
-        value={state.block}
-        onChange={onParagraphChange}
-        headingLevels={headingLevels}
-        enableHandbookBlocks={enableHandbookBlocks}
-      />
-      {enableHandbookBlocks && onAddSection && onAddSubsection ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={onAddSection}
-            className="inline-flex h-9 items-center rounded-md border border-red-200 bg-red-50 px-3 text-sm font-semibold text-red-800 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
-          >
-            + Add section
-          </button>
-          <button
-            type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={onAddSubsection}
-            disabled={!state.canAddSubsection}
-            title={
-              state.canAddSubsection
-                ? undefined
-                : "Add a section before adding a subsection."
-            }
-            className="inline-flex h-9 items-center rounded-md border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            + Add subsection
-          </button>
+      <ToolbarGroup title="Format" enabled={enableHandbookBlocks}>
+        <ParagraphSelect
+          value={state.block}
+          onChange={onParagraphChange}
+          headingLevels={headingLevels}
+          enableHandbookBlocks={enableHandbookBlocks}
+        />
+        <div className="flex items-center gap-2">
+          <ToolbarButton
+            label="Bold"
+            tooltip="Bold (⌘B)"
+            icon={<Bold size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onBold}
+            active={state.bold}
+            isToggle
+          />
+          <ToolbarButton
+            label="Italic"
+            tooltip="Italic (⌘I)"
+            icon={<Italic size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onItalic}
+            active={state.italic}
+            isToggle
+          />
+          <ToolbarButton
+            label="Inline code"
+            tooltip="Inline code"
+            icon={<Code size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onInlineCode}
+            active={codeActive}
+            isToggle
+          />
+          <ToolbarButton
+            label="Link"
+            tooltip="Link (⌘⇧K)"
+            icon={<Link2 size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onToggleLink}
+            active={state.link}
+            isToggle
+          />
         </div>
-      ) : null}
-      <div className="flex items-center gap-2">
-        <ToolbarButton
-          label="Bold"
-          tooltip="Bold (⌘B)"
-          icon={<Bold size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onBold}
-          active={state.bold}
-          isToggle
-        />
-        <ToolbarButton
-          label="Italic"
-          tooltip="Italic (⌘I)"
-          icon={<Italic size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onItalic}
-          active={state.italic}
-          isToggle
-        />
-        <ToolbarButton
-          label="Inline code"
-          tooltip="Inline code"
-          icon={<Code size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onInlineCode}
-          active={codeActive}
-          isToggle
-        />
-        <ToolbarButton
-          label="Link"
-          tooltip="Link (⌘⇧K)"
-          icon={<Link2 size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onToggleLink}
-          active={state.link}
-          isToggle
-        />
-      </div>
-      <div className="flex items-center gap-2">
-        <ToolbarButton
-          label="Bulleted list"
-          tooltip="Bulleted list (⌘⇧8)"
-          icon={<List size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onBulletList}
-          active={state.block === "bullet_list"}
-          isToggle
-        />
-        <ToolbarButton
-          label="Numbered list"
-          tooltip="Numbered list (⌘⇧7)"
-          icon={<ListOrdered size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onOrderedList}
-          active={state.block === "ordered_list"}
-          isToggle
-        />
-      </div>
-      <div className="flex items-center gap-2">
-        <ToolbarButton
-          label="Quote"
-          tooltip="Quote (⌘⇧9)"
-          icon={<Quote size={18} strokeWidth={1.5} aria-hidden="true" />}
-          onClick={onQuote}
-          active={state.block === "blockquote"}
-          isToggle
-        />
-        {hasDivider && onDivider ? (
+      </ToolbarGroup>
+      <ToolbarGroup title="Lists" enabled={enableHandbookBlocks}>
+        <div className="flex items-center gap-2">
           <ToolbarButton
-            label="Divider"
-            tooltip="Divider (---)"
-            icon={<Minus size={18} strokeWidth={1.5} aria-hidden="true" />}
-            onClick={onDivider}
+            label="Bulleted list"
+            tooltip="Bulleted list (⌘⇧8)"
+            icon={<List size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onBulletList}
+            active={state.block === "bullet_list"}
+            isToggle
           />
-        ) : null}
-        {onRequestImage ? (
           <ToolbarButton
-            label="Insert image"
-            tooltip="Insert image"
-            icon={<ImagePlus size={18} strokeWidth={1.5} aria-hidden="true" />}
-            onClick={onRequestImage}
-            disabled={imageBusy}
+            label="Numbered list"
+            tooltip="Numbered list (⌘⇧7)"
+            icon={
+              <ListOrdered size={18} strokeWidth={1.5} aria-hidden="true" />
+            }
+            onClick={onOrderedList}
+            active={state.block === "ordered_list"}
+            isToggle
           />
+        </div>
+      </ToolbarGroup>
+      <ToolbarGroup title="Structure" enabled={enableHandbookBlocks}>
+        {enableHandbookBlocks && onAddSection && onAddSubsection ? (
+          <div className="flex flex-wrap items-center gap-1">
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onAddSection}
+              className="inline-flex h-8 items-center rounded border border-gray-300 bg-white px-2 text-xs font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              + Section
+            </button>
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onAddSubsection}
+              disabled={!state.canAddSubsection}
+              title={
+                state.canAddSubsection
+                  ? undefined
+                  : "Place the cursor inside a section first"
+              }
+              className="inline-flex h-8 items-center rounded border border-gray-300 bg-white px-2 text-xs font-medium text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              + Subsection
+            </button>
+          </div>
         ) : null}
-      </div>
+      </ToolbarGroup>
+      <ToolbarGroup title="Insert" enabled={enableHandbookBlocks}>
+        <div className="flex items-center gap-2">
+          <ToolbarButton
+            label="Quote"
+            tooltip="Quote (⌘⇧9)"
+            icon={<Quote size={18} strokeWidth={1.5} aria-hidden="true" />}
+            onClick={onQuote}
+            active={state.block === "blockquote"}
+            isToggle
+          />
+          {hasDivider && onDivider ? (
+            <ToolbarButton
+              label="Divider"
+              tooltip="Divider (---)"
+              icon={<Minus size={18} strokeWidth={1.5} aria-hidden="true" />}
+              onClick={onDivider}
+            />
+          ) : null}
+          {onRequestImage ? (
+            <ToolbarButton
+              label="Insert image"
+              tooltip="Insert image"
+              icon={
+                <ImagePlus size={18} strokeWidth={1.5} aria-hidden="true" />
+              }
+              onClick={onRequestImage}
+              disabled={imageBusy}
+            />
+          ) : null}
+        </div>
+      </ToolbarGroup>
       {enableHandbookBlocks &&
       state.headingLevel &&
       onRenameHeading &&
@@ -410,6 +427,30 @@ export function EditorToolbar({
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ToolbarGroup({
+  title,
+  enabled,
+  children,
+}: {
+  title: string;
+  enabled: boolean;
+  children: ReactNode;
+}) {
+  if (!enabled) return <>{children}</>;
+  return (
+    <div
+      role="group"
+      aria-label={title}
+      className="flex flex-wrap items-center gap-2 xl:w-full xl:border-t xl:border-gray-100 xl:pt-2"
+    >
+      <span className="hidden w-full text-[10px] font-semibold uppercase tracking-wider text-gray-500 xl:block">
+        {title}
+      </span>
+      {children}
     </div>
   );
 }

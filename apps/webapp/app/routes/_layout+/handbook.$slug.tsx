@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Link, useLoaderData, useLocation } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
+import { ChevronRight } from "~/components/icons/library";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
@@ -11,7 +13,10 @@ import {
   getHandbookDocument,
   getHandbookOutline,
 } from "~/modules/ioio-handbook/document";
-import { getPublishedHandbookArticle } from "~/modules/ioio-handbook/service.server";
+import {
+  getPublishedHandbookArticle,
+  listRelatedHandbookArticles,
+} from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -40,8 +45,16 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         shouldBeCaptured: false,
       });
     }
+    const related = article.handbookCategory
+      ? await listRelatedHandbookArticles({
+          organizationId: auth.organizationId,
+          handbookCategoryId: article.handbookCategory.id,
+          articleId: article.id,
+        })
+      : { articles: [], hasMore: false };
     return payload({
       article,
+      related,
       canEdit: auth.canEdit,
       isStudent: auth.isStudent,
     });
@@ -67,7 +80,12 @@ export const handle = {
 };
 
 export default function HandbookArticlePage() {
-  const { article, canEdit, isStudent } = useLoaderData<typeof loader>();
+  const {
+    article,
+    canEdit,
+    isStudent,
+    related = { articles: [], hasMore: false },
+  } = useLoaderData<typeof loader>();
   const location = useLocation();
   const version = article.publishedVersion;
   const currentVersion = article.versions[0]?.id;
@@ -117,6 +135,7 @@ export default function HandbookArticlePage() {
   );
   const contentRef = useRef<HTMLDivElement | null>(null);
   const showOutline = outline.length > 1;
+  const showNavigation = showOutline || related.articles.length > 0;
   const [activeOutlineId, setActiveOutlineId] = useState(outline[0]?.id ?? "");
   const differences = useMemo(
     () =>
@@ -196,14 +215,25 @@ export default function HandbookArticlePage() {
         >
           ← Handbook
         </Link>
-        {canEdit || isStudent ? (
-          <Link
-            to={`/handbook/${encodeURIComponent(article.slug)}/edit?improve=1`}
-            className="inline-flex h-9 items-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800"
-          >
-            Improve this article
-          </Link>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {canEdit || isStudent ? (
+            <Link
+              to={`/handbook/${encodeURIComponent(
+                article.slug
+              )}/edit?improve=1`}
+              className="inline-flex h-9 items-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800"
+            >
+              Improve this article
+            </Link>
+          ) : null}
+          {canEdit ? (
+            <HandbookArticleActions
+              articleId={article.id}
+              slug={article.slug}
+              articleTitle={article.publishedVersion.title}
+            />
+          ) : null}
+        </div>
       </div>
 
       {viewingHistorical ? (
@@ -224,7 +254,7 @@ export default function HandbookArticlePage() {
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_16rem]">
         <article
           className={`rounded-2xl border border-gray-200 bg-white p-5 shadow-sm sm:p-8 ${
-            showOutline ? "" : "lg:col-span-2"
+            showNavigation ? "" : "lg:col-span-2"
           }`}
         >
           <header className="border-b border-gray-100 pb-5">
@@ -243,19 +273,6 @@ export default function HandbookArticlePage() {
             </p>
           </header>
 
-          {showOutline ? (
-            <details className="my-4 rounded-lg border border-gray-200 bg-gray-50 p-3 lg:hidden">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-800">
-                Contents
-              </summary>
-              <HandbookContents
-                outline={outline}
-                className="mt-3"
-                onNavigate={goToOutlineItem}
-                activeId={activeOutlineId}
-              />
-            </details>
-          ) : null}
           <div ref={contentRef} className="handbook-document space-y-8 py-6">
             {document.introduction ? (
               <section className="scroll-mt-28">
@@ -402,21 +419,122 @@ export default function HandbookArticlePage() {
             />
           ) : null}
         </article>
-        {showOutline ? (
-          <aside className="sticky top-24 hidden h-fit max-h-[calc(100vh-7rem)] overflow-auto border-l border-gray-200 pl-4 lg:block">
-            <h2 className="text-xs font-bold uppercase tracking-[0.12em] text-gray-500">
-              Contents
-            </h2>
-            <HandbookContents
-              outline={outline}
-              className="mt-3"
-              onNavigate={goToOutlineItem}
-              activeId={activeOutlineId}
-            />
+        {showNavigation ? (
+          <aside
+            aria-label="Article navigation"
+            className="order-first h-fit space-y-5 border-l border-gray-200 pl-4 lg:sticky lg:top-24 lg:order-none lg:max-h-[calc(100vh-7rem)] lg:overflow-auto"
+          >
+            {showOutline ? (
+              <HandbookNavigationPanel
+                title="Contents"
+                preferenceKey="handbook.contents.collapsed"
+              >
+                <HandbookContents
+                  outline={outline}
+                  onNavigate={goToOutlineItem}
+                  activeId={activeOutlineId}
+                />
+              </HandbookNavigationPanel>
+            ) : null}
+            {related.articles.length && article.handbookCategory ? (
+              <div
+                className={
+                  showOutline ? "border-t border-gray-200 pt-5" : undefined
+                }
+              >
+                <HandbookNavigationPanel
+                  title={`Related in ${article.handbookCategory.name}`}
+                  preferenceKey="handbook.related.collapsed"
+                >
+                  <nav aria-label="Related articles">
+                    <ul className="space-y-1.5">
+                      {related.articles.map((item) => (
+                        <li key={item.id}>
+                          <Link
+                            to={`/handbook/${encodeURIComponent(item.slug)}`}
+                            className="block rounded px-2 py-1 text-sm text-gray-700 hover:text-red-800 hover:underline"
+                          >
+                            {item.title}
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                    {related.hasMore ? (
+                      <Link
+                        to={`/handbook?handbookCategoryId=${encodeURIComponent(
+                          article.handbookCategory.id
+                        )}`}
+                        className="mt-3 block px-2 text-sm font-semibold text-red-800 hover:underline"
+                      >
+                        View all in {article.handbookCategory.name}
+                      </Link>
+                    ) : null}
+                  </nav>
+                </HandbookNavigationPanel>
+              </div>
+            ) : null}
           </aside>
         ) : null}
       </div>
     </main>
+  );
+}
+
+function HandbookNavigationPanel({
+  title,
+  preferenceKey,
+  children,
+}: {
+  title: string;
+  preferenceKey: string;
+  children: ReactNode;
+}) {
+  const id = useId();
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    let saved: string | null = null;
+    try {
+      saved = window.localStorage.getItem(preferenceKey);
+    } catch {
+      /* Storage may be disabled. */
+    }
+    setCollapsed(
+      saved === "true" ||
+        (saved !== "false" && window.matchMedia("(max-width: 1023px)").matches)
+    );
+  }, [preferenceKey]);
+  function toggle() {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      window.localStorage.setItem(preferenceKey, String(next));
+    } catch {
+      /* Keep navigation usable without storage. */
+    }
+  }
+  return (
+    <section>
+      <h2>
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          aria-controls={id}
+          onClick={toggle}
+          className="flex w-full items-center gap-2 rounded text-left text-xs font-bold uppercase tracking-[0.12em] text-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-700"
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className={`shrink-0 transition-transform ${
+              collapsed ? "" : "rotate-90"
+            }`}
+          />
+          {title}
+        </button>
+      </h2>
+      <div id={id} hidden={collapsed} className="mt-3">
+        {children}
+      </div>
+    </section>
   );
 }
 

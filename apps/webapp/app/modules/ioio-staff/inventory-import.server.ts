@@ -1398,7 +1398,10 @@ function reconstructPdfJsText(items: readonly PdfJsTextItem[]) {
   return normalizePdfJsPageText(text);
 }
 
-async function extractPdfPagesWithPdfJs(buffer: Buffer) {
+async function extractPdfPagesWithPdfJs(
+  buffer: Buffer,
+  { detectImages = false }: { detectImages?: boolean } = {}
+) {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(buffer),
@@ -1423,6 +1426,16 @@ async function extractPdfPagesWithPdfJs(buffer: Buffer) {
 
     const pages: ExtractedPdfPage[] = [];
     const positionedPages: PositionedPdfPage[] = [];
+    const imagePages: number[] = [];
+    const imageOperatorCodes = detectImages
+      ? new Set(
+          Object.entries(pdfjs.OPS)
+            .filter(([name]) =>
+              /paint(?:Inline)?Image|paintSolidColorImageMask/u.test(name)
+            )
+            .map(([, code]) => code)
+        )
+      : null;
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
@@ -1456,6 +1469,16 @@ async function extractPdfPagesWithPdfJs(buffer: Buffer) {
           ];
         }),
       });
+      if (imageOperatorCodes) {
+        const operatorList = await page.getOperatorList();
+        if (
+          operatorList.fnArray.some((operator) =>
+            imageOperatorCodes.has(operator)
+          )
+        ) {
+          imagePages.push(pageNumber);
+        }
+      }
       pages.push({
         sourceRef: `pdf-page-${pageNumber}`,
         page: pageNumber,
@@ -1466,6 +1489,7 @@ async function extractPdfPagesWithPdfJs(buffer: Buffer) {
     return {
       pages,
       positionedPages,
+      imagePages,
       diagnostics: getPdfTextDiagnostics(
         pages,
         pageCount,
@@ -2522,11 +2546,39 @@ async function extractPdfText(buffer: Buffer) {
  * inventory-specific parsing or normalization. Positioned text is returned
  * when PDF.js can provide it so document importers can use font-size cues. */
 export async function extractPdfDocumentPageData(buffer: Buffer) {
+  let preferredPdfJs: Awaited<
+    ReturnType<typeof extractPdfPagesWithPdfJs>
+  > | null = null;
+  try {
+    preferredPdfJs = await extractPdfPagesWithPdfJs(buffer, {
+      detectImages: true,
+    });
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.includes("more than")) {
+      throw cause;
+    }
+  }
+
+  if (preferredPdfJs && isMeaningfulPdfText(preferredPdfJs.diagnostics)) {
+    return {
+      pages: preferredPdfJs.pages.map(({ text }) => text),
+      pageNumbers: preferredPdfJs.pages.map(({ page }) => page),
+      positionedPages: preferredPdfJs.positionedPages.map(
+        ({ page, items }) => ({
+          page,
+          items,
+        })
+      ),
+      imagePages: preferredPdfJs.imagePages,
+    };
+  }
+
   const extracted = await extractPdfPages(buffer);
   let positionedPages = extracted.positionedPages;
   if (!positionedPages?.length) {
     try {
-      const positioned = await extractPdfPagesWithPdfJs(buffer);
+      const positioned =
+        preferredPdfJs ?? (await extractPdfPagesWithPdfJs(buffer));
       if (positioned.diagnostics.meaningfulText) {
         positionedPages = positioned.positionedPages;
       }
@@ -2541,6 +2593,7 @@ export async function extractPdfDocumentPageData(buffer: Buffer) {
       page,
       items,
     })),
+    imagePages: preferredPdfJs?.imagePages ?? [],
   };
 }
 

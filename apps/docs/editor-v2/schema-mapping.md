@@ -93,3 +93,14 @@ serialization output.
 `serializeMarkdoc` reuses ProseMirror’s Markdown serializer with custom handlers for bullet lists and raw blocks. After every edit we serialize the document back to Markdoc, guaranteeing that the stored value matches what downstream Markdoc consumers expect.
 
 For detailed implementation, see [`app/modules/editor-v2/markdoc-utils.ts`](../../../apps/webapp/app/modules/editor-v2/markdoc-utils.ts).
+
+### Responsive Handbook editing tools
+
+At viewport widths of 1280px and above, the Handbook editor uses a 13rem
+right editing rail beside the full-height article. The rail sticks 6rem below
+the viewport top, shares the existing toolbar commands and selection state,
+and can collapse to 2.5rem so the writing area gains the remaining space.
+The `handbook.editor.tools.collapsed` localStorage preference is optional;
+storage failures do not block editing. Below this breakpoint, the same toolbar
+returns above the bounded scrolling editor, independent of the desktop collapse
+preference. No article content or database representation changes.

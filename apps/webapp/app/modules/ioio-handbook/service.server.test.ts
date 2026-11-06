@@ -18,13 +18,14 @@ const mocks = vi.hoisted(() => ({
       deleteMany: vi.fn(),
     },
     handbookArticleVersion: { aggregate: vi.fn(), create: vi.fn() },
-    handbookSource: { upsert: vi.fn() },
+    handbookSource: { upsert: vi.fn(), deleteMany: vi.fn() },
     handbookVersionSource: { createMany: vi.fn() },
     handbookObservation: {
       create: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
   },
   handbookCategory: {
@@ -63,12 +64,16 @@ vi.mock("~/modules/activity-event/service.server", () => ({
 
 import {
   approveHandbookArticleRevision,
+  archiveHandbookArticle,
+  deleteHandbookArticlePermanently,
+  withdrawHandbookSubmission,
   createHandbookCategory,
   createHandbookImportDrafts,
   discardHandbookArticleRevisionDraft,
   deleteHandbookDraft,
   getHandbookEditData,
   listPublishedHandbookArticles,
+  listRelatedHandbookArticles,
   listMyHandbookDrafts,
   listHandbookCategoriesForManagement,
   normalizeHandbookCategoryName,
@@ -362,23 +367,19 @@ describe("Handbook categories", () => {
     });
   });
 
-  it("orders Handbook articles by Start here and stable position", async () => {
+  it("orders Handbook articles by manual position independently of publication dates", async () => {
     mocks.handbookArticle.findMany.mockResolvedValue([]);
 
     await listPublishedHandbookArticles({ organizationId: "org-1" });
 
     expect(mocks.handbookArticle.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        orderBy: [
-          { isStartHere: "desc" },
-          { position: "asc" },
-          { slug: "asc" },
-        ],
+        orderBy: [{ position: "asc" }, { slug: "asc" }],
       })
     );
   });
 
-  it("moves an article inside its Start here or normal ordering group", async () => {
+  it("moves an article within its whole category", async () => {
     mocks.tx.handbookArticle.findFirst.mockResolvedValue({
       id: "article-b",
       handbookCategoryId: "category-1",
@@ -410,6 +411,87 @@ describe("Handbook categories", () => {
         data: { position: 2 },
       })
     );
+  });
+
+  it("normalizes tied legacy positions when dragging an article before a sibling", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-c",
+      handbookCategoryId: "category-1",
+    });
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([
+      { id: "article-a", position: 0 },
+      { id: "article-b", position: 0 },
+      { id: "article-c", position: 0 },
+    ]);
+    await updateHandbookArticleNavigation({
+      organizationId: "org-1",
+      articleId: "article-c",
+      intent: "move-before",
+      targetArticleId: "article-b",
+    });
+    expect(
+      mocks.tx.handbookArticle.update.mock.calls.map(([args]) => [
+        args.where.id,
+        args.data.position,
+      ])
+    ).toEqual([
+      ["article-a", 1],
+      ["article-c", 2],
+      ["article-b", 3],
+    ]);
+    expect(mocks.tx.handbookArticle.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          organizationId: "org-1",
+          handbookCategoryId: "category-1",
+          status: "PUBLISHED",
+          publishedVersion: { isNot: null },
+        },
+      })
+    );
+  });
+
+  it("can drag an article after the last sibling", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-a",
+      handbookCategoryId: "category-1",
+    });
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([
+      { id: "article-a", position: 1 },
+      { id: "article-b", position: 2 },
+      { id: "article-c", position: 3 },
+    ]);
+    await updateHandbookArticleNavigation({
+      organizationId: "org-1",
+      articleId: "article-a",
+      intent: "move-after",
+      targetArticleId: "article-c",
+    });
+    expect(
+      mocks.tx.handbookArticle.update.mock.calls.map(([args]) => [
+        args.where.id,
+        args.data.position,
+      ])
+    ).toEqual([
+      ["article-b", 1],
+      ["article-c", 2],
+      ["article-a", 3],
+    ]);
+  });
+
+  it("rejects a drag target outside the source category without writing", async () => {
+    mocks.tx.handbookArticle.findMany.mockResolvedValue([
+      { id: "article-1", position: 1 },
+    ]);
+    await expect(
+      updateHandbookArticleNavigation({
+        organizationId: "org-1",
+        articleId: "article-1",
+        intent: "move-before",
+        targetArticleId: "other-category-article",
+      })
+    ).rejects.toThrow("same category");
+    expect(mocks.tx.handbookArticle.update).not.toHaveBeenCalled();
   });
 
   it("normalizes capitalization and repeated whitespace to one category identity", async () => {
@@ -1193,33 +1275,36 @@ describe("Handbook categories", () => {
     expect(mocks.tx.handbookArticleVersion.create).toHaveBeenCalled();
   });
 
-  it("keeps a published article position when publishing a new version", async () => {
-    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
-      id: "article-1",
-      organizationId: "org-1",
-      slug: "change-filament",
-      status: "PUBLISHED",
-      position: 7,
-      isStartHere: false,
-      handbookCategoryId: "handbook-category-1",
-      draftTitle: "How to change filament",
-      draftContent: "Updated steps.",
-      draftSourceUrls: [],
-    });
+  it.each([0, 7])(
+    "keeps published position %s when publishing a new version",
+    async (position) => {
+      mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+        id: "article-1",
+        organizationId: "org-1",
+        slug: "change-filament",
+        status: "PUBLISHED",
+        position,
+        isStartHere: false,
+        handbookCategoryId: "handbook-category-1",
+        draftTitle: "How to change filament",
+        draftContent: "Updated steps.",
+        draftSourceUrls: [],
+      });
 
-    await publishHandbookArticle({
-      organizationId: "org-1",
-      userId: "staff-1",
-      articleId: "article-1",
-    });
+      await publishHandbookArticle({
+        organizationId: "org-1",
+        userId: "staff-1",
+        articleId: "article-1",
+      });
 
-    expect(mocks.tx.handbookArticle.aggregate).not.toHaveBeenCalled();
-    expect(mocks.tx.handbookArticle.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.not.objectContaining({ position: expect.anything() }),
-      })
-    );
-  });
+      expect(mocks.tx.handbookArticle.aggregate).not.toHaveBeenCalled();
+      expect(mocks.tx.handbookArticle.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.not.objectContaining({ position: expect.anything() }),
+        })
+      );
+    }
+  );
 
   it("lets Staff approve and rename a proposal as a canonical Handbook category", async () => {
     await expect(
@@ -1291,5 +1376,373 @@ describe("Handbook categories", () => {
       data: { proposedCategoryName: null, handbookCategoryId: null },
     });
     expect(mocks.tx.handbookCategory.create).not.toHaveBeenCalled();
+  });
+});
+
+// why: database calls use the suite's shared mock to verify the readable query boundary without a live database.
+describe("related Handbook navigation", () => {
+  it("bounds category navigation, excludes the current article, and selects only the canonical publication", async () => {
+    mocks.handbookArticle.findMany.mockResolvedValue(
+      Array.from({ length: 8 }, (_, index) => ({
+        id: `article-${index}`,
+        slug: `article-${index}`,
+        publishedVersion: { title: `Article ${index}` },
+      }))
+    );
+    const result = await listRelatedHandbookArticles({
+      organizationId: "org-1",
+      handbookCategoryId: "printing",
+      articleId: "current",
+    });
+    expect(mocks.handbookArticle.findMany).toHaveBeenLastCalledWith({
+      where: {
+        organizationId: "org-1",
+        handbookCategoryId: "printing",
+        id: { not: "current" },
+        status: "PUBLISHED",
+        publishedVersion: { isNot: null },
+      },
+      orderBy: [{ position: "asc" }, { slug: "asc" }],
+      take: 8,
+      select: {
+        id: true,
+        slug: true,
+        publishedVersion: { select: { title: true } },
+      },
+    });
+    expect(result.articles.map(({ id }) => id)).toEqual(
+      Array.from({ length: 7 }, (_, index) => `article-${index}`)
+    );
+    expect(result.hasMore).toBe(true);
+  });
+  it("returns no related navigation for an empty category", async () => {
+    mocks.handbookArticle.findMany.mockResolvedValue([]);
+    expect(
+      await listRelatedHandbookArticles({
+        organizationId: "org-1",
+        handbookCategoryId: "printing",
+        articleId: "current",
+      })
+    ).toEqual({ articles: [], hasMore: false });
+  });
+});
+
+// why: the shared database mock verifies guarded mutations without deleting real knowledge.
+describe("Handbook removal safety", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.handbookArticle.updateMany.mockResolvedValue({ count: 1 });
+    mocks.handbookObservation.updateMany.mockResolvedValue({ count: 1 });
+  });
+
+  it("requires staff capability before archiving", async () => {
+    await expect(
+      archiveHandbookArticle({
+        organizationId: "org-1",
+        articleId: "article-1",
+        userId: "student-1",
+      })
+    ).rejects.toThrow("Only Staff");
+    expect(mocks.handbookArticle.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "changes only article visibility on archive/restore (restore=%s)",
+    async (restore) => {
+      await archiveHandbookArticle({
+        organizationId: "org-1",
+        articleId: "article-1",
+        userId: "staff-1",
+        canManageArticles: true,
+        restore,
+      });
+      expect(mocks.handbookArticle.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: "article-1",
+          organizationId: "org-1",
+          status: restore ? "ARCHIVED" : "PUBLISHED",
+          publishedVersionId: { not: null },
+        },
+        data: {
+          status: restore ? "PUBLISHED" : "ARCHIVED",
+        },
+      });
+      expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
+      expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects wrong-state or outside-workspace archive requests", async () => {
+    mocks.handbookArticle.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      archiveHandbookArticle({
+        organizationId: "org-1",
+        articleId: "other-article",
+        userId: "staff-1",
+        canManageArticles: true,
+      })
+    ).rejects.toThrow("no longer available");
+  });
+
+  it.each(["ARCHIVED", "PUBLISHED"] as const)(
+    "permanently deletes %s history and article-only records atomically",
+    async (status) => {
+      mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+        id: "article-1",
+        slug: "old-test-article",
+        status,
+        handbookCategoryId: "category-1",
+        publishedVersionId: "version-2",
+        publishedVersion: { title: "Old test article" },
+        versions: [
+          {
+            sources: [
+              { sourceId: "exclusive-source" },
+              { sourceId: "shared-source" },
+            ],
+          },
+          { sources: [] },
+        ],
+        observations: [
+          {
+            id: "article-review",
+            assetModelId: null,
+            kitId: null,
+            conversationId: null,
+            messageId: null,
+          },
+          {
+            id: "asset-linked-review",
+            assetModelId: "asset-1",
+            kitId: null,
+            conversationId: null,
+            messageId: null,
+          },
+        ],
+      });
+      mocks.tx.handbookArticle.deleteMany.mockResolvedValue({ count: 1 });
+      mocks.tx.handbookArticle.findMany.mockResolvedValue([
+        { id: "article-2", position: 1 },
+        { id: "article-3", position: 4 },
+      ]);
+
+      await expect(
+        deleteHandbookArticlePermanently({
+          organizationId: "org-1",
+          articleId: "article-1",
+          userId: "staff-1",
+          canManageArticles: true,
+          confirmationTitle: "Old test article",
+        })
+      ).resolves.toEqual({
+        id: "article-1",
+        slug: "old-test-article",
+        title: "Old test article",
+      });
+
+      expect(mocks.tx.handbookArticle.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            id: "article-1",
+            organizationId: "org-1",
+            status: { in: ["PUBLISHED", "ARCHIVED"] },
+            publishedVersionId: { not: null },
+          },
+        })
+      );
+      expect(mocks.tx.handbookObservation.deleteMany).toHaveBeenCalledWith({
+        where: {
+          organizationId: "org-1",
+          articleId: "article-1",
+          id: { in: ["article-review"] },
+        },
+      });
+      expect(mocks.tx.handbookObservation.updateMany).toHaveBeenCalledWith({
+        where: {
+          organizationId: "org-1",
+          articleId: "article-1",
+          id: { in: ["asset-linked-review"] },
+        },
+        data: { articleId: null },
+      });
+      expect(mocks.tx.handbookArticle.deleteMany).toHaveBeenCalledWith({
+        where: {
+          id: "article-1",
+          organizationId: "org-1",
+          status,
+          publishedVersionId: "version-2",
+        },
+      });
+      expect(mocks.tx.handbookSource.deleteMany).toHaveBeenCalledWith({
+        where: {
+          organizationId: "org-1",
+          id: { in: ["exclusive-source", "shared-source"] },
+          storageObjectPath: null,
+          versions: { none: {} },
+        },
+      });
+      expect(mocks.tx.handbookArticle.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: "article-3",
+          organizationId: "org-1",
+          status: "PUBLISHED",
+        },
+        data: { position: 2 },
+      });
+      expect(mocks.recordEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "IOIO_HANDBOOK_ARTICLE_DELETED",
+          organizationId: "org-1",
+          actorUserId: "staff-1",
+          entityType: "HANDBOOK_ARTICLE",
+          entityId: "article-1",
+          meta: { slug: "old-test-article", title: "Old test article" },
+        }),
+        mocks.tx
+      );
+    }
+  );
+
+  it("requires staff permission, published or archived state, and the exact article title", async () => {
+    await expect(
+      deleteHandbookArticlePermanently({
+        organizationId: "org-1",
+        articleId: "article-1",
+        userId: "student-1",
+        confirmationTitle: "Old test article",
+      })
+    ).rejects.toThrow("Only Staff");
+    expect(mocks.tx.handbookArticle.findFirst).not.toHaveBeenCalled();
+
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-1",
+      slug: "old-test-article",
+      status: "PUBLISHED",
+      handbookCategoryId: "category-1",
+      publishedVersion: { title: "Old test article" },
+      versions: [],
+      observations: [],
+    });
+    await expect(
+      deleteHandbookArticlePermanently({
+        organizationId: "org-1",
+        articleId: "article-1",
+        userId: "staff-1",
+        canManageArticles: true,
+        confirmationTitle: "Wrong title",
+      })
+    ).rejects.toThrow("exactly");
+    expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
+
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue(null);
+    await expect(
+      deleteHandbookArticlePermanently({
+        organizationId: "org-1",
+        articleId: "published-article",
+        userId: "staff-1",
+        canManageArticles: true,
+        confirmationTitle: "Some title",
+      })
+    ).rejects.toThrow("published or archived articles");
+    expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("withdraws an owned pending submission without altering its draft or versions", async () => {
+    await withdrawHandbookSubmission({
+      organizationId: "org-1",
+      observationId: "submission-1",
+      userId: "student-1",
+    });
+    expect(mocks.handbookObservation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "submission-1",
+        organizationId: "org-1",
+        status: "PENDING_REVIEW",
+        contributorUserId: "student-1",
+      },
+      data: {
+        status: "DISMISSED",
+        reviewedByUserId: "student-1",
+        reviewedAt: expect.any(Date),
+      },
+    });
+    expect(mocks.handbookArticle.updateMany).not.toHaveBeenCalled();
+    expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
+    expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects another contributor's or already-reviewed submission", async () => {
+    mocks.handbookObservation.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      withdrawHandbookSubmission({
+        organizationId: "org-1",
+        observationId: "other-submission",
+        userId: "student-1",
+      })
+    ).rejects.toThrow("permission");
+  });
+
+  it.each([
+    {
+      status: "PUBLISHED",
+      publishedVersionId: "v1",
+      _count: { versions: 1 },
+      observations: [],
+    },
+    {
+      status: "ARCHIVED",
+      publishedVersionId: "v1",
+      _count: { versions: 1 },
+      observations: [],
+    },
+    {
+      status: "DRAFT",
+      publishedVersionId: null,
+      _count: { versions: 1 },
+      observations: [],
+    },
+    {
+      status: "DRAFT",
+      publishedVersionId: null,
+      _count: { versions: 0 },
+      observations: [{ id: "pending" }],
+    },
+  ])(
+    "refuses draft deletion when state/history is protected: %j",
+    async (article) => {
+      mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+        id: "article-1",
+        ...article,
+      });
+      await expect(
+        deleteHandbookDraft({
+          organizationId: "org-1",
+          articleId: "article-1",
+          userId: "student-1",
+        })
+      ).rejects.toThrow();
+      expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses deletion when ownership or organization does not match", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue(null);
+    await expect(
+      deleteHandbookDraft({
+        organizationId: "org-1",
+        articleId: "other-draft",
+        userId: "student-1",
+      })
+    ).rejects.toThrow("permission");
+    expect(mocks.tx.handbookArticle.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "other-draft",
+          organizationId: "org-1",
+          createdByUserId: "student-1",
+        },
+      })
+    );
+    expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
   });
 });

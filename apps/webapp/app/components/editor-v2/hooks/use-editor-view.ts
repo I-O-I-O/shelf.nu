@@ -18,6 +18,7 @@ import {
   EDITOR_DISABLED_CLASS,
   placeholderPluginKey,
 } from "../helpers";
+import { imageBlockDropPlugin } from "../image-drop";
 
 interface UseEditorViewOptions {
   schema: Schema;
@@ -26,6 +27,7 @@ interface UseEditorViewOptions {
   placeholder?: string;
   maxLength?: number;
   allowRawBlockEditing?: boolean;
+  enableImageBlockDrop?: boolean;
   ariaLabel?: string;
   shouldAutoFocus?: boolean;
   onBlur?: (event: FocusEvent<HTMLTextAreaElement>) => void;
@@ -49,6 +51,7 @@ export function useEditorView(
     placeholder,
     maxLength,
     allowRawBlockEditing = true,
+    enableImageBlockDrop = false,
     ariaLabel,
     shouldAutoFocus,
     onBlur,
@@ -98,6 +101,7 @@ export function useEditorView(
         doc: initialDoc,
         plugins: [
           ...createInputPlugins(schema, () => openLinkDialogRef.current()),
+          ...(enableImageBlockDrop ? [imageBlockDropPlugin()] : []),
           placeholderPluginKey,
         ],
       }) as EditorState & { placeholder?: string },
@@ -247,7 +251,14 @@ export function useEditorView(
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultValue, maxLength, placeholder, schema, shouldAutoFocus]);
+  }, [
+    defaultValue,
+    enableImageBlockDrop,
+    maxLength,
+    placeholder,
+    schema,
+    shouldAutoFocus,
+  ]);
 
   // Update disabled state
   useEffect(() => {
