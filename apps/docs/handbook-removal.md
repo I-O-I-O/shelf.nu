@@ -15,12 +15,12 @@ destructive styling reserved for the confirmation action.
   changes PUBLISHED to ARCHIVED. It preserves position, draft ownership, content,
   version pointers, observations, and all published versions. Normal category,
   search, Related, and article-read queries already require PUBLISHED. Staff can
-  restore ARCHIVED to PUBLISHED from Settings → AI → Knowledge, using the same
-  guarded visibility transition. Stale saves and publication requests cannot
-  reactivate archived articles.
+  restore ARCHIVED to PUBLISHED from the Handbook article actions, using the
+  same guarded visibility transition. Stale saves and publication requests
+  cannot reactivate archived articles.
 - Permanent deletion: Staff can permanently delete a published article directly
-  from its article action menu or an archived article from Settings → AI →
-  Knowledge. The dialog requires the exact published title, and the service
+  from its article action menu or an archived article from Handbook management.
+  The dialog requires the exact published title, and the service
   checks that value again inside a serializable transaction. Article deletion
   cascades its published versions and version
   joins; article-only observations are removed, while observations also linked

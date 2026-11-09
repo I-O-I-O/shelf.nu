@@ -9,6 +9,11 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   archive: vi.fn(),
   deletePermanently: vi.fn(),
+  createCategory: vi.fn(),
+  listCategories: vi.fn(),
+  listArticles: vi.fn(),
+  renameCategory: vi.fn(),
+  updateArticleNavigation: vi.fn(),
   HandbookValidationError: class HandbookValidationError extends Error {},
 }));
 // why: route permission tests vary the trusted Shelf session without a real login.
@@ -18,7 +23,12 @@ vi.mock("~/modules/ioio-handbook/access.server", () => ({
 // why: database mutation safety is tested in the service suite; this suite checks the route boundary and confirmation UI.
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
   archiveHandbookArticle: mocks.archive,
+  createHandbookCategory: mocks.createCategory,
   deleteHandbookArticlePermanently: mocks.deletePermanently,
+  listHandbookCategoriesForManagement: mocks.listCategories,
+  listPublishedHandbookArticles: mocks.listArticles,
+  renameHandbookCategory: mocks.renameCategory,
+  updateHandbookArticleNavigation: mocks.updateArticleNavigation,
   HandbookValidationError: mocks.HandbookValidationError,
 }));
 import { action } from "~/routes/_layout+/handbook.manage";

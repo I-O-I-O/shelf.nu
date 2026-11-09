@@ -1,28 +1,11 @@
-import { useState } from "react";
-import { GripVertical } from "lucide-react";
-import type {
-  ActionFunctionArgs,
-  LoaderFunctionArgs,
-  MetaFunction,
-} from "react-router";
-import {
-  data,
-  Form,
-  Link,
-  redirect,
-  useFetcher,
-  useLoaderData,
-  useLocation,
-} from "react-router";
+import type { LoaderFunctionArgs, MetaFunction } from "react-router";
+import { data, Form, Link, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
-import { findHandbookSearchMatch } from "~/modules/ioio-handbook/document";
 import {
-  HandbookValidationError,
   listHandbookCategories,
   listPublishedHandbookArticles,
-  updateHandbookArticleNavigation,
 } from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
@@ -53,71 +36,6 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       isStudent: auth.isStudent,
     });
   } catch (cause) {
-    const reason = makeShelfError(cause, { userId });
-    throw data(error(reason), { status: reason.status });
-  }
-}
-
-export async function action({ context, request }: ActionFunctionArgs) {
-  const { userId } = context.getSession();
-  try {
-    const auth = await requireIoioHandbookRead({ context, request });
-    if (!auth.canEdit) {
-      return data(
-        { ok: false as const, message: "Only Staff can organize articles." },
-        { status: 403 }
-      );
-    }
-    const formData = await request.formData();
-    const intent = String(formData.get("intent") ?? "");
-    if (
-      !["move-before", "move-after", "move-up", "move-down"].includes(intent)
-    ) {
-      return data(
-        { ok: false as const, message: "Choose an article ordering action." },
-        { status: 400 }
-      );
-    }
-    const articleId = String(formData.get("articleId") ?? "").trim();
-    if (!articleId || articleId.length > 40) {
-      return data(
-        { ok: false as const, message: "Choose a valid Handbook article." },
-        { status: 400 }
-      );
-    }
-    const targetArticleId = String(
-      formData.get("targetArticleId") ?? ""
-    ).trim();
-    if (
-      (intent === "move-before" || intent === "move-after") &&
-      (!targetArticleId || targetArticleId.length > 40)
-    ) {
-      return data(
-        { ok: false as const, message: "Choose a valid target article." },
-        { status: 400 }
-      );
-    }
-    await updateHandbookArticleNavigation({
-      organizationId: auth.organizationId,
-      articleId,
-      intent: intent as "move-before" | "move-after" | "move-up" | "move-down",
-      ...(targetArticleId ? { targetArticleId } : {}),
-    });
-    const requestedReturnTo = String(formData.get("returnTo") ?? "/handbook");
-    const returnUrl = new URL(requestedReturnTo, request.url);
-    const destination =
-      returnUrl.origin === new URL(request.url).origin &&
-      returnUrl.pathname === "/handbook"
-        ? `${returnUrl.pathname}${returnUrl.search}`
-        : "/handbook";
-    return redirect(destination);
-  } catch (cause) {
-    if (cause instanceof HandbookValidationError) {
-      return data(
-        { ok: false as const, message: cause.message },
-        { status: 400 }
-      );
-    }
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
   }
@@ -156,193 +74,6 @@ function groupArticlesByCategory<
   );
 }
 
-type NavigationArticle = ReturnType<
-  typeof useLoaderData<typeof loader>
->["articles"][number];
-
-function HandbookCategoryArticles({
-  articles,
-  query,
-  canEdit,
-  returnTo,
-}: {
-  articles: NavigationArticle[];
-  query: string;
-  canEdit: boolean;
-  returnTo: string;
-}) {
-  const fetcher = useFetcher<typeof action>();
-  const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<{
-    id: string;
-    after: boolean;
-  } | null>(null);
-  const busy = fetcher.state !== "idle";
-  const canReorder =
-    canEdit && !query && Boolean(articles[0]?.handbookCategory);
-  function move(
-    articleId: string,
-    intent: "move-up" | "move-down" | "move-before" | "move-after",
-    targetArticleId?: string
-  ) {
-    if (busy) return;
-    void fetcher.submit(
-      {
-        articleId,
-        intent,
-        returnTo,
-        ...(targetArticleId ? { targetArticleId } : {}),
-      },
-      { method: "post", action: returnTo, preventScrollReset: true }
-    );
-  }
-  return (
-    <>
-      {fetcher.data && "message" in fetcher.data ? (
-        <p role="alert" className="mb-2 text-sm text-red-800">
-          {fetcher.data.message}
-        </p>
-      ) : null}
-      <ol className="divide-y divide-gray-100" aria-busy={busy}>
-        {articles.map((article, index) => {
-          if (!article.publishedVersion) return null;
-          const match = query
-            ? findHandbookSearchMatch(article.publishedVersion.content, query)
-            : null;
-          const target = match ? `#${match.id}` : "";
-          return (
-            <li
-              key={article.id}
-              className={`flex flex-wrap items-center gap-2 py-3 first:pt-0 last:pb-0 ${
-                draggedId === article.id ? "opacity-50" : ""
-              } ${
-                dropTarget?.id === article.id
-                  ? dropTarget.after
-                    ? "border-b-2 border-b-gray-500"
-                    : "border-t-2 border-t-gray-500"
-                  : ""
-              }`}
-              onDragOver={(event) => {
-                if (
-                  !canReorder ||
-                  !draggedId ||
-                  busy ||
-                  draggedId === article.id
-                )
-                  return;
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                const bounds = event.currentTarget.getBoundingClientRect();
-                setDropTarget({
-                  id: article.id,
-                  after: event.clientY > bounds.top + bounds.height / 2,
-                });
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (canReorder && draggedId && draggedId !== article.id) {
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  move(
-                    draggedId,
-                    event.clientY > bounds.top + bounds.height / 2
-                      ? "move-after"
-                      : "move-before",
-                    article.id
-                  );
-                }
-                setDraggedId(null);
-                setDropTarget(null);
-              }}
-            >
-              {canReorder ? (
-                <button
-                  type="button"
-                  draggable={!busy}
-                  disabled={busy}
-                  aria-label={`Drag to reorder ${article.publishedVersion.title}`}
-                  title="Drag to reorder; or use the ordering menu."
-                  onDragStart={(event) => {
-                    setDraggedId(article.id);
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", article.id);
-                  }}
-                  onDragEnd={() => {
-                    setDraggedId(null);
-                    setDropTarget(null);
-                  }}
-                  className="hidden h-9 w-7 cursor-grab items-center justify-center rounded text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-gray-500 sm:inline-flex"
-                >
-                  <GripVertical size={16} aria-hidden="true" />
-                </button>
-              ) : null}
-              <span className="w-6 shrink-0 self-start pt-0.5 text-sm tabular-nums text-gray-500">
-                {index + 1}.
-              </span>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-base font-semibold text-gray-950">
-                  <Link
-                    to={`/handbook/${article.slug}${target}`}
-                    className="hover:text-red-800"
-                  >
-                    {article.publishedVersion.title}
-                  </Link>
-                </h3>
-                {match ? (
-                  <p className="mt-1 text-xs text-gray-600">
-                    →{" "}
-                    <Link to={`/handbook/${article.slug}${target}`}>
-                      {match.title}
-                    </Link>
-                  </p>
-                ) : null}
-                <p className="mt-1 text-xs text-gray-500">
-                  Updated{" "}
-                  {new Date(
-                    article.publishedVersion.publishedAt
-                  ).toLocaleDateString()}
-                </p>
-              </div>
-              {canEdit ? (
-                <HandbookArticleActions
-                  articleId={article.id}
-                  slug={article.slug}
-                  articleTitle={article.publishedVersion.title}
-                  menuLabel={`Article actions for ${article.publishedVersion.title}`}
-                >
-                  {canReorder ? (
-                    <div
-                      role="group"
-                      aria-label={`Reorder ${article.publishedVersion.title}`}
-                      className="border-t border-gray-100 pt-1"
-                    >
-                      <button
-                        type="button"
-                        disabled={busy || index === 0}
-                        onClick={() => move(article.id, "move-up")}
-                        className="block min-h-9 w-full rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40"
-                      >
-                        Move up
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy || index === articles.length - 1}
-                        onClick={() => move(article.id, "move-down")}
-                        className="block min-h-9 w-full rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-40"
-                      >
-                        Move down
-                      </button>
-                    </div>
-                  ) : null}
-                </HandbookArticleActions>
-              ) : null}
-            </li>
-          );
-        })}
-      </ol>
-    </>
-  );
-}
-
 export const meta: MetaFunction = () => [
   { title: appendToMetaTitle("Handbook") },
 ];
@@ -357,8 +88,6 @@ export default function HandbookIndexPage() {
     canEdit,
     isStudent,
   } = useLoaderData<typeof loader>();
-  const location = useLocation();
-  const returnTo = `${location.pathname}${location.search}`;
   const seedCategories = query
     ? []
     : handbookCategoryId
@@ -382,35 +111,43 @@ export default function HandbookIndexPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {isStudent ? (
+            <Link
+              to="/handbook/new"
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+            >
+              Contribute
+            </Link>
+          ) : null}
+          {canEdit ? (
+            <Link
+              to="/handbook/new"
+              className="inline-flex h-10 items-center justify-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800"
+            >
+              New article
+            </Link>
+          ) : null}
           <Link
             to="/handbook/my-work"
             className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
           >
             My Work
           </Link>
-          {isStudent ? (
+          {canEdit ? (
             <Link
-              to="/handbook/new"
+              to="/handbook/review"
               className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
             >
-              Contribute knowledge
+              Review contributions
             </Link>
           ) : null}
           {canEdit ? (
-            <>
-              <Link
-                to="/settings/ai/knowledge"
-                className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
-              >
-                Review contributions
-              </Link>
-              <Link
-                to="/handbook/new"
-                className="inline-flex h-10 items-center justify-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800"
-              >
-                New article
-              </Link>
-            </>
+            <Link
+              to="/handbook/manage"
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50"
+            >
+              Manage Handbook
+            </Link>
           ) : null}
         </div>
       </header>
@@ -478,16 +215,45 @@ export default function HandbookIndexPage() {
                     )}`}
                     className="inline-flex h-9 items-center rounded-lg border border-red-700 bg-white px-3 text-sm font-semibold text-red-800 hover:bg-red-50"
                   >
-                    Contribute
+                    {isStudent ? "Contribute" : "New article"}
                   </Link>
                 ) : null}
               </header>
-              <HandbookCategoryArticles
-                articles={groupArticles}
-                query={query}
-                canEdit={canEdit}
-                returnTo={returnTo}
-              />
+              <ol className="divide-y divide-gray-100">
+                {groupArticles.map((article, index) => (
+                  <li
+                    key={article.id}
+                    className="flex items-start gap-3 py-3 first:pt-1 last:pb-1"
+                  >
+                    <span className="pt-0.5 text-sm font-semibold tabular-nums text-gray-500">
+                      {index + 1}.
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-medium text-gray-950">
+                        <Link
+                          to={`/handbook/${encodeURIComponent(article.slug)}`}
+                          className="hover:text-red-800 hover:underline"
+                        >
+                          {article.publishedVersion?.title ??
+                            "Untitled article"}
+                        </Link>
+                      </h3>
+                    </div>
+                    {canEdit ? (
+                      <HandbookArticleActions
+                        articleId={article.id}
+                        slug={article.slug}
+                        articleTitle={
+                          article.publishedVersion?.title ?? "article"
+                        }
+                        menuLabel={`Article actions for ${
+                          article.publishedVersion?.title ?? "article"
+                        }`}
+                      />
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
             </section>
           ))}
         </div>
@@ -505,7 +271,7 @@ export default function HandbookIndexPage() {
               to="/handbook/new"
               className="mt-4 inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800"
             >
-              Create the first article
+              New article
             </Link>
           ) : null}
         </section>

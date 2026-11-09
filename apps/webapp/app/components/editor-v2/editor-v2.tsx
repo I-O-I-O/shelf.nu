@@ -14,6 +14,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toggleMark, wrapIn } from "prosemirror-commands";
 import { redo, undo } from "prosemirror-history";
 import { wrapInList } from "prosemirror-schema-list";
+import { Selection } from "prosemirror-state";
 import type { EditorState } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
@@ -40,6 +41,7 @@ import { useLinkDialog } from "./hooks/use-link-dialog";
 import { useRawBlockDialog } from "./hooks/use-raw-block-dialog";
 import { useSlashCommands } from "./hooks/use-slash-commands";
 import { useToolbarState } from "./hooks/use-toolbar-state";
+import type { HandbookArticleLinkTarget } from "./types";
 
 interface EditorV2Props
   extends Omit<
@@ -55,6 +57,7 @@ interface EditorV2Props
   allowRawBlockEditing?: boolean;
   helpText?: string;
   onUploadImage?: (file: File) => Promise<{ src: string; alt?: string }>;
+  handbookArticles?: HandbookArticleLinkTarget[];
 }
 
 const HINT_TEXT = "Use / to access commands.";
@@ -75,6 +78,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       allowRawBlockEditing = true,
       helpText,
       onUploadImage,
+      handbookArticles,
       onBlur,
       onFocus,
       onChange,
@@ -211,6 +215,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       allowRawBlockEditing,
       ariaLabel: label,
       enableImageBlockDrop: enableHandbookBlocks,
+      fillAvailableSpace: enableHandbookBlocks,
       shouldAutoFocus,
       onBlur: (event) => {
         // The slash menu is portaled to the body and positioned against the
@@ -274,7 +279,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
             "isolate rounded-lg border border-gray-200 bg-white",
             enableHandbookBlocks
               ? tw(
-                  "flex max-h-[75vh] flex-col xl:grid xl:max-h-none xl:items-start xl:gap-4",
+                  "flex max-h-[75vh] flex-col xl:grid xl:max-h-none xl:items-stretch xl:gap-4",
                   toolsCollapsed
                     ? "xl:grid-cols-[minmax(0,1fr)_2.5rem]"
                     : "xl:grid-cols-[minmax(0,1fr)_13rem]"
@@ -374,13 +379,16 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
             className={tw(
               "relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300",
               enableHandbookBlocks
-                ? "min-h-0 overflow-auto xl:order-1 xl:min-w-0 xl:overflow-visible"
+                ? "min-h-0 overflow-auto xl:order-1 xl:flex xl:min-w-0 xl:flex-col xl:overflow-visible"
                 : ""
             )}
           >
             <div
               ref={editorContainerRef}
-              className="min-h-[200px]"
+              className={tw(
+                "min-h-[200px]",
+                enableHandbookBlocks ? "xl:flex xl:flex-1 xl:flex-col" : ""
+              )}
               data-testid="editor-v2-content"
               role="document"
               tabIndex={-1}
@@ -392,7 +400,18 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
                   return;
                 }
                 event.preventDefault();
-                viewRef.current?.focus();
+                const view = viewRef.current;
+                if (view) {
+                  view.dispatch(
+                    view.state.tr.setSelection(
+                      Selection.near(
+                        view.state.doc.resolve(view.state.doc.content.size),
+                        -1
+                      )
+                    )
+                  );
+                  view.focus();
+                }
               }}
             />
             <BubbleMenu
@@ -458,6 +477,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           onClose={closeLinkDialog}
           onHrefChange={setLinkHref}
           onApply={applyLink}
+          handbookArticles={handbookArticles}
         />
         {allowRawBlockEditing ? (
           <RawBlockDialog

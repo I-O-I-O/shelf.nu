@@ -48,7 +48,7 @@ describe("staff navigation preferences", () => {
     ]);
   });
 
-  it("drops removed inventory shortcuts from existing saved orders", () => {
+  it("drops Ask IOIO and removed inventory shortcuts from saved orders", () => {
     expect(
       normalizeStaffNavigationOrder(
         [
@@ -59,9 +59,9 @@ describe("staff navigation preferences", () => {
           "/handbook",
           "/assets",
         ],
-        ["/home", "/staff/ask", "/handbook", "/assets"]
+        ["/home", "/handbook", "/assets"]
       )
-    ).toEqual(["/home", "/staff/ask", "/handbook", "/assets"]);
+    ).toEqual(["/home", "/handbook", "/assets"]);
   });
 
   it("scopes storage by user and organization and restores only that preference", () => {

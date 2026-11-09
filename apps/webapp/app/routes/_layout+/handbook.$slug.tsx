@@ -216,14 +216,14 @@ export default function HandbookArticlePage() {
           ← Handbook
         </Link>
         <div className="flex items-center gap-2">
-          {canEdit || isStudent ? (
+          {isStudent ? (
             <Link
               to={`/handbook/${encodeURIComponent(
                 article.slug
               )}/edit?improve=1`}
               className="inline-flex h-9 items-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800"
             >
-              Improve this article
+              Edit article
             </Link>
           ) : null}
           {canEdit ? (

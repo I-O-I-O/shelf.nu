@@ -144,7 +144,7 @@ export default function HandbookMyWorkPage() {
           to="/handbook/new"
           className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800"
         >
-          {isStudent ? "Contribute knowledge" : "New article"}
+          {isStudent ? "Contribute" : "New article"}
         </Link>
       </div>
 
@@ -206,22 +206,39 @@ export default function HandbookMyWorkPage() {
                     {draft.draftTitle}
                   </h2>
                   <p className="mt-0.5 text-xs text-gray-500">
-                    {draft.workType === "NEW_ARTICLE"
-                      ? draft.submittedForReview
-                        ? "Pending review · New article"
-                        : "Draft · New article"
-                      : draft.workType === "IMPROVEMENT_PENDING"
-                      ? `Pending review · Improvement based on Version ${draft.baseVersionNumber}`
-                      : `Draft improvement · Based on Version ${draft.baseVersionNumber}`}
+                    {draft.contributionStatus === "PENDING_REVIEW"
+                      ? "Pending review"
+                      : draft.contributionStatus === "RETURNED_FOR_CHANGES"
+                      ? "Returned for changes"
+                      : draft.contributionStatus === "APPROVED"
+                      ? "Approved"
+                      : draft.contributionStatus === "REJECTED"
+                      ? "Rejected"
+                      : "Draft"}
+                    {draft.workType === "IMPROVEMENT_DRAFT" ||
+                    draft.workType === "IMPROVEMENT_PENDING"
+                      ? ` · Improvement based on Version ${draft.baseVersionNumber}`
+                      : draft.workType === "OUTCOME" && draft.baseVersionNumber
+                      ? ` · Improvement based on Version ${draft.baseVersionNumber}`
+                      : " · New article"}
                     {draft.handbookCategory?.name
                       ? ` · ${draft.handbookCategory.name}`
                       : ""}{" "}
-                    · Updated {new Date(draft.updatedAt).toLocaleDateString()}
+                    ·{" "}
+                    {draft.submittedAt
+                      ? `Submitted ${new Date(
+                          draft.submittedAt
+                        ).toLocaleDateString()}`
+                      : `Updated ${new Date(
+                          draft.updatedAt
+                        ).toLocaleDateString()}`}
                   </p>
                 </div>
                 <Link
                   to={
-                    draft.workType === "NEW_ARTICLE"
+                    draft.workType === "OUTCOME"
+                      ? `/handbook/${encodeURIComponent(draft.slug)}`
+                      : draft.workType === "NEW_ARTICLE"
                       ? `/handbook/${encodeURIComponent(draft.slug)}/edit`
                       : draft.workType === "IMPROVEMENT_PENDING"
                       ? `/handbook/${encodeURIComponent(draft.slug)}`
@@ -231,13 +248,17 @@ export default function HandbookMyWorkPage() {
                   }
                   className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                 >
-                  {draft.workType === "IMPROVEMENT_PENDING"
+                  {draft.workType === "OUTCOME"
+                    ? "View article"
+                    : draft.workType === "IMPROVEMENT_PENDING"
                     ? "View current article"
                     : draft.submittedForReview
                     ? "View submission"
                     : "Edit draft"}
                 </Link>
-                {draft.submittedForReview && draft.submissionId ? (
+                {draft.workType !== "OUTCOME" &&
+                draft.submittedForReview &&
+                draft.submissionId ? (
                   <HandbookRemovalButton
                     intent="withdraw-submission"
                     observationId={draft.submissionId}

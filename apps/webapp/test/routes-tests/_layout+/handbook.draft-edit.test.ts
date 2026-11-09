@@ -4,6 +4,7 @@ import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 const mocks = vi.hoisted(() => ({
   requireRead: vi.fn(),
   getEditData: vi.fn(),
+  listArticleTitles: vi.fn(),
   editorAction: vi.fn(),
 }));
 
@@ -14,6 +15,7 @@ vi.mock("~/modules/ioio-handbook/access.server", () => ({
 }));
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
   getHandbookEditData: mocks.getEditData,
+  listHandbookArticleTitles: mocks.listArticleTitles,
 }));
 vi.mock("~/modules/ioio-handbook/editor.server", () => ({
   handbookEditorAction: mocks.editorAction,
@@ -47,6 +49,14 @@ describe("Handbook draft edit route", () => {
       article: draft,
       categories: [{ id: "category-1", name: "Workshop Safety" }],
     });
+    mocks.listArticleTitles.mockResolvedValue([
+      {
+        slug: "how-to-change-filament",
+        title: "How to change filament",
+        handbookCategoryId: "category-1",
+        categoryName: "Workshop Safety",
+      },
+    ]);
     mocks.editorAction.mockResolvedValue({ ok: true });
   });
 
@@ -64,7 +74,18 @@ describe("Handbook draft edit route", () => {
     expect(result).toMatchObject({
       article: draft,
       categories: [{ id: "category-1", name: "Workshop Safety" }],
+      titleMatches: [
+        {
+          slug: "how-to-change-filament",
+          title: "How to change filament",
+          handbookCategoryId: "category-1",
+          categoryName: "Workshop Safety",
+        },
+      ],
       isStudent: true,
+    });
+    expect(mocks.listArticleTitles).toHaveBeenCalledWith({
+      organizationId: "org-1",
     });
     expect(mocks.getEditData).toHaveBeenCalledWith({
       organizationId: "org-1",

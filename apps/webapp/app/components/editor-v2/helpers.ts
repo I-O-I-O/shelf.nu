@@ -34,6 +34,7 @@ import {
 } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import { Decoration, DecorationSet } from "prosemirror-view";
+import { isInternalPath } from "~/utils/safe-internal-path";
 
 import type { SlashCommandItem, ToolbarBlock } from "./types";
 
@@ -471,6 +472,22 @@ export function deleteHandbookHeadingCommand(): PMCommand {
 export function sanitizeHref(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return "";
+
+  if (trimmed.startsWith("/handbook/")) {
+    try {
+      const url = new URL(trimmed, "https://internal.invalid");
+      if (
+        isInternalPath(trimmed) &&
+        url.pathname.startsWith("/handbook/") &&
+        url.pathname !== "/handbook/"
+      ) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+      return "";
+    } catch {
+      return "";
+    }
+  }
 
   const allowedProtocols = new Set(["http:", "https:", "mailto:", "tel:"]);
 

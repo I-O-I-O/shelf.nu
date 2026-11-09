@@ -18,6 +18,36 @@ import HandbookArticlePage, {
   loader as handbookArticleLoader,
 } from "~/routes/_layout+/handbook.$slug";
 
+function publishedArticle(slug: string) {
+  const publishedAt = new Date("2026-11-03T10:00:00.000Z");
+  return {
+    id: `article-${slug}`,
+    slug,
+    updatedAt: publishedAt,
+    handbookCategory: { id: "category-1", name: "3D Printing" },
+    publishedVersion: {
+      id: "version-1",
+      versionNumber: 1,
+      title: "How to change filament",
+      summary: null,
+      section: null,
+      content: "A current published guide.",
+      publishedAt,
+      publishedByName: "IOIO Staff",
+      sources: [],
+    },
+    versions: [
+      {
+        id: "version-1",
+        versionNumber: 1,
+        title: "How to change filament",
+        publishedAt,
+        publishedBy: "IOIO Staff",
+      },
+    ],
+  };
+}
+
 describe("published Handbook article page", () => {
   beforeEach(() => {
     window.localStorage.clear();
@@ -43,6 +73,69 @@ describe("published Handbook article page", () => {
     ).rejects.toMatchObject({ init: { status: 404 } });
     expect(service.listRelatedHandbookArticles).not.toHaveBeenCalled();
   });
+
+  it("gives Students one Edit article action that opens the revision editor", async () => {
+    const article = publishedArticle("change-filament");
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/:slug",
+          loader: () => ({
+            article,
+            canEdit: false,
+            isStudent: true,
+          }),
+          Component: HandbookArticlePage,
+        },
+      ],
+      { initialEntries: ["/handbook/change-filament"] }
+    );
+    render(<RouterProvider router={router} />);
+
+    const editLink = await screen.findByRole("link", { name: "Edit article" });
+    expect(editLink).toHaveAttribute(
+      "href",
+      "/handbook/change-filament/edit?improve=1"
+    );
+    expect(screen.queryByLabelText("Article actions")).toBeNull();
+    expect(screen.queryByText("Improve this article")).toBeNull();
+  });
+
+  it("gives Staff one published edit action alongside archive and delete", async () => {
+    const user = userEvent.setup();
+    const article = publishedArticle("change-filament");
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/:slug",
+          loader: () => ({
+            article,
+            canEdit: true,
+            isStudent: false,
+          }),
+          Component: HandbookArticlePage,
+        },
+      ],
+      { initialEntries: ["/handbook/change-filament"] }
+    );
+    render(<RouterProvider router={router} />);
+
+    await user.click(await screen.findByLabelText("Article actions"));
+    const editLink = screen.getByRole("link", { name: "Edit article" });
+    expect(editLink).toHaveAttribute(
+      "href",
+      "/handbook/change-filament/edit?improve=1"
+    );
+    expect(screen.queryByRole("link", { name: /^Edit$/u })).toBeNull();
+    expect(screen.queryByText("Improve this article")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Archive article" })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Delete permanently" })
+    ).toBeTruthy();
+  });
+
   it("shows category, content, references, and version details without legacy metadata", async () => {
     const article = {
       id: "article-1",

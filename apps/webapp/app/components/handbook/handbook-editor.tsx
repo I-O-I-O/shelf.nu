@@ -8,6 +8,7 @@ const HANDBOOK_HEADING_LEVELS = [2, 3];
 
 type HandbookEditorArticle = {
   id: string;
+  slug?: string;
   status: "DRAFT" | "PUBLISHED" | "ARCHIVED";
   draftTitle: string;
   draftContent: string;
@@ -174,6 +175,17 @@ export function HandbookEditor({
       ),
     [handbookCategoryId, title, titleMatches]
   );
+  const handbookArticles = useMemo(
+    () =>
+      titleMatches
+        .filter((item) => item.slug !== article?.slug)
+        .map(({ slug, title, categoryName }) => ({
+          slug,
+          title,
+          categoryName,
+        })),
+    [article?.slug, titleMatches]
+  );
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
@@ -187,7 +199,7 @@ export function HandbookEditor({
           </Link>
           <h1 className="mt-2 text-2xl font-semibold text-gray-950">
             {revisionMode
-              ? "Improve Handbook article"
+              ? "Edit Handbook article"
               : article
               ? "Edit Handbook draft"
               : "New Handbook article"}
@@ -303,7 +315,7 @@ export function HandbookEditor({
                       )}/edit?improve=1`}
                       className="font-semibold text-red-800 hover:underline"
                     >
-                      Improve this article
+                      Edit article
                     </Link>
                   </span>
                 </li>
@@ -356,7 +368,8 @@ export function HandbookEditor({
             enableHandbookBlocks
             allowRawBlockEditing={false}
             onUploadImage={uploadArticleImage}
-            helpText="Use Section for a main article part and Subsection for a nested part. Type / to add blocks. Images may be up to 2 MB. Add HTTPS video links with Link."
+            handbookArticles={handbookArticles}
+            helpText="Use Link for Handbook articles or external URLs. Use Section for a main article part and Subsection for a nested part. Type / to add blocks. Images may be up to 2 MB."
           />
         </div>
         <label className="block text-sm font-semibold text-gray-800">
@@ -410,9 +423,7 @@ export function HandbookEditor({
               value="submit-for-review"
               className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
             >
-              {revisionMode
-                ? "Submit improvement for Staff review"
-                : "Submit for Staff review"}
+              Submit for review
             </button>
           ) : (
             <button

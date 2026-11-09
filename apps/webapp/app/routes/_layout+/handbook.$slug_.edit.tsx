@@ -15,7 +15,10 @@ import { ErrorContent } from "~/components/errors";
 import { HandbookEditor } from "~/components/handbook/handbook-editor";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import { handbookEditorAction } from "~/modules/ioio-handbook/editor.server";
-import { getHandbookEditData } from "~/modules/ioio-handbook/service.server";
+import {
+  getHandbookEditData,
+  listHandbookArticleTitles,
+} from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
@@ -56,7 +59,15 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
           : `/handbook/${encodeURIComponent(params.slug ?? "")}`
       );
     }
-    return payload({ ...result, isStudent: auth.isStudent, revisionMode });
+    const titleMatches = await listHandbookArticleTitles({
+      organizationId: auth.organizationId,
+    });
+    return payload({
+      ...result,
+      titleMatches,
+      isStudent: auth.isStudent,
+      revisionMode,
+    });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -73,7 +84,7 @@ export const meta: MetaFunction = () => [
 export const handle = { breadcrumb: () => "Edit article" };
 
 export default function EditHandbookArticlePage() {
-  const { article, categories, isStudent, revisionMode } =
+  const { article, categories, isStudent, revisionMode, titleMatches } =
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const location = useLocation();
@@ -86,6 +97,7 @@ export default function EditHandbookArticlePage() {
       article={article}
       categories={categories}
       isStudent={isStudent}
+      titleMatches={titleMatches}
       revisionMode={revisionMode}
       busy={navigation.state === "submitting"}
       saved={new URLSearchParams(location.search).has("saved")}

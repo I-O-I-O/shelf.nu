@@ -30,6 +30,7 @@ interface UseEditorViewOptions {
   enableImageBlockDrop?: boolean;
   ariaLabel?: string;
   shouldAutoFocus?: boolean;
+  fillAvailableSpace?: boolean;
   onBlur?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onFocus?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onChange?: (value: string) => void;
@@ -54,6 +55,7 @@ export function useEditorView(
     enableImageBlockDrop = false,
     ariaLabel,
     shouldAutoFocus,
+    fillAvailableSpace = false,
     onBlur,
     onFocus,
     onChange,
@@ -108,6 +110,7 @@ export function useEditorView(
       attributes: {
         class: tw(
           EDITOR_BASE_CLASS,
+          fillAvailableSpace ? "xl:flex-1" : "",
           isDisabled ? EDITOR_DISABLED_CLASS : "",
           "cursor-text"
         ),
@@ -258,6 +261,7 @@ export function useEditorView(
     placeholder,
     schema,
     shouldAutoFocus,
+    fillAvailableSpace,
   ]);
 
   // Update disabled state
@@ -268,6 +272,7 @@ export function useEditorView(
     }
     const nextClass = tw(
       EDITOR_BASE_CLASS,
+      fillAvailableSpace ? "xl:flex-1" : "",
       disabled ? EDITOR_DISABLED_CLASS : "",
       "cursor-text"
     );
@@ -287,7 +292,7 @@ export function useEditorView(
     } else {
       dom.removeAttribute("aria-disabled");
     }
-  }, [ariaLabel, disabled, viewRef]);
+  }, [ariaLabel, disabled, fillAvailableSpace, viewRef]);
 
   // Update content when defaultValue changes
   useEffect(() => {

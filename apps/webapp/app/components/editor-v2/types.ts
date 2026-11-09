@@ -47,6 +47,12 @@ export interface LinkDialogState {
   range: { from: number; to: number } | null;
 }
 
+export interface HandbookArticleLinkTarget {
+  slug: string;
+  title: string;
+  categoryName: string;
+}
+
 export interface RawBlockDialogState {
   open: boolean;
   raw: string;

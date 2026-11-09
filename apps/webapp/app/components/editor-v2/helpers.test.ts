@@ -28,6 +28,7 @@ import {
   insertImageBlock,
   moveHandbookHeadingCommand,
   renameHandbookHeadingCommand,
+  sanitizeHref,
 } from "./helpers";
 
 const schema = createEditorSchema();
@@ -120,6 +121,45 @@ describe("findLinkRange", () => {
     const markdoc = "[alpha](https://one.test)[beta](https://one.test)\n";
 
     expect(rangeTextAt(markdoc, 3)).toBe("alphabeta");
+  });
+});
+
+describe("Handbook link serialization", () => {
+  it("keeps internal targets relative and preserves selected link text", () => {
+    const href = "/handbook/how-to-change-filament";
+    expect(sanitizeHref(href)).toBe(href);
+    expect(sanitizeHref("/handbook/../settings")).toBe("");
+
+    const doc = parseMarkdoc("For more information, see this guide.\n", schema);
+    let from = -1;
+    let to = -1;
+    doc.descendants((node, position) => {
+      if (!node.isText || !node.text) return;
+      const index = node.text.indexOf("this guide");
+      if (index < 0) return;
+      from = position + index;
+      to = from + "this guide".length;
+    });
+    expect(from).toBeGreaterThanOrEqual(0);
+
+    const state = EditorState.create({ doc, schema });
+    const updated = state.tr.addMark(
+      from,
+      to,
+      schema.marks.link.create({ href })
+    );
+    const serialized = serializeMarkdoc(state.apply(updated).doc, schema);
+
+    expect(serialized).toContain(`[this guide](${href})`);
+    expect(serialized).not.toContain("localhost");
+  });
+
+  it("keeps valid external URL behavior and rejects unsafe schemes", () => {
+    expect(sanitizeHref("https://example.com/guide")).toBe(
+      "https://example.com/guide"
+    );
+    expect(sanitizeHref("example.com/guide")).toBe("https://example.com/guide");
+    expect(sanitizeHref("javascript:alert(1)")).toBe("");
   });
 });
 

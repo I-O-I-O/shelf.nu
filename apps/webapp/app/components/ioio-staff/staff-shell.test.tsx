@@ -131,7 +131,6 @@ describe("IOIO staff Loans navigation active state", () => {
       )
     ).toEqual([
       "Dashboard",
-      "Ask IOIO",
       "Handbook",
       "Inventory",
       "Categories",
@@ -187,10 +186,9 @@ describe("IOIO staff Loans navigation active state", () => {
     ).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("keeps the staff navigation and hides the four removed sidebar entries", () => {
+  it("keeps the staff navigation without Ask IOIO or removed sidebar entries", () => {
     renderNavigation("/bookings", [
       "/home",
-      "/staff/ask",
       "/handbook",
       "/assets",
       "/staff/archived",
@@ -205,7 +203,6 @@ describe("IOIO staff Loans navigation active state", () => {
 
     for (const label of [
       "Dashboard",
-      "Ask IOIO",
       "Handbook",
       "Inventory",
       "Archive",
@@ -220,6 +217,7 @@ describe("IOIO staff Loans navigation active state", () => {
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("link", { name: "Ask IOIO" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Import" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Organize" })).toBeNull();
 
@@ -242,7 +240,6 @@ describe("StaffShell navigation order persistence", () => {
     await waitFor(() => {
       expect(navigationLabels(nav)).toEqual([
         "Dashboard",
-        "Ask IOIO",
         "Handbook",
         "Inventory",
         "Categories",
@@ -271,9 +268,9 @@ describe("StaffShell navigation order persistence", () => {
       expect(navigationLabels(nav).slice(0, 5)).toEqual([
         "Dashboard",
         "Inventory",
-        "Ask IOIO",
         "Handbook",
         "Categories",
+        "Locations",
       ]);
     });
 
@@ -286,9 +283,9 @@ describe("StaffShell navigation order persistence", () => {
     expect(navigationLabels(nav).slice(0, 5)).toEqual([
       "Dashboard",
       "Inventory",
-      "Ask IOIO",
       "Handbook",
       "Categories",
+      "Locations",
     ]);
 
     rendered.unmount();
@@ -300,9 +297,9 @@ describe("StaffShell navigation order persistence", () => {
       expect(navigationLabels(refreshedNav).slice(0, 5)).toEqual([
         "Dashboard",
         "Inventory",
-        "Ask IOIO",
         "Handbook",
         "Categories",
+        "Locations",
       ]);
     });
   });
@@ -318,7 +315,6 @@ describe("StaffShell navigation order persistence", () => {
     await waitFor(() =>
       expect(navigationLabels(nav)).toEqual([
         "Dashboard",
-        "Ask IOIO",
         "Handbook",
         "Inventory",
         "Categories",
@@ -350,7 +346,7 @@ describe("StaffShell navigation order persistence", () => {
       name: "IOIO staff navigation",
     });
     await waitFor(() =>
-      expect(navigationLabels(otherUserNav)[1]).toBe("Ask IOIO")
+      expect(navigationLabels(otherUserNav)[1]).toBe("Handbook")
     );
   });
 });

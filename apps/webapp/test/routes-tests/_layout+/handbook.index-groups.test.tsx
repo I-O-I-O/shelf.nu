@@ -1,12 +1,5 @@
 import { createElement } from "react";
-import {
-  fireEvent,
-  render,
-  screen,
-  within,
-  waitFor,
-} from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, within } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
 import HandbookIndexPage from "~/routes/_layout+/handbook._index";
@@ -105,14 +98,14 @@ describe("Handbook category groups", () => {
     ).toBeTruthy();
     expect(
       within(printing)
-        .getByRole("link", { name: "Contribute" })
+        .getByRole("link", { name: "New article" })
         .getAttribute("href")
     ).toBe("/handbook/new?handbookCategoryId=3d");
     expect(
       within(
         screen.getByRole("heading", { name: "Soldering" }).closest("section")!
       )
-        .getByRole("link", { name: "Contribute" })
+        .getByRole("link", { name: "New article" })
         .getAttribute("href")
     ).toBe("/handbook/new?handbookCategoryId=soldering");
   });
@@ -127,8 +120,8 @@ describe("Handbook category groups", () => {
             categories: [{ id: "laser", name: "Laser Cutting" }],
             query: "",
             handbookCategoryId: "",
-            canEdit: false,
-            isStudent: true,
+            canEdit: true,
+            isStudent: false,
           }),
           Component: HandbookIndexPage,
         },
@@ -140,117 +133,96 @@ describe("Handbook category groups", () => {
     expect(
       await screen.findByRole("heading", { name: "Laser Cutting" })
     ).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Contribute" })).toHaveAttribute(
-      "href",
-      "/handbook/new?handbookCategoryId=laser"
-    );
+    const category = screen
+      .getByRole("heading", { name: "Laser Cutting" })
+      .closest("section")!;
+    expect(
+      within(category).getByRole("link", { name: "New article" })
+    ).toHaveAttribute("href", "/handbook/new?handbookCategoryId=laser");
+    expect(
+      screen.queryByRole("button", { name: /Reorder article/ })
+    ).toBeNull();
+    expect(screen.queryByText("Move up")).toBeNull();
+    expect(screen.queryByText("Move down")).toBeNull();
   });
 });
 
-function renderOrderingExample(canEdit = true) {
-  const submissions: Record<string, FormDataEntryValue>[] = [];
-  const articles = [
-    "What 3D printing is",
-    "Why this piece of art is not working?",
-    "How to change filament",
-  ].map((title, index) => ({
-    id: `article-${index + 1}`,
-    slug: `article-${index + 1}`,
-    position: index + 1,
-    handbookCategory: { id: "3d", name: "3D Printing" },
-    publishedVersion: {
-      title,
-      content: title,
-      publishedAt: "2026-11-06T00:00:00Z",
-    },
-  }));
-  const router = createMemoryRouter(
-    [
-      {
-        path: "/handbook",
-        loader: () => ({
-          articles,
-          categories: [],
-          query: "",
-          handbookCategoryId: "",
-          canEdit,
-          isStudent: !canEdit,
-        }),
-        action: async ({ request }) => {
-          submissions.push(Object.fromEntries(await request.formData()));
-          return { ok: true };
-        },
-        Component: HandbookIndexPage,
-      },
-    ],
-    { initialEntries: ["/handbook"] }
-  );
-  render(createElement(RouterProvider, { router }));
-  return submissions;
-}
-
 describe("Handbook ordering controls", () => {
-  it("lets keyboard and touch users submit move actions from each article menu", async () => {
-    const user = userEvent.setup();
-    const submissions = renderOrderingExample();
-    await user.click(
-      await screen.findByLabelText("Article actions for How to change filament")
-    );
-    await user.click(
-      within(
-        screen.getByRole("group", { name: "Reorder How to change filament" })
-      ).getByRole("button", { name: "Move up" })
-    );
-    await waitFor(() =>
-      expect(submissions).toEqual([
-        { articleId: "article-3", intent: "move-up", returnTo: "/handbook" },
-      ])
-    );
-  });
-
-  it("submits the source and same-category destination when dragging", async () => {
-    const submissions = renderOrderingExample();
-    const source = await screen.findByRole("button", {
-      name: "Drag to reorder How to change filament",
-    });
-    const target = screen
-      .getByRole("link", { name: "Why this piece of art is not working?" })
-      .closest("li")!;
-    // why: Happy DOM does not provide native browser drag data transfer.
-    const dataTransfer = {
-      setData: () => {},
-      effectAllowed: "",
-      dropEffect: "",
+  it("offers the dedicated ordering page to staff, not students", async () => {
+    const renderHome = (canEdit: boolean) => {
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/handbook",
+            loader: () => ({
+              articles: [],
+              categories: [],
+              query: "",
+              handbookCategoryId: "",
+              canEdit,
+              isStudent: !canEdit,
+            }),
+            Component: HandbookIndexPage,
+          },
+        ],
+        { initialEntries: ["/handbook"] }
+      );
+      return render(createElement(RouterProvider, { router }));
     };
-    fireEvent.dragStart(source, { dataTransfer });
-    fireEvent.dragOver(target, { dataTransfer, clientY: 0 });
-    fireEvent.drop(target, { dataTransfer, clientY: 0 });
-    await waitFor(() =>
-      expect(submissions).toEqual([
-        {
-          articleId: "article-3",
-          intent: "move-before",
-          targetArticleId: "article-2",
-          returnTo: "/handbook",
-        },
-      ])
-    );
-  });
 
-  it("shows readers the numbered list without staff ordering controls", async () => {
-    renderOrderingExample(false);
-    await screen.findByRole("heading", { name: "3D Printing" });
+    const staff = renderHome(true);
+    await screen.findByRole("heading", { name: "Handbook" });
+    const staffNavigation = screen
+      .getByRole("heading", { name: "Handbook" })
+      .closest("header")!;
+    const staffActions = within(staffNavigation).getAllByRole("link");
     expect(
-      screen.getAllByRole("listitem").map((row) => row.textContent?.slice(0, 2))
-    ).toEqual(["1.", "2.", "3."]);
+      staffActions
+        .filter((link) =>
+          [
+            "New article",
+            "My Work",
+            "Review contributions",
+            "Manage Handbook",
+          ].includes(link.textContent?.trim() ?? "")
+        )
+        .map((link) => link.textContent?.trim())
+    ).toEqual([
+      "New article",
+      "My Work",
+      "Review contributions",
+      "Manage Handbook",
+    ]);
     expect(
-      screen.queryByRole("button", { name: /Drag to reorder/ })
+      await screen.findByRole("link", { name: "Manage Handbook" })
+    ).toHaveAttribute("href", "/handbook/manage");
+    expect(screen.queryByRole("link", { name: "Categories" })).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Organize articles" })
     ).toBeNull();
-    expect(screen.queryByLabelText(/Article actions for/)).toBeNull();
-    expect(screen.queryByText(/Start here/i)).toBeNull();
-    expect(screen.getByRole("link", { name: "Contribute" })).toHaveAttribute(
-      "href",
-      "/handbook/new?handbookCategoryId=3d"
-    );
+    expect(
+      screen.queryByRole("button", { name: /Reorder article/ })
+    ).toBeNull();
+    staff.unmount();
+
+    renderHome(false);
+    await screen.findByRole("heading", { name: "Handbook" });
+    expect(
+      within(
+        screen.getByRole("heading", { name: "Handbook" }).closest("header")!
+      )
+        .getAllByRole("link")
+        .filter((link) =>
+          ["Contribute", "My Work"].includes(link.textContent?.trim() ?? "")
+        )
+        .map((link) => link.textContent?.trim())
+    ).toEqual(["Contribute", "My Work"]);
+    expect(
+      screen.queryByRole("link", { name: "Review contributions" })
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage Handbook" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Reorder article/ })
+    ).toBeNull();
   });
 });

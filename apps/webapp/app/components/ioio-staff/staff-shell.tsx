@@ -7,7 +7,6 @@ import {
   GripVertical,
   Home,
   MapPin,
-  MessageCircle,
   PackageOpen,
   Archive,
   Settings,
@@ -38,7 +37,6 @@ import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
 const navigation = [
   { to: "/home", label: "Dashboard", Icon: Home, end: true },
-  { to: "/staff/ask", label: "Ask IOIO", Icon: MessageCircle, end: true },
   { to: "/handbook", label: "Handbook", Icon: ClipboardList, end: false },
   { to: "/assets", label: "Inventory", Icon: PackageOpen, end: false },
   { to: "/categories", label: "Categories", Icon: Tags, end: false },

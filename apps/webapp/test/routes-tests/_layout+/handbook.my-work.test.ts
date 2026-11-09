@@ -79,6 +79,63 @@ describe("Handbook My Work route", () => {
     });
   });
 
+  it("shows the student contribution states and submission date", async () => {
+    const submittedAt = "2026-11-09T00:00:00.000Z";
+    const statuses = [
+      ["Draft Article", "DRAFT"],
+      ["Pending Article", "PENDING_REVIEW"],
+      ["Returned Article", "RETURNED_FOR_CHANGES"],
+      ["Approved Article", "APPROVED"],
+      ["Rejected Article", "REJECTED"],
+    ] as const;
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/my-work",
+          Component: HandbookMyWorkPage,
+          loader: () => ({
+            isStudent: true,
+            drafts: statuses.map(([draftTitle, contributionStatus]) => ({
+              id: draftTitle,
+              slug: "change-filament",
+              draftTitle,
+              updatedAt: submittedAt,
+              submittedAt: contributionStatus === "DRAFT" ? null : submittedAt,
+              handbookCategory: null,
+              submittedForReview: contributionStatus === "PENDING_REVIEW",
+              workType:
+                contributionStatus === "APPROVED" ||
+                contributionStatus === "REJECTED"
+                  ? "OUTCOME"
+                  : "NEW_ARTICLE",
+              contributionStatus,
+              baseVersionNumber: null,
+            })),
+          }),
+        },
+      ],
+      { initialEntries: ["/handbook/my-work"] }
+    );
+    render(createElement(RouterProvider, { router }));
+
+    const rows = await screen.findAllByRole("listitem");
+    for (const status of [
+      "Draft",
+      "Pending review",
+      "Returned for changes",
+      "Approved",
+      "Rejected",
+    ]) {
+      expect(rows.some((row) => row.textContent?.includes(`${status} ·`))).toBe(
+        true
+      );
+    }
+    expect(screen.getAllByText(/Submitted/)).toHaveLength(4);
+    expect(
+      screen.queryByRole("link", { name: "Review contributions" })
+    ).toBeNull();
+  });
+
   it("deletes the requested draft and returns to My Work", async () => {
     const response = (await action(
       createActionArgs({
@@ -276,6 +333,7 @@ describe("Handbook My Work route", () => {
                 updatedAt: new Date("2026-11-04T00:00:00.000Z"),
                 handbookCategory: null,
                 submittedForReview: true,
+                contributionStatus: "PENDING_REVIEW",
                 submissionId: "submission-1",
                 workType: "NEW_ARTICLE",
                 baseVersionNumber: null,

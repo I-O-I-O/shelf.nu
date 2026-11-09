@@ -1,4 +1,10 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -10,12 +16,13 @@ function renderEditor(
     { id: "electronics", name: "Electronics" },
   ],
   isStudent = false,
-  extraProps: Partial<Parameters<typeof HandbookEditor>[0]> = {}
+  extraProps: Partial<Parameters<typeof HandbookEditor>[0]> = {},
+  initialEntry = "/handbook/new"
 ) {
   const router = createMemoryRouter(
     [
       {
-        path: "/handbook/new",
+        path: "/handbook/*",
         Component: () => (
           <HandbookEditor
             article={article}
@@ -26,13 +33,33 @@ function renderEditor(
         ),
       },
     ],
-    { initialEntries: ["/handbook/new"] }
+    { initialEntries: [initialEntry] }
   );
 
   return render(<RouterProvider router={router} />);
 }
 
 describe("HandbookEditor", () => {
+  it.each(["/handbook/new", "/handbook/what-3d-printing-is/edit"])(
+    "fills the content canvas and focuses its blank edge at the end on %s",
+    (path) => {
+      renderEditor(null, undefined, false, {}, path);
+
+      const canvas = screen.getByTestId("editor-v2-content");
+      const contentPane = canvas.parentElement;
+      const editorFrame = contentPane?.parentElement;
+      const proseMirror = canvas.querySelector('[contenteditable="true"]');
+
+      expect(editorFrame?.className).toContain("xl:items-stretch");
+      expect(contentPane?.className).toContain("xl:flex-col");
+      expect(canvas.className).toContain("xl:flex-1");
+      expect(proseMirror?.className).toContain("xl:flex-1");
+
+      fireEvent.mouseDown(canvas);
+      expect(document.activeElement).toBe(proseMirror);
+    }
+  );
+
   it("remembers the editing tools preference and can restore the tools", async () => {
     const user = userEvent.setup();
     window.localStorage.removeItem("handbook.editor.tools.collapsed");
@@ -86,7 +113,7 @@ describe("HandbookEditor", () => {
       screen.getByRole("button", { name: "Publish article" })
     ).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "Submit for Staff review" })
+      screen.queryByRole("button", { name: "Submit for review" })
     ).toBeNull();
 
     expect(screen.queryByText("Short summary")).toBeNull();
@@ -230,7 +257,7 @@ describe("HandbookEditor", () => {
 
     expect(screen.getByRole("button", { name: "Save draft" })).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "Submit for Staff review" })
+      screen.getByRole("button", { name: "Submit for review" })
     ).toBeTruthy();
     expect(
       screen.getByText(
@@ -259,7 +286,7 @@ describe("HandbookEditor", () => {
       screen.getByRole("combobox", { name: "Category" })
     ).toHaveTextContent("Proposed: Workshop Safety");
     expect(
-      screen.getByRole("button", { name: "Submit for Staff review" })
+      screen.getByRole("button", { name: "Submit for review" })
     ).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Publish article" })
@@ -289,9 +316,7 @@ describe("HandbookEditor", () => {
       screen.getByRole("link", { name: "View article" }).getAttribute("href")
     ).toBe("/handbook/change-filament");
     expect(
-      screen
-        .getByRole("link", { name: "Improve this article" })
-        .getAttribute("href")
+      screen.getByRole("link", { name: "Edit article" }).getAttribute("href")
     ).toBe("/handbook/change-filament/edit?improve=1");
     expect(
       screen.getByRole("button", { name: "Publish article" })
@@ -316,7 +341,7 @@ describe("HandbookEditor", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "Improve Handbook article" })
+      screen.getByRole("heading", { name: "Edit Handbook article" })
     ).toBeTruthy();
     expect(screen.getByLabelText("Title")).toHaveValue(
       "How to change filament"
@@ -329,7 +354,7 @@ describe("HandbookEditor", () => {
     );
     expect(
       screen.getByRole("button", {
-        name: "Submit improvement for Staff review",
+        name: "Submit for review",
       })
     ).toBeTruthy();
   });

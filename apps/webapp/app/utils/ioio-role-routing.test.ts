@@ -221,8 +221,8 @@ describe("IOIO account surface routing", () => {
     expect(isIoioStudentRoute("/ioio/loans")).toBe(true);
     expect(isIoioStudentRoute("/handbook/article")).toBe(true);
     expect(isIoioStudentRoute("/handbook/contribute")).toBe(true);
-    expect(isIoioStudentRoute("/handbook/new")).toBe(false);
-    expect(isIoioStudentRoute("/handbook/article/edit")).toBe(false);
+    expect(isIoioStudentRoute("/handbook/new")).toBe(true);
+    expect(isIoioStudentRoute("/handbook/article/edit")).toBe(true);
     expect(isIoioStudentRoute("/operations/tasks")).toBe(false);
     expect(isIoioStudentRoute("/account-details/general")).toBe(false);
   });

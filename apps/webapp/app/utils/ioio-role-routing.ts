@@ -94,14 +94,6 @@ export function isIoioStaffRoute(pathname: string) {
 }
 
 export function isIoioStudentRoute(pathname: string) {
-  if (
-    pathname === "/handbook/new" ||
-    pathname.startsWith("/handbook/new/") ||
-    /^\/handbook\/[^/]+\/edit(?:\/|$)/.test(pathname)
-  ) {
-    return false;
-  }
-
   return (
     pathname === "/ioio" ||
     pathname.startsWith("/ioio/") ||

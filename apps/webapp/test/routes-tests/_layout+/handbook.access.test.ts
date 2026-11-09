@@ -1,16 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loader as handbookArticleLoader } from "~/routes/_layout+/handbook.$slug";
+import { loader as handbookIndexLoader } from "~/routes/_layout+/handbook._index";
 import {
-  action as handbookIndexAction,
-  loader as handbookIndexLoader,
-} from "~/routes/_layout+/handbook._index";
+  action as handbookManageAction,
+  loader as handbookManageLoader,
+} from "~/routes/_layout+/handbook.manage";
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
   listHandbookCategories: vi.fn(),
+  listHandbookCategoriesForManagement: vi.fn(),
   listPublishedHandbookArticles: vi.fn(),
   getPublishedHandbookArticle: vi.fn(),
   updateHandbookArticleNavigation: vi.fn(),
+  createHandbookCategory: vi.fn(),
+  renameHandbookCategory: vi.fn(),
+  archiveHandbookArticle: vi.fn(),
+  deleteHandbookArticlePermanently: vi.fn(),
 }));
 
 // why: access is controlled by Shelf's permission service, which is the input
@@ -22,10 +28,17 @@ vi.mock("~/utils/roles.server", () => ({
 // why: these route tests verify role access and organization scoping, not the
 // Handbook database query implementation.
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
+  HandbookValidationError: class HandbookValidationError extends Error {},
   listHandbookCategories: mocks.listHandbookCategories,
+  listHandbookCategoriesForManagement:
+    mocks.listHandbookCategoriesForManagement,
   listPublishedHandbookArticles: mocks.listPublishedHandbookArticles,
   getPublishedHandbookArticle: mocks.getPublishedHandbookArticle,
   updateHandbookArticleNavigation: mocks.updateHandbookArticleNavigation,
+  createHandbookCategory: mocks.createHandbookCategory,
+  renameHandbookCategory: mocks.renameHandbookCategory,
+  archiveHandbookArticle: mocks.archiveHandbookArticle,
+  deleteHandbookArticlePermanently: mocks.deleteHandbookArticlePermanently,
 }));
 
 // why: ErrorContent and MarkdownViewer are not rendered by loader tests.
@@ -65,6 +78,7 @@ describe("IOIO Handbook read access", () => {
     );
     mocks.listPublishedHandbookArticles.mockResolvedValue([]);
     mocks.listHandbookCategories.mockResolvedValue([]);
+    mocks.listHandbookCategoriesForManagement.mockResolvedValue([]);
     mocks.getPublishedHandbookArticle.mockResolvedValue({
       id: "article-1",
       slug: "equipment-care",
@@ -87,6 +101,14 @@ describe("IOIO Handbook read access", () => {
         canEdit: boolean;
         isStudent: boolean;
       };
+      if (role === "ADMIN" || role === "OWNER") {
+        await handbookManageLoader(loaderArgs("/handbook/manage"));
+      } else {
+        const result = await handbookManageLoader(
+          loaderArgs("/handbook/manage")
+        ).catch((reason: unknown) => reason);
+        expect((result as { init: { status: number } }).init.status).toBe(403);
+      }
       const article = (await handbookArticleLoader(
         loaderArgs("/handbook/equipment-care", { slug: "equipment-care" })
       )) as { canEdit: boolean; isStudent: boolean };
@@ -134,16 +156,15 @@ describe("IOIO Handbook read access", () => {
     });
   });
 
-  it.each(["move-up", "move-down", "move-before", "move-after"])(
+  it.each(["move-before", "move-after"])(
     "lets Staff %s while blocking Students",
     async (intent) => {
       const createRequest = () => {
         const formData = new FormData();
         formData.set("intent", intent);
-        if (intent.startsWith("move-b") || intent === "move-after")
-          formData.set("targetArticleId", "article-2");
+        formData.set("targetArticleId", "article-2");
         formData.set("articleId", "article-1");
-        return new Request("http://localhost/handbook", {
+        return new Request("http://localhost/handbook/manage", {
           method: "POST",
           body: formData,
         });
@@ -160,7 +181,7 @@ describe("IOIO Handbook read access", () => {
         articleId: "article-1",
       });
 
-      const staffResult = await handbookIndexAction(
+      const staffResult = await handbookManageAction(
         createActionArgs(createRequest())
       );
 
@@ -168,19 +189,15 @@ describe("IOIO Handbook read access", () => {
         organizationId: "ioio-team-1",
         articleId: "article-1",
         intent,
-        ...(intent === "move-before" || intent === "move-after"
-          ? { targetArticleId: "article-2" }
-          : {}),
+        targetArticleId: "article-2",
       });
-      expect((staffResult as Response).headers.get("Location")).toBe(
-        "/handbook"
-      );
+      expect(staffResult).toMatchObject({ success: true });
 
       vi.clearAllMocks();
       mocks.requirePermission.mockResolvedValue(
         handbookPermission("SELF_SERVICE")
       );
-      const studentResult = await handbookIndexAction(
+      const studentResult = await handbookManageAction(
         createActionArgs(createRequest())
       );
 
@@ -188,6 +205,57 @@ describe("IOIO Handbook read access", () => {
       expect((studentResult as { init: { status: number } }).init.status).toBe(
         403
       );
+    }
+  );
+
+  it("loads all active categories and their articles for staff management", async () => {
+    mocks.listHandbookCategoriesForManagement.mockResolvedValue([
+      { id: "3d", name: "3D Printing", _count: { articles: 1 } },
+      { id: "laser", name: "Laser Cutting", _count: { articles: 0 } },
+    ]);
+    mocks.listPublishedHandbookArticles.mockResolvedValue([
+      { id: "article-1", handbookCategory: { id: "3d" } },
+    ]);
+    const result = (await handbookManageLoader(
+      loaderArgs("/handbook/manage")
+    )) as { categories: Array<{ id: string; articles: unknown[] }> };
+
+    expect(result.categories).toEqual([
+      {
+        id: "3d",
+        name: "3D Printing",
+        _count: { articles: 1 },
+        articles: [{ id: "article-1", handbookCategory: { id: "3d" } }],
+      },
+      {
+        id: "laser",
+        name: "Laser Cutting",
+        _count: { articles: 0 },
+        articles: [],
+      },
+    ]);
+  });
+
+  it.each(["move-up", "move-down"])(
+    "rejects the removed %s Handbook ordering action",
+    async (intent) => {
+      const formData = new FormData();
+      formData.set("intent", intent);
+      formData.set("articleId", "article-1");
+      const request = new Request("http://localhost/handbook/manage", {
+        method: "POST",
+        body: formData,
+      });
+      const result = await handbookManageAction({
+        context: { getSession: () => ({ userId: "user-1" }) },
+        request,
+        params: {},
+        url: new URL(request.url),
+        pattern: "/handbook",
+      } as never);
+
+      expect(mocks.updateHandbookArticleNavigation).not.toHaveBeenCalled();
+      expect((result as { init: { status: number } }).init.status).toBe(400);
     }
   );
 });
