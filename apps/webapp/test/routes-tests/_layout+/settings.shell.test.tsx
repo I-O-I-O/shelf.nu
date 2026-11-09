@@ -21,7 +21,6 @@ describe("IOIO staff Settings shell", () => {
       "IOIO Users",
       "Emails",
       "IOIO Lab Access",
-      "AI",
       "Backup",
     ]);
   });

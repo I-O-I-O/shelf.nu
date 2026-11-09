@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getDashboardLabTasks: vi.fn(),
   getTAHours: vi.fn(),
   getPurchasing: vi.fn(),
+  getStaffSystemStatus: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
 }));
 
@@ -38,6 +39,11 @@ vi.mock("~/modules/ioio-staff/ta-hours.server", () => ({
 }));
 vi.mock("~/modules/ioio-staff/purchasing.server", () => ({
   getPurchasingDashboardSummary: mocks.getPurchasing,
+}));
+// why: dashboard status probes use server health/storage resources that this
+// route payload test should not touch.
+vi.mock("~/modules/ioio-staff/system-status.server", () => ({
+  getStaffSystemStatus: mocks.getStaffSystemStatus,
 }));
 // why: the Home route delegates import execution to the same import engine as
 // /staff/import; isolate route payload wiring from the database-backed engine.
@@ -79,6 +85,11 @@ describe("IOIO staff dashboard loader", () => {
       spent: 0,
       openRequests: 0,
     });
+    mocks.getStaffSystemStatus.mockResolvedValue({
+      server: "online",
+      storagePercentUsed: 63,
+      claude: "unavailable",
+    });
     mocks.findUnique.mockResolvedValue({ staffDashboardPreferences: null });
   });
 
@@ -98,6 +109,11 @@ describe("IOIO staff dashboard loader", () => {
         awaitingConfirmationCount: number;
       };
       dashboardPreferences: { hidden: string[] };
+      systemStatus: {
+        server: string;
+        storagePercentUsed: number;
+        claude: string;
+      };
     };
 
     expect(result.isStaff).toBe(true);
@@ -113,6 +129,29 @@ describe("IOIO staff dashboard loader", () => {
       awaitingConfirmationCount: 0,
     });
     expect(result.dashboardPreferences.hidden).toEqual([]);
+    expect(result.systemStatus).toEqual({
+      server: "online",
+      storagePercentUsed: 63,
+      claude: "unavailable",
+    });
+  });
+
+  it("does not load staff system status for students", async () => {
+    mocks.requirePermission.mockResolvedValue({
+      organizationId: "org-1",
+      role: "USER",
+    });
+
+    const result = (await loader(
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "student-1" }) } as never,
+        request: new Request("http://localhost/home"),
+      })
+    )) as unknown as { isStaff: boolean; systemStatus: unknown };
+
+    expect(result.isStaff).toBe(false);
+    expect(result.systemStatus).toBeNull();
+    expect(mocks.getStaffSystemStatus).not.toHaveBeenCalled();
   });
 
   it("returns readiness issues from the legacy Home import handler", async () => {
@@ -237,5 +276,55 @@ describe("IOIO staff dashboard inventory shortcuts", () => {
     expect(screen.queryByText("Inventory tools")).not.toBeInTheDocument();
     expect(screen.queryByText("How the AI works")).not.toBeInTheDocument();
     expect(screen.queryByText("Works best for")).not.toBeInTheDocument();
+  });
+});
+
+describe("staff dashboard system status", () => {
+  function renderDashboard(isStaff: boolean) {
+    const Stub = createRoutesStub([
+      {
+        path: "/home",
+        Component: HomePage,
+        loader: () => ({
+          isStaff,
+          dashboardPreferences: { order: [], hidden: [] },
+          labTasks: null,
+          purchasing: null,
+          taHours: null,
+          systemStatus: isStaff
+            ? {
+                server: "online",
+                storagePercentUsed: 63,
+                claude: "unavailable",
+              }
+            : null,
+        }),
+      },
+    ]);
+
+    return render(createElement(Stub, { initialEntries: ["/home"] }));
+  }
+
+  it("shows a compact non-clickable status strip to staff", async () => {
+    renderDashboard(true);
+
+    const status = await screen.findByRole("region", {
+      name: "System status",
+    });
+    expect(status).toHaveTextContent(/Server\s*Online/u);
+    expect(status).toHaveTextContent(/Storage\s*63% used/u);
+    expect(status).toHaveTextContent(/Claude\s*Unavailable/u);
+    expect(status.querySelectorAll("a, button")).toHaveLength(0);
+    expect(screen.queryByRole("link", { name: "Ask IOIO" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Ask IOIO" })).toBeNull();
+  });
+
+  it("does not show system status or Ask IOIO to students", async () => {
+    renderDashboard(false);
+
+    await screen.findByRole("heading", { name: "Staff Dashboard" });
+    expect(screen.queryByRole("region", { name: "System status" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Ask IOIO" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Ask IOIO" })).toBeNull();
   });
 });

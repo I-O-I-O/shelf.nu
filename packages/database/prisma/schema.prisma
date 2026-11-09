@@ -1326,29 +1326,32 @@ model HandbookCategory {
 /// Human-facing knowledge page. Draft fields remain separate from published
 /// snapshots so readers never see unreviewed edits.
 model HandbookArticle {
-  id                 String                @id @default(cuid())
-  organizationId     String
-  slug               String
-  status             HandbookArticleStatus @default(DRAFT)
-  draftTitle         String                @db.VarChar(180)
-  draftSummary       String                @default("") @db.VarChar(700)
-  draftContent       String                @db.Text
-  draftSection       String?               @db.VarChar(80)
-  handbookCategoryId String?
-  isStartHere        Boolean               @default(false)
-  position           Int                   @default(0)
-  draftAssetModelIds String[]              @default([])
-  draftKitIds        String[]              @default([])
-  draftSourceUrls    String[]              @default([])
-  publishedVersionId String?               @unique
-  createdByUserId    String
-  updatedByUserId    String
-  createdAt          DateTime              @default(now())
-  updatedAt          DateTime              @updatedAt
+  id                          String                @id @default(cuid())
+  organizationId              String
+  slug                        String
+  status                      HandbookArticleStatus @default(DRAFT)
+  staffOnly                   Boolean               @default(false)
+  draftTitle                  String                @db.VarChar(180)
+  draftSummary                String                @default("") @db.VarChar(700)
+  draftContent                String                @db.Text
+  draftSection                String?               @db.VarChar(80)
+  handbookCategoryId          String?
+  isStartHere                 Boolean               @default(false)
+  position                    Int                   @default(0)
+  draftAssetModelIds          String[]              @default([])
+  draftKitIds                 String[]              @default([])
+  draftSourceUrls             String[]              @default([])
+  draftAttachmentsInitialized Boolean               @default(false)
+  publishedVersionId          String?               @unique
+  createdByUserId             String
+  updatedByUserId             String
+  createdAt                   DateTime              @default(now())
+  updatedAt                   DateTime              @updatedAt
 
   organization     Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   handbookCategory HandbookCategory?        @relation(fields: [handbookCategoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   versions         HandbookArticleVersion[] @relation("HandbookArticleVersions")
+  draftSources     HandbookSource[]         @relation("HandbookDraftSources")
   publishedVersion HandbookArticleVersion?  @relation("HandbookPublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
   observations     HandbookObservation[]
 
@@ -1400,26 +1403,29 @@ model HandbookArticleKit {
   @@index([kitId])
 }
 
-/// Source records support current structured knowledge but do not themselves
-/// become authoritative content. File analysis/upload is a separate future
-/// workflow; storage fields reserve the canonical object identity.
+/// Sources belong to published Handbook versions; uploaded file sources can
+/// also be associated with the article's editable draft before publication.
 model HandbookSource {
   id                String             @id @default(cuid())
   organizationId    String
+  draftArticleId    String?
   kind              HandbookSourceKind @default(EXTERNAL_REFERENCE)
   title             String             @db.VarChar(240)
   url               String?            @db.VarChar(500)
   storageObjectPath String?
   contentType       String?
+  fileSizeBytes     Int?
   extractedText     String?            @db.Text
   createdByUserId   String
   createdAt         DateTime           @default(now())
 
   organization Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  draftArticle HandbookArticle?        @relation("HandbookDraftSources", fields: [draftArticleId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   versions     HandbookVersionSource[]
 
   @@unique([organizationId, url])
   @@index([organizationId, kind, createdAt])
+  @@index([draftArticleId])
 }
 
 model HandbookVersionSource {

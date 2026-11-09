@@ -87,6 +87,7 @@ describe("Handbook categories route", () => {
     expect(mocks.listCategories).toHaveBeenCalledWith("org-1");
     expect(mocks.listArticles).toHaveBeenCalledWith({
       organizationId: "org-1",
+      canReadStaffOnly: true,
     });
   });
 

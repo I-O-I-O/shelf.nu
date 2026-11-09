@@ -83,7 +83,7 @@ describe("HandbookEditor", () => {
     window.localStorage.removeItem("handbook.editor.tools.collapsed");
   });
 
-  it("shows only title, category, content, references, and the existing actions", () => {
+  it("shows visibility alongside the article fields and existing actions", () => {
     renderEditor();
 
     expect(
@@ -93,8 +93,17 @@ describe("HandbookEditor", () => {
     ).toBeTruthy();
     expect(screen.getByLabelText("Title")).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Category" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Visibility" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "Everyone" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Staff only" })).not.toBeChecked();
     expect(
       screen.getByRole("textbox", { name: "Article content" })
+    ).toBeTruthy();
+    expect(screen.queryByText(/\/\s*30,?000\b/u)).toBeNull();
+    expect(
+      screen.getByText(
+        "Use Link for Handbook articles or external URLs. Use Section for a main article part and Subsection for a nested part. Type / to add blocks. Images may be up to 2 MB."
+      )
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inline code" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Insert image" })).toBeTruthy();
@@ -119,6 +128,34 @@ describe("HandbookEditor", () => {
     expect(screen.queryByText("Short summary")).toBeNull();
     expect(screen.queryByText(/Related Shelf products/)).toBeNull();
     expect(screen.queryByText(/Related Shelf Kits/)).toBeNull();
+  });
+
+  it("lets Staff choose staff-only visibility and keeps the setting when editing", async () => {
+    const user = userEvent.setup();
+    renderEditor({
+      id: "article-private",
+      status: "PUBLISHED",
+      staffOnly: true,
+      draftTitle: "Printer maintenance procedure",
+      draftContent: "Clean the nozzle.",
+      handbookCategoryId: "electronics",
+      draftSourceUrls: [],
+      attachments: [],
+      versions: [],
+    });
+
+    const staffOnly = screen.getByRole("radio", { name: "Staff only" });
+    expect(staffOnly).toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "Everyone" }));
+    expect(staffOnly).not.toBeChecked();
+  });
+
+  it("does not offer Students a staff-only visibility option", () => {
+    renderEditor(null, undefined, true);
+
+    expect(screen.getByText("Visibility")).toBeTruthy();
+    expect(screen.getByText("Everyone")).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: "Staff only" })).toBeNull();
   });
 
   it("adds a section and nested subsection using the visible editor actions", async () => {
@@ -157,6 +194,7 @@ describe("HandbookEditor", () => {
       draftContent: "Basic soldering guide.",
       handbookCategoryId: "electronics",
       draftSourceUrls: ["https://example.com/reference"],
+      attachments: [],
       versions: [],
     });
 
@@ -178,6 +216,36 @@ describe("HandbookEditor", () => {
     expect(screen.queryByText("Short summary")).toBeNull();
     expect(screen.queryByText(/Related Shelf products/)).toBeNull();
     expect(screen.queryByText(/Related Shelf Kits/)).toBeNull();
+  });
+
+  it("lets an article editor remove a staged attachment", async () => {
+    const user = userEvent.setup();
+    const view = renderEditor({
+      id: "article-1",
+      status: "DRAFT",
+      draftTitle: "Soldering Basics",
+      draftContent: "Basic soldering guide.",
+      handbookCategoryId: "electronics",
+      draftSourceUrls: [],
+      attachments: [
+        {
+          id: "source-1",
+          title: "notes.txt",
+          fileName: "notes.txt",
+          fileSizeBytes: 12,
+        },
+      ],
+      versions: [],
+    });
+
+    expect(
+      view.container.querySelector('input[name="attachmentSourceId"]')
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Remove notes.txt" }));
+    expect(
+      view.container.querySelector('input[name="attachmentSourceId"]')
+    ).toBeNull();
+    expect(screen.getByLabelText("Upload files")).toBeTruthy();
   });
 
   it("loads the article form when the organization has zero Handbook categories", () => {
@@ -333,6 +401,7 @@ describe("HandbookEditor", () => {
         handbookCategoryId: "electronics",
         revisionBaseVersionId: "version-2",
         draftSourceUrls: ["https://example.com/guide"],
+        attachments: [],
         versions: [],
       },
       [{ id: "electronics", name: "Electronics" }],

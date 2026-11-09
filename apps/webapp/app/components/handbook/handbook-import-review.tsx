@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Form, Link, useFetcher, useNavigation } from "react-router";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
+import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "~/modules/ioio-handbook/article-limits";
 import { getHandbookOutline } from "~/modules/ioio-handbook/document";
 import type {
   HandbookImportArticle,
@@ -316,7 +317,10 @@ export function HandbookImportReview({
   const busy = navigation.state === "submitting";
   const structureBusy = structureFetcher.state !== "idle";
   const provenance = `> [!NOTE] Imported from: ${draft.sourceName}`;
-  const articleContentLimit = Math.max(0, 30_000 - provenance.length - 2);
+  const articleContentLimit = Math.max(
+    0,
+    HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH - provenance.length - 2
+  );
   const totalSourceSections = useMemo(
     () =>
       articles.reduce((total, article) => total + article.sections.length, 0),
@@ -1386,10 +1390,7 @@ export function HandbookImportReview({
                       />
                     </label>
                     <p className="mt-1 text-xs text-gray-500">
-                      Use Markdown headings to preserve the outline.{" "}
-                      {content.length.toLocaleString()} /{" "}
-                      {articleContentLimit.toLocaleString()} characters
-                      available.
+                      Use Markdown headings to preserve the outline.
                     </p>
                   </details>
 
@@ -1467,8 +1468,9 @@ export function HandbookImportReview({
             role="alert"
             className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-950"
           >
-            Shorten each selected article to the 30,000-character Handbook limit
-            before creating drafts.
+            Shorten each selected article to the{" "}
+            {HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH.toLocaleString()}-character
+            safety limit before creating drafts.
           </p>
         ) : null}
 

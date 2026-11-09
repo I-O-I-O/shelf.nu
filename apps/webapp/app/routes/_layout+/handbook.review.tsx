@@ -12,7 +12,12 @@ import {
   useNavigation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import {
+  HandbookFileList,
+  type HandbookFileAttachment,
+} from "~/components/handbook/handbook-file-list";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
+import { handbookAttachmentFilenameFromPath } from "~/modules/ioio-handbook/attachment.shared";
 import { compareHandbookVersions } from "~/modules/ioio-handbook/document";
 import {
   approveHandbookArticleRevision,
@@ -394,6 +399,7 @@ export default function HandbookReviewPage() {
                         />
                       </div>
                       <ArticleReferences urls={article.draftSourceUrls} />
+                      <HandbookFileList files={article.draftAttachments} />
                       <CategoryResolution
                         observation={item}
                         categories={categories}
@@ -425,6 +431,22 @@ export default function HandbookReviewPage() {
             {improvements.map((item) => {
               const article = item.article!;
               const current = article.publishedVersion;
+              const currentFiles: HandbookFileAttachment[] =
+                current?.sources.flatMap(({ source }) =>
+                  source.kind === "UPLOADED_DOCUMENT" &&
+                  source.storageObjectPath
+                    ? [
+                        {
+                          id: source.id,
+                          title: source.title,
+                          fileName: handbookAttachmentFilenameFromPath(
+                            source.storageObjectPath
+                          ),
+                          fileSizeBytes: source.fileSizeBytes ?? 0,
+                        },
+                      ]
+                    : []
+                ) ?? [];
               const differences = current
                 ? compareHandbookVersions(current.content, article.draftContent)
                 : [];
@@ -478,6 +500,13 @@ export default function HandbookReviewPage() {
                                   .map(({ source }) => source.url)
                                   .filter((url): url is string => Boolean(url))}
                               />
+                              {current ? (
+                                <HandbookFileList
+                                  files={currentFiles}
+                                  versionId={current.id}
+                                  title="Current version files"
+                                />
+                              ) : null}
                             </section>
                             <section className="rounded-lg border border-blue-200 bg-blue-50/40 p-3">
                               <h4 className="font-semibold text-gray-900">
@@ -494,6 +523,10 @@ export default function HandbookReviewPage() {
                               </div>
                               <ArticleReferences
                                 urls={article.draftSourceUrls}
+                              />
+                              <HandbookFileList
+                                files={article.draftAttachments}
+                                title="Proposed files"
                               />
                             </section>
                           </div>

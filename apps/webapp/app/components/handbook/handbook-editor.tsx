@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Form, Link, useFetcher } from "react-router";
 import { EditorV2 } from "~/components/editor-v2/editor-v2";
+import { HANDBOOK_ATTACHMENT_ACCEPT } from "~/modules/ioio-handbook/attachment.shared";
 import { HandbookCategoryPicker } from "./handbook-category-picker";
 import { HandbookRemovalButton } from "./handbook-removal-button";
 
@@ -10,6 +11,7 @@ type HandbookEditorArticle = {
   id: string;
   slug?: string;
   status: "DRAFT" | "PUBLISHED" | "ARCHIVED";
+  staffOnly?: boolean;
   draftTitle: string;
   draftContent: string;
   handbookCategoryId: string | null;
@@ -18,6 +20,13 @@ type HandbookEditorArticle = {
   revisionSubmitted?: boolean;
   pendingSubmissionId?: string | null;
   draftSourceUrls: string[];
+  attachments: Array<{
+    id: string;
+    title: string;
+    fileName: string;
+    fileSizeBytes: number;
+    downloadVersionId?: string;
+  }>;
   versions: Array<{
     versionNumber: number;
     title: string;
@@ -31,6 +40,7 @@ type HandbookTitleMatch = {
   title: string;
   handbookCategoryId: string | null;
   categoryName: string;
+  staffOnly?: boolean;
 };
 
 function normalizeTitle(value: string) {
@@ -64,6 +74,12 @@ function findSimilarTitles(value: string, titles: HandbookTitleMatch[]) {
         right.score - left.score || left.title.localeCompare(right.title)
     )
     .slice(0, 4);
+}
+
+function formatAttachmentSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function HandbookEditor({
@@ -100,6 +116,9 @@ export function HandbookEditor({
     article?.proposedCategoryName ?? ""
   );
   const [title, setTitle] = useState(article?.draftTitle ?? "");
+  const [staffOnly, setStaffOnly] = useState(article?.staffOnly ?? false);
+  const [attachments, setAttachments] = useState(article?.attachments ?? []);
+  const [selectedFileCount, setSelectedFileCount] = useState(0);
 
   const uploadArticleImage = useCallback(async (file: File) => {
     const formData = new FormData();
@@ -124,11 +143,16 @@ export function HandbookEditor({
     setHandbookCategoryId(article?.handbookCategoryId ?? "");
     setProposedCategoryName(article?.proposedCategoryName ?? "");
     setTitle(article?.draftTitle ?? "");
+    setStaffOnly(article?.staffOnly ?? false);
+    setAttachments(article?.attachments ?? []);
+    setSelectedFileCount(0);
   }, [
     article?.id,
+    article?.attachments,
     article?.handbookCategoryId,
     article?.proposedCategoryName,
     article?.draftTitle,
+    article?.staffOnly,
     revisionMode,
   ]);
 
@@ -179,10 +203,11 @@ export function HandbookEditor({
     () =>
       titleMatches
         .filter((item) => item.slug !== article?.slug)
-        .map(({ slug, title, categoryName }) => ({
+        .map(({ slug, title, categoryName, staffOnly }) => ({
           slug,
           title,
           categoryName,
+          staffOnly,
         })),
     [article?.slug, titleMatches]
   );
@@ -244,6 +269,7 @@ export function HandbookEditor({
       </div>
       <Form
         method="post"
+        encType="multipart/form-data"
         className="space-y-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6"
       >
         {revisionMode ? (
@@ -356,6 +382,42 @@ export function HandbookEditor({
               : "Start typing to search existing categories. If no suitable category appears, type the new category name and choose “Create”."}
           </p>
         </div>
+        <fieldset className="rounded-lg border border-gray-200 p-4">
+          <legend className="px-1 text-sm font-semibold text-gray-900">
+            Visibility
+          </legend>
+          {isStudent ? (
+            <p className="text-sm text-gray-700">Everyone</p>
+          ) : (
+            <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-800">
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="visibility"
+                  value="everyone"
+                  checked={!staffOnly}
+                  onChange={() => setStaffOnly(false)}
+                />
+                Everyone
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="visibility"
+                  value="staff-only"
+                  checked={staffOnly}
+                  onChange={() => setStaffOnly(true)}
+                />
+                Staff only
+              </label>
+            </div>
+          )}
+          <p className="mt-1 text-xs font-normal text-gray-500">
+            {isStudent
+              ? "Student contributions are published for everyone after Staff approval."
+              : "Staff-only articles are hidden from Students, search, and public article links."}
+          </p>
+        </fieldset>
         <div className="block text-sm font-semibold text-gray-800">
           <span>Article content</span>
           <EditorV2
@@ -363,7 +425,6 @@ export function HandbookEditor({
             label="Article content"
             defaultValue={article?.draftContent ?? ""}
             placeholder="Write practical instructions, lists, warnings, and tips."
-            maxLength={30000}
             headingLevels={HANDBOOK_HEADING_LEVELS}
             enableHandbookBlocks
             allowRawBlockEditing={false}
@@ -385,6 +446,84 @@ export function HandbookEditor({
             className="mt-1 block w-full rounded-lg border border-gray-300 p-3 text-sm font-normal focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-100"
           />
         </label>
+        <section className="rounded-lg border border-gray-200 p-4">
+          <h2 className="text-sm font-semibold text-gray-900">Files</h2>
+          <p className="mt-1 text-xs font-normal text-gray-600">
+            Attach code and supporting documents for readers to download. Files
+            are not run by IOIO Lab. Up to 5 files, 10 MB each.
+          </p>
+          {attachments.length ? (
+            <ul className="mt-3 space-y-3">
+              {attachments.map((attachment) => (
+                <li
+                  key={attachment.id}
+                  className="flex flex-wrap items-end gap-2 rounded-lg bg-gray-50 p-3"
+                >
+                  <input
+                    type="hidden"
+                    name="attachmentSourceId"
+                    value={attachment.id}
+                  />
+                  <div className="min-w-48 flex-1 text-xs font-semibold text-gray-700">
+                    {attachment.title}
+                    <span className="mt-1 block font-normal text-gray-500">
+                      {attachment.title === attachment.fileName
+                        ? formatAttachmentSize(attachment.fileSizeBytes)
+                        : `${attachment.fileName} · ${formatAttachmentSize(
+                            attachment.fileSizeBytes
+                          )}`}
+                    </span>
+                  </div>
+                  <a
+                    href={`/api/handbook-attachment?sourceId=${encodeURIComponent(
+                      attachment.id
+                    )}${
+                      attachment.downloadVersionId
+                        ? `&versionId=${encodeURIComponent(
+                            attachment.downloadVersionId
+                          )}`
+                        : ""
+                    }`}
+                    className="inline-flex h-9 items-center rounded-md border border-gray-300 bg-white px-3 text-xs font-semibold text-gray-800 hover:bg-gray-100"
+                  >
+                    Download
+                  </a>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${attachment.fileName}`}
+                    onClick={() =>
+                      setAttachments((current) =>
+                        current.filter((item) => item.id !== attachment.id)
+                      )
+                    }
+                    className="inline-flex h-9 items-center rounded-md px-3 text-xs font-semibold text-red-800 hover:bg-red-50"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <label className="mt-3 block text-xs font-semibold text-gray-700">
+            Upload files
+            <input
+              type="file"
+              name="attachments"
+              multiple
+              accept={HANDBOOK_ATTACHMENT_ACCEPT}
+              onChange={(event) =>
+                setSelectedFileCount(event.currentTarget.files?.length ?? 0)
+              }
+              className="mt-1 block w-full text-sm font-normal text-gray-700 file:mr-3 file:rounded-md file:border-0 file:bg-gray-100 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-gray-800"
+            />
+          </label>
+          {selectedFileCount ? (
+            <p className="mt-2 text-xs text-gray-600">
+              {selectedFileCount} new file{selectedFileCount === 1 ? "" : "s"}{" "}
+              selected.
+            </p>
+          ) : null}
+        </section>
         {article?.versions.length ? (
           <section className="rounded-lg bg-gray-50 p-3">
             <h2 className="text-sm font-semibold text-gray-800">

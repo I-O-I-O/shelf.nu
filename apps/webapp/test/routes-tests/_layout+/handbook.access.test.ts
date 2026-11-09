@@ -9,6 +9,7 @@ import {
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
   listHandbookCategories: vi.fn(),
+  listHandbookCategoriesWithPublishedArticles: vi.fn(),
   listHandbookCategoriesForManagement: vi.fn(),
   listPublishedHandbookArticles: vi.fn(),
   getPublishedHandbookArticle: vi.fn(),
@@ -30,6 +31,8 @@ vi.mock("~/utils/roles.server", () => ({
 vi.mock("~/modules/ioio-handbook/service.server", () => ({
   HandbookValidationError: class HandbookValidationError extends Error {},
   listHandbookCategories: mocks.listHandbookCategories,
+  listHandbookCategoriesWithPublishedArticles:
+    mocks.listHandbookCategoriesWithPublishedArticles,
   listHandbookCategoriesForManagement:
     mocks.listHandbookCategoriesForManagement,
   listPublishedHandbookArticles: mocks.listPublishedHandbookArticles,
@@ -78,6 +81,7 @@ describe("IOIO Handbook read access", () => {
     );
     mocks.listPublishedHandbookArticles.mockResolvedValue([]);
     mocks.listHandbookCategories.mockResolvedValue([]);
+    mocks.listHandbookCategoriesWithPublishedArticles.mockResolvedValue([]);
     mocks.listHandbookCategoriesForManagement.mockResolvedValue([]);
     mocks.getPublishedHandbookArticle.mockResolvedValue({
       id: "article-1",
@@ -118,13 +122,24 @@ describe("IOIO Handbook read access", () => {
       expect(mocks.listPublishedHandbookArticles).toHaveBeenCalledWith({
         organizationId: "ioio-team-1",
         query: "",
+        handbookCategoryId: undefined,
+        canReadStaffOnly: canEdit,
       });
-      expect(mocks.listHandbookCategories).toHaveBeenCalledWith("ioio-team-1");
+      if (canEdit) {
+        expect(mocks.listHandbookCategories).toHaveBeenCalledWith(
+          "ioio-team-1"
+        );
+      } else {
+        expect(
+          mocks.listHandbookCategoriesWithPublishedArticles
+        ).toHaveBeenCalledWith({ organizationId: "ioio-team-1" });
+      }
       expect(mocks.getPublishedHandbookArticle).toHaveBeenCalledWith({
         organizationId: "ioio-team-1",
         slug: "equipment-care",
         versionId: undefined,
         compareVersionId: undefined,
+        canReadStaffOnly: canEdit,
       });
     }
   );
@@ -153,6 +168,7 @@ describe("IOIO Handbook read access", () => {
       slug: "equipment-care",
       versionId: "version-3",
       compareVersionId: "version-2",
+      canReadStaffOnly: true,
     });
   });
 

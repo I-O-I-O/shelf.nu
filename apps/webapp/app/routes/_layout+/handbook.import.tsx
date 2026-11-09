@@ -62,7 +62,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     }
     const [categories, existingArticles] = await Promise.all([
       listHandbookCategories(auth.organizationId),
-      listHandbookArticleTitles({ organizationId: auth.organizationId }),
+      listHandbookArticleTitles({
+        organizationId: auth.organizationId,
+        canReadStaffOnly: auth.canEdit,
+      }),
     ]);
     return payload({
       categories,

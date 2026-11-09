@@ -26,6 +26,7 @@ import {
   listHandbookCategoriesForManagement,
   listPublishedHandbookArticles,
   renameHandbookCategory,
+  setHandbookArticleVisibility,
   updateHandbookArticleNavigation,
 } from "~/modules/ioio-handbook/service.server";
 import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
@@ -49,11 +50,22 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         shouldBeCaptured: false,
       });
     }
+    const visibilityFilter = new URL(request.url).searchParams.get(
+      "visibility"
+    );
+    const selectedVisibility =
+      visibilityFilter === "EVERYONE" || visibilityFilter === "STAFF_ONLY"
+        ? visibilityFilter
+        : "ALL";
     const [categories, articles] = await Promise.all([
       listHandbookCategoriesForManagement(auth.organizationId),
-      listPublishedHandbookArticles({ organizationId: auth.organizationId }),
+      listPublishedHandbookArticles({
+        organizationId: auth.organizationId,
+        canReadStaffOnly: true,
+      }),
     ]);
     return payload({
+      visibilityFilter: selectedVisibility,
       categories: categories.map((category) => ({
         ...category,
         articles: articles.filter(
@@ -74,6 +86,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const handbookManagementIntent =
     intent === "create-category" ||
     intent === "rename-category" ||
+    intent === "set-visibility" ||
     intent === "move-before" ||
     intent === "move-after";
 
@@ -119,6 +132,35 @@ export async function action({ context, request }: ActionFunctionArgs) {
             ? `“${category.name}” is already the category name.`
             : `Renamed category to “${category.name}”.`,
         });
+      }
+
+      if (intent === "set-visibility") {
+        const articleId = String(form.get("articleId") ?? "").trim();
+        const staffOnly = String(form.get("staffOnly") ?? "");
+        if (
+          !articleId ||
+          articleId.length > 40 ||
+          (staffOnly !== "true" && staffOnly !== "false")
+        ) {
+          return data(
+            {
+              ok: false as const,
+              message: "Choose a valid visibility action.",
+            },
+            { status: 400 }
+          );
+        }
+        await setHandbookArticleVisibility({
+          organizationId: auth.organizationId,
+          articleId,
+          staffOnly: staffOnly === "true",
+          canManageArticles: true,
+        });
+        const requestedReturnTo = String(form.get("returnTo") ?? "");
+        const returnTo = requestedReturnTo.startsWith("/handbook/")
+          ? requestedReturnTo
+          : "/handbook";
+        return redirect(returnTo);
       }
 
       if (intent !== "move-before" && intent !== "move-after") {
@@ -241,7 +283,7 @@ type DropTarget = {
 } | null;
 
 export default function HandbookManagePage() {
-  const { categories } = useLoaderData<typeof loader>();
+  const { categories, visibilityFilter } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const fetcher = useFetcher<typeof action>();
   const navigation = useNavigation();
@@ -451,11 +493,44 @@ export default function HandbookManagePage() {
         </Form>
       ) : null}
 
+      <Form
+        method="get"
+        className="mb-4 flex flex-wrap items-end gap-3 rounded-xl border border-gray-200 bg-white p-4"
+      >
+        <label className="min-w-56 text-sm font-semibold text-gray-800">
+          Article visibility
+          <select
+            name="visibility"
+            defaultValue={visibilityFilter}
+            className="mt-1 block h-10 w-full rounded-lg border border-gray-300 bg-white px-3 font-normal"
+          >
+            <option value="ALL">All</option>
+            <option value="EVERYONE">Everyone</option>
+            <option value="STAFF_ONLY">Staff only</option>
+          </select>
+        </label>
+        <button className="inline-flex h-10 items-center rounded-lg border border-gray-300 px-4 text-sm font-semibold text-gray-800 hover:bg-gray-50">
+          Apply filter
+        </button>
+        {visibilityFilter !== "ALL" ? (
+          <p className="text-xs text-gray-600">
+            Clear the filter to drag articles in the full category order.
+          </p>
+        ) : null}
+      </Form>
+
       {categories.length ? (
         <div className="space-y-4">
           {categories.map((category) => {
             const collapsed = collapsedCategoryIds.has(category.id);
             const articles = category.articles;
+            const visibleArticles = articles.filter((article) =>
+              visibilityFilter === "ALL"
+                ? true
+                : visibilityFilter === "STAFF_ONLY"
+                ? article.staffOnly
+                : !article.staffOnly
+            );
             return (
               <section
                 id={`handbook-category-${category.id}`}
@@ -539,9 +614,12 @@ export default function HandbookManagePage() {
                     id={`handbook-category-articles-${category.id}`}
                     className="border-t border-gray-100"
                   >
-                    {articles.length ? (
-                      <ol className="divide-y divide-gray-100">
-                        {articles.map((article, index) => {
+                    {visibleArticles.length ? (
+                      <ul className="divide-y divide-gray-100">
+                        {visibleArticles.map((article) => {
+                          const canonicalIndex = articles.findIndex(
+                            (item) => item.id === article.id
+                          );
                           const title =
                             article.publishedVersion?.title ??
                             "Untitled article";
@@ -571,8 +649,13 @@ export default function HandbookManagePage() {
                               ) : null}
                               <button
                                 type="button"
+                                disabled={visibilityFilter !== "ALL"}
                                 aria-label={`Reorder article: ${title}`}
-                                draggable={articles.length > 1 && !dragBusy}
+                                draggable={
+                                  visibilityFilter === "ALL" &&
+                                  articles.length > 1 &&
+                                  !dragBusy
+                                }
                                 onDragStart={(event) => {
                                   event.dataTransfer.effectAllowed = "move";
                                   event.dataTransfer.setData(
@@ -591,11 +674,13 @@ export default function HandbookManagePage() {
                                 }}
                                 onClick={(event) => event.preventDefault()}
                                 className={`flex size-9 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
+                                  visibilityFilter === "ALL" &&
                                   articles.length > 1
                                     ? "cursor-grab active:cursor-grabbing"
                                     : "cursor-default"
                                 }`}
                                 title={
+                                  visibilityFilter === "ALL" &&
                                   articles.length > 1
                                     ? "Drag to reorder"
                                     : undefined
@@ -607,24 +692,72 @@ export default function HandbookManagePage() {
                                 />
                               </button>
                               <span className="w-8 shrink-0 text-right text-sm font-semibold tabular-nums text-gray-500">
-                                {index + 1}.
+                                {canonicalIndex + 1}.
                               </span>
-                              <h3 className="min-w-0 flex-1 font-medium text-gray-950">
-                                <Link
-                                  to={`/handbook/${encodeURIComponent(
-                                    article.slug
-                                  )}`}
-                                  draggable={false}
-                                  className="hover:text-red-800 hover:underline"
+                              <Link
+                                to={`/handbook/${encodeURIComponent(
+                                  article.slug
+                                )}`}
+                                draggable={false}
+                                title={title}
+                                className="block min-w-0 flex-1 truncate text-left text-sm font-medium text-gray-900 hover:text-gray-700"
+                              >
+                                {title}
+                              </Link>
+                              <span
+                                className={`shrink-0 rounded-full border px-2 py-1 text-xs font-semibold ${
+                                  article.staffOnly
+                                    ? "border-amber-300 bg-amber-50 text-amber-900"
+                                    : "border-green-200 bg-green-50 text-green-900"
+                                }`}
+                              >
+                                {article.staffOnly ? "Staff only" : "Everyone"}
+                              </span>
+                              <Form
+                                method="post"
+                                action="/handbook/manage"
+                                className="shrink-0"
+                              >
+                                <input
+                                  type="hidden"
+                                  name="intent"
+                                  value="set-visibility"
+                                />
+                                <input
+                                  type="hidden"
+                                  name="articleId"
+                                  value={article.id}
+                                />
+                                <input
+                                  type="hidden"
+                                  name="staffOnly"
+                                  value={article.staffOnly ? "false" : "true"}
+                                />
+                                <input
+                                  type="hidden"
+                                  name="returnTo"
+                                  value={`/handbook/manage?visibility=${visibilityFilter}`}
+                                />
+                                <button
+                                  type="submit"
+                                  disabled={formBusy}
+                                  aria-label={`${
+                                    article.staffOnly
+                                      ? "Make visible to everyone"
+                                      : "Make staff only"
+                                  }: ${title}`}
+                                  className="inline-flex h-8 items-center rounded-md border border-gray-300 px-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-wait disabled:opacity-60"
                                 >
-                                  {title}
-                                </Link>
-                              </h3>
+                                  {article.staffOnly
+                                    ? "Set to Everyone"
+                                    : "Set to Staff only"}
+                                </button>
+                              </Form>
                               {indicatorAfter ? <DropIndicator after /> : null}
                             </li>
                           );
                         })}
-                      </ol>
+                      </ul>
                     ) : (
                       <p className="p-4 text-sm text-gray-600">
                         No published articles to order in this category.

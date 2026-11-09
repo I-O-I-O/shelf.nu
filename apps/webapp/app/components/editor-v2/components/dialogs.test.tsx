@@ -21,11 +21,13 @@ describe("Handbook link dialog", () => {
             slug: "how-to-change-filament",
             title: "How to change filament",
             categoryName: "3D Printing",
+            staffOnly: true,
           },
           {
             slug: "choosing-software",
             title: "Choosing Software for Laser Cutting",
             categoryName: "Laser Cutting",
+            staffOnly: true,
           },
         ]}
       />
@@ -43,13 +45,14 @@ describe("Handbook link dialog", () => {
     });
     expect(within(results).getByText("How to change filament")).toBeTruthy();
     expect(within(results).getByText("3D Printing")).toBeTruthy();
+    expect(within(results).getByText("Staff only")).toBeTruthy();
     expect(
       within(results).queryByText("Choosing Software for Laser Cutting")
     ).toBeNull();
 
     fireEvent.click(
       within(results).getByRole("button", {
-        name: "3D Printing How to change filament",
+        name: "3D Printing How to change filament Staff only",
       })
     );
     expect(hrefChanges.at(-1)).toBe("/handbook/how-to-change-filament");

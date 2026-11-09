@@ -43,6 +43,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       ownerUserId: auth.isStudent && !revisionMode ? auth.userId : undefined,
       userId: auth.userId,
       revisionMode,
+      canReadStaffOnly: auth.canEdit,
     });
     if (!result.article)
       throw new ShelfError({
@@ -61,6 +62,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     }
     const titleMatches = await listHandbookArticleTitles({
       organizationId: auth.organizationId,
+      canReadStaffOnly: auth.canEdit,
     });
     return payload({
       ...result,

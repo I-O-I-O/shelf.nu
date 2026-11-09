@@ -11,7 +11,15 @@ import { db } from "~/database/db.server";
 import type { ExtendedPrismaClient } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { Logger } from "~/utils/logger";
+import { removeStorageImageObject } from "~/utils/storage.server";
 import { resolveUserDisplayName } from "~/utils/user";
+import {
+  uploadHandbookAttachmentObject,
+  validateHandbookAttachment,
+  HANDBOOK_ATTACHMENT_MAX_FILES,
+} from "./attachment.server";
+import { handbookAttachmentFilenameFromPath } from "./attachment.shared";
+import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "./article-limits";
 import {
   getKnowledgeOverlap,
   getKnowledgeTerms,
@@ -78,7 +86,7 @@ export async function createHandbookImportDrafts({
       !article.title.trim() ||
       article.title.trim().length > 180 ||
       !article.content.trim() ||
-      article.content.trim().length > 30_000
+      article.content.trim().length > HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH
     ) {
       throw new HandbookValidationError(
         "Every imported article needs a title and content within the Handbook limits."
@@ -244,9 +252,11 @@ export async function createHandbookImportDrafts({
           ? current.draftContent
           : current.publishedVersion.content;
         const revisedContent = `${baseContent.trim()}\n\n${proposal.content.trim()}`;
-        if (revisedContent.length > 30_000) {
+        if (revisedContent.length > HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH) {
           throw new HandbookValidationError(
-            `The proposed revision for “${current.publishedVersion.title}” exceeds the 30,000-character article limit. Shorten the imported content or create a new article.`
+            `The proposed revision for “${
+              current.publishedVersion.title
+            }” exceeds the ${HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH.toLocaleString()}-character safety limit. Shorten the imported content or create a new article.`
           );
         }
         const baseSources = hasExistingDraftChanges
@@ -333,10 +343,19 @@ async function getDisplayNamesByUserId(userIds: string[]) {
   return new Map(users.map((user) => [user.id, resolveUserDisplayName(user)]));
 }
 
-const handbookReferences = {
+const handbookAttachmentReferences = {
   sources: {
     select: {
-      source: { select: { id: true, title: true, url: true, kind: true } },
+      source: {
+        select: {
+          id: true,
+          title: true,
+          url: true,
+          kind: true,
+          storageObjectPath: true,
+          fileSizeBytes: true,
+        },
+      },
     },
   },
 } satisfies PrismaTypes.HandbookArticleVersionInclude;
@@ -350,16 +369,19 @@ export async function listPublishedHandbookArticles({
   organizationId,
   query = "",
   handbookCategoryId,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   query?: string;
   handbookCategoryId?: string;
+  canReadStaffOnly?: boolean;
 }) {
   const search = query.trim().slice(0, 120);
   const articles = await db.handbookArticle.findMany({
     where: {
       organizationId,
       status: HandbookArticleStatus.PUBLISHED,
+      ...(canReadStaffOnly ? {} : { staffOnly: false }),
       ...(handbookCategoryId ? { handbookCategoryId } : {}),
       publishedVersion: {
         is: {
@@ -379,12 +401,13 @@ export async function listPublishedHandbookArticles({
     select: {
       id: true,
       slug: true,
+      staffOnly: true,
       updatedAt: true,
       position: true,
       handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
         include: {
-          ...handbookReferences,
+          ...handbookAttachmentReferences,
         },
       },
     },
@@ -397,10 +420,12 @@ export async function listRelatedHandbookArticles({
   organizationId,
   handbookCategoryId,
   articleId,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   handbookCategoryId: string;
   articleId: string;
+  canReadStaffOnly?: boolean;
 }) {
   const articles = await db.handbookArticle.findMany({
     where: {
@@ -408,6 +433,7 @@ export async function listRelatedHandbookArticles({
       handbookCategoryId,
       id: { not: articleId },
       status: HandbookArticleStatus.PUBLISHED,
+      ...(canReadStaffOnly ? {} : { staffOnly: false }),
       publishedVersion: { isNot: null },
     },
     orderBy: handbookArticleNavigationOrder,
@@ -507,14 +533,17 @@ export async function updateHandbookArticleNavigation({
 export async function listHandbookArticleTitles({
   organizationId,
   handbookCategoryId,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   handbookCategoryId?: string;
+  canReadStaffOnly?: boolean;
 }) {
   const articles = await db.handbookArticle.findMany({
     where: {
       organizationId,
       status: HandbookArticleStatus.PUBLISHED,
+      ...(canReadStaffOnly ? {} : { staffOnly: false }),
       ...(handbookCategoryId ? { handbookCategoryId } : {}),
       publishedVersion: { is: {} },
     },
@@ -522,6 +551,7 @@ export async function listHandbookArticleTitles({
     select: {
       id: true,
       slug: true,
+      staffOnly: true,
       handbookCategoryId: true,
       publishedVersionId: true,
       handbookCategory: { select: { name: true } },
@@ -534,6 +564,7 @@ export async function listHandbookArticleTitles({
           {
             id: article.id,
             slug: article.slug,
+            staffOnly: article.staffOnly,
             title: article.publishedVersion.title,
             handbookCategoryId: article.handbookCategoryId,
             publishedVersionId: article.publishedVersionId,
@@ -544,32 +575,83 @@ export async function listHandbookArticleTitles({
   );
 }
 
+export async function setHandbookArticleVisibility({
+  organizationId,
+  articleId,
+  staffOnly,
+  canManageArticles,
+}: {
+  organizationId: string;
+  articleId: string;
+  staffOnly: boolean;
+  canManageArticles: boolean;
+}) {
+  if (!canManageArticles) {
+    throw new HandbookValidationError(
+      "Only Staff can change Handbook article visibility."
+    );
+  }
+  const article = await db.handbookArticle.findFirst({
+    where: {
+      id: articleId,
+      organizationId,
+      status: HandbookArticleStatus.PUBLISHED,
+      publishedVersionId: { not: null },
+    },
+    select: { id: true, staffOnly: true },
+  });
+  if (!article) {
+    throw new HandbookValidationError(
+      "That published Handbook article could not be found."
+    );
+  }
+  if (article.staffOnly === staffOnly) return { id: article.id, staffOnly };
+  const updated = await db.handbookArticle.updateMany({
+    where: {
+      id: article.id,
+      organizationId,
+      status: HandbookArticleStatus.PUBLISHED,
+    },
+    data: { staffOnly },
+  });
+  if (!updated.count) {
+    throw new HandbookValidationError(
+      "The article changed before its visibility could be updated."
+    );
+  }
+  return { id: article.id, staffOnly };
+}
+
 export async function getPublishedHandbookArticle({
   organizationId,
   slug,
   versionId,
   compareVersionId,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   slug: string;
   versionId?: string;
   compareVersionId?: string;
+  canReadStaffOnly?: boolean;
 }) {
   const article = await db.handbookArticle.findFirst({
     where: {
       organizationId,
       slug,
       status: HandbookArticleStatus.PUBLISHED,
+      ...(canReadStaffOnly ? {} : { staffOnly: false }),
       publishedVersionId: { not: null },
     },
     select: {
       id: true,
       slug: true,
+      staffOnly: true,
       updatedAt: true,
       handbookCategory: { select: { id: true, name: true } },
       publishedVersion: {
         include: {
-          ...handbookReferences,
+          ...handbookAttachmentReferences,
         },
       },
       versions: {
@@ -589,13 +671,13 @@ export async function getPublishedHandbookArticle({
     versionId
       ? db.handbookArticleVersion.findFirst({
           where: { id: versionId, articleId: article.id },
-          include: { ...handbookReferences },
+          include: { ...handbookAttachmentReferences },
         })
       : Promise.resolve(article.publishedVersion),
     compareVersionId
       ? db.handbookArticleVersion.findFirst({
           where: { id: compareVersionId, articleId: article.id },
-          include: { ...handbookReferences },
+          include: { ...handbookAttachmentReferences },
         })
       : Promise.resolve(null),
   ]);
@@ -634,6 +716,7 @@ export async function getHandbookEditData({
   ownerUserId,
   userId,
   revisionMode = false,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   articleId?: string;
@@ -641,6 +724,7 @@ export async function getHandbookEditData({
   ownerUserId?: string;
   userId?: string;
   revisionMode?: boolean;
+  canReadStaffOnly?: boolean;
 }) {
   const [article, categories] = await Promise.all([
     articleId || slug
@@ -650,39 +734,51 @@ export async function getHandbookEditData({
                 id: articleId,
                 organizationId,
                 status: { not: HandbookArticleStatus.ARCHIVED },
+                ...(canReadStaffOnly ? {} : { staffOnly: false }),
                 ...(ownerUserId ? { createdByUserId: ownerUserId } : {}),
               }
             : {
                 slug,
                 organizationId,
-                status: { not: HandbookArticleStatus.ARCHIVED },
+                ...(canReadStaffOnly ? {} : { staffOnly: false }),
                 ...(revisionMode
                   ? { status: HandbookArticleStatus.PUBLISHED }
-                  : ownerUserId
-                  ? {
-                      OR: [
-                        {
-                          createdByUserId: ownerUserId,
-                          status: HandbookArticleStatus.DRAFT,
-                        },
-                        ...(revisionMode
-                          ? [{ status: HandbookArticleStatus.PUBLISHED }]
-                          : []),
-                      ],
-                    }
-                  : {}),
+                  : {
+                      status: { not: HandbookArticleStatus.ARCHIVED },
+                      ...(ownerUserId
+                        ? {
+                            OR: [
+                              {
+                                createdByUserId: ownerUserId,
+                                status: HandbookArticleStatus.DRAFT,
+                              },
+                            ],
+                          }
+                        : {}),
+                    }),
               },
           select: {
             id: true,
             status: true,
+            staffOnly: true,
             draftTitle: true,
             draftContent: true,
             draftSourceUrls: true,
+            draftAttachmentsInitialized: true,
+            draftSources: {
+              where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+              select: {
+                id: true,
+                title: true,
+                storageObjectPath: true,
+                fileSizeBytes: true,
+              },
+            },
             handbookCategoryId: true,
             updatedByUserId: true,
             publishedVersionId: true,
             publishedVersion: {
-              include: { ...handbookReferences },
+              include: { ...handbookAttachmentReferences },
             },
             observations: {
               where: { status: HandbookObservationStatus.PENDING_REVIEW },
@@ -718,10 +814,60 @@ export async function getHandbookEditData({
   const authorNames = await getDisplayNamesByUserId(
     article?.versions.map((version) => version.publishedByUserId) ?? []
   );
+  const publishedAttachments =
+    article?.publishedVersion?.sources.flatMap(({ source }) =>
+      source.kind === HandbookSourceKind.UPLOADED_DOCUMENT &&
+      source.storageObjectPath
+        ? [
+            {
+              id: source.id,
+              title: source.title,
+              fileName: handbookAttachmentFilenameFromPath(
+                source.storageObjectPath
+              ),
+              fileSizeBytes: source.fileSizeBytes ?? 0,
+              downloadVersionId: article.publishedVersion!.id,
+            },
+          ]
+        : []
+    ) ?? [];
+  const draftAttachments =
+    article?.draftSources.flatMap((source) =>
+      source.storageObjectPath
+        ? [
+            {
+              id: source.id,
+              title: source.title,
+              fileName: handbookAttachmentFilenameFromPath(
+                source.storageObjectPath
+              ),
+              fileSizeBytes: source.fileSizeBytes ?? 0,
+              ...(article.publishedVersion?.sources.some(
+                ({ source: versionSource }) => versionSource.id === source.id
+              )
+                ? { downloadVersionId: article.publishedVersion.id }
+                : {}),
+            },
+          ]
+        : []
+    ) ?? [];
+  const hasSavedRevision = Boolean(
+    revisionMode &&
+      article?.status === HandbookArticleStatus.PUBLISHED &&
+      ((userId && article.updatedByUserId === userId) ||
+        article.observations.some((item) => Boolean(item.publishedVersionId)))
+  );
+  const attachments =
+    article?.draftAttachmentsInitialized && (!revisionMode || hasSavedRevision)
+      ? draftAttachments
+      : publishedAttachments;
   return {
     article: article
       ? {
           ...article,
+          draftSources: undefined,
+          publishedVersion: undefined,
+          attachments,
           pendingSubmissionId: article.observations[0]?.id ?? null,
           proposedCategoryName:
             article.observations.find((item) => item.proposedCategoryName)
@@ -781,6 +927,30 @@ export async function getHandbookEditData({
 export async function listHandbookCategories(organizationId: string) {
   return db.handbookCategory.findMany({
     where: { organizationId, archivedAt: null },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+    select: { id: true, name: true },
+  });
+}
+
+export async function listHandbookCategoriesWithPublishedArticles({
+  organizationId,
+  canReadStaffOnly = false,
+}: {
+  organizationId: string;
+  canReadStaffOnly?: boolean;
+}) {
+  return db.handbookCategory.findMany({
+    where: {
+      organizationId,
+      archivedAt: null,
+      articles: {
+        some: {
+          status: HandbookArticleStatus.PUBLISHED,
+          publishedVersionId: { not: null },
+          ...(canReadStaffOnly ? {} : { staffOnly: false }),
+        },
+      },
+    },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     select: { id: true, name: true },
   });
@@ -973,6 +1143,7 @@ export async function saveHandbookDraft({
   handbookCategoryId,
   content,
   sourceUrls,
+  staffOnly,
 }: {
   organizationId: string;
   userId: string;
@@ -985,6 +1156,7 @@ export async function saveHandbookDraft({
   handbookCategoryId?: string;
   content: string;
   sourceUrls: string[];
+  staffOnly?: boolean;
 }) {
   const normalizedTitle = title.trim();
   const normalizedContent = content.trim();
@@ -993,7 +1165,10 @@ export async function saveHandbookDraft({
       "Add a title and article content before saving."
     );
   }
-  if (normalizedTitle.length > 180 || normalizedContent.length > 30_000) {
+  if (
+    normalizedTitle.length > 180 ||
+    normalizedContent.length > HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH
+  ) {
     throw new HandbookValidationError(
       "One or more fields are longer than the allowed limit."
     );
@@ -1041,12 +1216,21 @@ export async function saveHandbookDraft({
         draftTitle: true,
         draftContent: true,
         draftSourceUrls: true,
+        draftAttachmentsInitialized: true,
+        draftSources: {
+          where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+          select: { id: true },
+        },
         updatedByUserId: true,
         publishedVersion: {
           select: {
             title: true,
             content: true,
-            sources: { select: { source: { select: { url: true } } } },
+            sources: {
+              select: {
+                source: { select: { id: true, url: true, kind: true } },
+              },
+            },
           },
         },
         observations: {
@@ -1074,6 +1258,17 @@ export async function saveHandbookDraft({
       current.updatedByUserId !== revisionOwnerUserId &&
       (current.draftTitle !== current.publishedVersion.title ||
         current.draftContent !== current.publishedVersion.content ||
+        (current.draftAttachmentsInitialized &&
+          JSON.stringify(current.draftSources.map(({ id }) => id).sort()) !==
+            JSON.stringify(
+              current.publishedVersion.sources
+                .filter(
+                  ({ source }) =>
+                    source.kind === HandbookSourceKind.UPLOADED_DOCUMENT
+                )
+                .map(({ source }) => source.id)
+                .sort()
+            )) ||
         JSON.stringify(cleanSourceUrls(current.draftSourceUrls)) !==
           JSON.stringify(
             cleanSourceUrls(
@@ -1100,6 +1295,7 @@ export async function saveHandbookDraft({
         draftContent: normalizedContent,
         draftSourceUrls: validSources,
         updatedByUserId: userId,
+        ...(staffOnly === undefined ? {} : { staffOnly }),
       },
     });
     if (!updated.count) {
@@ -1139,6 +1335,7 @@ export async function saveHandbookDraft({
         handbookCategoryId: category?.id ?? null,
         draftSourceUrls: validSources,
         updatedByUserId: userId,
+        ...(staffOnly === undefined ? {} : { staffOnly }),
       },
       select: { id: true, slug: true, status: true },
     });
@@ -1160,10 +1357,240 @@ export async function saveHandbookDraft({
       draftContent: normalizedContent,
       handbookCategoryId: category?.id ?? null,
       draftSourceUrls: validSources,
+      ...(staffOnly === undefined ? {} : { staffOnly }),
       createdByUserId: userId,
       updatedByUserId: userId,
     },
     select: { id: true, slug: true, status: true },
+  });
+}
+
+export async function createHandbookAttachmentSource({
+  organizationId,
+  userId,
+  filename,
+  contentType,
+  bytes,
+}: {
+  organizationId: string;
+  userId: string;
+  filename: string;
+  contentType: string;
+  bytes: Buffer;
+}) {
+  let validated: ReturnType<typeof validateHandbookAttachment>;
+  try {
+    validated = validateHandbookAttachment({ filename, contentType, bytes });
+  } catch (cause) {
+    throw new HandbookValidationError(
+      cause instanceof Error ? cause.message : "This file cannot be attached."
+    );
+  }
+
+  const storageObjectPath = await uploadHandbookAttachmentObject({
+    filename: validated.filename,
+    bytes,
+  });
+  try {
+    const source = await db.handbookSource.create({
+      data: {
+        organizationId,
+        kind: HandbookSourceKind.UPLOADED_DOCUMENT,
+        title: validated.filename,
+        storageObjectPath,
+        contentType: "application/octet-stream",
+        fileSizeBytes: bytes.byteLength,
+        createdByUserId: userId,
+      },
+      select: { id: true },
+    });
+    return source.id;
+  } catch (cause) {
+    await removeStorageImageObject({
+      bucketName: "assets",
+      objectPath: storageObjectPath,
+    }).catch(() => undefined);
+    throw cause;
+  }
+}
+
+/** Replace the article's editable attachment set while keeping published version links intact. */
+export async function setHandbookDraftAttachments({
+  organizationId,
+  userId,
+  articleId,
+  sourceIds,
+  newlyUploadedSourceIds = [],
+}: {
+  organizationId: string;
+  userId: string;
+  articleId: string;
+  sourceIds: string[];
+  newlyUploadedSourceIds?: string[];
+}) {
+  const selectedIds = [...new Set(sourceIds)];
+  const newIds = [...new Set(newlyUploadedSourceIds)];
+  if (
+    selectedIds.length > HANDBOOK_ATTACHMENT_MAX_FILES ||
+    newIds.some((id) => !selectedIds.includes(id))
+  ) {
+    throw new HandbookValidationError(
+      `An article can have up to ${HANDBOOK_ATTACHMENT_MAX_FILES} files.`
+    );
+  }
+
+  const detachedSourceIds = await db.$transaction(async (tx) => {
+    const article = await tx.handbookArticle.findFirst({
+      where: {
+        id: articleId,
+        organizationId,
+        status: { not: HandbookArticleStatus.ARCHIVED },
+        updatedByUserId: userId,
+      },
+      select: { id: true },
+    });
+    if (!article) {
+      throw new HandbookValidationError(
+        "This Handbook draft is no longer available to edit."
+      );
+    }
+
+    const sources = selectedIds.length
+      ? await tx.handbookSource.findMany({
+          where: {
+            id: { in: selectedIds },
+            organizationId,
+            kind: HandbookSourceKind.UPLOADED_DOCUMENT,
+            OR: [
+              { draftArticleId: articleId },
+              { versions: { some: { version: { articleId } } } },
+              {
+                id: { in: newIds },
+                draftArticleId: null,
+                createdByUserId: userId,
+              },
+            ],
+          },
+          select: {
+            id: true,
+            title: true,
+            storageObjectPath: true,
+          },
+        })
+      : [];
+    if (sources.length !== selectedIds.length) {
+      throw new HandbookValidationError(
+        "One or more selected files are no longer available for this article."
+      );
+    }
+    const detachedSources = await tx.handbookSource.findMany({
+      where: {
+        organizationId,
+        draftArticleId: articleId,
+        ...(selectedIds.length ? { id: { notIn: selectedIds } } : {}),
+      },
+      select: { id: true },
+    });
+
+    await tx.handbookSource.updateMany({
+      where: {
+        organizationId,
+        draftArticleId: articleId,
+        ...(selectedIds.length ? { id: { notIn: selectedIds } } : {}),
+      },
+      data: { draftArticleId: null },
+    });
+    for (const source of sources) {
+      await tx.handbookSource.update({
+        where: { id: source.id, organizationId },
+        data: { draftArticleId: articleId },
+      });
+    }
+    await tx.handbookArticle.update({
+      where: { id: articleId, organizationId },
+      data: { draftAttachmentsInitialized: true },
+    });
+    return detachedSources.map(({ id }) => id);
+  });
+  await removeUnusedHandbookAttachmentSources({
+    organizationId,
+    sourceIds: detachedSourceIds,
+  });
+}
+
+async function removeUnusedHandbookAttachmentSources({
+  organizationId,
+  sourceIds,
+}: {
+  organizationId: string;
+  sourceIds: string[];
+}) {
+  if (!sourceIds.length) return;
+  const sources = await db.handbookSource.findMany({
+    where: {
+      id: { in: sourceIds },
+      organizationId,
+      kind: HandbookSourceKind.UPLOADED_DOCUMENT,
+      draftArticleId: null,
+      versions: { none: {} },
+    },
+    select: { id: true, storageObjectPath: true },
+  });
+  for (const source of sources) {
+    const deleted = await db.handbookSource.deleteMany({
+      where: {
+        id: source.id,
+        organizationId,
+        draftArticleId: null,
+        versions: { none: {} },
+      },
+    });
+    if (deleted.count && source.storageObjectPath) {
+      await removeStorageImageObject({
+        bucketName: "assets",
+        objectPath: source.storageObjectPath,
+      }).catch(() => undefined);
+    }
+  }
+}
+
+export async function removeUnattachedHandbookAttachmentSources({
+  organizationId,
+  userId,
+  sourceIds,
+}: {
+  organizationId: string;
+  userId: string;
+  sourceIds: string[];
+}) {
+  if (!sourceIds.length) return;
+  const sources = await db.handbookSource.findMany({
+    where: {
+      id: { in: sourceIds },
+      organizationId,
+      createdByUserId: userId,
+      kind: HandbookSourceKind.UPLOADED_DOCUMENT,
+      draftArticleId: null,
+      versions: { none: {} },
+    },
+    select: { id: true, storageObjectPath: true },
+  });
+  for (const source of sources) {
+    if (source.storageObjectPath) {
+      await removeStorageImageObject({
+        bucketName: "assets",
+        objectPath: source.storageObjectPath,
+      }).catch(() => undefined);
+    }
+  }
+  await db.handbookSource.deleteMany({
+    where: {
+      id: { in: sources.map(({ id }) => id) },
+      organizationId,
+      createdByUserId: userId,
+      draftArticleId: null,
+      versions: { none: {} },
+    },
   });
 }
 
@@ -1186,6 +1613,12 @@ async function publishHandbookArticleInTransaction(
       id: articleId,
       organizationId,
       status: { not: HandbookArticleStatus.ARCHIVED },
+    },
+    include: {
+      draftSources: {
+        where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+        select: { id: true },
+      },
     },
   });
   if (!article)
@@ -1247,7 +1680,7 @@ async function publishHandbookArticleInTransaction(
       publishedByUserId: userId,
     },
   });
-  const sourceIds: string[] = [];
+  const sourceIds: string[] = article.draftSources?.map(({ id }) => id) ?? [];
   for (const sourceUrl of cleanSourceUrls(article.draftSourceUrls)) {
     const title = new URL(sourceUrl).hostname.replace(/^www\./, "");
     const source = await tx.handbookSource.upsert({
@@ -1283,6 +1716,7 @@ async function publishHandbookArticleInTransaction(
       status: HandbookArticleStatus.PUBLISHED,
       publishedVersionId: version.id,
       updatedByUserId: userId,
+      draftAttachmentsInitialized: true,
     },
   });
   await recordEvent(
@@ -1777,6 +2211,11 @@ export async function submitHandbookDraftForReview({
         draftTitle: true,
         draftContent: true,
         draftSourceUrls: true,
+        draftAttachmentsInitialized: true,
+        draftSources: {
+          where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+          select: { id: true },
+        },
         handbookCategoryId: true,
         publishedVersionId: true,
         publishedVersion: {
@@ -1784,7 +2223,11 @@ export async function submitHandbookDraftForReview({
             versionNumber: true,
             title: true,
             content: true,
-            sources: { select: { source: { select: { url: true } } } },
+            sources: {
+              select: {
+                source: { select: { id: true, url: true, kind: true } },
+              },
+            },
           },
         },
       },
@@ -1863,9 +2306,20 @@ export async function submitHandbookDraftForReview({
         .filter((url): url is string => Boolean(url))
     );
     const proposedSourceUrls = cleanSourceUrls(article.draftSourceUrls);
+    const currentAttachmentIds = article.publishedVersion.sources
+      .filter(
+        ({ source }) => source.kind === HandbookSourceKind.UPLOADED_DOCUMENT
+      )
+      .map(({ source }) => source.id)
+      .sort();
+    const proposedAttachmentIds = article.draftAttachmentsInitialized
+      ? article.draftSources.map(({ id }) => id).sort()
+      : currentAttachmentIds;
     const revisionHasChanges =
       article.draftTitle !== article.publishedVersion.title ||
       article.draftContent !== article.publishedVersion.content ||
+      JSON.stringify(proposedAttachmentIds) !==
+        JSON.stringify(currentAttachmentIds) ||
       JSON.stringify(proposedSourceUrls) !==
         JSON.stringify(currentSourceUrls) ||
       Boolean(pendingCategoryProposal) ||
@@ -2078,6 +2532,15 @@ export async function listHandbookObservations(organizationId: string) {
           draftTitle: true,
           draftContent: true,
           draftSourceUrls: true,
+          draftSources: {
+            where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+            select: {
+              id: true,
+              title: true,
+              storageObjectPath: true,
+              fileSizeBytes: true,
+            },
+          },
           publishedVersion: {
             select: {
               id: true,
@@ -2085,7 +2548,18 @@ export async function listHandbookObservations(organizationId: string) {
               content: true,
               versionNumber: true,
               sources: {
-                select: { source: { select: { title: true, url: true } } },
+                select: {
+                  source: {
+                    select: {
+                      id: true,
+                      title: true,
+                      url: true,
+                      kind: true,
+                      storageObjectPath: true,
+                      fileSizeBytes: true,
+                    },
+                  },
+                },
               },
             },
           },
@@ -2130,6 +2604,30 @@ export async function listHandbookObservations(organizationId: string) {
     ...observation,
     contributorName:
       contributorNames.get(observation.contributorUserId) ?? null,
+    article: observation.article
+      ? {
+          ...observation.article,
+          draftSources: undefined,
+          draftAttachments: observation.article.draftSources.flatMap(
+            (source) =>
+              source.storageObjectPath
+                ? [
+                    {
+                      id: source.id,
+                      title: source.title,
+                      fileName: handbookAttachmentFilenameFromPath(
+                        source.storageObjectPath
+                      ),
+                      fileSizeBytes: source.fileSizeBytes ?? 0,
+                    },
+                  ]
+                : []
+          ),
+          publishedVersion: observation.article.publishedVersion
+            ? observation.article.publishedVersion
+            : null,
+        }
+      : null,
   }));
 }
 
@@ -2155,9 +2653,11 @@ export async function listHandbookArticlesForStaff(organizationId: string) {
 export async function listMyHandbookDrafts({
   organizationId,
   userId,
+  canReadStaffOnly = false,
 }: {
   organizationId: string;
   userId: string;
+  canReadStaffOnly?: boolean;
 }) {
   const [drafts, revisedArticles, pendingRevisions, contributionRecords] =
     await Promise.all([
@@ -2190,6 +2690,7 @@ export async function listMyHandbookDrafts({
           organizationId,
           updatedByUserId: userId,
           status: HandbookArticleStatus.PUBLISHED,
+          ...(canReadStaffOnly ? {} : { staffOnly: false }),
           observations: {
             none: {
               status: HandbookObservationStatus.PENDING_REVIEW,
@@ -2204,6 +2705,11 @@ export async function listMyHandbookDrafts({
           slug: true,
           draftTitle: true,
           draftContent: true,
+          draftAttachmentsInitialized: true,
+          draftSources: {
+            where: { kind: HandbookSourceKind.UPLOADED_DOCUMENT },
+            select: { id: true },
+          },
           updatedAt: true,
           handbookCategory: { select: { id: true, name: true } },
           publishedVersion: {
@@ -2212,6 +2718,11 @@ export async function listMyHandbookDrafts({
               title: true,
               content: true,
               versionNumber: true,
+              sources: {
+                select: {
+                  source: { select: { id: true, kind: true } },
+                },
+              },
             },
           },
         },
@@ -2223,6 +2734,9 @@ export async function listMyHandbookDrafts({
           status: HandbookObservationStatus.PENDING_REVIEW,
           publishedVersionId: { not: null },
           articleId: { not: null },
+          ...(canReadStaffOnly
+            ? {}
+            : { article: { is: { staffOnly: false } } }),
         },
         orderBy: { createdAt: "desc" },
         take: 200,
@@ -2253,6 +2767,9 @@ export async function listMyHandbookDrafts({
           organizationId,
           contributorUserId: userId,
           articleId: { not: null },
+          ...(canReadStaffOnly
+            ? {}
+            : { article: { is: { staffOnly: false } } }),
           OR: [
             { title: { startsWith: "Draft submitted for review:" } },
             { title: { startsWith: "Proposed improvement:" } },
@@ -2332,7 +2849,18 @@ export async function listMyHandbookDrafts({
       (article) =>
         article.publishedVersion &&
         (article.draftTitle !== article.publishedVersion.title ||
-          article.draftContent !== article.publishedVersion.content)
+          article.draftContent !== article.publishedVersion.content ||
+          (article.draftAttachmentsInitialized &&
+            JSON.stringify(article.draftSources.map(({ id }) => id).sort()) !==
+              JSON.stringify(
+                article.publishedVersion.sources
+                  .filter(
+                    ({ source }) =>
+                      source.kind === HandbookSourceKind.UPLOADED_DOCUMENT
+                  )
+                  .map(({ source }) => source.id)
+                  .sort()
+              )))
     )
     .map((article) => ({
       id: article.id,
@@ -2876,7 +3404,11 @@ export async function discardHandbookArticleRevisionDraft({
 export async function getHandbookContributionOptions(organizationId: string) {
   const [articles, assetModels, kits, categories] = await Promise.all([
     db.handbookArticle.findMany({
-      where: { organizationId, status: HandbookArticleStatus.PUBLISHED },
+      where: {
+        organizationId,
+        status: HandbookArticleStatus.PUBLISHED,
+        staffOnly: false,
+      },
       orderBy: { slug: "asc" },
       select: {
         id: true,
@@ -3196,6 +3728,7 @@ export async function findRelatedHandbookKnowledge({
       where: {
         organizationId,
         status: HandbookArticleStatus.PUBLISHED,
+        staffOnly: false,
         publishedVersion: {
           is: { OR: [...matching("title"), ...matching("content")] },
         },
@@ -3290,6 +3823,7 @@ async function queryHandbookContextForAssistant({
       where: {
         organizationId,
         status: HandbookArticleStatus.PUBLISHED,
+        ...(audience === "staff" ? {} : { staffOnly: false }),
         publishedVersion: {
           is: {
             OR: [

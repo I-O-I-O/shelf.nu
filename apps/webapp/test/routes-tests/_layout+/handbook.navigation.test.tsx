@@ -114,8 +114,8 @@ describe("Handbook navigation", () => {
         .getAttribute("href")
     ).toBe("/handbook/review");
     expect(
-      screen.getByRole("link", { name: "Manage Handbook" }).getAttribute("href")
-    ).toBe("/handbook/manage");
+      screen.getByRole("link", { name: "Manage Handbook" })
+    ).toHaveAttribute("href", "/handbook/manage");
     expect(screen.queryByRole("link", { name: "Categories" })).toBeNull();
     expect(
       screen.queryByRole("link", { name: "Organize articles" })

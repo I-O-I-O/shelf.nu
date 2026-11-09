@@ -32,6 +32,10 @@ import {
 } from "~/modules/ioio-staff/inventory-import.server";
 import { getDashboardLabTasks } from "~/modules/ioio-staff/lab-tasks.server";
 import { getPurchasingDashboardSummary } from "~/modules/ioio-staff/purchasing.server";
+import {
+  getStaffSystemStatus,
+  type StaffSystemStatus,
+} from "~/modules/ioio-staff/system-status.server";
 import { getTAHoursDashboardSummary } from "~/modules/ioio-staff/ta-hours.server";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -56,7 +60,13 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
     const isStaff = role === "ADMIN" || role === "OWNER";
-    const [labTasks, taHours, purchasing, savedDashboardPreferences] = isStaff
+    const [
+      labTasks,
+      taHours,
+      purchasing,
+      savedDashboardPreferences,
+      systemStatus,
+    ] = isStaff
       ? await Promise.all([
           getDashboardLabTasks({ organizationId, userId }),
           getTAHoursDashboardSummary(organizationId, userId),
@@ -65,8 +75,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             where: { id: userId },
             select: { staffDashboardPreferences: true },
           }),
+          getStaffSystemStatus(),
         ])
-      : [null, null, null, null];
+      : [null, null, null, null, null];
 
     return payload({
       header: { title: "Home" },
@@ -74,6 +85,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       labTasks,
       taHours,
       purchasing,
+      systemStatus,
       dashboardPreferences: normalizeStaffDashboardPreferences(
         savedDashboardPreferences?.staffDashboardPreferences
       ),
@@ -268,8 +280,14 @@ export const handle = {
 };
 
 export default function HomePage() {
-  const { dashboardPreferences, isStaff, labTasks, purchasing, taHours } =
-    useLoaderData<typeof loader>();
+  const {
+    dashboardPreferences,
+    isStaff,
+    labTasks,
+    purchasing,
+    systemStatus,
+    taHours,
+  } = useLoaderData<typeof loader>();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
@@ -513,31 +531,9 @@ export default function HomePage() {
           ) : null}
         </header>
 
-        <form
-          action="/staff/ask"
-          method="get"
-          className="mt-7 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-4"
-        >
-          <label htmlFor="staff-dashboard-search" className="sr-only">
-            Ask IOIO about inventory, loans, or reports
-          </label>
-          <div className="flex items-center gap-3">
-            <input
-              id="staff-dashboard-search"
-              name="q"
-              type="search"
-              placeholder="Ask IOIO about inventory, loans, or reports..."
-              autoComplete="off"
-              className="min-h-11 min-w-0 flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 text-sm text-gray-950 outline-none placeholder:text-gray-500 focus:border-red-400 focus:ring-4 focus:ring-red-50"
-            />
-            <button
-              type="submit"
-              className="min-h-11 rounded-xl bg-red-700 px-4 text-sm font-bold text-white transition hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-            >
-              Ask IOIO
-            </button>
-          </div>
-        </form>
+        {isStaff && systemStatus ? (
+          <SystemStatusStrip status={systemStatus} />
+        ) : null}
 
         {isStaff ? (
           <div className="mt-6 space-y-6">
@@ -552,6 +548,65 @@ export default function HomePage() {
       </div>
     </div>
   );
+}
+
+function SystemStatusStrip({ status }: { status: StaffSystemStatus }) {
+  const serverIsOnline = status.server === "online";
+  const claudeLabel =
+    status.claude === "online"
+      ? "Online"
+      : status.claude === "offline"
+      ? "Offline"
+      : "Unavailable";
+  const claudeDotState =
+    status.claude === "online"
+      ? "online"
+      : status.claude === "offline"
+      ? "issue"
+      : "unavailable";
+  return (
+    <section
+      aria-label="System status"
+      className="mt-7 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3"
+    >
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <p className="text-xs font-bold uppercase tracking-[0.16em] text-gray-500">
+          System status
+        </p>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-gray-700">
+          <p className="flex items-center gap-2">
+            <StatusDot state={serverIsOnline ? "online" : "issue"} />
+            <span>Server</span>
+            <span className="font-semibold text-gray-950">
+              {serverIsOnline ? "Online" : "Issue"}
+            </span>
+          </p>
+          <p>
+            <span>Storage</span>{" "}
+            <span className="font-semibold text-gray-950">
+              {status.storagePercentUsed === null
+                ? "Unavailable"
+                : `${status.storagePercentUsed}% used`}
+            </span>
+          </p>
+          <p className="flex items-center gap-2">
+            <StatusDot state={claudeDotState} />
+            <span>Claude</span>
+            <span className="font-semibold text-gray-950">{claudeLabel}</span>
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StatusDot({ state }: { state: "online" | "issue" | "unavailable" }) {
+  const color = {
+    online: "bg-green-600",
+    issue: "bg-red-600",
+    unavailable: "bg-gray-400",
+  }[state];
+  return <span aria-hidden="true" className={`size-2 rounded-full ${color}`} />;
 }
 
 function DashboardHoursValue({

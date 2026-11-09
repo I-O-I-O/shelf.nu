@@ -412,9 +412,16 @@ describe("standalone import helper HTTP service", () => {
       415
     );
     expect(
-      (await sendToHandler({ method: "GET", url: "/health" })).body
+      (
+        await sendToHandler({
+          method: "GET",
+          url: "/health",
+          config: { readStorageUsedPercent: () => Promise.resolve(33) },
+        })
+      ).body
     ).toEqual({
       status: "ok",
+      storageUsedPercent: 33,
     });
   });
 

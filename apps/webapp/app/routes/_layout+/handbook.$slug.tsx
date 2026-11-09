@@ -4,9 +4,14 @@ import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Link, useLoaderData, useLocation } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
+import {
+  HandbookFileList,
+  type HandbookFileAttachment,
+} from "~/components/handbook/handbook-file-list";
 import { ChevronRight } from "~/components/icons/library";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
+import { handbookAttachmentFilenameFromPath } from "~/modules/ioio-handbook/attachment.shared";
 import {
   assignHandbookHeadingIds,
   compareHandbookVersions,
@@ -35,6 +40,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       slug,
       versionId,
       compareVersionId,
+      canReadStaffOnly: auth.canEdit,
     });
     if (!article) {
       throw new ShelfError({
@@ -50,6 +56,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
           organizationId: auth.organizationId,
           handbookCategoryId: article.handbookCategory.id,
           articleId: article.id,
+          canReadStaffOnly: auth.canEdit,
         })
       : { articles: [], hasMore: false };
     return payload({
@@ -88,6 +95,22 @@ export default function HandbookArticlePage() {
   } = useLoaderData<typeof loader>();
   const location = useLocation();
   const version = article.publishedVersion;
+  const referenceSources = version.sources.filter(({ source }) => source.url);
+  const fileAttachments: HandbookFileAttachment[] = version.sources.flatMap(
+    ({ source }) =>
+      source.kind === "UPLOADED_DOCUMENT" && source.storageObjectPath
+        ? [
+            {
+              id: source.id,
+              title: source.title,
+              fileName: handbookAttachmentFilenameFromPath(
+                source.storageObjectPath
+              ),
+              fileSizeBytes: source.fileSizeBytes ?? 0,
+            },
+          ]
+        : []
+  );
   const currentVersion = article.versions[0]?.id;
   const viewingHistorical = currentVersion !== version.id;
   const document = useMemo(
@@ -101,7 +124,7 @@ export default function HandbookArticlePage() {
   const outline = useMemo(
     () => [
       ...(document.introduction &&
-      (document.sections.length > 0 || version.sources.length > 0)
+      (document.sections.length > 0 || referenceSources.length > 0)
         ? [
             {
               level: 2 as const,
@@ -111,7 +134,7 @@ export default function HandbookArticlePage() {
           ]
         : []),
       ...headingOutline,
-      ...(version.sources.length &&
+      ...(referenceSources.length &&
       !headingOutline.some((item) => /^references?$/iu.test(item.title.trim()))
         ? [
             {
@@ -131,7 +154,7 @@ export default function HandbookArticlePage() {
           ]
         : []),
     ],
-    [document, headingOutline, version.sources.length]
+    [document, headingOutline, referenceSources.length]
   );
   const contentRef = useRef<HTMLDivElement | null>(null);
   const showOutline = outline.length > 1;
@@ -231,10 +254,18 @@ export default function HandbookArticlePage() {
               articleId={article.id}
               slug={article.slug}
               articleTitle={article.publishedVersion.title}
+              staffOnly={article.staffOnly}
+              returnTo={`/handbook/${encodeURIComponent(article.slug)}`}
             />
           ) : null}
         </div>
       </div>
+
+      {canEdit && article.staffOnly ? (
+        <p className="mb-4 inline-flex rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-bold uppercase tracking-wide text-amber-900">
+          Staff only
+        </p>
+      ) : null}
 
       {viewingHistorical ? (
         <div
@@ -335,13 +366,13 @@ export default function HandbookArticlePage() {
                       ) : null}
                     </section>
                   ))}
-                  {includesReferences && version.sources.length ? (
-                    <HandbookSourceList sources={version.sources} />
+                  {includesReferences && referenceSources.length ? (
+                    <HandbookSourceList sources={referenceSources} />
                   ) : null}
                 </section>
               );
             })}
-            {version.sources.length &&
+            {referenceSources.length &&
             !headingOutline.some((item) =>
               /^references?$/iu.test(item.title.trim())
             ) ? (
@@ -352,9 +383,10 @@ export default function HandbookArticlePage() {
                 >
                   References
                 </h2>
-                <HandbookSourceList sources={version.sources} />
+                <HandbookSourceList sources={referenceSources} />
               </section>
             ) : null}
+            <HandbookFileList files={fileAttachments} versionId={version.id} />
           </div>
 
           {article.versions.length > 0 ? (

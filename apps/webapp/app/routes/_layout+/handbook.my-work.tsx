@@ -32,6 +32,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     const drafts = await listMyHandbookDrafts({
       organizationId: auth.organizationId,
       userId: auth.userId,
+      canReadStaffOnly: auth.canEdit,
     });
     return payload({ drafts, isStudent: auth.isStudent });
   } catch (cause) {

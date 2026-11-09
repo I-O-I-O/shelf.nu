@@ -1,0 +1,2 @@
+ALTER TABLE "HandbookArticle"
+ADD COLUMN "staffOnly" BOOLEAN NOT NULL DEFAULT false;

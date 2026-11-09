@@ -38,7 +38,10 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       url.searchParams.get("handbookCategoryId")?.trim() ?? "";
     const [editData, titleMatches] = await Promise.all([
       getHandbookEditData({ organizationId: auth.organizationId }),
-      listHandbookArticleTitles({ organizationId: auth.organizationId }),
+      listHandbookArticleTitles({
+        organizationId: auth.organizationId,
+        canReadStaffOnly: auth.canEdit,
+      }),
     ]);
     const initialCategoryId = editData.categories.some(
       (category) => category.id === requestedCategoryId

@@ -19,12 +19,10 @@ import {
   NavLink,
   Outlet,
   useLocation,
-  useMatches,
   useRouteLoaderData,
 } from "react-router";
 import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
 import { StaffLogo } from "~/components/ioio-staff/staff-logo";
-import { ChatHistoryMenu } from "~/components/ioio-student/chat-history";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
 import { StudentBorrowListIndicator } from "~/components/ioio-student/student-shell";
 import {
@@ -335,12 +333,8 @@ export default function StaffShell() {
     });
   }
 
-  const matches = useMatches();
   const canViewLabTasks = Boolean(layoutData?.isIoioStaff);
   const labStatus = layoutData?.labStatus ?? null;
-  const askMatch = matches.find((match) => match.pathname === "/staff/ask");
-  const chatScope = (askMatch?.data as { chatScope?: string } | undefined)
-    ?.chatScope;
 
   return (
     <StudentCheckoutProvider>
@@ -435,12 +429,6 @@ export default function StaffShell() {
                 onReorder={reorderNavigation}
                 onNavigate={() => setMobileMenuOpen(false)}
                 canViewLabTasks={canViewLabTasks}
-              />
-              <ChatHistoryMenu
-                namespace="staff"
-                scope={chatScope}
-                to="/staff/ask"
-                onNavigate={() => setMobileMenuOpen(false)}
               />
               <StaffAccountControls
                 onNavigate={() => setMobileMenuOpen(false)}

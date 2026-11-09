@@ -51,6 +51,7 @@ export interface HandbookArticleLinkTarget {
   slug: string;
   title: string;
   categoryName: string;
+  staffOnly?: boolean;
 }
 
 export interface RawBlockDialogState {

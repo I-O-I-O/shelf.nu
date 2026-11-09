@@ -5,6 +5,7 @@ import { HandbookArticleActions } from "~/components/handbook/handbook-article-a
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   listHandbookCategories,
+  listHandbookCategoriesWithPublishedArticles,
   listPublishedHandbookArticles,
 } from "~/modules/ioio-handbook/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -24,8 +25,13 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         organizationId: auth.organizationId,
         query,
         handbookCategoryId,
+        canReadStaffOnly: auth.canEdit,
       }),
-      listHandbookCategories(auth.organizationId),
+      auth.canEdit
+        ? listHandbookCategories(auth.organizationId)
+        : listHandbookCategoriesWithPublishedArticles({
+            organizationId: auth.organizationId,
+          }),
     ]);
     return payload({
       articles,
@@ -219,26 +225,29 @@ export default function HandbookIndexPage() {
                   </Link>
                 ) : null}
               </header>
-              <ol className="divide-y divide-gray-100">
+              <ul className="divide-y divide-gray-100">
                 {groupArticles.map((article, index) => (
                   <li
                     key={article.id}
-                    className="flex items-start gap-3 py-3 first:pt-1 last:pb-1"
+                    className="flex min-w-0 items-center gap-3 py-2 first:pt-1 last:pb-1"
                   >
-                    <span className="pt-0.5 text-sm font-semibold tabular-nums text-gray-500">
+                    <span className="w-7 shrink-0 text-right text-sm font-medium tabular-nums text-gray-500">
                       {index + 1}.
                     </span>
-                    <div className="min-w-0 flex-1">
-                      <h3 className="font-medium text-gray-950">
-                        <Link
-                          to={`/handbook/${encodeURIComponent(article.slug)}`}
-                          className="hover:text-red-800 hover:underline"
-                        >
-                          {article.publishedVersion?.title ??
-                            "Untitled article"}
-                        </Link>
-                      </h3>
-                    </div>
+                    <Link
+                      to={`/handbook/${encodeURIComponent(article.slug)}`}
+                      title={
+                        article.publishedVersion?.title ?? "Untitled article"
+                      }
+                      className="block min-w-0 flex-1 truncate text-left text-sm font-medium text-gray-900 hover:text-gray-700"
+                    >
+                      {article.publishedVersion?.title ?? "Untitled article"}
+                    </Link>
+                    {canEdit && article.staffOnly ? (
+                      <span className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-900">
+                        Staff only
+                      </span>
+                    ) : null}
                     {canEdit ? (
                       <HandbookArticleActions
                         articleId={article.id}
@@ -246,6 +255,8 @@ export default function HandbookIndexPage() {
                         articleTitle={
                           article.publishedVersion?.title ?? "article"
                         }
+                        staffOnly={article.staffOnly}
+                        returnTo="/handbook"
                         menuLabel={`Article actions for ${
                           article.publishedVersion?.title ?? "article"
                         }`}
@@ -253,7 +264,7 @@ export default function HandbookIndexPage() {
                     ) : null}
                   </li>
                 ))}
-              </ol>
+              </ul>
             </section>
           ))}
         </div>

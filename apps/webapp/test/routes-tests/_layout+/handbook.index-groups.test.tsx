@@ -39,6 +39,7 @@ describe("Handbook category groups", () => {
               {
                 id: "article-3",
                 slug: "soldering-basics",
+                staffOnly: true,
                 handbookCategory: { id: "soldering", name: "Soldering" },
                 isStartHere: false,
                 position: 1,
@@ -68,12 +69,28 @@ describe("Handbook category groups", () => {
     expect(
       await screen.findByRole("heading", { name: "Soldering" })
     ).toBeTruthy();
+    const firstArticleLink = screen.getByRole("link", {
+      name: "What 3D printing is",
+    });
+    const secondArticleLink = screen.getByRole("link", {
+      name: "How to change filament",
+    });
+    expect(firstArticleLink).toHaveAttribute(
+      "href",
+      "/handbook/what-3d-printing-is"
+    );
+    expect(firstArticleLink).toHaveClass(
+      "text-sm",
+      "font-medium",
+      "text-gray-900",
+      "truncate"
+    );
     expect(
-      screen.getByRole("heading", { name: "What 3D printing is" })
-    ).toBeTruthy();
+      screen.queryByRole("heading", { name: "What 3D printing is" })
+    ).toBeNull();
     expect(
-      screen.getByRole("heading", { name: "How to change filament" })
-    ).toBeTruthy();
+      screen.queryByRole("heading", { name: "How to change filament" })
+    ).toBeNull();
     expect(screen.queryByText(/Start here/i)).toBeNull();
     const printing = screen
       .getByRole("heading", { name: "3D Printing" })
@@ -86,16 +103,19 @@ describe("Handbook category groups", () => {
       expect.stringContaining("1.What 3D printing is"),
       expect.stringContaining("2.How to change filament"),
     ]);
+    expect(within(printing).getByRole("list").tagName).toBe("UL");
     expect(
-      screen
-        .getByRole("link", { name: "What 3D printing is" })
-        .compareDocumentPosition(
-          screen.getByRole("link", { name: "How to change filament" })
-        ) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+      within(printing).getAllByRole("listitem")[0].textContent
+    ).not.toMatch(/1\.\s*1\./);
     expect(
-      screen.getByRole("heading", { name: "Soldering Basics" })
+      firstArticleLink.compareDocumentPosition(secondArticleLink) &
+        Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Soldering Basics" })).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "Soldering Basics" })
+    ).toBeNull();
+    expect(screen.getByText("Staff only")).toBeTruthy();
     expect(
       within(printing)
         .getByRole("link", { name: "New article" })
@@ -147,8 +167,8 @@ describe("Handbook category groups", () => {
   });
 });
 
-describe("Handbook ordering controls", () => {
-  it("offers the dedicated ordering page to staff, not students", async () => {
+describe("Handbook staff management visibility", () => {
+  it("hides the combined category and ordering manager entry for staff", async () => {
     const renderHome = (canEdit: boolean) => {
       const router = createMemoryRouter(
         [
@@ -194,7 +214,7 @@ describe("Handbook ordering controls", () => {
       "Manage Handbook",
     ]);
     expect(
-      await screen.findByRole("link", { name: "Manage Handbook" })
+      screen.getByRole("link", { name: "Manage Handbook" })
     ).toHaveAttribute("href", "/handbook/manage");
     expect(screen.queryByRole("link", { name: "Categories" })).toBeNull();
     expect(

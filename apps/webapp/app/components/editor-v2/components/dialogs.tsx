@@ -161,6 +161,11 @@ export function LinkDialog({
                         <span className="block text-sm font-semibold text-gray-900">
                           {article.title}
                         </span>
+                        {article.staffOnly ? (
+                          <span className="mt-1 inline-flex rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-900">
+                            Staff only
+                          </span>
+                        ) : null}
                       </button>
                     </li>
                   );

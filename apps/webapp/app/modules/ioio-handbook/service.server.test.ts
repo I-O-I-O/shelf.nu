@@ -76,11 +76,15 @@ import {
   discardHandbookArticleRevisionDraft,
   deleteHandbookDraft,
   getHandbookEditData,
+  getPublishedHandbookArticle,
+  getHandbookContextForAssistant,
   listPublishedHandbookArticles,
   listRelatedHandbookArticles,
   listMyHandbookDrafts,
   listHandbookCategoriesForManagement,
+  listHandbookCategoriesWithPublishedArticles,
   listHandbookArticleTitles,
+  setHandbookArticleVisibility,
   normalizeHandbookCategoryName,
   publishHandbookArticle,
   rejectHandbookArticleRevision,
@@ -275,7 +279,7 @@ describe("Handbook PDF import drafts", () => {
     );
   });
 
-  it("rejects an imported revision that would exceed the article content limit", async () => {
+  it("accepts an imported revision longer than the former 30,000-character limit", async () => {
     const publishedContent = `## Existing\n\n${"x".repeat(29_990)}`;
     mocks.tx.handbookArticle.findFirst.mockResolvedValue({
       id: "existing-article",
@@ -294,22 +298,22 @@ describe("Handbook PDF import drafts", () => {
       observations: [],
     });
 
-    await expect(
-      createHandbookImportDrafts({
-        organizationId: "org-1",
-        userId: "staff-1",
-        articles: [
-          {
-            title: "Inkscape shortcuts",
-            content: "## Shortcuts\n\nUse Ctrl+D.",
-            sourceUrls: [],
-            existingArticleSlug: "inkscape-basics",
-            revisionBaseVersionId: "version-4",
-          },
-        ],
-      })
-    ).rejects.toThrow("exceeds the 30,000-character article limit");
-    expect(mocks.tx.handbookArticle.updateMany).not.toHaveBeenCalled();
+    await createHandbookImportDrafts({
+      organizationId: "org-1",
+      userId: "staff-1",
+      articles: [
+        {
+          title: "Inkscape shortcuts",
+          content: "## Shortcuts\n\nUse Ctrl+D.",
+          sourceUrls: [],
+          existingArticleSlug: "inkscape-basics",
+          revisionBaseVersionId: "version-4",
+        },
+      ],
+    });
+    const savedDraft =
+      mocks.tx.handbookArticle.updateMany.mock.calls[0]?.[0].data.draftContent;
+    expect(savedDraft?.length).toBeGreaterThan(30_000);
   });
 });
 
@@ -386,6 +390,80 @@ describe("Handbook categories", () => {
     expect(mocks.handbookArticle.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         orderBy: [{ position: "asc" }, { slug: "asc" }],
+      })
+    );
+  });
+
+  it("filters staff-only articles from the default published list and returns them only when authorized", async () => {
+    mocks.handbookArticle.findMany.mockResolvedValue([]);
+
+    await listPublishedHandbookArticles({ organizationId: "org-1" });
+    expect(mocks.handbookArticle.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "org-1",
+          staffOnly: false,
+        }),
+        select: expect.objectContaining({ staffOnly: true }),
+      })
+    );
+
+    await listPublishedHandbookArticles({
+      organizationId: "org-1",
+      canReadStaffOnly: true,
+    });
+    expect(mocks.handbookArticle.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({ staffOnly: false }),
+      })
+    );
+  });
+
+  it("hides categories with no student-visible published articles from the Handbook home", async () => {
+    mocks.handbookCategory.findMany.mockResolvedValue([]);
+
+    await listHandbookCategoriesWithPublishedArticles({
+      organizationId: "org-1",
+    });
+
+    expect(mocks.handbookCategory.findMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: "org-1",
+        archivedAt: null,
+        articles: {
+          some: {
+            status: "PUBLISHED",
+            publishedVersionId: { not: null },
+            staffOnly: false,
+          },
+        },
+      },
+      orderBy: [{ name: "asc" }, { id: "asc" }],
+      select: { id: true, name: true },
+    });
+  });
+
+  it("scopes direct published article lookup to the caller's visibility", async () => {
+    mocks.handbookArticle.findFirst.mockResolvedValue(null);
+
+    await getPublishedHandbookArticle({
+      organizationId: "org-1",
+      slug: "printer-maintenance",
+    });
+    expect(mocks.handbookArticle.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ staffOnly: false }),
+      })
+    );
+
+    await getPublishedHandbookArticle({
+      organizationId: "org-1",
+      slug: "printer-maintenance",
+      canReadStaffOnly: true,
+    });
+    expect(mocks.handbookArticle.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({ staffOnly: false }),
       })
     );
   });
@@ -668,6 +746,7 @@ describe("Handbook categories", () => {
           organizationId: "org-1",
           updatedByUserId: "student-1",
           status: "PUBLISHED",
+          staffOnly: false,
         }),
       })
     );
@@ -1381,6 +1460,32 @@ describe("Handbook categories", () => {
     expect(mocks.tx.handbookArticleVersion.create).toHaveBeenCalled();
   });
 
+  it("snapshots the selected draft files into the new published version", async () => {
+    mocks.tx.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-1",
+      organizationId: "org-1",
+      slug: "soldering-basics",
+      status: "DRAFT",
+      position: 0,
+      handbookCategoryId: "handbook-category-1",
+      draftTitle: "Soldering Basics",
+      draftContent: "Basic soldering guide.",
+      draftSourceUrls: [],
+      draftSources: [{ id: "file-source-1" }],
+    });
+
+    await publishHandbookArticle({
+      organizationId: "org-1",
+      userId: "staff-1",
+      articleId: "article-1",
+    });
+
+    expect(mocks.tx.handbookVersionSource.createMany).toHaveBeenCalledWith({
+      data: [{ versionId: "version-1", sourceId: "file-source-1" }],
+      skipDuplicates: true,
+    });
+  });
+
   it.each([0, 7])(
     "keeps published position %s when publishing a new version",
     async (position) => {
@@ -1506,6 +1611,7 @@ describe("related Handbook navigation", () => {
         handbookCategoryId: "printing",
         id: { not: "current" },
         status: "PUBLISHED",
+        staffOnly: false,
         publishedVersion: { isNot: null },
       },
       orderBy: [{ position: "asc" }, { slug: "asc" }],
@@ -1543,6 +1649,7 @@ describe("Handbook article link targets", () => {
       {
         id: "article-1",
         slug: "how-to-change-filament",
+        staffOnly: false,
         handbookCategoryId: "category-3d",
         publishedVersionId: "version-1",
         handbookCategory: { name: "3D Printing" },
@@ -1556,6 +1663,7 @@ describe("Handbook article link targets", () => {
       {
         id: "article-1",
         slug: "how-to-change-filament",
+        staffOnly: false,
         title: "How to change filament",
         handbookCategoryId: "category-3d",
         publishedVersionId: "version-1",
@@ -1567,6 +1675,7 @@ describe("Handbook article link targets", () => {
         where: {
           organizationId: "org-1",
           status: "PUBLISHED",
+          staffOnly: false,
           publishedVersion: { is: {} },
         },
       })
@@ -1574,6 +1683,79 @@ describe("Handbook article link targets", () => {
     expect(
       mocks.handbookArticle.findMany.mock.calls.at(-1)?.[0]
     ).not.toHaveProperty("take");
+  });
+
+  it("changes canonical visibility without creating or rewriting an article revision", async () => {
+    mocks.handbookArticle.findFirst.mockResolvedValue({
+      id: "article-1",
+      staffOnly: false,
+    });
+    mocks.handbookArticle.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      setHandbookArticleVisibility({
+        organizationId: "org-1",
+        articleId: "article-1",
+        staffOnly: true,
+        canManageArticles: true,
+      })
+    ).resolves.toEqual({ id: "article-1", staffOnly: true });
+
+    expect(mocks.handbookArticle.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "article-1",
+        organizationId: "org-1",
+        status: "PUBLISHED",
+      },
+      data: { staffOnly: true },
+    });
+    expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
+  });
+
+  it("does not permit a non-staff caller to change visibility", async () => {
+    await expect(
+      setHandbookArticleVisibility({
+        organizationId: "org-1",
+        articleId: "article-1",
+        staffOnly: true,
+        canManageArticles: false,
+      })
+    ).rejects.toThrow("Only Staff can change Handbook article visibility.");
+    expect(mocks.handbookArticle.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("Ask IOIO Handbook visibility", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.handbookArticle.findMany.mockResolvedValue([]);
+    mocks.handbookObservation.findMany.mockResolvedValue([]);
+  });
+
+  it("keeps staff-only Handbook articles out of student AI retrieval", async () => {
+    await getHandbookContextForAssistant({
+      organizationId: "org-1",
+      question: "How do I maintain the printer?",
+      audience: "student",
+    });
+    expect(mocks.handbookArticle.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ staffOnly: false }),
+      })
+    );
+  });
+
+  it("allows staff AI retrieval to include staff-only articles", async () => {
+    await getHandbookContextForAssistant({
+      organizationId: "org-1",
+      question: "How do I maintain the printer?",
+      audience: "staff",
+    });
+    expect(mocks.handbookArticle.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({ staffOnly: false }),
+      })
+    );
   });
 });
 

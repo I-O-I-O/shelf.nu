@@ -15,6 +15,7 @@ import {
   type AnyImportHelperRequest,
   type AnyImportHelperResponse,
 } from "./import-helper-contract.server";
+import { getHelperStorageUsedPercent } from "./import-helper-storage.server";
 import { SHELF_TASK_RESPONSE_JSON_SCHEMA } from "./shelf-task-plan.server";
 
 export const CLAUDE_IMPORT_HELPER_EXECUTABLE = "/home/master/.local/bin/claude";
@@ -932,6 +933,7 @@ export class ImportHelperServiceFailure extends Error {
 
 export type ImportHelperServiceConfig = {
   authToken: string;
+  readStorageUsedPercent?: () => Promise<number | null>;
   inference?: ClaudeProcessRunner;
   processTimeoutMs?: number;
   maxRequestBytes?: number;
@@ -1127,7 +1129,15 @@ export function createImportHelperRequestHandler(
     };
 
     if (url.pathname === "/health" && method === "GET") {
-      finish(200, { status: "ok" }, "import_helper_health");
+      void (config.readStorageUsedPercent ?? getHelperStorageUsedPercent)()
+        .catch(() => null)
+        .then((storageUsedPercent) => {
+          finish(
+            200,
+            { status: "ok", storageUsedPercent },
+            "import_helper_health"
+          );
+        });
       return;
     }
     if (url.pathname !== "/import") {

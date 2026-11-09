@@ -65,6 +65,46 @@ function isValidEndpoint(endpoint: string): boolean {
   }
 }
 
+/** Lightweight health request through the existing helper connection; no inference. */
+export async function getImportHelperStorageUsedPercent(
+  config: ImportHelperClientConfig = getRuntimeConfig()
+): Promise<number | null> {
+  const endpoint = config.endpoint?.trim();
+  const authToken = config.authToken?.trim();
+  if (!endpoint || !authToken || !isValidEndpoint(endpoint)) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+  try {
+    const response = await (config.fetchImpl ?? fetch)(
+      new URL("/health", endpoint),
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${authToken}` },
+        redirect: "error",
+        signal: controller.signal,
+      }
+    );
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (text.length > 2048) return null;
+    const body: unknown = JSON.parse(text);
+    if (!body || typeof body !== "object" || !("storageUsedPercent" in body))
+      return null;
+    const percent = body.storageUsedPercent;
+    return typeof percent === "number" &&
+      Number.isFinite(percent) &&
+      percent >= 0 &&
+      percent <= 100
+      ? Math.round(percent)
+      : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }

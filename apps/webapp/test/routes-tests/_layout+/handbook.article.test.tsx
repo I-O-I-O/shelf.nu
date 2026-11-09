@@ -23,6 +23,7 @@ function publishedArticle(slug: string) {
   return {
     id: `article-${slug}`,
     slug,
+    staffOnly: false,
     updatedAt: publishedAt,
     handbookCategory: { id: "category-1", name: "3D Printing" },
     publishedVersion: {
@@ -71,6 +72,9 @@ describe("published Handbook article page", () => {
         params: { slug: "deleted-article" },
       } as never)
     ).rejects.toMatchObject({ init: { status: 404 } });
+    expect(service.getPublishedHandbookArticle).toHaveBeenCalledWith(
+      expect.objectContaining({ canReadStaffOnly: false })
+    );
     expect(service.listRelatedHandbookArticles).not.toHaveBeenCalled();
   });
 
@@ -104,6 +108,7 @@ describe("published Handbook article page", () => {
   it("gives Staff one published edit action alongside archive and delete", async () => {
     const user = userEvent.setup();
     const article = publishedArticle("change-filament");
+    article.staffOnly = true;
     const router = createMemoryRouter(
       [
         {
@@ -131,6 +136,10 @@ describe("published Handbook article page", () => {
     expect(
       screen.getByRole("button", { name: "Archive article" })
     ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Make visible to everyone" })
+    ).toBeTruthy();
+    expect(screen.getByText("Staff only")).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Delete permanently" })
     ).toBeTruthy();

@@ -72,7 +72,6 @@ export function getIoioSettingsTabs(isPersonal: boolean) {
         { to: "team", content: "IOIO Users" },
         { to: "emails", content: "Emails" },
         { to: "card-access", content: "IOIO Lab Access" },
-        { to: "ai", content: "AI" },
         { to: "backup", content: "Backup" },
       ];
 }
