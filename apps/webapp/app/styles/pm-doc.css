@@ -48,6 +48,13 @@
   border-radius: 0.5rem;
 }
 
+.pm-doc.pm--editing img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+
 .pm-doc a {
   color: inherit;
   text-decoration: underline;

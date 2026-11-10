@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FocusEvent, MutableRefObject, RefObject } from "react";
 import type { Schema } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
+import type { Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 
 import {
@@ -34,6 +35,8 @@ interface UseEditorViewOptions {
   onBlur?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onFocus?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onChange?: (value: string) => void;
+  onTransaction?: (transaction: Transaction) => void;
+  onPasteImage?: (file: File, view: EditorView) => void;
   onStateUpdate?: (state: EditorState, view: EditorView) => void;
   onKeyDown?: (event: KeyboardEvent) => boolean;
   openLinkDialog: () => void;
@@ -59,6 +62,8 @@ export function useEditorView(
     onBlur,
     onFocus,
     onChange,
+    onTransaction,
+    onPasteImage,
     onStateUpdate,
     onKeyDown,
     openLinkDialog,
@@ -78,6 +83,8 @@ export function useEditorView(
   const onBlurRef = useRef(onBlur);
   const onFocusRef = useRef(onFocus);
   const onChangeRef = useRef(onChange);
+  const onTransactionRef = useRef(onTransaction);
+  const onPasteImageRef = useRef(onPasteImage);
 
   disabledRef.current = disabled;
   onStateUpdateRef.current = onStateUpdate;
@@ -87,6 +94,8 @@ export function useEditorView(
   onBlurRef.current = onBlur;
   onFocusRef.current = onFocus;
   onChangeRef.current = onChange;
+  onTransactionRef.current = onTransaction;
+  onPasteImageRef.current = onPasteImage;
 
   // Initialize editor view
   useEffect(() => {
@@ -120,6 +129,7 @@ export function useEditorView(
       },
       editable: () => !disabledRef.current,
       dispatchTransaction: (tr) => {
+        onTransactionRef.current?.(tr);
         const currentView = (viewRef.current ?? view) as EditorView;
         const nextState = currentView.state.apply(tr);
         let nextMarkdoc = markdocValueRef.current;
@@ -186,6 +196,22 @@ export function useEditorView(
         },
       },
       handlePaste: (view, event) => {
+        const clipboard = event.clipboardData;
+        const imageFile = clipboard
+          ? Array.from(clipboard.items)
+              .filter((item) => item.type.startsWith("image/"))
+              .map((item) => item.getAsFile())
+              .find((file): file is File => Boolean(file)) ??
+            Array.from(clipboard.files).find((file) =>
+              file.type.startsWith("image/")
+            )
+          : undefined;
+        if (imageFile && onPasteImageRef.current) {
+          event.preventDefault();
+          onPasteImageRef.current(imageFile, view);
+          return true;
+        }
+
         const text = event.clipboardData?.getData("text/plain");
         if (!text) return false;
 

@@ -16,6 +16,7 @@ import { redo, undo } from "prosemirror-history";
 import { wrapInList } from "prosemirror-schema-list";
 import { Selection } from "prosemirror-state";
 import type { EditorState } from "prosemirror-state";
+import type { SelectionBookmark } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
 import { createEditorSchema } from "~/modules/editor-v2/markdoc-utils";
@@ -30,7 +31,7 @@ import {
   createSlashCommands,
   deleteHandbookHeadingCommand,
   insertHandbookHeadingCommand,
-  insertImageBlock,
+  insertImageAtSelection,
   moveHandbookHeadingCommand,
   renameHandbookHeadingCommand,
 } from "./helpers";
@@ -57,6 +58,7 @@ interface EditorV2Props
   allowRawBlockEditing?: boolean;
   helpText?: string;
   onUploadImage?: (file: File) => Promise<{ src: string; alt?: string }>;
+  allowClipboardImagePaste?: boolean;
   handbookArticles?: HandbookArticleLinkTarget[];
 }
 
@@ -78,6 +80,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       allowRawBlockEditing = true,
       helpText,
       onUploadImage,
+      allowClipboardImagePaste = false,
       handbookArticles,
       onBlur,
       onFocus,
@@ -94,6 +97,7 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
     const hiddenTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const imageInputRef = useRef<HTMLInputElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const imageSelectionBookmarkRef = useRef<SelectionBookmark | null>(null);
     const [toolsCollapsed, setToolsCollapsed] = useState(false);
     useEffect(() => {
       if (!enableHandbookBlocks) return;
@@ -119,6 +123,10 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
 
     const requestImage = useCallback(() => {
       setImageError("");
+      if (viewRef.current) {
+        imageSelectionBookmarkRef.current =
+          viewRef.current.state.selection.getBookmark();
+      }
       imageInputRef.current?.click();
     }, []);
 
@@ -168,28 +176,41 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       viewRef
     );
 
-    const handleImageFile = async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.currentTarget.files?.[0];
-      event.currentTarget.value = "";
-      if (!file || !onUploadImage) return;
+    const uploadAndInsertImage = async (
+      file: File,
+      sourceView = viewRef.current,
+      altOverride?: string
+    ) => {
+      if (!onUploadImage || !sourceView) return;
       if (file.size > MAX_EDITOR_IMAGE_SIZE) {
         setImageError("Images must be 2 MB or smaller.");
+        imageSelectionBookmarkRef.current = null;
         return;
       }
 
+      imageSelectionBookmarkRef.current ??=
+        sourceView.state.selection.getBookmark();
       setImageBusy(true);
       setImageError("");
       try {
         const uploaded = await onUploadImage(file);
-        const alt = uploaded.alt ?? file.name.replace(/\.[^.]+$/u, "").trim();
-        if (
-          !viewRef.current ||
-          !insertImageBlock(viewRef.current, uploaded.src, alt)
-        ) {
-          throw new Error(
-            "Place the cursor in the article before inserting an image."
-          );
+        const alt =
+          altOverride ??
+          uploaded.alt ??
+          file.name.replace(/\.[^.]+$/u, "").trim();
+        const view = viewRef.current;
+        if (!view) throw new Error("The editor is no longer available.");
+        const bookmark = imageSelectionBookmarkRef.current;
+        imageSelectionBookmarkRef.current = null;
+        let selection = view.state.selection;
+        if (bookmark) {
+          try {
+            selection = bookmark.resolve(view.state.doc);
+          } catch {
+            // Use the current selection if an intervening edit invalidated it.
+          }
         }
+        insertImageAtSelection(view, uploaded.src, alt, selection);
       } catch (cause) {
         setImageError(
           cause instanceof Error
@@ -197,8 +218,29 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
             : "The image could not be uploaded."
         );
       } finally {
+        imageSelectionBookmarkRef.current = null;
         setImageBusy(false);
       }
+    };
+
+    const handleImageFile = (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (file) void uploadAndInsertImage(file);
+      else imageSelectionBookmarkRef.current = null;
+    };
+
+    const handlePasteImage = (file: File, view: EditorView) => {
+      if (!allowClipboardImagePaste) {
+        setImageError("Use Insert image to upload an image in this editor.");
+        return;
+      }
+      if (imageBusy) {
+        setImageError("Wait for the current image upload to finish.");
+        return;
+      }
+      imageSelectionBookmarkRef.current = view.state.selection.getBookmark();
+      void uploadAndInsertImage(file, view, "Pasted image");
     };
 
     // Extract onKeyDown from restTextareaProps if it exists
@@ -227,6 +269,13 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       },
       onFocus,
       onChange,
+      onTransaction: (transaction) => {
+        if (imageSelectionBookmarkRef.current) {
+          imageSelectionBookmarkRef.current =
+            imageSelectionBookmarkRef.current.map(transaction.mapping);
+        }
+      },
+      onPasteImage: onUploadImage ? handlePasteImage : undefined,
       onStateUpdate: (state: EditorState, view: EditorView) => {
         applyToolbarState(state);
         updateBubble(state, view);

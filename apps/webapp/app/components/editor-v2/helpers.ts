@@ -28,6 +28,7 @@ import {
 import { Plugin } from "prosemirror-state";
 import {
   Selection,
+  NodeSelection,
   TextSelection,
   type Command as PMCommand,
   type EditorState,
@@ -715,16 +716,20 @@ export function createCalloutCommand(
 
 export function insertImageBlock(view: EditorView, src: string, alt: string) {
   const { state } = view;
+  const image = state.schema.nodes.image.create({ src, alt, title: alt });
+  if (
+    state.selection instanceof NodeSelection &&
+    state.selection.node.type === state.schema.nodes.image
+  ) {
+    view.dispatch(state.tr.replaceSelectionWith(image).scrollIntoView());
+    view.focus();
+    return true;
+  }
   const depth = state.selection.$from.depth;
   if (depth < 1) return false;
 
   const currentBlock = state.selection.$from.node(depth);
   const blockPosition = state.selection.$from.before(depth);
-  const image = state.schema.nodes.image.create({
-    src,
-    alt,
-    title: alt,
-  });
   const imageParagraph = state.schema.nodes.paragraph.create(null, image);
   const blankParagraph = state.schema.nodes.paragraph.create();
   const tr = state.tr.insert(
@@ -734,6 +739,20 @@ export function insertImageBlock(view: EditorView, src: string, alt: string) {
   const cursor =
     blockPosition + currentBlock.nodeSize + imageParagraph.nodeSize + 1;
   tr.setSelection(Selection.near(tr.doc.resolve(cursor)));
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
+  return true;
+}
+
+/** Insert a pasted image at the selection, replacing it when an image is selected. */
+export function insertImageAtSelection(
+  view: EditorView,
+  src: string,
+  alt: string,
+  selection = view.state.selection
+) {
+  const image = view.state.schema.nodes.image.create({ src, alt, title: alt });
+  const tr = view.state.tr.setSelection(selection).replaceSelectionWith(image);
   view.dispatch(tr.scrollIntoView());
   view.focus();
   return true;

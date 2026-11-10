@@ -9,7 +9,7 @@
  *
  * @see {@link file://./helpers.ts}
  */
-import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorState, NodeSelection, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { describe, expect, it } from "vitest";
 
@@ -25,6 +25,7 @@ import {
   deleteHandbookHeadingCommand,
   findLinkRange,
   insertHandbookHeadingCommand,
+  insertImageAtSelection,
   insertImageBlock,
   moveHandbookHeadingCommand,
   renameHandbookHeadingCommand,
@@ -317,6 +318,50 @@ describe("Handbook editor commands", () => {
     expect(content.indexOf("![Laser cutter](/api/handbook-image")).toBeLessThan(
       content.indexOf("Next paragraph.")
     );
+    view.destroy();
+  });
+
+  it("pastes at the cursor and replaces a selected image", () => {
+    const url = "/api/handbook-image?path=handbook/org/new.png";
+    const doc = parseMarkdoc(
+      "Before after.\n\n![Old](/old-image.png)\n",
+      schema
+    );
+    const container = document.createElement("div");
+    const view = new EditorView(container, {
+      state: EditorState.create({ doc, schema }),
+      dispatchTransaction(transaction) {
+        view.updateState(view.state.apply(transaction));
+      },
+    });
+
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, 8))
+    );
+    insertImageAtSelection(view, url, "Pasted screenshot");
+    let content = serializeMarkdoc(view.state.doc, schema);
+    expect(content.indexOf("Before")).toBeLessThan(
+      content.indexOf("![Pasted screenshot](")
+    );
+    expect(content.indexOf("![Pasted screenshot](")).toBeLessThan(
+      content.indexOf("after.")
+    );
+
+    const imagePosition: number[] = [];
+    view.state.doc.descendants((node, position) => {
+      if (node.type.name === "image" && node.attrs.alt === "Old") {
+        imagePosition.push(position);
+      }
+    });
+    view.dispatch(
+      view.state.tr.setSelection(
+        NodeSelection.create(view.state.doc, imagePosition[0]!)
+      )
+    );
+    insertImageBlock(view, url, "Replacement screenshot");
+    content = serializeMarkdoc(view.state.doc, schema);
+    expect(content).not.toContain("old-image.png");
+    expect(content).toContain("![Replacement screenshot](");
     view.destroy();
   });
 });

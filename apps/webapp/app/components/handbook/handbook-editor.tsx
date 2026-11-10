@@ -137,7 +137,12 @@ export function HandbookEditor({
     if (!response.ok || !result.ok || !result.src) {
       throw new Error(result.message ?? "The image could not be uploaded.");
     }
-    return { src: result.src, alt: file.name.replace(/\.[^.]+$/u, "") };
+    return {
+      src: result.src,
+      alt: /^(?:blob|image)(?:\.[^.]+)?$/iu.test(file.name)
+        ? "Pasted image"
+        : file.name.replace(/\.[^.]+$/u, ""),
+    };
   }, []);
 
   useEffect(() => {
@@ -424,6 +429,7 @@ export function HandbookEditor({
             enableHandbookBlocks
             allowRawBlockEditing={false}
             onUploadImage={uploadArticleImage}
+            allowClipboardImagePaste={!isStudent}
             handbookArticles={handbookArticles}
             helpText="Use Link for Handbook articles or external URLs. Use Section for a main article part and Subsection for a nested part. Type / to add blocks. Images may be up to 2 MB."
           />
