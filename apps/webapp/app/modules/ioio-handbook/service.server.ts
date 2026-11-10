@@ -13,13 +13,13 @@ import { recordEvent } from "~/modules/activity-event/service.server";
 import { Logger } from "~/utils/logger";
 import { removeStorageImageObject } from "~/utils/storage.server";
 import { resolveUserDisplayName } from "~/utils/user";
+import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "./article-limits";
 import {
   uploadHandbookAttachmentObject,
   validateHandbookAttachment,
   HANDBOOK_ATTACHMENT_MAX_FILES,
 } from "./attachment.server";
 import { handbookAttachmentFilenameFromPath } from "./attachment.shared";
-import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "./article-limits";
 import {
   getKnowledgeOverlap,
   getKnowledgeTerms,
@@ -27,11 +27,32 @@ import {
   normalizeSourceUrl,
 } from "./handbook.shared";
 
+import {
+  appendHandbookReviewFeedback,
+  getHandbookReviewFeedback,
+  HANDBOOK_REVIEW_FEEDBACK_MAX_LENGTH,
+} from "./review-feedback.shared";
+
 export class HandbookValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "HandbookValidationError";
   }
+}
+
+function reviewFeedbackUpdate(content: string | undefined, feedback?: string) {
+  const note = feedback?.trim();
+  if (!note) return {};
+  const updatedContent = appendHandbookReviewFeedback(content ?? "", note);
+  if (
+    note.length > HANDBOOK_REVIEW_FEEDBACK_MAX_LENGTH ||
+    updatedContent.length > 4000
+  ) {
+    throw new HandbookValidationError(
+      "Keep review feedback to 1000 characters or fewer."
+    );
+  }
+  return { content: updatedContent };
 }
 
 async function isStudentHandbookContributor(
@@ -781,11 +802,19 @@ export async function getHandbookEditData({
               include: { ...handbookAttachmentReferences },
             },
             observations: {
-              where: { status: HandbookObservationStatus.PENDING_REVIEW },
+              where: {
+                OR: [
+                  { status: HandbookObservationStatus.PENDING_REVIEW },
+                  ...(userId ? [{ contributorUserId: userId }] : []),
+                ],
+              },
               orderBy: { createdAt: "desc" },
               take: 10,
               select: {
                 id: true,
+                status: true,
+                content: true,
+                reviewedByUserId: true,
                 proposedCategoryName: true,
                 handbookCategoryId: true,
                 publishedVersionId: true,
@@ -811,6 +840,24 @@ export async function getHandbookEditData({
       select: { id: true, name: true },
     }),
   ]);
+  const pendingObservations =
+    article?.observations.filter(
+      (item) => item.status === HandbookObservationStatus.PENDING_REVIEW
+    ) ?? [];
+  const latestOwnReview = article?.observations.find(
+    (item) => item.contributorUserId === userId
+  );
+  const rejectedReview =
+    latestOwnReview?.status === HandbookObservationStatus.DISMISSED &&
+    latestOwnReview.reviewedByUserId !== latestOwnReview.contributorUserId
+      ? latestOwnReview
+      : null;
+  const revisionReview =
+    pendingObservations.find((item) => item.publishedVersionId) ??
+    (rejectedReview?.publishedVersionId === article?.publishedVersionId &&
+    article?.updatedByUserId === userId
+      ? rejectedReview
+      : null);
   const authorNames = await getDisplayNamesByUserId(
     article?.versions.map((version) => version.publishedByUserId) ?? []
   );
@@ -855,7 +902,7 @@ export async function getHandbookEditData({
     revisionMode &&
       article?.status === HandbookArticleStatus.PUBLISHED &&
       ((userId && article.updatedByUserId === userId) ||
-        article.observations.some((item) => Boolean(item.publishedVersionId)))
+        pendingObservations.some((item) => Boolean(item.publishedVersionId)))
   );
   const attachments =
     article?.draftAttachmentsInitialized && (!revisionMode || hasSavedRevision)
@@ -868,20 +915,19 @@ export async function getHandbookEditData({
           draftSources: undefined,
           publishedVersion: undefined,
           attachments,
-          pendingSubmissionId: article.observations[0]?.id ?? null,
+          pendingSubmissionId: pendingObservations[0]?.id ?? null,
+          reviewFeedback: getHandbookReviewFeedback(rejectedReview?.content),
           proposedCategoryName:
-            article.observations.find((item) => item.proposedCategoryName)
-              ?.proposedCategoryName ?? null,
+            (
+              pendingObservations.find((item) => item.proposedCategoryName) ??
+              rejectedReview
+            )?.proposedCategoryName ?? null,
           revisionCategoryId:
-            article.observations.find((item) => item.publishedVersionId)
-              ?.handbookCategoryId ?? article.handbookCategoryId,
+            revisionReview?.handbookCategoryId ?? article.handbookCategoryId,
           revisionBaseVersionId:
-            article.observations.find((item) => item.publishedVersionId)
-              ?.publishedVersionId ?? article.publishedVersionId,
-          revisionContributorUserId:
-            article.observations.find((item) => item.publishedVersionId)
-              ?.contributorUserId ?? null,
-          revisionSubmitted: article.observations.some((item) =>
+            revisionReview?.publishedVersionId ?? article.publishedVersionId,
+          revisionContributorUserId: revisionReview?.contributorUserId ?? null,
+          revisionSubmitted: pendingObservations.some((item) =>
             Boolean(item.publishedVersionId)
           ),
           ...(revisionMode && article.status === HandbookArticleStatus.PUBLISHED
@@ -890,7 +936,7 @@ export async function getHandbookEditData({
                   userId && article.updatedByUserId === userId;
                 const published = article.publishedVersion;
                 const pendingRevision = Boolean(
-                  article.observations.some((item) => item.publishedVersionId)
+                  pendingObservations.some((item) => item.publishedVersionId)
                 );
                 return {
                   draftTitle:
@@ -909,8 +955,8 @@ export async function getHandbookEditData({
                           .filter((url): url is string => Boolean(url)) ??
                         article.draftSourceUrls,
                   handbookCategoryId:
-                    article.observations.find((item) => item.publishedVersionId)
-                      ?.handbookCategoryId ?? article.handbookCategoryId,
+                    revisionReview?.handbookCategoryId ??
+                    article.handbookCategoryId,
                 };
               })()
             : {}),
@@ -1253,10 +1299,25 @@ export async function saveHandbookDraft({
         "A revision of this article is already awaiting Staff review."
       );
     }
+    const rejectedOwnedRevision =
+      revisionOwnerUserId && current.updatedByUserId !== revisionOwnerUserId
+        ? await db.handbookObservation.findFirst({
+            where: {
+              organizationId,
+              articleId: current.id,
+              publishedVersionId: revisionBaseVersionId,
+              status: HandbookObservationStatus.DISMISSED,
+              contributorUserId: current.updatedByUserId,
+              reviewedByUserId: { not: current.updatedByUserId },
+            },
+            select: { id: true },
+          })
+        : null;
     if (
       revisionOwnerUserId &&
       current.updatedByUserId !== revisionOwnerUserId &&
-      (current.draftTitle !== current.publishedVersion.title ||
+      (Boolean(rejectedOwnedRevision) ||
+        current.draftTitle !== current.publishedVersion.title ||
         current.draftContent !== current.publishedVersion.content ||
         (current.draftAttachmentsInitialized &&
           JSON.stringify(current.draftSources.map(({ id }) => id).sort()) !==
@@ -1968,11 +2029,13 @@ export async function resolveHandbookArticleSubmission({
   userId,
   observationId,
   resolution,
+  feedback,
 }: {
   organizationId: string;
   userId: string;
   observationId: string;
   resolution: "return-for-changes" | "reject";
+  feedback?: string;
 }) {
   return db.$transaction(async (tx) => {
     const observation = await tx.handbookObservation.findFirst({
@@ -1982,7 +2045,7 @@ export async function resolveHandbookArticleSubmission({
         status: HandbookObservationStatus.PENDING_REVIEW,
         articleId: { not: null },
       },
-      select: { id: true, contributorUserId: true },
+      select: { id: true, contributorUserId: true, content: true },
     });
     if (!observation) {
       throw new HandbookValidationError(
@@ -2013,6 +2076,7 @@ export async function resolveHandbookArticleSubmission({
             : HandbookObservationStatus.DISMISSED,
         reviewedByUserId: userId,
         reviewedAt: new Date(),
+        ...reviewFeedbackUpdate(observation.content, feedback),
       },
     });
     if (!update.count) {
@@ -2500,26 +2564,66 @@ export async function submitHandbookDraftForReview({
   return { ...observation, alreadyPending: false as const };
 }
 
-export async function listHandbookObservations(organizationId: string) {
-  const observations = await db.handbookObservation.findMany({
+function pendingHandbookReviewsWhere(
+  organizationId: string
+): Prisma.HandbookObservationWhereInput {
+  return {
+    organizationId,
+    status: HandbookObservationStatus.PENDING_REVIEW,
+    article: { status: { not: HandbookArticleStatus.ARCHIVED } },
+    AND: [
+      {
+        OR: [
+          { title: { startsWith: "Draft submitted for review:" } },
+          { title: { startsWith: "Proposed improvement:" } },
+        ],
+      },
+      {
+        OR: [
+          { publishedVersionId: { not: null } },
+          { article: { status: HandbookArticleStatus.DRAFT } },
+        ],
+      },
+    ],
+  };
+}
+
+async function studentHandbookContributorIds(
+  organizationId: string,
+  contributorIds?: string[]
+) {
+  const memberships = await db.userOrganization.findMany({
     where: {
       organizationId,
-      status: HandbookObservationStatus.PENDING_REVIEW,
-      AND: [
-        {
-          OR: [
-            { title: { startsWith: "Draft submitted for review:" } },
-            { title: { startsWith: "Proposed improvement:" } },
-          ],
-        },
-        {
-          OR: [
-            { publishedVersionId: { not: null } },
-            { article: { status: HandbookArticleStatus.DRAFT } },
-          ],
-        },
-      ],
+      ...(contributorIds ? { userId: { in: contributorIds } } : {}),
+      roles: { has: OrganizationRoles.SELF_SERVICE },
     },
+    select: { userId: true, roles: true },
+  });
+  return memberships
+    .filter(
+      ({ roles }) =>
+        !roles.includes(OrganizationRoles.ADMIN) &&
+        !roles.includes(OrganizationRoles.OWNER)
+    )
+    .map(({ userId }) => userId);
+}
+
+/** Count the canonical review queue without fetching article content or applying pagination. */
+export async function countPendingHandbookReviews(organizationId: string) {
+  const studentIds = await studentHandbookContributorIds(organizationId);
+  if (!studentIds.length) return 0;
+  return db.handbookObservation.count({
+    where: {
+      ...pendingHandbookReviewsWhere(organizationId),
+      contributorUserId: { in: studentIds },
+    },
+  });
+}
+
+export async function listHandbookObservations(organizationId: string) {
+  const observations = await db.handbookObservation.findMany({
+    where: pendingHandbookReviewsWhere(organizationId),
     orderBy: { createdAt: "desc" },
     take: 100,
     include: {
@@ -2575,24 +2679,10 @@ export async function listHandbookObservations(organizationId: string) {
       observations.map((observation) => observation.contributorUserId)
     ),
   ];
-  const studentMemberships = contributorIds.length
-    ? await db.userOrganization.findMany({
-        where: {
-          organizationId,
-          userId: { in: contributorIds },
-          roles: { has: OrganizationRoles.SELF_SERVICE },
-        },
-        select: { userId: true, roles: true },
-      })
-    : [];
   const studentIds = new Set(
-    studentMemberships
-      .filter(
-        ({ roles }) =>
-          !roles.includes(OrganizationRoles.ADMIN) &&
-          !roles.includes(OrganizationRoles.OWNER)
-      )
-      .map(({ userId: contributorId }) => contributorId)
+    contributorIds.length
+      ? await studentHandbookContributorIds(organizationId, contributorIds)
+      : []
   );
   const studentObservations = observations.filter((observation) =>
     studentIds.has(observation.contributorUserId)
@@ -2788,6 +2878,7 @@ export async function listMyHandbookDrafts({
           id: true,
           articleId: true,
           title: true,
+          content: true,
           createdAt: true,
           status: true,
           reviewedByUserId: true,
@@ -2841,6 +2932,10 @@ export async function listMyHandbookDrafts({
       submittedForReview: observations.length > 0,
       baseVersionNumber: null,
       contributionStatus,
+      reviewFeedback:
+        contributionStatus === "REJECTED"
+          ? getHandbookReviewFeedback(latest?.content)
+          : null,
       submittedAt: withdrawn ? null : latest?.createdAt ?? null,
     };
   });
@@ -2850,6 +2945,14 @@ export async function listMyHandbookDrafts({
         article.publishedVersion &&
         (article.draftTitle !== article.publishedVersion.title ||
           article.draftContent !== article.publishedVersion.content ||
+          (() => {
+            const latest = latestContributionByArticle.get(article.id);
+            return (
+              latest?.status === HandbookObservationStatus.DISMISSED &&
+              latest.reviewedByUserId !== latest.contributorUserId &&
+              latest.publishedVersionId === article.publishedVersion.id
+            );
+          })() ||
           (article.draftAttachmentsInitialized &&
             JSON.stringify(article.draftSources.map(({ id }) => id).sort()) !==
               JSON.stringify(
@@ -2891,6 +2994,9 @@ export async function listMyHandbookDrafts({
           return "RETURNED_FOR_CHANGES" as const;
         return "DRAFT" as const;
       })(),
+      reviewFeedback: getHandbookReviewFeedback(
+        latestContributionByArticle.get(article.id)?.content
+      ),
       submittedAt:
         latestContributionByArticle.get(article.id)?.createdAt ?? null,
     }));
@@ -2910,6 +3016,7 @@ export async function listMyHandbookDrafts({
             workType: "IMPROVEMENT_PENDING" as const,
             submittedForReview: true,
             baseVersionNumber: observation.publishedVersion.versionNumber,
+            reviewFeedback: null,
             contributionStatus: "PENDING_REVIEW" as const,
             submittedAt: observation.createdAt,
           },
@@ -2938,7 +3045,11 @@ export async function listMyHandbookDrafts({
           : Boolean(article.publishedVersionId));
       if (!isRejected && !isApproved) return [];
       // A rejected new article remains editable and is represented by its draft row.
-      if (isRejected && article.status === HandbookArticleStatus.DRAFT)
+      if (
+        isRejected &&
+        (article.status === HandbookArticleStatus.DRAFT ||
+          improvementDrafts.some((draft) => draft.articleId === article.id))
+      )
         return [];
       const proposedTitle = observation.title.replace(
         /^(?:Proposed improvement: |Draft submitted for review: )/u,
@@ -2964,6 +3075,9 @@ export async function listMyHandbookDrafts({
           contributionStatus: isApproved
             ? ("APPROVED" as const)
             : ("REJECTED" as const),
+          reviewFeedback: isRejected
+            ? getHandbookReviewFeedback(observation.content)
+            : null,
           submittedAt: observation.createdAt,
         },
       ];
@@ -3587,10 +3701,12 @@ export async function rejectHandbookArticleRevision({
   organizationId,
   userId,
   observationId,
+  feedback,
 }: {
   organizationId: string;
   userId: string;
   observationId: string;
+  feedback?: string;
 }) {
   return db.$transaction(async (tx) => {
     const observation = await tx.handbookObservation.findFirst({
@@ -3603,6 +3719,7 @@ export async function rejectHandbookArticleRevision({
       },
       select: {
         id: true,
+        content: true,
         articleId: true,
         contributorUserId: true,
         publishedVersionId: true,
@@ -3649,24 +3766,6 @@ export async function rejectHandbookArticleRevision({
         "The current article version changed. Reopen the article before rejecting this revision."
       );
     }
-    await tx.handbookArticle.update({
-      where: {
-        id: article.id,
-        organizationId,
-        status: HandbookArticleStatus.PUBLISHED,
-        publishedVersionId: observation.publishedVersionId,
-      },
-      data: {
-        draftTitle: article.publishedVersion.title,
-        draftContent: article.publishedVersion.content,
-        draftSourceUrls: cleanSourceUrls(
-          article.publishedVersion.sources
-            .map(({ source }) => source.url)
-            .filter((url): url is string => Boolean(url))
-        ),
-        updatedByUserId: article.publishedVersion.publishedByUserId,
-      },
-    });
     const dismissed = await tx.handbookObservation.updateMany({
       where: {
         id: observation.id,
@@ -3678,6 +3777,7 @@ export async function rejectHandbookArticleRevision({
         status: HandbookObservationStatus.DISMISSED,
         reviewedByUserId: userId,
         reviewedAt: new Date(),
+        ...reviewFeedbackUpdate(observation.content, feedback),
       },
     });
     if (!dismissed.count) {

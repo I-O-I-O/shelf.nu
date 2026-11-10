@@ -1,7 +1,7 @@
 import { createElement } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createMemoryRouter, redirect, RouterProvider } from "react-router";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 
@@ -76,6 +76,7 @@ describe("Handbook My Work route", () => {
     expect(mocks.listDrafts).toHaveBeenCalledWith({
       organizationId: "org-1",
       userId: "student-1",
+      canReadStaffOnly: false,
     });
   });
 
@@ -109,6 +110,10 @@ describe("Handbook My Work route", () => {
                   ? "OUTCOME"
                   : "NEW_ARTICLE",
               contributionStatus,
+              reviewFeedback:
+                contributionStatus === "REJECTED"
+                  ? "Clarify the safety section."
+                  : null,
               baseVersionNumber: null,
             })),
           }),
@@ -130,6 +135,20 @@ describe("Handbook My Work route", () => {
         true
       );
     }
+    for (const row of rows.filter((row) =>
+      /Approved|Rejected/.test(row.textContent ?? "")
+    )) {
+      expect(
+        within(row).queryByRole("button", { name: /Actions for/ })
+      ).toBeNull();
+    }
+    expect(screen.queryByText("Delete permanently")).toBeNull();
+    expect(
+      screen.getByText("Clarify the safety section.", { exact: false })
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Edit", exact: true })
+    ).toHaveAttribute("href", "/handbook/change-filament/edit?improve=1");
     expect(screen.getAllByText(/Submitted/)).toHaveLength(4);
     expect(
       screen.queryByRole("link", { name: "Review contributions" })
@@ -298,7 +317,10 @@ describe("Handbook My Work route", () => {
     render(createElement(RouterProvider, { router }));
 
     await user.click(
-      await screen.findByRole("button", { name: "Delete draft" })
+      await screen.findByRole("button", { name: /Actions for/ })
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Delete draft" })
     );
 
     expect(
@@ -351,8 +373,10 @@ describe("Handbook My Work route", () => {
       await screen.findByText(/Pending review · New article/)
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Delete draft" })).toBeNull();
+    expect(screen.queryByText("Withdraw submission")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /Actions for/ }));
     expect(
-      screen.getByRole("button", { name: "Withdraw submission" })
+      screen.getByRole("menuitem", { name: "Withdraw submission" })
     ).toBeTruthy();
   });
 
@@ -399,7 +423,10 @@ describe("Handbook My Work route", () => {
       );
       render(createElement(RouterProvider, { router }));
       await user.click(
-        await screen.findByRole("button", { name: "Withdraw submission" })
+        await screen.findByRole("button", { name: /Actions for/ })
+      );
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Withdraw submission" })
       );
       expect(screen.getByRole("alertdialog")).toHaveTextContent(
         "submission record will be retained"
@@ -409,53 +436,73 @@ describe("Handbook My Work route", () => {
         screen.getByRole("button", { name: "Withdraw submission" })
       );
       expect(await screen.findByText(/Submission withdrawn/)).toBeTruthy();
+      expect(screen.queryByRole("alertdialog")).toBeNull();
       expect(screen.getByText("My proposal")).toBeTruthy();
       expect(mocks.deleteDraft).not.toHaveBeenCalled();
     }
   );
 
-  it("removes a deleted draft from My Work and shows success feedback", async () => {
-    const user = userEvent.setup();
-    let deleted = false;
-    const draft = {
-      id: "article-1",
-      slug: "test-handbook-draft",
-      draftTitle: "Test Handbook Draft",
-      updatedAt: new Date("2026-11-04T00:00:00.000Z"),
-      handbookCategory: null,
-      submittedForReview: false,
-      workType: "NEW_ARTICLE",
-      baseVersionNumber: null,
-    };
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/handbook/my-work",
-          loader: () => ({
-            drafts: deleted ? [] : [draft],
-            isStudent: true,
-          }),
-          action: () => {
-            deleted = true;
-            return redirect("/handbook/my-work?deleted=1");
+  it.each(["DRAFT", "RETURNED_FOR_CHANGES"])(
+    "removes owned %s work after confirmation",
+    async (contributionStatus) => {
+      const user = userEvent.setup();
+      let deleted = false;
+      mocks.deleteDraft.mockImplementation(() => {
+        deleted = true;
+        return Promise.resolve({ id: "article-1" });
+      });
+      const draft = {
+        contributionStatus,
+        id: "article-1",
+        slug: "test-handbook-draft",
+        draftTitle: "Test Handbook Draft",
+        updatedAt: new Date("2026-11-04T00:00:00.000Z"),
+        handbookCategory: null,
+        submittedForReview: false,
+        workType: "NEW_ARTICLE",
+        baseVersionNumber: null,
+      };
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/handbook/my-work",
+            loader: () => ({
+              drafts: deleted ? [] : [draft],
+              isStudent: true,
+            }),
+            action: (routeArgs) =>
+              action({ ...routeArgs, context: mockContext }),
+            Component: HandbookMyWorkPage,
           },
-          Component: HandbookMyWorkPage,
-        },
-      ],
-      { initialEntries: ["/handbook/my-work"] }
-    );
-    render(createElement(RouterProvider, { router }));
+        ],
+        { initialEntries: ["/handbook/my-work"] }
+      );
+      render(createElement(RouterProvider, { router }));
 
-    await user.click(
-      await screen.findByRole("button", { name: "Delete draft" })
-    );
-    await user.click(screen.getByRole("button", { name: "Delete draft" }));
+      await user.click(
+        await screen.findByRole("button", { name: /Actions for/ })
+      );
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Delete draft" })
+      );
+      expect(screen.getByRole("alertdialog")).toHaveTextContent(
+        "Delete this draft?"
+      );
+      expect(mocks.deleteDraft).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Delete draft" }));
 
-    expect(await screen.findByText("Draft deleted.")).toBeTruthy();
-    expect(
-      await screen.findByText("You have no Handbook drafts yet.")
-    ).toBeTruthy();
-    expect(screen.queryByText("Test Handbook Draft")).toBeNull();
-    expect(router.state.location.search).toBe("?deleted=1");
-  });
+      expect(await screen.findByText("Draft deleted.")).toBeTruthy();
+      expect(mocks.deleteDraft).toHaveBeenCalledWith({
+        organizationId: "org-1",
+        articleId: "article-1",
+        userId: "student-1",
+        canManageAnyDraft: false,
+      });
+      expect(
+        await screen.findByText("You have no Handbook drafts yet.")
+      ).toBeTruthy();
+      expect(screen.queryByText("Test Handbook Draft")).toBeNull();
+      expect(router.state.location.search).toBe("?deleted=1");
+    }
+  );
 });

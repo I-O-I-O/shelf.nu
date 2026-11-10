@@ -2,6 +2,12 @@ import { useState } from "react";
 import { useFetcher } from "react-router";
 import { Button } from "~/components/shared/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  DropdownMenuItem,
+} from "~/components/shared/dropdown";
+import {
   AlertDialog,
   AlertDialogCancel,
   AlertDialogContent,
@@ -56,12 +62,14 @@ export function HandbookRemovalButton({
   observationId,
   articleTitle,
   actionPath = "/handbook/manage",
+  menuItem = false,
 }: {
   intent: keyof typeof actions;
   articleId?: string;
   observationId?: string;
   articleTitle?: string;
   actionPath?: string;
+  menuItem?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [confirmationTitle, setConfirmationTitle] = useState("");
@@ -86,15 +94,26 @@ export function HandbookRemovalButton({
         }}
       >
         <AlertDialogTrigger asChild>
-          <button
-            type="button"
-            disabled={busy}
-            className={`min-h-9 rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50 ${
-              isPermanentDelete ? "font-medium text-red-800" : "text-gray-700"
-            }`}
-          >
-            {copy.label}
-          </button>
+          {menuItem ? (
+            <DropdownMenuItem
+              disabled={busy}
+              // Keep the menu mounted while its confirmation dialog is open.
+              onSelect={(event) => event.preventDefault()}
+              className="text-error-700"
+            >
+              {copy.label}
+            </DropdownMenuItem>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              className={`min-h-9 rounded px-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50 ${
+                isPermanentDelete ? "font-medium text-red-800" : "text-gray-700"
+              }`}
+            >
+              {copy.label}
+            </button>
+          )}
         </AlertDialogTrigger>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -151,5 +170,34 @@ export function HandbookRemovalButton({
         </p>
       ) : null}
     </>
+  );
+}
+
+export function HandbookRemovalMenu({
+  menuLabel,
+  ...props
+}: Parameters<typeof HandbookRemovalButton>[0] & { menuLabel: string }) {
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          aria-label={menuLabel}
+        >
+          <span aria-hidden="true">⋯</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <HandbookRemovalButton
+          key={`${props.intent}:${
+            props.articleId ?? props.observationId ?? ""
+          }`}
+          {...props}
+          menuItem
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

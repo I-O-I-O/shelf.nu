@@ -243,10 +243,34 @@ describe("Handbook article management", () => {
       })
     ).toHaveAttribute("draggable", "true");
     await user.click(
-      screen.getByRole("button", {
-        name: "Make staff only: What 3D printing is",
+      within(publicRow!).getByRole("button", {
+        name: "Article actions for What 3D printing is",
       })
     );
+    expect(mocks.updateArticleNavigation).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("menuitem", { name: "Edit article" })
+    ).toHaveAttribute("href", "/handbook/what-3d-printing-is/edit?improve=1");
+    expect(publicRow!.contains(screen.getByRole("menu"))).toBe(false);
+    await user.click(
+      screen.getByRole("menuitem", { name: "Delete permanently" })
+    );
+    const deletion = screen.getByRole("alertdialog");
+    expect(
+      within(deletion).getByRole("button", { name: "Delete permanently" })
+    ).toBeDisabled();
+    expect(
+      within(deletion).getByLabelText(/Type “What 3D printing is” to confirm/)
+    ).toBeTruthy();
+    await user.click(within(deletion).getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("menuitem", { name: "Archive article" }));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      "history will be preserved"
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.deletePermanently).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("menuitem", { name: "Make staff only" }));
 
     await waitFor(() => {
       expect(mocks.setVisibility).toHaveBeenCalledWith({

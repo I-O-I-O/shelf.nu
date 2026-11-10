@@ -43,11 +43,13 @@ const mocks = vi.hoisted(() => ({
     updateMany: vi.fn(),
   },
   handbookObservation: {
+    count: vi.fn(),
     findMany: vi.fn(),
     findFirst: vi.fn(),
     updateMany: vi.fn(),
   },
   userOrganization: { findFirst: vi.fn(), findMany: vi.fn() },
+  user: { findMany: vi.fn() },
   recordEvent: vi.fn(),
 }));
 
@@ -59,6 +61,7 @@ vi.mock("~/database/db.server", () => ({
     handbookArticle: mocks.handbookArticle,
     handbookObservation: mocks.handbookObservation,
     userOrganization: mocks.userOrganization,
+    user: mocks.user,
   },
 }));
 vi.mock("~/modules/activity-event/service.server", () => ({
@@ -66,6 +69,7 @@ vi.mock("~/modules/activity-event/service.server", () => ({
 }));
 
 import {
+  countPendingHandbookReviews,
   approveHandbookNewArticleSubmission,
   approveHandbookArticleRevision,
   archiveHandbookArticle,
@@ -88,6 +92,8 @@ import {
   normalizeHandbookCategoryName,
   publishHandbookArticle,
   rejectHandbookArticleRevision,
+  resolveHandbookArticleSubmission,
+  listHandbookObservations,
   renameHandbookCategory,
   resolveHandbookObservationCategoryProposal,
   saveHandbookDraft,
@@ -1089,6 +1095,7 @@ describe("Handbook categories", () => {
   });
 
   it("saves a revision on the same published article without changing its live category", async () => {
+    mocks.handbookObservation.findFirst.mockResolvedValue(null);
     mocks.handbookArticle.findFirst.mockResolvedValue({
       id: "article-1",
       slug: "change-filament",
@@ -1310,7 +1317,7 @@ describe("Handbook categories", () => {
     expect(mocks.tx.handbookArticleVersion.create).not.toHaveBeenCalled();
   });
 
-  it("rejects a pending revision by restoring the current published draft snapshot", async () => {
+  it("rejects a pending revision while retaining the contributor and proposed draft", async () => {
     mocks.tx.handbookObservation.findFirst.mockResolvedValue({
       id: "observation-revision-1",
       articleId: "article-1",
@@ -1336,15 +1343,7 @@ describe("Handbook categories", () => {
       })
     ).resolves.toEqual({ articleId: "article-1" });
 
-    expect(mocks.tx.handbookArticle.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          draftTitle: "How to change filament",
-          draftContent: "Current steps.",
-          updatedByUserId: "staff-1",
-        }),
-      })
-    );
+    expect(mocks.tx.handbookArticle.update).not.toHaveBeenCalled();
     expect(mocks.tx.handbookObservation.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "DISMISSED" }),
@@ -2077,4 +2076,345 @@ describe("Handbook removal safety", () => {
     );
     expect(mocks.tx.handbookArticle.deleteMany).not.toHaveBeenCalled();
   });
+});
+
+describe("canonical Handbook review count", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("counts pending student articles and improvements without pagination", async () => {
+    mocks.userOrganization.findMany.mockResolvedValue([
+      { userId: "student-1", roles: ["SELF_SERVICE"] },
+      { userId: "staff-1", roles: ["SELF_SERVICE", "ADMIN"] },
+      { userId: "owner-1", roles: ["SELF_SERVICE", "OWNER"] },
+    ]);
+    mocks.handbookObservation.count.mockResolvedValue(125);
+    expect(await countPendingHandbookReviews("org-1")).toBe(125);
+    expect(mocks.userOrganization.findMany).toHaveBeenCalledWith({
+      where: { organizationId: "org-1", roles: { has: "SELF_SERVICE" } },
+      select: { userId: true, roles: true },
+    });
+    expect(mocks.handbookObservation.count).toHaveBeenCalledWith({
+      where: {
+        organizationId: "org-1",
+        status: "PENDING_REVIEW",
+        contributorUserId: { in: ["student-1"] },
+        article: { status: { not: "ARCHIVED" } },
+        AND: [
+          {
+            OR: [
+              { title: { startsWith: "Draft submitted for review:" } },
+              { title: { startsWith: "Proposed improvement:" } },
+            ],
+          },
+          {
+            OR: [
+              { publishedVersionId: { not: null } },
+              { article: { status: "DRAFT" } },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("returns zero when the organization has no student contributors", async () => {
+    mocks.userOrganization.findMany.mockResolvedValue([]);
+    expect(await countPendingHandbookReviews("org-1")).toBe(0);
+    expect(mocks.handbookObservation.count).not.toHaveBeenCalled();
+  });
+});
+
+describe("rejected contribution resubmission loop", () => {
+  it.each([false, true])(
+    "retains identity, feedback and ownership through rejection, resubmission and approval (revision=%s)",
+    async (revisionMode) => {
+      vi.resetAllMocks();
+      const base = revisionMode
+        ? {
+            id: "base-version",
+            versionNumber: 1,
+            title: "Published title",
+            content: "Published content",
+            publishedByUserId: "staff-1",
+            sources: [],
+          }
+        : null;
+      let published = base;
+      const article = {
+        id: "article-loop",
+        slug: "test-guide",
+        organizationId: "org-1",
+        status: revisionMode ? "PUBLISHED" : "DRAFT",
+        draftTitle: "Test Guide",
+        draftContent: "Needs clearer safety instructions.",
+        draftSourceUrls: [],
+        handbookCategoryId: "category-1",
+        handbookCategory: { id: "category-1", name: "Safety" },
+        createdByUserId: "student-1",
+        updatedByUserId: "student-1",
+        publishedVersionId: base?.id ?? null,
+        draftAttachmentsInitialized: true,
+        staffOnly: false,
+        position: 1,
+        updatedAt: new Date(),
+      };
+      type Review = {
+        id: string;
+        status: string;
+        organizationId: string;
+        contributorUserId: string;
+        articleId: string;
+        publishedVersionId: string | null;
+        title: string;
+        content: string;
+        handbookCategoryId: string | null;
+        proposedCategoryName: string | null;
+        reviewedByUserId: string | null;
+        createdAt: Date;
+      };
+      const reviews: Review[] = [];
+      const view = () => ({
+        ...article,
+        publishedVersion: published,
+        draftSources: [],
+        versions: published ? [{ ...published, publishedAt: new Date() }] : [],
+        observations: reviews.slice().reverse(),
+      });
+      const matchesReview = (review: Review, where: Record<string, unknown>) =>
+        (!where.id || where.id === review.id) &&
+        (!where.status || where.status === review.status) &&
+        (!where.contributorUserId ||
+          where.contributorUserId === review.contributorUserId);
+      mocks.user.findMany.mockResolvedValue([]);
+      mocks.userOrganization.findMany.mockResolvedValue([
+        { userId: "student-1", roles: ["SELF_SERVICE"] },
+      ]);
+      mocks.tx.userOrganization.findFirst.mockResolvedValue({
+        roles: ["SELF_SERVICE"],
+      });
+      mocks.handbookCategory.findMany.mockResolvedValue([
+        { id: "category-1", name: "Safety" },
+      ]);
+      mocks.handbookCategory.findFirst.mockResolvedValue({ id: "category-1" });
+      mocks.tx.handbookCategory.findFirst.mockResolvedValue({
+        id: "category-1",
+      });
+      mocks.handbookArticle.findFirst.mockImplementation(
+        ({ where, select }) => {
+          if (
+            where.createdByUserId &&
+            where.createdByUserId !== article.createdByUserId
+          )
+            return null;
+          const result = view();
+          if (select?.observations?.where?.status === "PENDING_REVIEW")
+            result.observations = result.observations.filter(
+              (item) => item.status === "PENDING_REVIEW"
+            );
+          return result;
+        }
+      );
+      mocks.tx.handbookArticle.findFirst.mockImplementation(() => view());
+      mocks.handbookArticle.findMany.mockImplementation(({ where }) =>
+        where.status === article.status &&
+        (!where.updatedByUserId ||
+          where.updatedByUserId === article.updatedByUserId)
+          ? [
+              {
+                ...view(),
+                observations: reviews.filter(
+                  (item) =>
+                    item.status === "PENDING_REVIEW" && !item.publishedVersionId
+                ),
+              },
+            ]
+          : []
+      );
+      mocks.handbookArticle.update.mockImplementation(({ data }) => {
+        Object.assign(article, data);
+        return view();
+      });
+      mocks.handbookArticle.updateMany.mockImplementation(({ data }) => {
+        Object.assign(article, data);
+        return { count: 1 };
+      });
+      mocks.tx.handbookArticle.update.mockImplementation(({ data }) => {
+        Object.assign(article, data);
+        return view();
+      });
+      mocks.handbookObservation.findFirst.mockImplementation(
+        ({ where }) =>
+          reviews.find((item) => matchesReview(item, where)) ?? null
+      );
+      mocks.tx.handbookObservation.findFirst.mockImplementation(
+        ({ where }) =>
+          reviews.find((item) => matchesReview(item, where)) ?? null
+      );
+      mocks.handbookObservation.findMany.mockImplementation(({ where }) =>
+        reviews
+          .slice()
+          .reverse()
+          .filter((item) =>
+            where.AND
+              ? item.status === "PENDING_REVIEW"
+              : where.status === "PENDING_REVIEW"
+              ? item.status === "PENDING_REVIEW" &&
+                Boolean(item.publishedVersionId)
+              : true
+          )
+          .map((item) => ({
+            ...item,
+            article: view(),
+            handbookCategory: article.handbookCategory,
+            publishedVersion: item.publishedVersionId ? base : null,
+          }))
+      );
+      mocks.handbookObservation.count.mockImplementation(
+        () => reviews.filter((item) => item.status === "PENDING_REVIEW").length
+      );
+      mocks.tx.handbookObservation.create.mockImplementation(({ data }) => {
+        const item: Review = {
+          status: "PENDING_REVIEW",
+          publishedVersionId: null,
+          proposedCategoryName: null,
+          reviewedByUserId: null,
+          ...data,
+          id: `review-${reviews.length + 1}`,
+          createdAt: new Date(1000 * (reviews.length + 1)),
+        };
+        reviews.push(item);
+        return item;
+      });
+      mocks.tx.handbookObservation.updateMany.mockImplementation(
+        ({ where, data }) => {
+          const item = reviews.find((entry) => matchesReview(entry, where));
+          if (!item) return { count: 0 };
+          Object.assign(item, data);
+          return { count: 1 };
+        }
+      );
+      mocks.tx.handbookArticleVersion.aggregate.mockResolvedValue({
+        _max: { versionNumber: base?.versionNumber ?? 0 },
+      });
+      mocks.tx.handbookArticleVersion.create.mockImplementation(({ data }) => {
+        published = { ...data, id: "approved-version", sources: [] };
+        return published;
+      });
+      const submission = {
+        organizationId: "org-1",
+        userId: "student-1",
+        articleId: article.id,
+        ...(revisionMode
+          ? { revisionMode: true, revisionBaseVersionId: base!.id }
+          : {}),
+      };
+      const first = await submitHandbookDraftForReview(submission);
+      expect(await countPendingHandbookReviews("org-1")).toBe(1);
+      const feedback = "The safety section needs clearer instructions.";
+      if (revisionMode)
+        await rejectHandbookArticleRevision({
+          organizationId: "org-1",
+          userId: "staff-1",
+          observationId: first.id,
+          feedback,
+        });
+      else
+        await resolveHandbookArticleSubmission({
+          organizationId: "org-1",
+          userId: "staff-1",
+          observationId: first.id,
+          resolution: "reject",
+          feedback,
+        });
+      expect(await countPendingHandbookReviews("org-1")).toBe(0);
+      expect(article.updatedByUserId).toBe("student-1");
+      expect(article.draftContent).toBe("Needs clearer safety instructions.");
+      const rejected = await listMyHandbookDrafts({
+        organizationId: "org-1",
+        userId: "student-1",
+      });
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).toMatchObject({
+        articleId: article.id,
+        contributionStatus: "REJECTED",
+        reviewFeedback: feedback,
+      });
+      const reopened = await getHandbookEditData({
+        organizationId: "org-1",
+        articleId: article.id,
+        userId: "student-1",
+        revisionMode,
+      });
+      expect(reopened.article).toMatchObject({
+        id: article.id,
+        draftContent: article.draftContent,
+        reviewFeedback: feedback,
+        revisionSubmitted: false,
+      });
+      if (revisionMode) {
+        await expect(
+          saveHandbookDraft({
+            ...submission,
+            userId: "other-student",
+            revisionOwnerUserId: "other-student",
+            title: "Stolen",
+            content: "Stolen",
+            sourceUrls: [],
+          })
+        ).rejects.toThrow("Another draft improvement");
+      } else {
+        await expect(
+          saveHandbookDraft({
+            organizationId: "org-1",
+            userId: "other-student",
+            ownerUserId: "other-student",
+            articleId: article.id,
+            title: "Stolen",
+            content: "Stolen",
+            sourceUrls: [],
+          })
+        ).rejects.toThrow("could not be found");
+      }
+      await saveHandbookDraft({
+        ...submission,
+        ownerUserId: revisionMode ? undefined : "student-1",
+        revisionOwnerUserId: revisionMode ? "student-1" : undefined,
+        title: "Test Guide revised",
+        handbookCategoryId: "category-1",
+        content: "Wear eye protection and power off before changing parts.",
+        sourceUrls: [],
+      });
+      const resubmitted = await submitHandbookDraftForReview(submission);
+      expect(resubmitted.id).not.toBe(first.id);
+      expect(reviews[0].status).toBe("DISMISSED");
+      expect(await countPendingHandbookReviews("org-1")).toBe(1);
+      const queue = await listHandbookObservations("org-1");
+      expect(queue.map((entry) => entry.id)).toEqual([resubmitted.id]);
+      expect(article.publishedVersionId).toBe(base?.id ?? null);
+      if (revisionMode)
+        await approveHandbookArticleRevision({
+          organizationId: "org-1",
+          userId: "staff-1",
+          observationId: resubmitted.id,
+        });
+      else
+        await approveHandbookNewArticleSubmission({
+          organizationId: "org-1",
+          userId: "staff-1",
+          observationId: resubmitted.id,
+        });
+      expect(article.id).toBe("article-loop");
+      expect(article.status).toBe("PUBLISHED");
+      expect(published).toMatchObject({
+        content: "Wear eye protection and power off before changing parts.",
+      });
+      expect(await countPendingHandbookReviews("org-1")).toBe(0);
+      const approved = await listMyHandbookDrafts({
+        organizationId: "org-1",
+        userId: "student-1",
+      });
+      expect(approved).toHaveLength(1);
+      expect(approved[0].contributionStatus).toBe("APPROVED");
+    }
+  );
 });

@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { createRoutesStub } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getTAHours: vi.fn(),
   getPurchasing: vi.fn(),
   getStaffSystemStatus: vi.fn(),
+  countPendingHandbookReviews: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
 }));
 
@@ -54,6 +55,12 @@ vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   prepareStaffInventoryImport: vi.fn(),
 }));
 
+// why: the dashboard loader delegates the canonical database count to Handbook;
+// isolate route authorization and fresh-load wiring from a live database.
+vi.mock("~/modules/ioio-handbook/service.server", () => ({
+  countPendingHandbookReviews: mocks.countPendingHandbookReviews,
+}));
+
 import HomePage, { action, loader } from "~/routes/_layout+/home";
 
 describe("IOIO staff dashboard loader", () => {
@@ -91,6 +98,7 @@ describe("IOIO staff dashboard loader", () => {
       claude: "unavailable",
     });
     mocks.findUnique.mockResolvedValue({ staffDashboardPreferences: null });
+    mocks.countPendingHandbookReviews.mockResolvedValue(0);
   });
 
   it("loads a fresh organization with empty operational data", async () => {
@@ -147,11 +155,32 @@ describe("IOIO staff dashboard loader", () => {
         context: { getSession: () => ({ userId: "student-1" }) } as never,
         request: new Request("http://localhost/home"),
       })
-    )) as unknown as { isStaff: boolean; systemStatus: unknown };
+    )) as unknown as {
+      isStaff: boolean;
+      systemStatus: unknown;
+      pendingHandbookReviews: unknown;
+    };
 
     expect(result.isStaff).toBe(false);
+    expect(result.pendingHandbookReviews).toBeNull();
+    expect(mocks.countPendingHandbookReviews).not.toHaveBeenCalled();
     expect(result.systemStatus).toBeNull();
     expect(mocks.getStaffSystemStatus).not.toHaveBeenCalled();
+  });
+
+  it("reloads the canonical pending count each time staff opens the dashboard", async () => {
+    mocks.countPendingHandbookReviews
+      .mockResolvedValueOnce(3)
+      .mockResolvedValueOnce(0);
+    const args = () =>
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/home"),
+      });
+    expect(await loader(args())).toMatchObject({ pendingHandbookReviews: 3 });
+    expect(await loader(args())).toMatchObject({ pendingHandbookReviews: 0 });
+    expect(mocks.countPendingHandbookReviews).toHaveBeenCalledWith("org-1");
+    expect(mocks.countPendingHandbookReviews).toHaveBeenCalledTimes(2);
   });
 
   it("returns readiness issues from the legacy Home import handler", async () => {
@@ -279,52 +308,109 @@ describe("IOIO staff dashboard inventory shortcuts", () => {
   });
 });
 
-describe("staff dashboard system status", () => {
-  function renderDashboard(isStaff: boolean) {
+describe("staff dashboard Lab status hierarchy", () => {
+  function renderDashboard(isStaff: boolean, pendingHandbookReviews = 0) {
     const Stub = createRoutesStub([
       {
-        path: "/home",
-        Component: HomePage,
+        id: "routes/_layout+/_layout",
+        path: "/",
         loader: () => ({
-          isStaff,
-          dashboardPreferences: { order: [], hidden: [] },
-          labTasks: null,
-          purchasing: null,
-          taHours: null,
-          systemStatus: isStaff
-            ? {
-                server: "online",
-                storagePercentUsed: 63,
-                claude: "unavailable",
-              }
-            : null,
+          labStatus: {
+            totalIssues: 0,
+            severity: "healthy",
+            overdueLoans: 0,
+            unresolvedReports: 0,
+            generalReports: 0,
+            incompleteKits: 0,
+            importWarnings: 0,
+            pendingReservationRequests: 0,
+            returnChecks: 0,
+            returnedWithIssues: 0,
+            preparationTasks: 0,
+            cancelledPickups: 0,
+            readyForPickup: 0,
+            annualAccessApprovals: 0,
+            issues: [],
+          },
         }),
+        children: [
+          {
+            path: "home",
+            Component: HomePage,
+            loader: () => ({
+              isStaff,
+              pendingHandbookReviews,
+              dashboardPreferences: { order: ["operations"], hidden: [] },
+              labTasks: null,
+              purchasing: null,
+              taHours: null,
+              systemStatus: isStaff
+                ? {
+                    server: "online",
+                    storagePercentUsed: 63,
+                    claude: "unavailable",
+                  }
+                : null,
+            }),
+          },
+        ],
       },
     ]);
-
     return render(createElement(Stub, { initialEntries: ["/home"] }));
   }
 
-  it("shows a compact non-clickable status strip to staff", async () => {
-    renderDashboard(true);
-
-    const status = await screen.findByRole("region", {
-      name: "System status",
-    });
+  it("keeps System status above Lab status and places reviews only in its operational grid", async () => {
+    renderDashboard(true, 3);
+    const lab = await screen.findByRole("region", { name: "Lab status" });
+    const status = screen.getByRole("region", { name: "System status" });
     expect(status).toHaveTextContent(/Server\s*Online/u);
     expect(status).toHaveTextContent(/Storage\s*63% used/u);
     expect(status).toHaveTextContent(/Claude\s*Unavailable/u);
+    expect(within(status).queryByText("Handbook reviews")).toBeNull();
     expect(status.querySelectorAll("a, button")).toHaveLength(0);
-    expect(screen.queryByRole("link", { name: "Ask IOIO" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Ask IOIO" })).toBeNull();
+    expect(
+      status.compareDocumentPosition(lab) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(lab.contains(status)).toBe(false);
+    expect(
+      within(lab).getByRole("link", { name: /Handbook reviews/ })
+    ).toHaveTextContent("3");
+    expect(
+      screen.getAllByRole("link", { name: /Handbook reviews/ })
+    ).toHaveLength(1);
+    expect(screen.getAllByRole("region", { name: "Lab status" })).toHaveLength(
+      1
+    );
+    expect(
+      screen.getAllByRole("region", { name: "System status" })
+    ).toHaveLength(1);
+    expect(
+      screen.queryByRole("region", { name: "Handbook reviews" })
+    ).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Review submissions" })
+    ).toBeNull();
   });
 
-  it("does not show system status or Ask IOIO to students", async () => {
-    renderDashboard(false);
+  it.each([0, 3])(
+    "links the compact %s pending item to the canonical queue",
+    async (count) => {
+      renderDashboard(true, count);
+      const lab = await screen.findByRole("region", { name: "Lab status" });
+      const reviews = within(lab).getByRole("link", {
+        name: /Handbook reviews/,
+      });
+      expect(reviews).toHaveTextContent(String(count));
+      expect(reviews).toHaveAttribute("href", "/handbook/review");
+      expect(screen.queryByText("No submissions waiting")).toBeNull();
+    }
+  );
 
+  it("does not show the staff status area or review count to students", async () => {
+    renderDashboard(false, 3);
     await screen.findByRole("heading", { name: "Staff Dashboard" });
+    expect(screen.queryByRole("region", { name: "Lab status" })).toBeNull();
     expect(screen.queryByRole("region", { name: "System status" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Ask IOIO" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Ask IOIO" })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Handbook reviews/ })).toBeNull();
   });
 });

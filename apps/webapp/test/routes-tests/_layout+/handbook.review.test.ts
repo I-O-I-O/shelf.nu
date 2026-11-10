@@ -1,5 +1,13 @@
+import { createElement } from "react";
+import { render, screen, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
+import HandbookReviewPage, {
+  action,
+  loader,
+} from "~/routes/_layout+/handbook.review";
 import { ShelfError } from "~/utils/error";
 
 const mocks = vi.hoisted(() => ({
@@ -28,8 +36,6 @@ vi.mock("~/modules/ioio-handbook/service.server", () => ({
   resolveHandbookArticleSubmission: mocks.resolveSubmission,
   resolveHandbookObservationCategoryProposal: mocks.resolveCategory,
 }));
-
-import { action, loader } from "~/routes/_layout+/handbook.review";
 
 const context = { getSession: () => ({ userId: "staff-1" }) } as never;
 
@@ -131,5 +137,83 @@ describe("Handbook review route", () => {
       )
     ).rejects.toMatchObject({ init: { status: 403 } });
     expect(mocks.listObservations).not.toHaveBeenCalled();
+  });
+});
+
+describe("simple contribution review actions", () => {
+  it("offers Approve and Reject, accepts optional feedback and closes the rejected review", async () => {
+    const user = userEvent.setup();
+    let pending = true;
+    mocks.requireStaff.mockResolvedValue({
+      userId: "staff-1",
+      organizationId: "team-1",
+      currentOrganization: { type: "TEAM" },
+    });
+    mocks.resolveSubmission.mockImplementation(() => {
+      pending = false;
+    });
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook/review",
+          Component: HandbookReviewPage,
+          loader: () => ({
+            categories: [],
+            observations: pending
+              ? [
+                  {
+                    id: "submission-1",
+                    createdAt: new Date(),
+                    handbookCategory: { id: "safety", name: "Safety" },
+                    proposedCategoryName: null,
+                    publishedVersionId: null,
+                    article: {
+                      status: "DRAFT",
+                      draftTitle: "Test Guide",
+                      draftContent: "Needs safety instructions.",
+                      draftSourceUrls: [],
+                      draftAttachments: [],
+                    },
+                  },
+                ]
+              : [],
+          }),
+          action: (args) => action({ ...args, context }),
+        },
+      ],
+      { initialEntries: ["/handbook/review"] }
+    );
+    render(createElement(RouterProvider, { router }));
+    await user.click(await screen.findByText("Review", { exact: true }));
+    expect(
+      screen.getByRole("button", { name: "Approve", exact: true })
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Return|Dismiss/ })).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "Reject", exact: true })
+    );
+    const dialog = screen.getByRole("alertdialog");
+    const reason = within(dialog).getByRole("textbox", {
+      name: "Reason (optional)",
+    });
+    expect(reason).not.toBeRequired();
+    await user.type(reason, "The safety section needs clearer instructions.");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Reject", exact: true })
+    );
+    await waitFor(() =>
+      expect(mocks.resolveSubmission).toHaveBeenCalledWith({
+        organizationId: "team-1",
+        userId: "staff-1",
+        observationId: "submission-1",
+        resolution: "reject",
+        feedback: "The safety section needs clearer instructions.",
+      })
+    );
+    expect(
+      await screen.findByText(
+        "No new article submissions are waiting for review."
+      )
+    ).toBeTruthy();
   });
 });

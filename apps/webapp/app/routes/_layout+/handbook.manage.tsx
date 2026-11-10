@@ -17,6 +17,14 @@ import {
   useNavigation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
+import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
+import { Button } from "~/components/shared/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "~/components/shared/dropdown";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   archiveHandbookArticle,
@@ -557,13 +565,32 @@ export default function HandbookManagePage() {
                       {category._count.articles === 1 ? "article" : "articles"}
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingCategoryId(category.id)}
-                    className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-800 hover:bg-gray-50"
-                  >
-                    Rename
-                  </button>
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="size-9 shrink-0 p-0"
+                        aria-label={`Category actions for ${category.name}`}
+                      >
+                        <span aria-hidden="true">⋯</span>
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      onCloseAutoFocus={(event) => {
+                        if (editingCategoryId === category.id)
+                          event.preventDefault();
+                      }}
+                    >
+                      <DropdownMenuItem
+                        onSelect={() => setEditingCategoryId(category.id)}
+                      >
+                        Rename category
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
 
                 {editingCategoryId === category.id ? (
@@ -713,46 +740,17 @@ export default function HandbookManagePage() {
                               >
                                 {article.staffOnly ? "Staff only" : "Everyone"}
                               </span>
-                              <Form
-                                method="post"
-                                action="/handbook/manage"
-                                className="shrink-0"
-                              >
-                                <input
-                                  type="hidden"
-                                  name="intent"
-                                  value="set-visibility"
+                              <div className="shrink-0">
+                                <HandbookArticleActions
+                                  portaled
+                                  articleId={article.id}
+                                  slug={article.slug}
+                                  articleTitle={title}
+                                  staffOnly={article.staffOnly}
+                                  returnTo={`/handbook/manage?visibility=${visibilityFilter}`}
+                                  menuLabel={`Article actions for ${title}`}
                                 />
-                                <input
-                                  type="hidden"
-                                  name="articleId"
-                                  value={article.id}
-                                />
-                                <input
-                                  type="hidden"
-                                  name="staffOnly"
-                                  value={article.staffOnly ? "false" : "true"}
-                                />
-                                <input
-                                  type="hidden"
-                                  name="returnTo"
-                                  value={`/handbook/manage?visibility=${visibilityFilter}`}
-                                />
-                                <button
-                                  type="submit"
-                                  disabled={formBusy}
-                                  aria-label={`${
-                                    article.staffOnly
-                                      ? "Make visible to everyone"
-                                      : "Make staff only"
-                                  }: ${title}`}
-                                  className="inline-flex h-8 items-center rounded-md border border-gray-300 px-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-wait disabled:opacity-60"
-                                >
-                                  {article.staffOnly
-                                    ? "Set to Everyone"
-                                    : "Set to Staff only"}
-                                </button>
-                              </Form>
+                              </div>
                               {indicatorAfter ? <DropIndicator after /> : null}
                             </li>
                           );

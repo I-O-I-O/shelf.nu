@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
-import { ShelfError } from "~/utils/error";
 
 const mocks = vi.hoisted(() => ({
   requireStaff: vi.fn(),
@@ -32,13 +31,14 @@ vi.mock("~/modules/ioio-handbook/service.server", () => ({
   deleteHandbookArticlePermanently: mocks.deleteArticle,
 }));
 
+import { loader as legacyCategoriesLoader } from "~/routes/_layout+/handbook.categories";
 import {
   action,
   loader,
   default as HandbookManagePage,
 } from "~/routes/_layout+/handbook.manage";
-import { loader as legacyCategoriesLoader } from "~/routes/_layout+/handbook.categories";
 import { loader as legacyOrganizerLoader } from "~/routes/_layout+/handbook.organize";
+import { ShelfError } from "~/utils/error";
 
 const context = { getSession: () => ({ userId: "staff-1" }) } as never;
 
@@ -214,44 +214,58 @@ describe("Handbook categories route", () => {
     expect(mocks.listCategories).not.toHaveBeenCalled();
   });
 
-  it("shows article counts and simple create and inline rename actions", async () => {
-    const user = userEvent.setup();
-    const router = createMemoryRouter(
-      [
-        {
-          path: "/handbook/manage",
-          loader: () => ({
-            categories: [
-              {
-                id: "category-1",
-                name: "Workshop Safety",
-                _count: { articles: 2 },
-                articles: [],
-              },
-            ],
-          }),
-          HydrateFallback: () => <p>Loading categories…</p>,
-          Component: HandbookManagePage,
-        },
-      ],
-      { initialEntries: ["/handbook/manage"] }
-    );
-    render(<RouterProvider router={router} />);
+  it.each([0, 2])(
+    "shows category menus with %s articles and opens inline rename",
+    async (articleCount) => {
+      const user = userEvent.setup();
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/handbook/manage",
+            loader: () => ({
+              categories: [
+                {
+                  id: "category-1",
+                  name: "Workshop Safety",
+                  _count: { articles: articleCount },
+                  articles: [],
+                },
+              ],
+            }),
+            HydrateFallback: () => <p>Loading categories…</p>,
+            Component: HandbookManagePage,
+          },
+        ],
+        { initialEntries: ["/handbook/manage"] }
+      );
+      render(<RouterProvider router={router} />);
 
-    expect(
-      await screen.findByRole("button", { name: "Collapse Workshop Safety" })
-    ).toHaveTextContent("2 articles");
-    await user.click(screen.getByRole("button", { name: "+ New category" }));
-    expect(screen.getByLabelText("Category name")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "Create category" })
-    ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: "Rename" }));
-    expect(screen.getByLabelText("Name for Workshop Safety")).toHaveValue(
-      "Workshop Safety"
-    );
-    expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
-  });
+      expect(
+        await screen.findByRole("button", { name: "Collapse Workshop Safety" })
+      ).toHaveTextContent(`${articleCount} articles`);
+      await user.click(screen.getByRole("button", { name: "+ New category" }));
+      expect(screen.getByLabelText("Category name")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+      expect(
+        screen.getByRole("button", { name: "Create category" })
+      ).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+      await user.click(
+        screen.getByRole("button", {
+          name: "Category actions for Workshop Safety",
+        })
+      );
+      expect(
+        screen.queryByRole("menuitem", { name: "Delete category" })
+      ).toBeNull();
+      await user.click(
+        screen.getByRole("menuitem", { name: "Rename category" })
+      );
+      expect(screen.getByLabelText("Name for Workshop Safety")).toHaveValue(
+        "Workshop Safety"
+      );
+      expect(screen.getByRole("button", { name: "Save" })).toBeTruthy();
+    }
+  );
 });

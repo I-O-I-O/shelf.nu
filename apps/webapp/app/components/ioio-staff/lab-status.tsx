@@ -49,7 +49,13 @@ function countActionableItems(issues: LabIssue[], preparationTasks: number) {
   );
 }
 
-function IssueSummary({ status }: { status: LabStatus }) {
+function IssueSummary({
+  status,
+  pendingHandbookReviews,
+}: {
+  status: LabStatus;
+  pendingHandbookReviews: number;
+}) {
   const summaries = [
     {
       label: "Overdue loans",
@@ -96,6 +102,11 @@ function IssueSummary({ status }: { status: LabStatus }) {
       count: status.annualAccessApprovals,
       href: "/operations?view=access-approvals",
     },
+    {
+      label: "Handbook reviews",
+      count: pendingHandbookReviews,
+      href: "/handbook/review",
+    },
   ] as const;
   return (
     <div className="mt-4 grid auto-rows-fr grid-cols-2 items-stretch gap-2 sm:grid-cols-4">
@@ -115,7 +126,13 @@ function IssueSummary({ status }: { status: LabStatus }) {
   );
 }
 
-export function LabStatusCard({ status }: { status: LabStatus }) {
+export function LabStatusCard({
+  status,
+  pendingHandbookReviews = 0,
+}: {
+  status: LabStatus;
+  pendingHandbookReviews?: number;
+}) {
   const visibleIssues = status.issues.slice(0, 3);
   const actionableItemCount = countActionableItems(
     status.issues,
@@ -149,7 +166,10 @@ export function LabStatusCard({ status }: { status: LabStatus }) {
           />
         </div>
       </div>
-      <IssueSummary status={status} />
+      <IssueSummary
+        status={status}
+        pendingHandbookReviews={pendingHandbookReviews}
+      />
       {status.totalIssues > 0 ? (
         <section aria-labelledby="lab-status-attention" className="mt-4">
           <h3

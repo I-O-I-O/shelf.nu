@@ -451,3 +451,55 @@ describe("HandbookEditor", () => {
     );
   });
 });
+
+describe("student draft removal menu", () => {
+  it.each([
+    [null, "Delete draft", "Delete this draft?"],
+    ["submission-1", "Withdraw submission", "Withdraw this submission?"],
+  ] as const)(
+    "offers the confirmed action for pending submission %s",
+    async (pendingSubmissionId, label, title) => {
+      const user = userEvent.setup();
+      renderEditor(
+        {
+          id: "student-draft",
+          status: "DRAFT",
+          draftTitle: "My draft",
+          draftContent: "My notes",
+          handbookCategoryId: "electronics",
+          draftSourceUrls: [],
+          attachments: [],
+          versions: [],
+          pendingSubmissionId,
+        },
+        undefined,
+        true
+      );
+      await user.click(screen.getByRole("button", { name: "Draft actions" }));
+      await user.click(screen.getByRole("menuitem", { name: label }));
+      expect(screen.getByRole("alertdialog")).toHaveTextContent(title);
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+    }
+  );
+
+  it("does not offer permanent deletion for a published article", () => {
+    renderEditor(
+      {
+        id: "published",
+        status: "PUBLISHED",
+        draftTitle: "Published guide",
+        draftContent: "Published notes",
+        handbookCategoryId: "electronics",
+        draftSourceUrls: [],
+        attachments: [],
+        versions: [],
+      },
+      undefined,
+      true,
+      { revisionMode: true }
+    );
+    expect(screen.queryByRole("button", { name: "Draft actions" })).toBeNull();
+    expect(screen.queryByText("Delete permanently")).toBeNull();
+  });
+});

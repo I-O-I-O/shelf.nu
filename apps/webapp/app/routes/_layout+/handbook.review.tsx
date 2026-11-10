@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -17,8 +18,20 @@ import {
   type HandbookFileAttachment,
 } from "~/components/handbook/handbook-file-list";
 import { MarkdownViewer } from "~/components/markdown/markdown-viewer";
+import { Button } from "~/components/shared/button";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "~/components/shared/modal";
 import { handbookAttachmentFilenameFromPath } from "~/modules/ioio-handbook/attachment.shared";
 import { compareHandbookVersions } from "~/modules/ioio-handbook/document";
+import { HANDBOOK_REVIEW_FEEDBACK_MAX_LENGTH } from "~/modules/ioio-handbook/review-feedback.shared";
 import {
   approveHandbookArticleRevision,
   approveHandbookNewArticleSubmission,
@@ -137,6 +150,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         userId: auth.userId,
         observationId,
         resolution: "reject",
+        feedback: String(form.get("feedback") ?? ""),
       });
       return payload({
         success: true as const,
@@ -149,11 +163,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
         organizationId: auth.organizationId,
         userId: auth.userId,
         observationId,
+        feedback: String(form.get("feedback") ?? ""),
       });
       return payload({
         success: true as const,
         message:
-          "Improvement rejected. The current published version remains live.",
+          "Improvement rejected. The student can edit and resubmit it; the current published version remains live.",
       });
     }
     return data(
@@ -277,41 +292,63 @@ function ReviewActions({
 }) {
   const navigation = useNavigation();
   const busy = navigation.state === "submitting";
+  const [rejectOpen, setRejectOpen] = useState(false);
   return (
     <div className="mt-5 flex flex-wrap gap-2 border-t border-gray-100 pt-4">
       <Form method="post">
         <input type="hidden" name="observationId" value={observationId} />
-        <button
+        <Button
+          type="submit"
           name="intent"
           value={improvement ? "approve-revision" : "approve-new"}
           disabled={busy || categoryPending}
-          className="inline-flex h-10 items-center rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
         >
-          {improvement ? "Approve & publish new version" : "Approve & publish"}
-        </button>
+          Approve
+        </Button>
       </Form>
-      <Form method="post">
-        <input type="hidden" name="observationId" value={observationId} />
-        <button
-          name="intent"
-          value="return-for-changes"
-          disabled={busy}
-          className="inline-flex h-10 items-center rounded-lg border border-gray-300 bg-white px-4 text-sm font-semibold text-gray-800 disabled:opacity-50"
-        >
-          Return for changes
-        </button>
-      </Form>
-      <Form method="post">
-        <input type="hidden" name="observationId" value={observationId} />
-        <button
-          name="intent"
-          value={improvement ? "reject-revision" : "reject-new"}
-          disabled={busy}
-          className="inline-flex h-10 items-center rounded-lg px-3 text-sm font-semibold text-gray-600 hover:bg-gray-100 disabled:opacity-50"
-        >
-          Reject
-        </button>
-      </Form>
+      <AlertDialog open={rejectOpen} onOpenChange={setRejectOpen}>
+        <AlertDialogTrigger asChild>
+          <Button type="button" variant="secondary" disabled={busy}>
+            Reject
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reject contribution</AlertDialogTitle>
+            <AlertDialogDescription>
+              The student can edit and submit it for review again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Form method="post">
+            <input type="hidden" name="observationId" value={observationId} />
+            <label className="mb-4 block text-sm font-medium text-gray-800">
+              Reason (optional)
+              <textarea
+                name="feedback"
+                maxLength={HANDBOOK_REVIEW_FEEDBACK_MAX_LENGTH}
+                rows={3}
+                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2"
+              />
+            </label>
+            <AlertDialogFooter>
+              <AlertDialogCancel asChild>
+                <Button type="button" variant="secondary">
+                  Cancel
+                </Button>
+              </AlertDialogCancel>
+              <Button
+                type="submit"
+                variant="danger"
+                name="intent"
+                value={improvement ? "reject-revision" : "reject-new"}
+                disabled={busy}
+              >
+                Reject
+              </Button>
+            </AlertDialogFooter>
+          </Form>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

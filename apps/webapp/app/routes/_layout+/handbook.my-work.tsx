@@ -12,7 +12,8 @@ import {
   useLocation,
 } from "react-router";
 import { ErrorContent } from "~/components/errors";
-import { HandbookRemovalButton } from "~/components/handbook/handbook-removal-button";
+import { HandbookRemovalMenu } from "~/components/handbook/handbook-removal-button";
+import { Button } from "~/components/shared/button";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   discardHandbookArticleRevisionDraft,
@@ -202,8 +203,8 @@ export default function HandbookMyWorkPage() {
                 key={draft.id}
                 className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
               >
-                <div className="min-w-0">
-                  <h2 className="font-medium text-gray-950">
+                <div className="min-w-0 flex-1 basis-full sm:basis-0">
+                  <h2 className="break-words font-inter text-sm font-medium leading-5 text-gray-900">
                     {draft.draftTitle}
                   </h2>
                   <p className="mt-0.5 text-xs text-gray-500">
@@ -234,51 +235,66 @@ export default function HandbookMyWorkPage() {
                           draft.updatedAt
                         ).toLocaleDateString()}`}
                   </p>
+                  {draft.reviewFeedback ? (
+                    <p className="mt-2 whitespace-pre-wrap break-words text-sm text-gray-700">
+                      <span className="font-semibold">Staff feedback: </span>
+                      {draft.reviewFeedback}
+                    </p>
+                  ) : null}
                 </div>
-                <Link
-                  to={
-                    draft.workType === "OUTCOME"
-                      ? `/handbook/${encodeURIComponent(draft.slug)}`
-                      : draft.workType === "NEW_ARTICLE"
-                      ? `/handbook/${encodeURIComponent(draft.slug)}/edit`
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    to={
+                      draft.workType === "OUTCOME" &&
+                      draft.contributionStatus !== "REJECTED"
+                        ? `/handbook/${encodeURIComponent(draft.slug)}`
+                        : draft.workType === "NEW_ARTICLE"
+                        ? `/handbook/${encodeURIComponent(draft.slug)}/edit`
+                        : draft.workType === "IMPROVEMENT_PENDING"
+                        ? `/handbook/${encodeURIComponent(draft.slug)}`
+                        : `/handbook/${encodeURIComponent(
+                            draft.slug
+                          )}/edit?improve=1`
+                    }
+                  >
+                    {draft.contributionStatus === "REJECTED"
+                      ? "Edit"
+                      : draft.workType === "OUTCOME"
+                      ? "View article"
                       : draft.workType === "IMPROVEMENT_PENDING"
-                      ? `/handbook/${encodeURIComponent(draft.slug)}`
-                      : `/handbook/${encodeURIComponent(
-                          draft.slug
-                        )}/edit?improve=1`
-                  }
-                  className="inline-flex h-9 items-center rounded-lg border border-gray-300 px-3 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-                >
-                  {draft.workType === "OUTCOME"
-                    ? "View article"
-                    : draft.workType === "IMPROVEMENT_PENDING"
-                    ? "View current article"
-                    : draft.submittedForReview
-                    ? "View submission"
-                    : "Edit draft"}
-                </Link>
-                {draft.workType !== "OUTCOME" &&
-                draft.submittedForReview &&
-                draft.submissionId ? (
-                  <HandbookRemovalButton
-                    intent="withdraw-submission"
-                    observationId={draft.submissionId}
-                    actionPath="/handbook/my-work"
-                  />
-                ) : draft.workType === "NEW_ARTICLE" &&
-                  !draft.submittedForReview ? (
-                  <HandbookRemovalButton
-                    intent="delete-draft"
-                    articleId={draft.id}
-                    actionPath="/handbook/my-work"
-                  />
-                ) : draft.workType === "IMPROVEMENT_DRAFT" ? (
-                  <HandbookRemovalButton
-                    intent="discard-revision"
-                    articleId={draft.articleId}
-                    actionPath="/handbook/my-work"
-                  />
-                ) : null}
+                      ? "View current article"
+                      : draft.submittedForReview
+                      ? "View submission"
+                      : "Edit draft"}
+                  </Button>
+                  {draft.workType !== "OUTCOME" &&
+                  draft.submittedForReview &&
+                  draft.submissionId ? (
+                    <HandbookRemovalMenu
+                      menuLabel={`Actions for ${draft.draftTitle}`}
+                      intent="withdraw-submission"
+                      observationId={draft.submissionId}
+                      actionPath="/handbook/my-work"
+                    />
+                  ) : draft.workType === "NEW_ARTICLE" &&
+                    !draft.submittedForReview ? (
+                    <HandbookRemovalMenu
+                      menuLabel={`Actions for ${draft.draftTitle}`}
+                      intent="delete-draft"
+                      articleId={draft.id}
+                      actionPath="/handbook/my-work"
+                    />
+                  ) : draft.workType === "IMPROVEMENT_DRAFT" ? (
+                    <HandbookRemovalMenu
+                      menuLabel={`Actions for ${draft.draftTitle}`}
+                      intent="discard-revision"
+                      articleId={draft.articleId}
+                      actionPath="/handbook/my-work"
+                    />
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>

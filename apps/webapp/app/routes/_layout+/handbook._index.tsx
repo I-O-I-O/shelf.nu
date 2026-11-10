@@ -214,11 +214,15 @@ export default function HandbookIndexPage() {
                     {groupArticles.length === 1 ? "article" : "articles"}
                   </p>
                 </div>
-                {category && (canEdit || isStudent) ? (
+                {canEdit || isStudent ? (
                   <Link
-                    to={`/handbook/new?handbookCategoryId=${encodeURIComponent(
-                      category.id
-                    )}`}
+                    to={
+                      category
+                        ? `/handbook/new?handbookCategoryId=${encodeURIComponent(
+                            category.id
+                          )}`
+                        : "/handbook/new"
+                    }
                     className="inline-flex h-9 items-center rounded-lg border border-red-700 bg-white px-3 text-sm font-semibold text-red-800 hover:bg-red-50"
                   >
                     {isStudent ? "Contribute" : "New article"}

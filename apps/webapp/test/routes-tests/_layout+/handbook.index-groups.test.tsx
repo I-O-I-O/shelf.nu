@@ -49,6 +49,18 @@ describe("Handbook category groups", () => {
                   publishedAt: new Date("2026-10-03T00:00:00.000Z"),
                 },
               },
+              {
+                id: "article-4",
+                slug: "general-safety",
+                handbookCategory: null,
+                isStartHere: false,
+                position: 1,
+                publishedVersion: {
+                  title: "General safety",
+                  content: "Use shared tools safely.",
+                  publishedAt: new Date("2026-10-04T00:00:00.000Z"),
+                },
+              },
             ].sort((a, b) => a.position - b.position),
             categories: [],
             query: "",
@@ -128,6 +140,55 @@ describe("Handbook category groups", () => {
         .getByRole("link", { name: "New article" })
         .getAttribute("href")
     ).toBe("/handbook/new?handbookCategoryId=soldering");
+    const otherKnowledge = screen
+      .getByRole("heading", { name: "Other knowledge" })
+      .closest("section")!;
+    expect(
+      within(otherKnowledge).getByRole("link", { name: "New article" })
+    ).toHaveAttribute("href", "/handbook/new");
+  });
+
+  it("shows students a Contribute action for uncategorized articles", async () => {
+    const router = createMemoryRouter(
+      [
+        {
+          path: "/handbook",
+          loader: () => ({
+            articles: [
+              {
+                id: "article-uncategorized",
+                slug: "general-safety",
+                handbookCategory: null,
+                isStartHere: false,
+                position: 1,
+                publishedVersion: {
+                  title: "General safety",
+                  content: "Use shared tools safely.",
+                  publishedAt: new Date("2026-10-04T00:00:00.000Z"),
+                },
+              },
+            ],
+            categories: [],
+            query: "",
+            handbookCategoryId: "",
+            canEdit: false,
+            isStudent: true,
+          }),
+          Component: HandbookIndexPage,
+        },
+      ],
+      { initialEntries: ["/handbook"] }
+    );
+    render(createElement(RouterProvider, { router }));
+
+    const otherKnowledge = await screen.findByRole("heading", {
+      name: "Other knowledge",
+    });
+    expect(
+      within(otherKnowledge.closest("section")!).getByRole("link", {
+        name: "Contribute",
+      })
+    ).toHaveAttribute("href", "/handbook/new");
   });
 
   it("keeps empty category contribution actions available", async () => {

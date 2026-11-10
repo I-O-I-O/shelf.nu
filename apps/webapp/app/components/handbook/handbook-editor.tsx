@@ -3,7 +3,7 @@ import { Form, Link, useFetcher } from "react-router";
 import { EditorV2 } from "~/components/editor-v2/editor-v2";
 import { HANDBOOK_ATTACHMENT_ACCEPT } from "~/modules/ioio-handbook/attachment.shared";
 import { HandbookCategoryPicker } from "./handbook-category-picker";
-import { HandbookRemovalButton } from "./handbook-removal-button";
+import { HandbookRemovalMenu } from "./handbook-removal-button";
 
 const HANDBOOK_HEADING_LEVELS = [2, 3];
 
@@ -19,6 +19,7 @@ type HandbookEditorArticle = {
   revisionBaseVersionId?: string | null;
   revisionSubmitted?: boolean;
   pendingSubmissionId?: string | null;
+  reviewFeedback?: string | null;
   draftSourceUrls: string[];
   attachments: Array<{
     id: string;
@@ -240,33 +241,27 @@ export function HandbookEditor({
                 : article.status}
             </span>
             {article.status === "DRAFT" && article.versions.length === 0 ? (
-              <details className="relative">
-                <summary
-                  aria-label="Draft actions"
-                  className="flex size-9 cursor-pointer list-none items-center justify-center rounded text-gray-600 hover:bg-gray-100"
-                >
-                  ⋯
-                </summary>
-                <div className="absolute right-0 z-30 mt-1 w-48 rounded border border-gray-200 bg-white p-1 shadow-sm">
-                  {article.pendingSubmissionId ? (
-                    <HandbookRemovalButton
-                      intent="withdraw-submission"
-                      observationId={article.pendingSubmissionId}
-                      actionPath="/handbook/my-work"
-                    />
-                  ) : (
-                    <HandbookRemovalButton
-                      intent="delete-draft"
-                      articleId={article.id}
-                      actionPath="/handbook/my-work"
-                    />
-                  )}
-                </div>
-              </details>
+              <HandbookRemovalMenu
+                menuLabel="Draft actions"
+                intent={
+                  article.pendingSubmissionId
+                    ? "withdraw-submission"
+                    : "delete-draft"
+                }
+                articleId={article.pendingSubmissionId ? undefined : article.id}
+                observationId={article.pendingSubmissionId ?? undefined}
+                actionPath="/handbook/my-work"
+              />
             ) : null}
           </div>
         ) : null}
       </div>
+      {article?.reviewFeedback ? (
+        <p className="mb-4 whitespace-pre-wrap break-words rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+          <span className="font-semibold">Staff feedback: </span>
+          {article.reviewFeedback}
+        </p>
+      ) : null}
       <Form
         method="post"
         encType="multipart/form-data"

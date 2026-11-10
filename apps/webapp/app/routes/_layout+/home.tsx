@@ -18,6 +18,7 @@ import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customize
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
 import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
 import { db } from "~/database/db.server";
+import { countPendingHandbookReviews } from "~/modules/ioio-handbook/service.server";
 import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
 import {
   DEFAULT_STAFF_DASHBOARD_PREFERENCES,
@@ -66,6 +67,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       purchasing,
       savedDashboardPreferences,
       systemStatus,
+      pendingHandbookReviews,
     ] = isStaff
       ? await Promise.all([
           getDashboardLabTasks({ organizationId, userId }),
@@ -76,8 +78,9 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             select: { staffDashboardPreferences: true },
           }),
           getStaffSystemStatus(),
+          countPendingHandbookReviews(organizationId),
         ])
-      : [null, null, null, null, null];
+      : [null, null, null, null, null, null];
 
     return payload({
       header: { title: "Home" },
@@ -86,6 +89,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       taHours,
       purchasing,
       systemStatus,
+      pendingHandbookReviews,
       dashboardPreferences: normalizeStaffDashboardPreferences(
         savedDashboardPreferences?.staffDashboardPreferences
       ),
@@ -286,6 +290,7 @@ export default function HomePage() {
     labTasks,
     purchasing,
     systemStatus,
+    pendingHandbookReviews,
     taHours,
   } = useLoaderData<typeof loader>();
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
@@ -297,7 +302,12 @@ export default function HomePage() {
     resolveUserDisplayName(dashboardUser) || "Your TA hours";
   const hiddenWidgets = new Set(dashboardPreferences.hidden);
   const widgets: Record<StaffDashboardWidgetId, ReactNode> = {
-    operations: labStatus ? <LabStatusCard status={labStatus} /> : null,
+    operations: labStatus ? (
+      <LabStatusCard
+        status={labStatus}
+        pendingHandbookReviews={pendingHandbookReviews ?? 0}
+      />
+    ) : null,
     purchasing: purchasing ? (
       <section
         aria-labelledby="dashboard-purchasing-heading"
