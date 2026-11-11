@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import {
+  parseExplicitInventorySources,
+  matchExplicitInventorySource,
+} from "./inventory-source.server";
 import { locationRoleSchema } from "./location-role.server";
 import {
   shelfTaskPlanSchema,
@@ -513,6 +517,10 @@ const candidateProposalRowSchema = z
   .object({
     sourceRef: identifierSchema,
     productName: z.string().trim().min(1).max(500),
+    // Source labels are distinct from suggested canonical Shelf IDs.
+    organization: z.string().trim().max(300).nullable().optional(),
+    room: z.string().trim().max(300).nullable().optional(),
+    location: z.string().trim().max(300).nullable().optional(),
     supplierProductNumber: z.string().max(300).nullable(),
     quantity: z.number().int().positive().max(1_000_000).nullable(),
     quantityStatus: quantityStatusSchema,
@@ -1111,6 +1119,7 @@ export function validateImportHelperResponse(
   const settingRules = new Map(
     request.allowedSettings.map((rule) => [rule.key, rule])
   );
+  const explicitSources = parseExplicitInventorySources(request.document.pages);
   result.rows.forEach((row, rowIndex) => {
     const invalid = (message: string, path: (string | number)[]): never => {
       throw new ImportHelperValidationError(
@@ -1220,6 +1229,24 @@ export function validateImportHelperResponse(
           index,
         ]);
       }
+    }
+    const explicit = matchExplicitInventorySource(
+      row.evidence,
+      explicitSources
+    );
+    if (explicit) {
+      row.sourceRef = explicit.sourceRef;
+      row.productName = explicit.sourceItemName;
+      row.quantity = explicit.quantity;
+      row.quantityStatus =
+        explicit.quantityIsEstimated || explicit.quantity === null
+          ? "UNKNOWN"
+          : "RECEIVED";
+      row.organization = explicit.sourceOrganization;
+      row.room = explicit.sourceRoom;
+      row.location = explicit.sourceStorageLocation;
+      // Canonical location IDs are resolved by Shelf from the full org hierarchy.
+      row.locationSuggestions = [];
     }
   });
 

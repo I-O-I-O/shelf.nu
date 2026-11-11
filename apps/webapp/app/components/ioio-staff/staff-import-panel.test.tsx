@@ -266,6 +266,80 @@ describe("StaffImportPanel review gate", () => {
     expect(screen.getByLabelText("Inventory quantity")).toBeTruthy();
   });
 
+  it("shows source lab/room/bin separately and submits the explicit estimate and child location", async () => {
+    let submitted: FormData | undefined;
+    // why: capture the router form boundary without performing inventory writes.
+    const action = vi.fn(async ({ request }: { request: Request }) => {
+      const form = await request.formData();
+      if (form.get("intent") === "save-draft")
+        return {
+          error: null,
+          kind: "import-draft-saved",
+          operationId: "operation-1",
+        };
+      submitted = form;
+      return {
+        error: null,
+        kind: "import-in-progress",
+        operationId: "operation-1",
+      };
+    });
+    renderPanel(
+      {
+        title: "U-shaped jumper wires",
+        quantity: 150,
+        receivedQuantity: null,
+        quantityStatus: "UNKNOWN",
+        quantityIsEstimated: true,
+        sourceQuantity: 150,
+        sourceOrganization: "IOIO Lab",
+        sourceRoom: "B477",
+        sourceStorageLocation: "A1-3",
+        roomLocationId: "room-b477",
+        locationId: "bin-A1-3",
+      },
+      true,
+      {
+        locationOptions: [
+          {
+            id: "bin-A1-3",
+            name: "A1-3",
+            pathLabel: "IOIO Lab · B477 · A1-3",
+            parentId: "room-b477",
+            operational: false,
+            currentUnits: 0,
+          },
+        ],
+      },
+      action
+    );
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Source lab: IOIO Lab")).toBeVisible();
+    expect(screen.getByText("Source room: B477")).toBeVisible();
+    expect(screen.getByText("Source storage/bin: A1-3")).toBeVisible();
+    expect(
+      screen.getByText("Source estimated quantity: 150 (confirm during review)")
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByLabelText("Approve U-shaped jumper wires for import")
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      ).toBeEnabled()
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    );
+    await waitFor(() => expect(submitted).toBeDefined());
+    const decisions = JSON.parse(String(submitted?.get("reviewDecisions")));
+    expect(decisions[0]).toMatchObject({
+      title: "U-shaped jumper wires",
+      quantity: 150,
+      locationId: "bin-A1-3",
+    });
+  });
+
   it("uses row checkboxes as approval and applies only checked rows", async () => {
     const rows = ["Arduino Nano", "USB-C Cable"].map((title, index) => ({
       rowNumber: index + 1,

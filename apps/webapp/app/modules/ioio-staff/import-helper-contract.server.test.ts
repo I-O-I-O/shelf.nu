@@ -9,6 +9,10 @@ import {
   validateImportHelperResponse,
   type ImportHelperRequest,
 } from "./import-helper-contract.server";
+import {
+  inventorySourceRows,
+  inventorySourceText,
+} from "../../../test/factories/ioio-inventory-source";
 
 function makeMouserRequest() {
   return createMouserEnrichmentRequest({
@@ -782,6 +786,40 @@ describe("import helper contract", () => {
         makeRequest()
       )
     ).toThrow("evidence that cannot be verified");
+  });
+
+  it("corrects explicit lab, room, bin, item and quantity before returning a validated proposal", () => {
+    const request = makeRequest();
+    request.document.pages = [
+      { sourceRef: "page-1", page: 1, text: inventorySourceText() },
+    ];
+    const response = makeResponse();
+    response.rows = inventorySourceRows.map(([bin, name]) => ({
+      ...response.rows[0]!,
+      productName: "Hallucinated product",
+      quantity: 1,
+      organization: "Wrong lab",
+      room: "A2-5",
+      location: "B477",
+      evidence: [{ sourceRef: "page-1", text: `${bin} | ${name}` }],
+    }));
+    const result = parseAndValidateImportHelperResponse(
+      JSON.stringify(response),
+      request
+    );
+    if ("mode" in result) throw new Error("Expected inventory response");
+    expect(
+      result.rows.map((row) => [row.location, row.productName, row.quantity])
+    ).toEqual(inventorySourceRows);
+    expect(
+      result.rows.every(
+        (row) =>
+          row.organization === "IOIO Lab" &&
+          row.room === "B477" &&
+          row.location !== "B477" &&
+          row.locationSuggestions.length === 0
+      )
+    ).toBe(true);
   });
 
   it("returns safe manual mode for malformed JSON", async () => {

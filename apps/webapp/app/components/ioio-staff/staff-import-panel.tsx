@@ -1594,6 +1594,23 @@ function StaffImportProposalView({
                             {quantity != null ? (
                               <p>Proposed quantity: {quantity}</p>
                             ) : null}
+                            {row.sourceOrganization ? (
+                              <p>Source lab: {row.sourceOrganization}</p>
+                            ) : null}
+                            {row.sourceRoom ? (
+                              <p>Source room: {row.sourceRoom}</p>
+                            ) : null}
+                            {row.sourceStorageLocation ? (
+                              <p>
+                                Source storage/bin: {row.sourceStorageLocation}
+                              </p>
+                            ) : null}
+                            {row.quantityIsEstimated ? (
+                              <p>
+                                Source estimated quantity: {row.quantity}{" "}
+                                (confirm during review)
+                              </p>
+                            ) : null}
                             {row.quantityStatus ? (
                               <p>
                                 Quantity status:{" "}

@@ -104,6 +104,13 @@ import {
   type ImportReviewIssue,
   type StaffImportReviewState,
 } from "./import-review";
+import {
+  parseExplicitInventorySources,
+  getInventoryDocumentContext,
+  matchExplicitInventorySource,
+  resolveExplicitInventoryLocation,
+  type ExplicitInventorySourceRow,
+} from "./inventory-source.server";
 import { PDF_OCR_MAX_PAGES, PdfOcrError, ocrPdfPages } from "./pdf-ocr.server";
 import { pdfjsResourceUrl } from "./pdfjs-runtime.server";
 import {
@@ -244,6 +251,13 @@ export type StaffImportRow = {
   supplierPartNumber?: string | null;
   unitDescription?: string | null;
   sourceNotes?: string | null;
+  sourceOrganization?: string | null;
+  sourceRoom?: string | null;
+  sourceStorageLocation?: string | null;
+  sourceItemName?: string | null;
+  roomLocationId?: string | null;
+  quantityIsEstimated?: boolean;
+  sourceQuantity?: number | null;
   orderedQuantity?: number | null;
   receivedQuantity?: number | null;
   quantityStatus?: ProcurementQuantityStatus;
@@ -3934,13 +3948,26 @@ function classifyRow(
     categoryResolution.status === "ACTIVE_MATCH"
       ? categoryResolution.category
       : null;
-  const locationResolution = resolveImportLocation(
-    row.location,
-    locations.map((item) => ({
-      ...item,
-      pathLabel: item.pathLabel || item.name,
-    }))
-  );
+  const explicitLocation = row.sourceStorageLocation
+    ? resolveExplicitInventoryLocation(
+        {
+          sourceRoom: row.sourceRoom ?? null,
+          sourceStorageLocation: row.sourceStorageLocation,
+        },
+        locations
+      )
+    : null;
+  const locationResolution = row.sourceStorageLocation
+    ? explicitLocation
+      ? { status: "MATCH" as const, location: explicitLocation.location }
+      : { status: "UNMATCHED" as const }
+    : resolveImportLocation(
+        row.location,
+        locations.map((item) => ({
+          ...item,
+          pathLabel: item.pathLabel || item.name,
+        }))
+      );
   const location =
     locationResolution.status === "MATCH" ? locationResolution.location : null;
   const base: Omit<StaffImportProposalRow, "action" | "reason"> = {
@@ -4246,6 +4273,28 @@ function resolvePdfRowLocations({
 }) {
   return rows.map((row) => {
     if (!row.title.trim()) return row;
+    if (row.sourceStorageLocation) {
+      const resolved = resolveExplicitInventoryLocation(
+        {
+          sourceRoom: row.sourceRoom ?? null,
+          sourceStorageLocation: row.sourceStorageLocation,
+        },
+        locations
+      );
+      return {
+        ...row,
+        location: resolved?.location.pathLabel ?? row.sourceStorageLocation,
+        roomLocationId: resolved?.roomLocationId ?? null,
+        suggestedLocationId: resolved?.location.id ?? null,
+        locationSuggestionMethod: "deterministic-fallback" as const,
+        locationSuggestionConfidence: resolved ? 1 : 0,
+        locationSuggestionStatus: resolved
+          ? ("SUGGESTED" as const)
+          : ("UNRESOLVED" as const),
+      };
+    }
+    if (row.sourceRoom)
+      return { ...row, location: null, suggestedLocationId: null };
     const evidence = {
       productName: row.title,
       manufacturer: row.manufacturer,
@@ -4454,6 +4503,82 @@ function matchPdfTableRow(
   return nameMatches.length === 1 ? nameMatches[0] : undefined;
 }
 
+function normalizeExplicitInventoryRows(
+  sources: ExplicitInventorySourceRow[],
+  inferred: StaffImportRow[]
+): StaffImportRow[] {
+  const enrichments = new Map<ExplicitInventorySourceRow, StaffImportRow[]>();
+  for (const row of inferred) {
+    const source = matchExplicitInventorySource(
+      row.helperCandidate?.evidence ?? [],
+      sources
+    );
+    if (source)
+      enrichments.set(source, [...(enrichments.get(source) ?? []), row]);
+  }
+  return sources.map((source, index): StaffImportRow => {
+    const matches = enrichments.get(source) ?? [];
+    const enrichment = matches.length === 1 ? matches[0] : null;
+    return {
+      ...enrichment,
+      rowNumber: index + 2,
+      title: source.sourceItemName,
+      sourceItemName: source.sourceItemName,
+      sourceDescription:
+        source.description ??
+        enrichment?.sourceDescription ??
+        source.sourceItemName,
+      helperCandidate: enrichment?.helperCandidate
+        ? {
+            ...enrichment.helperCandidate,
+            sourceRef: source.sourceRef,
+            productName: source.sourceItemName,
+            quantity: source.quantity,
+            quantityStatus:
+              source.quantityIsEstimated || source.quantity === null
+                ? "UNKNOWN"
+                : "RECEIVED",
+            organization: source.sourceOrganization,
+            room: source.sourceRoom,
+            location: source.sourceStorageLocation,
+            locationSuggestions: [],
+          }
+        : undefined,
+      sourceOrganization: source.sourceOrganization,
+      sourceRoom: source.sourceRoom,
+      sourceStorageLocation: source.sourceStorageLocation,
+      quantity: source.quantity,
+      quantityIsEstimated: source.quantityIsEstimated,
+      sourceQuantity: source.quantity,
+      receivedQuantity: source.quantityIsEstimated ? null : source.quantity,
+      quantityStatus:
+        source.quantityIsEstimated || source.quantity === null
+          ? "UNKNOWN"
+          : "RECEIVED",
+      // Resolve the exact source bin under its room later, never a helper guess.
+      location: source.sourceStorageLocation,
+      suggestedLocationId: null,
+      category: enrichment?.category ?? null,
+      type: null,
+      reviewRequired: true,
+      pdfClassification: "PARTIAL",
+      uncertainFields: [
+        "Helper proposal",
+        ...(source.quantityIsEstimated || source.quantity === null
+          ? ["Quantity"]
+          : []),
+      ],
+      sourceEvidence: [
+        {
+          sourceRef: source.sourceRef,
+          page: source.page,
+          text: source.sourceText,
+        },
+      ],
+    };
+  });
+}
+
 function mapHelperProposalToRows({
   candidates,
   pdfPages,
@@ -4470,6 +4595,7 @@ function mapHelperProposalToRows({
   sourceTableRows?: StaffImportRow[];
 }): { rows: StaffImportRow[]; pdfSummary: StaffImportPdfSummary } {
   const pagesByRef = new Map(pdfPages.map((page) => [page.sourceRef, page]));
+  const documentContext = getInventoryDocumentContext(pdfPages);
   const rows = candidates.map((candidate, index): StaffImportRow => {
     const tableRow = sourceTableRows
       ? matchPdfTableRow(candidate, sourceTableRows)
@@ -4536,6 +4662,27 @@ function mapHelperProposalToRows({
     return {
       rowNumber: index + 2,
       title: candidate.productName,
+      sourceOrganization:
+        documentContext.sourceOrganization ??
+        (candidate.organization &&
+        pdfPages.some((page) => page.text.includes(candidate.organization!))
+          ? candidate.organization
+          : null),
+      sourceRoom:
+        documentContext.sourceRoom ??
+        (candidate.room &&
+        /^[A-Z]\d{2,5}$/iu.test(candidate.room) &&
+        pdfPages.some((page) => page.text.includes(candidate.room!))
+          ? candidate.room
+          : null),
+      sourceStorageLocation:
+        candidate.location &&
+        /^[A-Z]\d{1,3}-\d{1,3}$/iu.test(candidate.location) &&
+        candidate.evidence.some(({ text }) =>
+          text.includes(candidate.location!)
+        )
+          ? candidate.location.toUpperCase()
+          : null,
       quantity,
       category: category?.name ?? null,
       location: selectedLocation?.pathLabel ?? null,
@@ -5007,6 +5154,7 @@ export async function prepareStaffInventoryImport({
       ? "mouser-deterministic+claude-enrichment:v2"
       : "mouser-deterministic:v1";
   } else if (parsed.pdfPages) {
+    const explicitSources = parseExplicitInventorySources(parsed.pdfPages);
     let fallbackPdfTable: ReturnType<typeof parsePdfTablePages> | null = null;
     try {
       fallbackPdfTable = parsePdfTablePages(parsed.pdfPages);
@@ -5105,7 +5253,8 @@ export async function prepareStaffInventoryImport({
       extractionProvider = "import-helper:v1";
     } else if (
       helperResult.status === "ready" &&
-      !("mode" in helperResult.proposal)
+      !("mode" in helperResult.proposal) &&
+      !explicitSources.length
     ) {
       throw importError(
         "Claude could not confidently identify product line items in this document."
@@ -5114,7 +5263,7 @@ export async function prepareStaffInventoryImport({
       if (fallbackPdfTable) {
         rows = fallbackPdfTable.rows;
         pdfSummary = fallbackPdfTable.pdfSummary;
-      } else {
+      } else if (!explicitSources.length) {
         throw importError(
           PDF_HELPER_FAILURE_MESSAGES[
             helperResult.status === "manual"
@@ -5123,6 +5272,14 @@ export async function prepareStaffInventoryImport({
           ]
         );
       }
+    }
+    if (explicitSources.length) {
+      rows = normalizeExplicitInventoryRows(explicitSources, rows);
+      pdfSummary = {
+        validItemRows: rows.length,
+        needsReview: rows.length,
+        ignoredRows: 0,
+      };
     }
   }
   if (getStaffImportFormat(file.name) !== "PDF") {
@@ -6713,6 +6870,14 @@ function buildImportedDescription(
 ) {
   const parts = [
     `Imported from ${filename}`,
+    row.sourceOrganization ? `Source lab: ${row.sourceOrganization}` : null,
+    row.sourceRoom ? `Source room: ${row.sourceRoom}` : null,
+    row.sourceStorageLocation
+      ? `Source storage location: ${row.sourceStorageLocation}`
+      : null,
+    row.quantityIsEstimated
+      ? `Source estimated quantity: ${row.sourceQuantity ?? row.quantity}`
+      : null,
     row.sourceDescription
       ? `Source description: ${row.sourceDescription}`
       : null,
@@ -9472,7 +9637,16 @@ export async function applyStaffInventoryImport({
           title: row.title,
           description:
             type === "QUANTITY_TRACKED" && row.assetModelDescription?.trim()
-              ? row.assetModelDescription.trim()
+              ? [
+                  row.assetModelDescription.trim(),
+                  row.sourceRoom ||
+                  row.sourceOrganization ||
+                  row.sourceStorageLocation
+                    ? buildImportedDescription(proposal.source.filename, row)
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join("\n\n")
               : buildImportedDescription(proposal.source.filename, row),
           userId,
           organizationId,

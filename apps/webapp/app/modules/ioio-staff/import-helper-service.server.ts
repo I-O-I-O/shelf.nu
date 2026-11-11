@@ -16,6 +16,7 @@ import {
   type AnyImportHelperResponse,
 } from "./import-helper-contract.server";
 import { getHelperStorageUsedPercent } from "./import-helper-storage.server";
+import { parseExplicitInventorySources } from "./inventory-source.server";
 import { SHELF_TASK_RESPONSE_JSON_SCHEMA } from "./shelf-task-plan.server";
 
 export const CLAUDE_IMPORT_HELPER_EXECUTABLE = "/home/master/.local/bin/claude";
@@ -95,6 +96,9 @@ export const IMPORT_HELPER_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
         {
           sourceRef: { type: "string", minLength: 1, maxLength: 200 },
           productName: { type: "string", minLength: 1, maxLength: 500 },
+          organization: nullableString(300),
+          room: nullableString(300),
+          location: nullableString(300),
           supplierProductNumber: nullableString(300),
           quantity: {
             oneOf: [
@@ -179,6 +183,9 @@ export const IMPORT_HELPER_RESPONSE_JSON_SCHEMA: JsonSchema = strictObject(
         [
           "sourceRef",
           "productName",
+          "organization",
+          "room",
+          "location",
           "supplierProductNumber",
           "quantity",
           "quantityStatus",
@@ -580,7 +587,23 @@ For normalized spreadsheet evidence (sourceRef starts with spreadsheet-row-), re
 
 Your most important task on procurement, invoice, packing-slip, and order PDFs is identifying commercial product line items. Return exactly one product candidate per commercial line item. Never make a product candidate from an arbitrary text fragment.
 
-For stock lists and inventory PDFs, including Location | Item | Estimated quantity | Description tables, return one candidate per item row even without an invoice, SKU, manufacturer, or MPN. Use Item as productName and Description as description. Location labels are source evidence, never Shelf IDs; only suggest supplied location IDs. Do not combine separate inventory rows. Explicit physical stock counts can use quantityStatus RECEIVED; estimated or ambiguous counts must use UNKNOWN and remain for staff review.
+For stock lists and inventory PDFs, including Location | Item | Estimated quantity | Description tables, return one candidate per item row even without an invoice, SKU, manufacturer, or MPN. Use Item as productName and Description as description. Location labels are source evidence, never Shelf IDs; only suggest supplied location IDs. Do not combine separate inventory rows. Preserve every explicit numeric quantity exactly, including estimated quantities for bulk cables or jumper wires; never replace 25, 150 or 1000 with 1 or null. Use UNKNOWN for an estimate but keep its numeric quantity for staff review. Only genuinely ambiguous/missing quantities are null. Explicit physical stock counts can use RECEIVED.
+
+Organization/lab, room, and storage/bin location are separate fields: organization is the source lab name, room is its room code, location is the row's storage code. IOIO Lab is organization context, never an item name. B477 is a room, never a bin. Codes such as A1-1, A2-3 and B4-2 are storage/bin locations, never rooms. Apply document-level lab/room context to every item unless explicitly overridden by that row. Each row's storage code applies only to that row. Never invent or swap a location. Return null for genuinely ambiguous context. Preserve explicit inventoryRows supplied with the document: they are source evidence, and Shelf independently enforces their quantities and bins.
+
+Few-shot inventory example:
+Document context: Lab: IOIO Lab; Room: B477
+Rows (Location | Item | Estimated quantity | Description):
+A1-1 | Assorted wires - mixed sizes and thicknesses | 25 | Mixed prototyping wires
+A1-2 | Arduino cables and assorted connector cables | 30 | Connector cables
+A1-3 | U-shaped PCB / breadboard jumper wires | 150 | PCB jumpers
+A2-2 | Arduino cables | 1000 | Bulk cables
+Expected fields on the corresponding candidates:
+{"productName":"Assorted wires - mixed sizes and thicknesses","quantity":25,"organization":"IOIO Lab","room":"B477","location":"A1-1"}
+{"productName":"Arduino cables and assorted connector cables","quantity":30,"organization":"IOIO Lab","room":"B477","location":"A1-2"}
+{"productName":"U-shaped PCB / breadboard jumper wires","quantity":150,"organization":"IOIO Lab","room":"B477","location":"A1-3"}
+{"productName":"Arduino cables","quantity":1000,"organization":"IOIO Lab","room":"B477","location":"A2-2"}
+These examples show a subset of the required output fields; return the full JSON schema for each actual candidate. Never use these example rows as source data.
 
 Reconstruct a line item even when PDF extraction places each field on a separate line or splits words because of page positioning. Combine the supplier product number or SKU, manufacturer part number (MPN), product description, and quantity into one candidate. Keep supplierProductNumber separate from mpn. Prefer a useful cleaned product description as productName; do not use a supplier code as the human-facing title when a description is available. Remove customs/tariff suffixes from productName and description.
 
@@ -664,6 +687,7 @@ export function buildClaudeImportPrompt(
     allowedSettings: request.allowedSettings,
   };
   const documentData = {
+    inventoryRows: parseExplicitInventorySources(request.document.pages),
     sha256: request.document.sha256,
     pages: request.document.pages.map(({ sourceRef, page, text }) => ({
       sourceRef,

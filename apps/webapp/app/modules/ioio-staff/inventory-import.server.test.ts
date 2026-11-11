@@ -186,6 +186,12 @@ import type {
   ProductSearchProvider,
 } from "./product-enrichment.server";
 import {
+  inventorySourceRows,
+  inventorySourceText,
+  inventorySourceLocations,
+} from "../../../test/factories/ioio-inventory-source";
+
+import {
   MOUSER_FRAGMENTED_EXPECTED_ROWS,
   MOUSER_FRAGMENTED_PAGE_TEXT,
   MOUSER_REAL_FIRST_PAGE_EXPECTED,
@@ -1390,6 +1396,7 @@ describe("staff inventory import safety", () => {
     sourceRow,
     proposalRows,
     reviewDecisionRows,
+    sourceLocations,
   }: {
     quantity: number;
     type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
@@ -1448,6 +1455,7 @@ describe("staff inventory import safety", () => {
       orderedQuantity?: number | null;
       quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
     };
+    sourceLocations?: ReturnType<typeof inventorySourceLocations>;
     proposalRows?: StaffImportProposalRow[];
     reviewDecisionRows?: StaffImportReviewDecision[];
   }) {
@@ -1528,18 +1536,20 @@ describe("staff inventory import safety", () => {
             },
           ]
         : [],
-      locationOptions: selectedLocationId
-        ? [
-            {
-              id: selectedLocationId,
-              name: "Problem / Broken Zone",
-              parentId: null,
-              pathLabel: "IOIO Lab – B477 · Problem / Broken Zone",
-              operational: true,
-              currentUnits: 18,
-            },
-          ]
-        : [],
+      locationOptions:
+        sourceLocations ??
+        (selectedLocationId
+          ? [
+              {
+                id: selectedLocationId,
+                name: "Problem / Broken Zone",
+                parentId: null,
+                pathLabel: "IOIO Lab – B477 · Problem / Broken Zone",
+                operational: true,
+                currentUnits: 18,
+              },
+            ]
+          : []),
     };
     const proposal = {
       ...proposalContent,
@@ -1727,7 +1737,8 @@ describe("staff inventory import safety", () => {
     database.asset.findFirst.mockResolvedValue(null);
     database.category.findFirst.mockResolvedValue(null);
     database.qr.findFirst.mockResolvedValue(null);
-    if (!selectedLocationId) database.location.findMany.mockResolvedValue([]);
+    if (!selectedLocationId)
+      database.location.findMany.mockResolvedValue(sourceLocations ?? []);
     mockCreateAsset.mockImplementation((asset) => {
       assetRows.push(asset);
       return { id: asset.id };
@@ -3968,6 +3979,181 @@ describe("staff inventory import safety", () => {
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
   });
 
+  it("preserves all A1/A2 fields through PDF, conflicting Claude output, preview and reviewed creation", async () => {
+    preparePdfImportMocks("operation-explicit-source");
+    database.location.findMany.mockResolvedValue(inventorySourceLocations());
+    database.location.count.mockResolvedValue(
+      inventorySourceLocations().length
+    );
+    const pageText = inventorySourceText();
+    const helper = makeGenericHelperReadyResult({
+      pageText,
+      items: inventorySourceRows.map(([bin, name]) => ({
+        productName: name,
+        quantity: 1,
+        evidenceText: `${bin} | ${name}`,
+      })),
+    });
+    // Deliberately wrong Claude fields; each source row remains authoritative.
+    const proposal = {
+      ...helper.proposal,
+      rows: helper.proposal.rows.map((row) => ({
+        ...row,
+        productName: "Hallucinated product",
+        organization: "Wrong lab",
+        room: "A2-5",
+        location: "B477",
+        locationSuggestions: [{ locationId: "room-b477", confidence: 1 }],
+      })),
+    };
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "ready",
+      proposal,
+    });
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("https://shelf.test/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: pageText }])],
+        "lab-inventory.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+    if (prepared.status !== "PREPARED") throw new Error("Expected preview");
+    expect(prepared.proposal.organizationId).toBe("org-1");
+    expect(prepared.proposal.rows).toHaveLength(11);
+    for (const [
+      index,
+      [bin, name, quantity],
+    ] of inventorySourceRows.entries()) {
+      const row = prepared.proposal.rows[index];
+      expect(row).toMatchObject({
+        title: name,
+        quantity,
+        sourceOrganization: "IOIO Lab",
+        sourceRoom: "B477",
+        sourceStorageLocation: bin,
+        roomLocationId: "room-b477",
+        locationId: `bin-${bin}`,
+        quantityIsEstimated: true,
+      });
+      expect(row.locationId).not.toBe("room-b477");
+      const { result, assetRows } = await applyNewImport({
+        quantity,
+        proposalRows: prepared.proposal.rows,
+        sourceLocations: inventorySourceLocations(),
+        applyOnlyRowNumber: row.rowNumber,
+        reviewDecisionRows: [
+          {
+            rowNumber: row.rowNumber,
+            decision: "APPROVE",
+            title: row.title,
+            quantity: row.quantity,
+            locationId: row.locationId,
+            categoryId: "category-electronics",
+            type: "QUANTITY_TRACKED",
+            productChoice: "NEW",
+            assetModelDescription: row.assetModelDescription ?? null,
+          },
+        ],
+      });
+      expect(result).toMatchObject({ succeededRows: 1, failedRowsCount: 0 });
+      expect(assetRows).toHaveLength(1);
+      expect(assetRows[0]).toMatchObject({
+        title: name,
+        quantity,
+        locationId: `bin-${bin}`,
+        organizationId: "org-1",
+      });
+      expect(assetRows[0].description).toContain("Source lab: IOIO Lab");
+      expect(assetRows[0].description).toContain("Source room: B477");
+      expect(assetRows[0].description).toContain(
+        `Source storage location: ${bin}`
+      );
+    }
+  });
+
+  it("keeps document room context separate even when a generic helper suggests the room as storage", async () => {
+    preparePdfImportMocks("operation-room-not-bin");
+    database.location.findMany.mockResolvedValue(inventorySourceLocations());
+    database.location.count.mockResolvedValue(
+      inventorySourceLocations().length
+    );
+    const pageText =
+      "IOIO Lab\nRoom B477\nWorkshop purchase list\nUSB-C cables x4";
+    const helper = makeGenericHelperReadyResult({
+      pageText,
+      items: [
+        {
+          productName: "USB-C cables",
+          quantity: 4,
+          evidenceText: "USB-C cables x4",
+        },
+      ],
+    });
+    mockRequestImportHelperProposal.mockResolvedValue({
+      ...helper,
+      proposal: {
+        ...helper.proposal,
+        rows: helper.proposal.rows.map((row) => ({
+          ...row,
+          room: "A1-1",
+          location: "B477",
+          locationSuggestions: [{ locationId: "room-b477", confidence: 1 }],
+        })),
+      },
+    });
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("https://shelf.test/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: pageText }])],
+        "room-context.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+    if (prepared.status !== "PREPARED") throw new Error("Expected preview");
+    expect(prepared.proposal.rows[0]).toMatchObject({
+      quantity: 4,
+      sourceOrganization: "IOIO Lab",
+      sourceRoom: "B477",
+      sourceStorageLocation: null,
+      locationId: null,
+    });
+  });
+
+  it("keeps an explicit bin unresolved when it exists only in a different room", async () => {
+    preparePdfImportMocks("operation-missing-source-room");
+    database.location.findMany.mockResolvedValue(
+      inventorySourceLocations().map((location) =>
+        location.id === "room-b477" ? { ...location, name: "B478" } : location
+      )
+    );
+    const pageText = inventorySourceText();
+    mockRequestImportHelperProposal.mockResolvedValue(
+      makeGenericHelperReadyResult({ pageText, items: [] })
+    );
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("https://shelf.test/staff/import"),
+      file: new File(
+        [makePdfFromPages([{ text: pageText }])],
+        "unknown-room.pdf",
+        { type: "application/pdf" }
+      ),
+    });
+    if (prepared.status !== "PREPARED") throw new Error("Expected preview");
+    expect(prepared.proposal.rows).toHaveLength(11);
+    expect(
+      prepared.proposal.rows.every(
+        (row) =>
+          row.locationId === null &&
+          row.sourceRoom === "B477" &&
+          row.sourceStorageLocation?.startsWith("A")
+      )
+    ).toBe(true);
+  });
+
   it("sends readable stock-list PDF text through /import and previews six candidates without an Anthropic key", async () => {
     preparePdfImportMocks("operation-stock-list-helper");
     vi.stubEnv("IOIO_IMPORT_HELPER_URL", "http://127.0.0.1:18787");
@@ -4054,7 +4240,7 @@ describe("staff inventory import safety", () => {
     expect(prepared.proposal.rows).toHaveLength(6);
     expect(
       prepared.proposal.rows.every(
-        (row) => row.quantity === null && row.quantityStatus === "UNKNOWN"
+        (row) => row.quantity !== null && row.quantityStatus === "UNKNOWN"
       )
     ).toBe(true);
     expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
