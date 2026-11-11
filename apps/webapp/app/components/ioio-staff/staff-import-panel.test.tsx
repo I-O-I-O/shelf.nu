@@ -1021,20 +1021,212 @@ describe("StaffImportPanel review gate", () => {
     );
   });
 
-  it("shows normalized quantity in the compact table and preloads Edit", () => {
+  it("keeps the compact quantity and expanded editor synchronized", () => {
     renderPanel({ quantity: 4, receivedQuantity: 4, type: "QUANTITY_TRACKED" });
-
-    expect(screen.getByRole("row", { name: /Arduino Nano/ })).toHaveTextContent(
-      "4"
-    );
+    const compact = screen.getByRole("spinbutton", {
+      name: "Quantity for Arduino Nano",
+    });
+    expect(compact).toHaveValue(4);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const quantity = screen.getByLabelText("Inventory quantity");
     expect(quantity).toHaveValue(4);
     fireEvent.change(quantity, { target: { value: "7" } });
-    expect(
-      screen.getAllByRole("row", { name: /Arduino Nano/ })[0]
-    ).toHaveTextContent("7");
+    expect(compact).toHaveValue(7);
+    fireEvent.change(compact, { target: { value: "40" } });
+    expect(quantity).toHaveValue(40);
   });
+
+  it("renders missing quantities as blank editable fields without a fallback", () => {
+    renderPanel({ quantity: null, receivedQuantity: null });
+    const input = screen.getByRole("spinbutton", {
+      name: "Quantity for Arduino Nano",
+    });
+    expect(input).toHaveValue(null);
+    expect(input).toHaveAttribute("min", "1");
+    expect(input).toHaveAttribute("step", "1");
+    expect(screen.getByText("Quantity required")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+    fireEvent.change(input, { target: { value: "1000" } });
+    expect(input).toHaveValue(1000);
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveValue(null);
+    expect(screen.getByText("Quantity required")).toBeVisible();
+  });
+
+  it.each([
+    [{ quantity: 30, receivedQuantity: null }, 30],
+    [{ sourceQuantity: 25, quantity: 30, receivedQuantity: 30 }, 25],
+    [{ sourceQuantity: 1000, quantity: null, receivedQuantity: null }, 1000],
+  ])(
+    "prefills the source quantity before candidate values: %j",
+    (row, expected) => {
+      renderPanel(row);
+      expect(
+        screen.getByRole("spinbutton", { name: "Quantity for Arduino Nano" })
+      ).toHaveValue(expected);
+    }
+  );
+
+  it("keeps a cleared source quantity blank across category edits", () => {
+    renderPanel({ sourceQuantity: 30, quantity: 1, receivedQuantity: 1 });
+    const input = screen.getByRole("spinbutton", {
+      name: "Quantity for Arduino Nano",
+    });
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
+      target: { value: "" },
+    });
+    expect(input).toHaveValue(null);
+    expect(screen.getByText("Quantity required")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+  });
+
+  it("keeps a saved staff quantity ahead of source and helper quantities", () => {
+    renderPanel(
+      { sourceQuantity: 30, quantity: 1, receivedQuantity: 1 },
+      true,
+      {
+        savedReviewDecisions: [{ rowNumber: 1, quantity: 40 }],
+      } as Partial<StaffImportProposal>
+    );
+    expect(
+      screen.getByRole("spinbutton", { name: "Quantity for Arduino Nano" })
+    ).toHaveValue(40);
+  });
+
+  it.each(["-1", "0", "1.5", "1000001"])(
+    "shows an inline error and blocks Apply for invalid quantity %s",
+    (value) => {
+      renderPanel({ quantity: 30, receivedQuantity: 30 });
+      const input = screen.getByRole("spinbutton", {
+        name: "Quantity for Arduino Nano",
+      });
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveValue(Number(value));
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      expect(
+        screen.getByText("Enter a whole number from 1 to 1,000,000.")
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      ).toBeDisabled();
+      fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
+        target: { value: "" },
+      });
+      expect(input).toHaveValue(Number(value));
+    }
+  );
+
+  it("preserves row selections and edited quantities when another row changes", () => {
+    const rows = ["First item", "Second item"].map((title, index) => ({
+      rowNumber: index + 1,
+      title,
+      action: "CREATE",
+      assetId: null,
+      categoryId: "category-1",
+      locationId: null,
+      currentQuantity: null,
+      currentCategoryId: null,
+      currentLocationId: null,
+      quantity: 30,
+      receivedQuantity: 30,
+      type: "QUANTITY_TRACKED",
+      reason: "New item",
+    }));
+    renderPanel({}, true, { rows } as Partial<StaffImportProposal>);
+    const firstApproval = screen.getByLabelText(
+      "Approve First item for import"
+    );
+    const secondApproval = screen.getByLabelText(
+      "Approve Second item for import"
+    );
+    fireEvent.click(firstApproval);
+    fireEvent.click(secondApproval);
+    const first = screen.getByRole("spinbutton", {
+      name: "Quantity for First item",
+    });
+    const second = screen.getByRole("spinbutton", {
+      name: "Quantity for Second item",
+    });
+    fireEvent.change(first, { target: { value: "40" } });
+    fireEvent.change(second, { target: { value: "1000" } });
+    expect(first).toHaveValue(40);
+    expect(second).toHaveValue(1000);
+    expect(firstApproval).toBeChecked();
+    expect(secondApproval).toBeChecked();
+    fireEvent.change(screen.getByLabelText("Category for Second item"), {
+      target: { value: "" },
+    });
+    expect(first).toHaveValue(40);
+    expect(second).toHaveValue(1000);
+    expect(firstApproval).toBeChecked();
+  });
+
+  it.each([40, 1000])(
+    "preserves and submits staff quantity %s across category and other row edits",
+    async (editedQuantity) => {
+      let submitted: FormData | undefined;
+      // why: capture the review action boundary without creating inventory.
+      const action = vi.fn(async ({ request }: { request: Request }) => {
+        const form = await request.formData();
+        if (form.get("intent") === "save-draft")
+          return {
+            error: null,
+            kind: "import-draft-saved",
+            operationId: "operation-1",
+          };
+        submitted = form;
+        return {
+          error: null,
+          kind: "import-in-progress",
+          operationId: "operation-1",
+        };
+      });
+      renderPanel(
+        { sourceQuantity: 30, quantity: 1, receivedQuantity: 1 },
+        true,
+        {},
+        action
+      );
+      const input = screen.getByRole("spinbutton", {
+        name: "Quantity for Arduino Nano",
+      });
+      expect(input).toHaveValue(30);
+      fireEvent.change(input, { target: { value: String(editedQuantity) } });
+      fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
+        target: { value: "" },
+      });
+      expect(input).toHaveValue(editedQuantity);
+      fireEvent.change(screen.getByLabelText("Category for Arduino Nano"), {
+        target: { value: "category-1" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      fireEvent.change(screen.getByLabelText("Item name"), {
+        target: { value: "Edited Arduino Nano" },
+      });
+      expect(input).toHaveValue(editedQuantity);
+      fireEvent.click(screen.getByLabelText("Approve Arduino Nano for import"));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Apply approved changes" })
+        ).toBeEnabled()
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      );
+      await waitFor(() => expect(submitted).toBeDefined());
+      const decisions = JSON.parse(String(submitted?.get("reviewDecisions")));
+      expect(decisions[0]).toMatchObject({
+        quantity: editedQuantity,
+        title: "Edited Arduino Nano",
+      });
+      expect(decisions[0]).not.toHaveProperty("quantityInput");
+    }
+  );
 
   it("labels a concrete existing Shelf candidate as a possible match", () => {
     renderPanel({

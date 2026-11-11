@@ -1454,6 +1454,7 @@ describe("staff inventory import safety", () => {
       receivedQuantity?: number | null;
       orderedQuantity?: number | null;
       quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
+      sourceQuantity?: number;
     };
     sourceLocations?: ReturnType<typeof inventorySourceLocations>;
     proposalRows?: StaffImportProposalRow[];
@@ -1480,6 +1481,9 @@ describe("staff inventory import safety", () => {
           ? ("EXPLICIT_SERIALIZED_SOURCE" as const)
           : ("DEFAULT_QUANTITY" as const),
       quantity: sourceRow ? sourceRow.quantity : quantity,
+      ...(sourceRow?.sourceQuantity !== undefined
+        ? { sourceQuantity: sourceRow.sourceQuantity }
+        : {}),
       receivedQuantity: sourceRow
         ? sourceRow.receivedQuantity ?? null
         : quantity,
@@ -1990,6 +1994,65 @@ describe("staff inventory import safety", () => {
       ]),
     });
   }
+
+  it.each([40, 1000])(
+    "creates stock with staff-edited quantity %s instead of source 30 or helper 1",
+    async (edited) => {
+      const { result, assetRows } = await applyNewImport({
+        quantity: edited,
+        sourceRow: {
+          title: "Arduino Nano",
+          quantity: 1,
+          receivedQuantity: 1,
+          sourceQuantity: 30,
+        },
+      });
+      expect(result).toMatchObject({ succeededRows: 1, failedRowsCount: 0 });
+      expect(assetRows).toHaveLength(1);
+      expect(assetRows[0]).toMatchObject({
+        quantity: edited,
+        type: "QUANTITY_TRACKED",
+      });
+      expect(mockCreateAsset).toHaveBeenCalledWith(
+        expect.objectContaining({ quantity: edited })
+      );
+    }
+  );
+
+  it("creates an item with the reviewed quantity when the source quantity was missing", async () => {
+    const { result, assetRows } = await applyNewImport({
+      quantity: 40,
+      sourceRow: {
+        title: "Arduino Nano",
+        quantity: null,
+        receivedQuantity: null,
+        quantityStatus: "UNKNOWN",
+      },
+    });
+    expect(result).toMatchObject({ succeededRows: 1, failedRowsCount: 0 });
+    expect(assetRows[0].quantity).toBe(40);
+  });
+
+  it.each([-1, 0, 1.5])(
+    "blocks invalid reviewed quantity %s before creating inventory",
+    async (quantity) => {
+      const { result, assetRows } = await applyNewImport({
+        quantity,
+        sourceRow: {
+          title: "Arduino Nano",
+          quantity: 30,
+          receivedQuantity: 30,
+        },
+      });
+      expect(result).toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedCount: 1,
+        blockedRows: [{ issues: [{ code: "INVALID_QUANTITY" }] }],
+      });
+      expect(assetRows).toHaveLength(0);
+      expect(mockCreateAsset).not.toHaveBeenCalled();
+    }
+  );
 
   it("defaults a single imported product to quantity tracking", async () => {
     const { result, assetRows, ledgerRows, modelId } = await applyNewImport({

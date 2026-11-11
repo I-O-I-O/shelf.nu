@@ -130,6 +130,9 @@ type ReviewDecision = {
   approveNewCategory: boolean;
   locationId: string | null;
   quantity: number | null;
+  /** Local editing text; only validated quantity is serialized to the server. */
+  quantityInput?: string;
+  quantityBadInput?: boolean;
   type: "INDIVIDUAL" | "QUANTITY_TRACKED" | null;
   trackingModeConfirmed: boolean;
   trackingModeSelectedByStaff: boolean;
@@ -567,7 +570,12 @@ function StaffImportProposalView({
           newCategoryName: row.proposedCategoryName ?? null,
           approveNewCategory: false,
           locationId: row.locationId,
-          quantity: row.receivedQuantity ?? row.quantity ?? null,
+          quantity:
+            row.sourceQuantity ??
+            row.receivedQuantity ??
+            row.quantity ??
+            row.helperCandidate?.quantity ??
+            null,
           type: defaultTrackingType,
           trackingModeConfirmed: false,
           trackingModeSelectedByStaff: false,
@@ -834,6 +842,20 @@ function StaffImportProposalView({
         if (!validation.ready) nextDecision.decision = null;
       }
       return { ...current, [rowNumber]: nextDecision };
+    });
+  };
+
+  const updateQuantity = (rowNumber: number, raw: string, badInput = false) => {
+    const value = raw.trim() === "" ? null : Number(raw);
+    const valid =
+      value !== null &&
+      Number.isSafeInteger(value) &&
+      value >= 1 &&
+      value <= 1_000_000;
+    updateDecision(rowNumber, {
+      quantityInput: raw,
+      quantityBadInput: badInput,
+      quantity: valid && !badInput ? value : null,
     });
   };
 
@@ -1281,7 +1303,24 @@ function StaffImportProposalView({
                 const quantity =
                   decision && decision.quantity !== undefined
                     ? decision.quantity
-                    : row.receivedQuantity ?? row.quantity ?? null;
+                    : row.sourceQuantity ??
+                      row.receivedQuantity ??
+                      row.quantity ??
+                      row.helperCandidate?.quantity ??
+                      null;
+                const quantityInput =
+                  decision?.quantityInput ??
+                  (quantity == null ? "" : String(quantity));
+                const quantityInvalid =
+                  decision?.quantityBadInput ||
+                  (quantityInput !== "" &&
+                    (!Number.isSafeInteger(Number(quantityInput)) ||
+                      Number(quantityInput) < 1 ||
+                      Number(quantityInput) > 1_000_000));
+                const quantityError = quantityInvalid
+                  ? "Enter a whole number from 1 to 1,000,000."
+                  : undefined;
+                const quantityStateId = `review-quantity-state-${row.rowNumber}`;
                 const proposedImage =
                   decision?.manualImage === null
                     ? null
@@ -1657,8 +1696,52 @@ function StaffImportProposalView({
                           </div>
                         </details>
                       </td>
-                      <td className="whitespace-nowrap p-2 align-top font-semibold tabular-nums">
-                        {quantity ?? "—"}
+                      <td className="w-28 p-2 align-top tabular-nums">
+                        <Input
+                          label={`Quantity for ${row.title}`}
+                          hideLabel
+                          name={`review-table-quantity-${row.rowNumber}`}
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          max={1_000_000}
+                          step={1}
+                          value={quantityInput}
+                          onChange={(event) =>
+                            updateQuantity(
+                              row.rowNumber,
+                              event.currentTarget.value,
+                              event.currentTarget.validity.badInput
+                            )
+                          }
+                          aria-invalid={Boolean(quantityError)}
+                          aria-describedby={quantityStateId}
+                          error={quantityError}
+                          hideErrorText
+                          className="w-24"
+                          inputClassName={`h-9 px-2 py-1 text-sm font-semibold tabular-nums ${
+                            quantityInput === "" && !quantityError
+                              ? "border-amber-400 bg-amber-50"
+                              : quantityError
+                              ? ""
+                              : "border-green-300"
+                          }`}
+                        />
+                        <p
+                          id={quantityStateId}
+                          className={`mt-1 max-w-28 text-xs ${
+                            quantityError
+                              ? "text-error-600"
+                              : quantityInput === ""
+                              ? "text-amber-700"
+                              : "sr-only"
+                          }`}
+                        >
+                          {quantityError ??
+                            (quantityInput === ""
+                              ? "Quantity required"
+                              : "Quantity ready")}
+                        </p>
                       </td>
                       <td className="min-w-36 p-2 align-top">
                         {isResolved ? (
@@ -1843,15 +1926,17 @@ function StaffImportProposalView({
                                 name={`review-quantity-${row.rowNumber}`}
                                 type="number"
                                 min={1}
-                                value={
-                                  reviewDecisions[row.rowNumber]?.quantity ?? ""
-                                }
+                                max={1_000_000}
+                                step={1}
+                                value={quantityInput}
+                                error={quantityError}
+                                aria-invalid={Boolean(quantityError)}
                                 onChange={(event) =>
-                                  updateDecision(row.rowNumber, {
-                                    quantity: event.target.value
-                                      ? Number(event.target.value)
-                                      : null,
-                                  })
+                                  updateQuantity(
+                                    row.rowNumber,
+                                    event.currentTarget.value,
+                                    event.currentTarget.validity.badInput
+                                  )
                                 }
                                 className="w-full min-w-0 max-w-48"
                                 inputClassName="min-w-0"
