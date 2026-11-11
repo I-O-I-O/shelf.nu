@@ -1,5 +1,5 @@
 import type { LoaderFunctionArgs } from "react-router";
-import { data, redirect } from "react-router";
+import { data } from "react-router";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
@@ -9,6 +9,10 @@ import { PUBLIC_BUCKET } from "~/utils/constants";
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const auth = await requireIoioHandbookRead({ context, request });
   const path = new URL(request.url).searchParams.get("path") ?? "";
+  const pathOrganizationId = path.split("/")[1] ?? "";
+  if (!isHandbookImagePathForOrganization(path, pathOrganizationId)) {
+    throw data({ message: "Invalid Handbook image path." }, { status: 400 });
+  }
   if (!isHandbookImagePathForOrganization(path, auth.organizationId)) {
     throw data(
       { message: "This Handbook image is not available." },
@@ -37,11 +41,21 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     }
   }
 
-  const { data: image } = getSupabaseAdmin()
+  const { data: image, error } = await getSupabaseAdmin()
     .storage.from(PUBLIC_BUCKET)
-    .getPublicUrl(path);
-  return redirect(image.publicUrl, {
-    status: 302,
-    headers: { "Cache-Control": "private, no-store" },
+    .download(path);
+  if (error || !image) {
+    throw data(
+      { message: "This Handbook image is not available." },
+      { status: 404 }
+    );
+  }
+
+  return new Response(await image.arrayBuffer(), {
+    headers: {
+      "Content-Type": image.type,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 }
