@@ -1,7 +1,8 @@
+import { readFile, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { readFile, statfs } from "node:fs/promises";
 import { checkApplicationHealth } from "~/utils/healthcheck.server";
+import { getImportHelperHealth } from "./import-helper-client.server";
 
 export type StaffSystemStatus = {
   server: "online" | "issue";
@@ -198,16 +199,21 @@ async function getServerStatus(
 export async function getStaffSystemStatus({
   checkHealth = checkApplicationHealth,
   readStoragePercent = () => getLocalStorageUsedPercent(),
+  checkHelperHealth = getImportHelperHealth,
 }: {
   checkHealth?: typeof checkApplicationHealth;
   readStoragePercent?: () => Promise<number | null>;
+  checkHelperHealth?: typeof getImportHelperHealth;
 } = {}): Promise<StaffSystemStatus> {
-  const [server, storagePercentUsed] = await Promise.all([
+  const [server, storagePercentUsed, helperHealth] = await Promise.all([
     getServerStatus(checkHealth),
     readStoragePercent().catch(() => null),
+    checkHelperHealth().catch(() => ({ status: "unavailable" as const })),
   ]);
 
-  // There is no non-inference Claude reachability check in the app today.
-  // Report that honestly instead of making a model request from the dashboard.
-  return { server, storagePercentUsed, claude: "unavailable" };
+  return {
+    server,
+    storagePercentUsed,
+    claude: helperHealth.status === "ok" ? "online" : "unavailable",
+  };
 }

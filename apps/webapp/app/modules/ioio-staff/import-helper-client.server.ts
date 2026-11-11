@@ -9,6 +9,7 @@ import {
 
 export const DEFAULT_IMPORT_HELPER_TIMEOUT_MS = 20_000;
 export const MAX_IMPORT_HELPER_RESPONSE_BYTES = 2_000_000;
+export const IMPORT_HELPER_HEALTH_TIMEOUT_MS = 1200;
 
 export type ImportHelperManualReason =
   | "helper_not_configured"
@@ -65,16 +66,29 @@ function isValidEndpoint(endpoint: string): boolean {
   }
 }
 
-/** Lightweight health request through the existing helper connection; no inference. */
-export async function getImportHelperStorageUsedPercent(
+export type ImportHelperHealth = {
+  status: "ok" | "unavailable";
+  storageUsedPercent: number | null;
+};
+
+/** Probe the persistent helper without inference or the long import timeout.
+ * Only health data leaves this server-side client, never connection details. */
+export async function getImportHelperHealth(
   config: ImportHelperClientConfig = getRuntimeConfig()
-): Promise<number | null> {
+): Promise<ImportHelperHealth> {
+  const unavailable: ImportHelperHealth = {
+    status: "unavailable",
+    storageUsedPercent: null,
+  };
   const endpoint = config.endpoint?.trim();
   const authToken = config.authToken?.trim();
-  if (!endpoint || !authToken || !isValidEndpoint(endpoint)) return null;
+  if (!endpoint || !authToken || !isValidEndpoint(endpoint)) return unavailable;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1200);
+  const timer = setTimeout(
+    () => controller.abort(),
+    IMPORT_HELPER_HEALTH_TIMEOUT_MS
+  );
   try {
     const response = await (config.fetchImpl ?? fetch)(
       new URL("/health", endpoint),
@@ -82,27 +96,43 @@ export async function getImportHelperStorageUsedPercent(
         method: "GET",
         headers: { authorization: `Bearer ${authToken}` },
         redirect: "error",
+        cache: "no-store",
         signal: controller.signal,
       }
     );
-    if (!response.ok) return null;
+    if (!response.ok) return unavailable;
     const text = await response.text();
-    if (text.length > 2048) return null;
+    if (text.length > 2048) return unavailable;
     const body: unknown = JSON.parse(text);
-    if (!body || typeof body !== "object" || !("storageUsedPercent" in body))
-      return null;
-    const percent = body.storageUsedPercent;
-    return typeof percent === "number" &&
+    if (
+      !body ||
+      typeof body !== "object" ||
+      !("status" in body) ||
+      body.status !== "ok"
+    )
+      return unavailable;
+    const percent =
+      "storageUsedPercent" in body ? body.storageUsedPercent : null;
+    const storageUsedPercent =
+      typeof percent === "number" &&
       Number.isFinite(percent) &&
       percent >= 0 &&
       percent <= 100
-      ? Math.round(percent)
-      : null;
+        ? Math.round(percent)
+        : null;
+    return { status: "ok", storageUsedPercent };
   } catch {
-    return null;
+    return unavailable;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Storage consumers share the same health probe and configuration parsing. */
+export async function getImportHelperStorageUsedPercent(
+  config: ImportHelperClientConfig = getRuntimeConfig()
+): Promise<number | null> {
+  return (await getImportHelperHealth(config)).storageUsedPercent;
 }
 
 function isAbortError(error: unknown): boolean {
