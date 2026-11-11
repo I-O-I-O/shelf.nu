@@ -790,6 +790,8 @@ export async function getAuditSessionDetails({
                 id: true,
                 title: true,
                 mainImage: true,
+                mainImageStoragePath: true,
+                thumbnailImageStoragePath: true,
                 thumbnailImage: true,
                 // Lets the re-sign below tell a lapsed photo URL.
                 mainImageExpiration: true,
@@ -1234,6 +1236,8 @@ export async function getAssetsForAuditSession({
         id: true,
         title: true,
         mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
         thumbnailImage: true,
         // Model cover image for assets with no image of their own
         ...ASSET_MODEL_IMAGE_SELECT,

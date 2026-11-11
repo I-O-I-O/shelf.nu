@@ -67,11 +67,11 @@ import {
   assertAssetQuantitiesAvailable,
   getAssetAvailability,
 } from "~/modules/asset/availability.server";
-import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
 import {
   reconcileManualPlacementsForStockDecrease,
   reportAmbiguousPlacementReconcile,
 } from "~/modules/asset/placement-reconcile.server";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import {
   isDirectBookingBlockedByKit,
   isQuantityTracked,
@@ -13483,6 +13483,20 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
       userOrganizations,
       request,
     });
+
+    const imageRows = (
+      bookingFound as { bookingAssets?: Array<{ asset: object }> }
+    ).bookingAssets?.filter(
+      (row) => row.asset && typeof row.asset === "object"
+    );
+    if (Array.isArray(imageRows)) {
+      const resolved = await resolveAssetImagesForPresentation(
+        imageRows.map((row) => row.asset)
+      );
+      imageRows.forEach((row, index) => {
+        row.asset = resolved[index];
+      });
+    }
 
     return bookingFound;
   } catch (cause) {

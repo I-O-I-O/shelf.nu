@@ -9,21 +9,26 @@ import {
   MAX_PUBLIC_FILES_PER_REMOVE,
   parseFileFormData,
   removePublicFiles,
+  resolveStorageImageUrl,
   uploadFile,
 } from "./storage.server";
 
 // why: the Supabase admin client talks to storage over HTTP; stub `remove` so
 // the tests stay offline and can assert the paths sent in each request
-const { storageRemoveMock, storageUploadMock } = vi.hoisted(() => ({
-  storageRemoveMock: vi.fn(),
-  storageUploadMock: vi.fn(),
-}));
+const { storageRemoveMock, storageUploadMock, storageSignMock } = vi.hoisted(
+  () => ({
+    storageRemoveMock: vi.fn(),
+    storageUploadMock: vi.fn(),
+    storageSignMock: vi.fn(),
+  })
+);
 vi.mock("~/integrations/supabase/client", () => ({
   getSupabaseAdmin: () => ({
     storage: {
       from: () => ({
         remove: storageRemoveMock,
         upload: storageUploadMock,
+        createSignedUrl: storageSignMock,
       }),
     },
   }),
@@ -659,4 +664,54 @@ it("enforces the requested final byte cap after canonical processing and before 
     )
   ).rejects.toThrow();
   expect(storageUploadMock).not.toHaveBeenCalled();
+});
+
+describe("image presentation URL stability", () => {
+  it("reuses a signature across concurrent and repeated loader reads", async () => {
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/stable?token=one" },
+      error: null,
+    });
+    const options = {
+      bucketName: "assets" as const,
+      objectPath: "org/asset/stability.webp",
+      isPublic: false,
+    };
+    const urls = await Promise.all([
+      resolveStorageImageUrl(options),
+      resolveStorageImageUrl(options),
+    ]);
+    expect(await resolveStorageImageUrl(options)).toBe(urls[0]);
+    expect(urls[0]).toBe(urls[1]);
+    expect(storageSignMock).toHaveBeenCalledTimes(1);
+    storageSignMock.mockClear();
+    await resolveStorageImageUrl({
+      ...options,
+      objectPath: "org/asset/replacement.webp",
+    });
+    expect(storageSignMock).toHaveBeenCalledWith(
+      "org/asset/replacement.webp",
+      259200
+    );
+  });
+
+  it("does not cache a failed signing request", async () => {
+    const options = {
+      bucketName: "assets" as const,
+      objectPath: "org/asset/retry.webp",
+      isPublic: false,
+    };
+    storageSignMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: "Object not found" },
+    });
+    await expect(resolveStorageImageUrl(options)).rejects.toThrow();
+    storageSignMock.mockResolvedValueOnce({
+      data: { signedUrl: "https://storage.example/recovered" },
+      error: null,
+    });
+    expect(await resolveStorageImageUrl(options)).toBe(
+      "https://storage.example/recovered"
+    );
+  });
 });

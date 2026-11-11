@@ -102,6 +102,8 @@ describe("getAssetModelRollup", () => {
         name: "MacBook Pro 16",
         description: null,
         image: null,
+        imageStoragePath: "org-1/asset-models/am-1/cover.webp",
+        thumbnailImageStoragePath: "org-1/asset-models/am-1/thumb.webp",
         thumbnailImage: null,
         defaultCategoryId: "cat-1",
         defaultCategoryName: "Laptops",
@@ -119,6 +121,14 @@ describe("getAssetModelRollup", () => {
 
     const result = await getAssetModelRollup(baseArgs);
 
+    expect(result.rows[0].image).toContain(
+      "/storage/v1/object/public/files/org-1/asset-models/am-1/cover.webp"
+    );
+    expect(result.rows[0].thumbnailImage).toContain(
+      "/storage/v1/object/public/files/org-1/asset-models/am-1/thumb.webp"
+    );
+    expect(lastQueryText()).toContain('am."imageStoragePath"');
+    expect(lastQueryText()).toContain('am."thumbnailImageStoragePath"');
     expect(result.totalModels).toBe(3);
     expect(result.totalRollupAssets).toBe(34);
     expect(result.rows[0]).toMatchObject({

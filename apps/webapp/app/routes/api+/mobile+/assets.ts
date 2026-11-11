@@ -162,6 +162,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
             title: true,
             status: true,
             mainImage: true,
+            mainImageStoragePath: true,
+            thumbnailImageStoragePath: true,
             // The scanner invites you to "Enter QR, barcode, or SAM ID", and
             // this list is where that search lands — so each row has to be able
             // to show WHICH SAM ID matched. Without it the user gets hits

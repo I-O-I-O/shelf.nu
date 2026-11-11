@@ -1605,6 +1605,8 @@ async function fetchIdleAssetRows(
       organizationId: true,
       title: true,
       mainImage: true,
+      mainImageStoragePath: true,
+      thumbnailImageStoragePath: true,
       mainImageExpiration: true,
       thumbnailImage: true,
       // Model cover image for assets with no image of their own
@@ -2025,6 +2027,8 @@ async function fetchCustodyRows(
           organizationId: true,
           title: true,
           mainImage: true,
+          mainImageStoragePath: true,
+          thumbnailImageStoragePath: true,
           mainImageExpiration: true,
           thumbnailImage: true,
           // Model cover image for assets with no image of their own
@@ -2328,6 +2332,8 @@ async function fetchTopBookedAssetRows(
               organizationId: true,
               title: true,
               mainImage: true,
+              mainImageStoragePath: true,
+              thumbnailImageStoragePath: true,
               mainImageExpiration: true,
               thumbnailImage: true,
               // Model cover image for assets with no image of their own
@@ -3365,6 +3371,8 @@ async function fetchInventoryRows(
       organizationId: true,
       title: true,
       mainImage: true,
+      mainImageStoragePath: true,
+      thumbnailImageStoragePath: true,
       mainImageExpiration: true,
       thumbnailImage: true,
       // Model cover image for assets with no image of their own
@@ -3908,6 +3916,8 @@ export async function assetUtilizationReport(
         organizationId: true,
         title: true,
         mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
         mainImageExpiration: true,
         thumbnailImage: true,
         // Model cover image for assets with no image of their own
@@ -4208,6 +4218,8 @@ export async function assetActivityReport(
         organizationId: true,
         title: true,
         mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
         mainImageExpiration: true,
         thumbnailImage: true,
         // Model cover image for assets with no image of their own

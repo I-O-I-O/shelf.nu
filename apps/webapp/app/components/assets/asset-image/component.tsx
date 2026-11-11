@@ -179,18 +179,14 @@ export const AssetImage = ({
   const [loadedImageNaturalWidth, setLoadedImageNaturalWidth] = useState(0);
   const {
     isLoading,
-    isImageError,
     isDialogOpen,
-    hasAttemptedRefresh,
-    isFetchingImage,
     refreshedMainImage,
     refreshedThumbnailImage,
     failedImageUrls,
   } = state;
 
   // Track if we've already tried refreshing to prevent loops.
-  // The ref is the authoritative guard (readable from stale closures);
-  // the `hasAttemptedRefresh` state drives the cache-buster in render.
+  // The ref is the authoritative guard, including in stale closures.
   const hasAttemptedRefreshRef = useRef(false);
 
   const { id: assetId, thumbnailImage } = asset;
@@ -198,6 +194,22 @@ export const AssetImage = ({
   // Tracks which asset this instance last rendered, so the mount/refresh effect
   // can detect an asset swap (instance reuse) and reset its per-asset guards.
   const previousAssetIdRef = useRef(assetId);
+  // A new signature for the same object is not a replacement. A new object
+  // (or a removed image) must discard repaired URLs from the old upload.
+  const imageIdentity = JSON.stringify([
+    assetId,
+    asset.mainImage?.replace(
+      /(\/storage\/v1\/object\/sign\/[^?]+)\?.*$/u,
+      "$1"
+    ),
+    asset.thumbnailImage?.replace(
+      /(\/storage\/v1\/object\/sign\/[^?]+)\?.*$/u,
+      "$1"
+    ),
+    asset.assetModel?.image,
+    asset.assetModel?.thumbnailImage,
+  ]);
+  const previousImageIdentityRef = useRef(imageIdentity);
 
   const isPreviewAsset = isAssetForPreview(asset);
   const mainImageExpiration = isPreviewAsset ? asset.mainImageExpiration : null;
@@ -221,9 +233,6 @@ export const AssetImage = ({
    */
   const canRepairImage = resolved.source === "asset";
   const mainImage = canRepairImage ? resolved.fullUrl : null;
-
-  // Create a stable cache-busting key that won't change on re-renders
-  const [cacheBuster] = useState(isImageError ? `?t=${Date.now()}` : "");
 
   /**
    * Prefer a freshly-refreshed URL, falling back to the resolved value. Use
@@ -267,8 +276,7 @@ export const AssetImage = ({
   const activeImageUrl =
     imageCandidates.find((url) => !failedImageUrls.includes(url)) ??
     ASSET_IMAGE_PLACEHOLDER;
-  const imageUrl =
-    activeImageUrl + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+  const imageUrl = activeImageUrl;
 
   // For preview dialog, always use the full-size image before its fallbacks.
   const previewCandidates = [
@@ -284,8 +292,7 @@ export const AssetImage = ({
   const activePreviewUrl =
     previewCandidates.find((url) => !failedImageUrls.includes(url)) ??
     ASSET_IMAGE_PLACEHOLDER;
-  const previewImageUrl =
-    activePreviewUrl + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+  const previewImageUrl = activePreviewUrl;
 
   /**
    * Refreshes the asset's signed main-image (and thumbnail) URLs.
@@ -441,7 +448,11 @@ export const AssetImage = ({
   useEffect(() => {
     // When the asset actually changes (not the initial mount), clear the
     // one-shot guard and the previously-refreshed URLs before scheduling work.
-    if (previousAssetIdRef.current !== assetId) {
+    if (
+      previousAssetIdRef.current !== assetId ||
+      previousImageIdentityRef.current !== imageIdentity
+    ) {
+      previousImageIdentityRef.current = imageIdentity;
       previousAssetIdRef.current = assetId;
       hasAttemptedRefreshRef.current = false;
       setLoadedImageNaturalWidth(0);
@@ -500,7 +511,7 @@ export const AssetImage = ({
       timerIds.forEach((id) => clearTimeout(id));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assetId]); // Re-run when the rendered asset changes
+  }, [assetId, imageIdentity]); // Re-run only when the asset or image object changes
 
   // Debug the image URLs - uncomment during debugging
   // useEffect(() => {
@@ -543,8 +554,7 @@ export const AssetImage = ({
           className
         )}
       >
-        {(isLoading ||
-          (useThumbnail && isFetchingImage && !thumbnailImage)) && (
+        {isLoading && resolved.source !== "placeholder" && (
           <div
             className={tw(
               "absolute inset-0 flex items-center justify-center bg-gray-100",

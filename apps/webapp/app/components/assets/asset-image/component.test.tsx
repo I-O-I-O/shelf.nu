@@ -500,6 +500,96 @@ describe("AssetImage model-image inheritance", () => {
   });
   // why: fetch is the external network boundary; a refresh response is stubbed
   // so the component stores a refreshed URL before the tier changes.
+  it("shows a replacement after a locally refreshed image on the same asset", async () => {
+    // why: fetch is the external storage repair boundary.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          asset: {
+            mainImage: "https://storage.example/repaired.webp",
+            thumbnailImage: "https://storage.example/repaired-thumb.webp",
+          },
+        }),
+        { status: 200 }
+      )
+    );
+    const asset = createExpiredPreviewAsset();
+    const { rerender } = render(
+      <AssetImage asset={asset} alt="Replace repaired" withPreview />
+    );
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    const image = screen.getAllByAltText("Replace repaired")[0];
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/repaired-thumb.webp"
+    );
+    rerender(
+      <AssetImage
+        asset={{
+          ...asset,
+          mainImage: "https://storage.example/new.webp",
+          thumbnailImage: "https://storage.example/new-thumb.webp",
+          mainImageExpiration: new Date("2099-01-01"),
+        }}
+        alt="Replace repaired"
+        withPreview
+      />
+    );
+    expect(screen.getAllByAltText("Replace repaired")[0]).toBe(image);
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/new-thumb.webp"
+    );
+  });
+
+  it("does not cover a loaded full image while generating its thumbnail", async () => {
+    // why: hold the external repair request open to observe background loading.
+    vi.spyOn(global, "fetch").mockReturnValue(new Promise<Response>(() => {}));
+    render(
+      <AssetImage
+        asset={createAssetNeedingThumbnail()}
+        alt="Background thumbnail"
+      />
+    );
+    const image = screen.getByAltText("Background thumbnail");
+    fireEvent.load(image);
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+    expect(image).toHaveAttribute(
+      "src",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t"
+    );
+  });
+
+  it("keeps a no-image placeholder stable without a loading overlay", () => {
+    const asset = createAssetWithoutImage();
+    const { rerender } = render(
+      <AssetImage asset={asset} alt="Stable placeholder" />
+    );
+    const image = screen.getByAltText("Stable placeholder");
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+    rerender(<AssetImage asset={{ ...asset }} alt="Stable placeholder" />);
+    expect(screen.getByAltText("Stable placeholder")).toBe(image);
+    expect(image).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
+  });
+
+  it("keeps the same loaded image element and source during normal revalidation", () => {
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImageExpiration: new Date("2099-01-01"),
+    };
+    const { rerender } = render(<AssetImage asset={asset} alt="Stable" />);
+    const image = screen.getByAltText("Stable");
+    fireEvent.load(image);
+    rerender(<AssetImage asset={{ ...asset }} alt="Stable" />);
+    expect(screen.getByAltText("Stable")).toBe(image);
+    expect(image).toHaveAttribute("src", asset.thumbnailImage);
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+  });
+
   it("drops a refreshed asset url once the asset falls back to its model", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(

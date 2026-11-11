@@ -915,6 +915,18 @@ describe("assetQueryFragment", () => {
 
       expect(sql).toContain('am.image AS "assetModelImage"');
       expect(sql).toContain(
+        'a."mainImageStoragePath" AS "assetMainImageStoragePath"'
+      );
+      expect(sql).toContain(
+        'a."thumbnailImageStoragePath" AS "assetThumbnailImageStoragePath"'
+      );
+      expect(sql).toContain(
+        'am."imageStoragePath" AS "assetModelImageStoragePath"'
+      );
+      expect(sql).toContain(
+        'am."thumbnailImageStoragePath" AS "assetModelThumbnailImageStoragePath"'
+      );
+      expect(sql).toContain(
         'am."thumbnailImage" AS "assetModelThumbnailImage"'
       );
     });

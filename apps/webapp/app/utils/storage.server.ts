@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 
 import { parseFormData } from "@remix-run/form-data-parser";
-import type { LRUCache } from "lru-cache";
+import { LRUCache } from "lru-cache";
 import type { ResizeOptions } from "sharp";
 
 import { extractStoragePath } from "~/components/assets/asset-image/utils";
@@ -32,6 +32,14 @@ const label: ErrorLabel = "File storage";
 
 export type StorageImageBucket = "assets" | "kits" | "files";
 
+// Reuse signatures across loaders/SSE revalidation and coalesce concurrent
+// requests for the same object. Uploads use a new object path on replacement.
+// Keep well inside the signature's 72-hour lifetime; never cache failures.
+const presentationImageUrls = new LRUCache<string, Promise<string>>({
+  max: 5000,
+  ttl: 60 * 60 * 1000,
+});
+
 /**
  * Resolve an image's current presentation URL without making that URL its
  * persisted identity. Legacy Supabase URLs are parsed only when they
@@ -57,7 +65,28 @@ export async function resolveStorageImageUrl({
 
   if (!path) return legacyUrl ?? null;
   if (isPublic) return getPublicFileURL({ filename: path, bucketName });
-  return createSignedUrl({ filename: path, bucketName });
+  const key = `${bucketName}:${path}`;
+  const cached = presentationImageUrls.get(key);
+  if (cached) return cached;
+  const pending = createSignedUrl({ filename: path, bucketName });
+  presentationImageUrls.set(key, pending);
+  try {
+    return await pending;
+  } catch (cause) {
+    if (presentationImageUrls.get(key) === pending) {
+      presentationImageUrls.delete(key);
+    }
+    Logger.warn(
+      new ShelfError({
+        cause: null,
+        message: "Failed to resolve storage image for presentation",
+        additionalData: { bucketName, objectPath: path },
+        label,
+        shouldBeCaptured: false,
+      })
+    );
+    throw cause;
+  }
 }
 
 /** Only interpret legacy URLs as Storage objects when their URL path explicitly

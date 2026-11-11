@@ -32,7 +32,10 @@ import {
 } from "~/components/shared/modal";
 import { PageBackLink } from "~/components/shared/page-back-link";
 import { db } from "~/database/db.server";
+import { serializeAssetImage } from "~/modules/asset/image-resolution";
+import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { getSafeReturnTo } from "~/modules/booking/return-review-navigation";
 import { disableReturnedAssetFromUse } from "~/modules/ioio-staff/return-inspection.server";
 import { completeSubmittedReturn } from "~/modules/ioio-student/return-item.server";
@@ -167,9 +170,15 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
                   returnHandling: true,
                   ioioHidden: true,
                   assetModel: {
-                    select: { organizationId: true, ioioHidden: true },
+                    select: {
+                      organizationId: true,
+                      ioioHidden: true,
+                      ...ASSET_MODEL_IMAGE_SELECT.assetModel.select,
+                    },
                   },
                   mainImage: true,
+                  mainImageStoragePath: true,
+                  thumbnailImageStoragePath: true,
                   thumbnailImage: true,
                 },
               },
@@ -254,6 +263,10 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
       .filter(Boolean)
       .join(" · ");
 
+    const [resolvedAsset] = await resolveAssetImagesForPresentation([
+      bookingAsset.asset,
+    ]);
+    const resolvedImage = serializeAssetImage(resolvedAsset);
     return data(
       payload({
         task: {
@@ -261,8 +274,8 @@ export async function loader({ context, params, request }: LoaderFunctionArgs) {
           assetId: bookingAsset.asset.id,
           title: displayTitle,
           image: {
-            mainImage: bookingAsset.asset.mainImage,
-            thumbnailImage: bookingAsset.asset.thumbnailImage,
+            mainImage: resolvedImage.mainImage,
+            thumbnailImage: resolvedImage.thumbnailImage,
           },
           isKit,
           isProblem,

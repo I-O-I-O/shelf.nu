@@ -193,7 +193,6 @@ import { resolveAssetSearchIds } from "./search-ids.server";
 import { buildAssetStatusWhere, splitAssetSearchTerms } from "./search.server";
 import { getNextSequentialId } from "./sequential-id.server";
 import type {
-  AdvancedIndexAsset,
   AdvancedIndexQueryResult,
   CreateAssetFromBackupImportPayload,
   CreateAssetFromContentImportPayload,
@@ -261,6 +260,18 @@ type AssetImagePresentationFields = {
   kitThumbnailImage?: string | null;
 };
 
+/** A missing thumbnail must not discard valid images for the whole page.
+ * Storage resolution logs bucket/object diagnostics before rejecting. */
+async function resolvePresentationImage(
+  options: Parameters<typeof resolveStorageImageUrl>[0]
+) {
+  try {
+    return await resolveStorageImageUrl(options);
+  } catch {
+    return options.legacyUrl ?? null;
+  }
+}
+
 /** Resolve canonical paths (or supported legacy URLs) for a read response only. */
 export async function resolveAssetImagesForPresentation<T extends object>(
   assets: T[]
@@ -269,13 +280,13 @@ export async function resolveAssetImagesForPresentation<T extends object>(
     assets.map(async (asset) => {
       const imageFields = asset as T & AssetImagePresentationFields;
       const [mainImage, thumbnailImage] = await Promise.all([
-        resolveStorageImageUrl({
+        resolvePresentationImage({
           bucketName: "assets",
           objectPath: imageFields.mainImageStoragePath,
           legacyUrl: imageFields.mainImage,
           isPublic: false,
         }),
-        resolveStorageImageUrl({
+        resolvePresentationImage({
           bucketName: "assets",
           objectPath: imageFields.thumbnailImageStoragePath,
           legacyUrl: imageFields.thumbnailImage,
@@ -286,13 +297,13 @@ export async function resolveAssetImagesForPresentation<T extends object>(
       const assetModel = imageFields.assetModel
         ? {
             ...imageFields.assetModel,
-            image: await resolveStorageImageUrl({
+            image: await resolvePresentationImage({
               bucketName: "files",
               objectPath: imageFields.assetModel.imageStoragePath,
               legacyUrl: imageFields.assetModel.image,
               isPublic: true,
             }),
-            thumbnailImage: await resolveStorageImageUrl({
+            thumbnailImage: await resolvePresentationImage({
               bucketName: "files",
               objectPath: imageFields.assetModel.thumbnailImageStoragePath,
               legacyUrl: imageFields.assetModel.thumbnailImage,
@@ -311,7 +322,7 @@ export async function resolveAssetImagesForPresentation<T extends object>(
                 ...relation,
                 kit: {
                   ...relation.kit,
-                  image: await resolveStorageImageUrl({
+                  image: await resolvePresentationImage({
                     bucketName: "kits",
                     objectPath: relation.kit.imageStoragePath,
                     legacyUrl: relation.kit.image,
@@ -324,14 +335,14 @@ export async function resolveAssetImagesForPresentation<T extends object>(
         : imageFields.assetKits;
 
       const kitImage = imageFields.kitImage
-        ? await resolveStorageImageUrl({
+        ? await resolvePresentationImage({
             bucketName: "kits",
             objectPath: imageFields.kitImageStoragePath,
             legacyUrl: imageFields.kitImage,
             isPublic: false,
           })
         : imageFields.kitImageStoragePath
-        ? await resolveStorageImageUrl({
+        ? await resolvePresentationImage({
             bucketName: "kits",
             objectPath: imageFields.kitImageStoragePath,
             isPublic: false,
@@ -342,9 +353,15 @@ export async function resolveAssetImagesForPresentation<T extends object>(
         ...asset,
         mainImage,
         thumbnailImage,
-        mainImageExpiration: mainImage
-          ? new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
-          : null,
+        ...("mainImageExpiration" in imageFields
+          ? {
+              mainImageExpiration: mainImage
+                ? mainImage === imageFields.mainImage
+                  ? imageFields.mainImageExpiration
+                  : new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+                : null,
+            }
+          : {}),
         assetModel,
         assetKits,
         kitImage,
@@ -1303,7 +1320,7 @@ export async function getAdvancedPaginatedAndFilterableAssets({
       { operationIsRead: true }
     );
     const totalAssets = result[0].total_count;
-    const assets: AdvancedIndexAsset[] = result[0].assets;
+    const assets = await resolveAssetImagesForPresentation(result[0].assets);
     const totalPages = Math.ceil(totalAssets / take);
     return {
       search,
@@ -7722,6 +7739,19 @@ export async function refreshExpiredAssetImages(
   assets: Array<ResignableAssetImageRow & { organizationId?: string }>,
   options: AssetImageResignBounds & { organizationId?: string } = {}
 ): Promise<Array<ResignableAssetImageRow & { organizationId?: string }>> {
+  assets = await Promise.all(
+    assets.map(async (asset) => {
+      const fields = asset as AssetImagePresentationFields;
+      if (
+        !fields.mainImageStoragePath &&
+        !fields.thumbnailImageStoragePath &&
+        !fields.assetModel?.imageStoragePath &&
+        !fields.assetModel?.thumbnailImageStoragePath
+      )
+        return asset;
+      return (await resolveAssetImagesForPresentation([asset]))[0];
+    })
+  );
   const now = new Date();
   // A repeated id is the same asset: it is signed once, and that result applies
   // to every row carrying the id.

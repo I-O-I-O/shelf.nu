@@ -190,6 +190,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
                 unitOfMeasure: true,
                 consumptionType: true,
                 mainImage: true,
+                mainImageStoragePath: true,
+                thumbnailImageStoragePath: true,
                 thumbnailImage: true,
                 // Lets the re-sign below tell a lapsed photo URL.
                 mainImageExpiration: true,

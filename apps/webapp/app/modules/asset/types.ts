@@ -237,7 +237,14 @@ export type AdvancedIndexAsset = Pick<
   /** The model's cover image, used when the asset has none of its own.
    * Shaped as the nested relation the Prisma selects return so
    * `resolveAssetImage` takes the same input on both index modes. */
-  assetModel: { image: string | null; thumbnailImage: string | null } | null;
+  mainImageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
+  assetModel: {
+    image: string | null;
+    thumbnailImage: string | null;
+    imageStoragePath?: string | null;
+    thumbnailImageStoragePath?: string | null;
+  } | null;
   /** Native Kit cover for an asset that belongs to a Kit. */
   kitImage?: string | null;
   /** Primary kit (oldest pivot row) — mirrors the LATERAL primary-pick

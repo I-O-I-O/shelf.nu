@@ -88,6 +88,8 @@ export const KIT_SELECT_FIELDS_FOR_LIST_ITEMS = {
   id: true,
   title: true,
   mainImage: true,
+  mainImageStoragePath: true,
+  thumbnailImageStoragePath: true,
   thumbnailImage: true,
   mainImageExpiration: true,
   // Model cover image for member assets with no image of their own

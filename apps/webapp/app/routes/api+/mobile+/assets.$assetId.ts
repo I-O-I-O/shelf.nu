@@ -93,6 +93,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         description: true,
         status: true,
         mainImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
         // The workspace-scoped "SAM-0017" ID. The detail screen shows it, as
         // the web asset overview does, because the scanner's manual entry
         // accepts it ("Enter QR, barcode, or SAM ID").

@@ -175,9 +175,15 @@ describe("api/bookings/:bookingId/assets-sidebar — read gate", () => {
 
 describe("api/bookings/:bookingId/assets-sidebar — payload", () => {
   it("returns the asset rows with the qty-progress maps the drawer renders", async () => {
+    const asset = {
+      id: "asset-1",
+      mainImage: "https://example.com/stable.webp",
+      thumbnailImage: null,
+      assetModel: null,
+    };
     dbMocks.bookingFindFirst.mockResolvedValue(
       bookingRow({
-        bookingAssets: [{ id: "ba-1", quantity: 5, assetKitId: null }],
+        bookingAssets: [{ id: "ba-1", quantity: 5, assetKitId: null, asset }],
       })
     );
     dbMocks.consumptionLogGroupBy.mockResolvedValue([
@@ -197,7 +203,7 @@ describe("api/bookings/:bookingId/assets-sidebar — payload", () => {
     // part of this route's contract rather than an implementation detail.
     expect(body.error).toBeNull();
     expect(body.bookingAssets).toEqual([
-      { id: "ba-1", quantity: 5, assetKitId: null },
+      { id: "ba-1", quantity: 5, assetKitId: null, asset },
     ]);
     // Returned and damaged both leave the booking, so they sum into the total…
     expect(body.dispositionedByAsset).toEqual({ "asset-1": 3 });

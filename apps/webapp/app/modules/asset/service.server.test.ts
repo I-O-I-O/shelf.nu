@@ -1245,6 +1245,27 @@ describe("resolveAssetImagesForPresentation", () => {
     );
   });
 
+  it("keeps valid full images and other rows when one thumbnail fails to sign", async () => {
+    mockResolveStorageImageUrl.mockImplementation(
+      ({ objectPath, legacyUrl }) =>
+        objectPath === "broken-thumb"
+          ? Promise.reject(new Error("Storage unavailable"))
+          : Promise.resolve(objectPath ?? legacyUrl ?? null)
+    );
+    const result = await resolveAssetImagesForPresentation([
+      {
+        id: "one",
+        mainImageStoragePath: "full-one",
+        thumbnailImageStoragePath: "broken-thumb",
+      },
+      { id: "two", mainImageStoragePath: "full-two" },
+    ]);
+    expect(result).toMatchObject([
+      { mainImage: "full-one", thumbnailImage: null },
+      { mainImage: "full-two" },
+    ]);
+  });
+
   it("resolves path-only asset and model images through Shelf Storage URLs", async () => {
     const [asset] = await resolveAssetImagesForPresentation([
       {

@@ -27,6 +27,7 @@ import type { ExtendedPrismaClient } from "~/database/db.server";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { getPeakReservedUnitsByAsset } from "~/modules/asset/availability-primitives.server";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import {
   updateBarcodes,
   validateBarcodeUniqueness,
@@ -2040,6 +2041,18 @@ export async function getKit<const T extends Prisma.KitInclude | undefined>({
         label,
         status: 404,
         shouldBeCaptured: false, // In this case we shouldnt be capturing the error
+      });
+    }
+
+    const imageRows = (
+      kit as { assetKits?: Array<{ asset: object }> }
+    ).assetKits?.filter((row) => row.asset && typeof row.asset === "object");
+    if (Array.isArray(imageRows)) {
+      const resolved = await resolveAssetImagesForPresentation(
+        imageRows.map((row) => row.asset)
+      );
+      imageRows.forEach((row, index) => {
+        row.asset = resolved[index];
       });
     }
 

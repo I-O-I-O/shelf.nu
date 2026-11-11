@@ -1,25 +1,26 @@
+import { createLoaderArgs } from "@mocks/remix";
 import { db } from "~/database/db.server";
+import { loader } from "~/routes/api+/kits";
 import { makeShelfError } from "~/utils/error";
 import { requirePermission } from "~/utils/roles.server";
-import { loader } from "~/routes/api+/kits";
-import { createLoaderArgs } from "@mocks/remix";
 
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
 
 // why: mocking Remix's data() function to return Response objects for React Router v7 single fetch
-const createDataMock = vitest.hoisted(() => {
-  return () =>
-    vitest.fn((data: unknown, init?: ResponseInit) => {
-      return new Response(JSON.stringify(data), {
-        status: init?.status || 200,
-        headers: {
-          "Content-Type": "application/json",
-          ...(init?.headers || {}),
-        },
-      });
-    });
-});
+const createDataMock = vitest.hoisted(
+  () => () =>
+    vitest.fn(
+      (data: unknown, init?: ResponseInit) =>
+        new Response(JSON.stringify(data), {
+          status: init?.status || 200,
+          headers: {
+            "Content-Type": "application/json",
+            ...(init?.headers || {}),
+          },
+        })
+    )
+);
 
 vitest.mock("react-router", async () => {
   const actual = await vitest.importActual("react-router");
@@ -42,7 +43,9 @@ vitest.mock("~/utils/roles.server", () => ({
   requirePermission: vitest.fn(),
 }));
 
-vitest.mock("~/utils/error", () => ({
+// why: control error responses while preserving error classes used by Storage.
+vitest.mock("~/utils/error", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   makeShelfError: vitest.fn(),
 }));
 
@@ -66,7 +69,7 @@ const mockKits = [
         asset: {
           id: "asset-1",
           title: "Canon Camera",
-          mainImage: "camera.jpg",
+          mainImage: "https://example.com/camera.jpg",
           mainImageExpiration: "2024-12-31T23:59:59Z",
           thumbnailImage: null,
           assetModel: null,
@@ -79,7 +82,7 @@ const mockKits = [
         asset: {
           id: "asset-2",
           title: "Tripod",
-          mainImage: "tripod.jpg",
+          mainImage: "https://example.com/tripod.jpg",
           mainImageExpiration: "2024-12-31T23:59:59Z",
           thumbnailImage: null,
           assetModel: null,
@@ -100,7 +103,7 @@ const mockKits = [
         asset: {
           id: "asset-3",
           title: "Video Camera",
-          mainImage: "video-camera.jpg",
+          mainImage: "https://example.com/video-camera.jpg",
           mainImageExpiration: "2024-12-31T23:59:59Z",
           thumbnailImage: null,
           assetModel: null,
@@ -185,6 +188,8 @@ describe("/api/kits", () => {
                   id: true,
                   title: true,
                   mainImage: true,
+                  mainImageStoragePath: true,
+                  thumbnailImageStoragePath: true,
                   mainImageExpiration: true,
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
@@ -298,6 +303,8 @@ describe("/api/kits", () => {
                   id: true,
                   title: true,
                   mainImage: true,
+                  mainImageStoragePath: true,
+                  thumbnailImageStoragePath: true,
                   mainImageExpiration: true,
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
@@ -360,6 +367,8 @@ describe("/api/kits", () => {
                   id: true,
                   title: true,
                   mainImage: true,
+                  mainImageStoragePath: true,
+                  thumbnailImageStoragePath: true,
                   mainImageExpiration: true,
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's
@@ -427,6 +436,8 @@ describe("/api/kits", () => {
                   id: true,
                   title: true,
                   mainImage: true,
+                  mainImageStoragePath: true,
+                  thumbnailImageStoragePath: true,
                   mainImageExpiration: true,
                   thumbnailImage: true,
                   // Selected so the loader can resolve the member asset's

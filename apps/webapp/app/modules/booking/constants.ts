@@ -222,6 +222,8 @@ export const BOOKINGS_LIST_ASSETS_INCLUDE = {
           availableToBook: true,
           status: true,
           mainImage: true,
+          mainImageStoragePath: true,
+          thumbnailImageStoragePath: true,
           thumbnailImage: true,
           // Model cover image for assets with no image of their own
           ...ASSET_MODEL_IMAGE_SELECT,
@@ -323,6 +325,8 @@ export const BOOKING_WITH_ASSETS_INCLUDE = {
           // flows on the existing booking query rather than issuing a
           // second round-trip for images.
           mainImage: true,
+          mainImageStoragePath: true,
+          thumbnailImageStoragePath: true,
           thumbnailImage: true,
           // Model cover image for assets with no image of their own
           ...ASSET_MODEL_IMAGE_SELECT,
