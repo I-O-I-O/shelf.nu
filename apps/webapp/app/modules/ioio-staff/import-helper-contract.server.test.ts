@@ -829,6 +829,7 @@ describe("import helper contract", () => {
     [400, "invalid_request_400"],
     [401, "unauthorized_401"],
     [502, "helper_inference_502"],
+    [504, "timeout"],
   ] as const)("classifies helper HTTP %s", async (status, classification) => {
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     const fetchImpl = vi.fn(() =>
@@ -887,6 +888,31 @@ describe("import helper contract", () => {
     expect(result).toEqual({ status: "manual", reason: "timeout" });
     expectDiagnostic(loggerInfo, "timeout", null);
   });
+
+  it.each(["http://127.0.0.1:18787", "http://127.0.0.1:18787/import"])(
+    "posts proposals to /import for configured URL %s",
+    async (endpoint) => {
+      // why: assert the HTTP target without invoking the external Claude helper.
+      const fetchImpl = vi.fn(() =>
+        Promise.resolve(jsonResponse(makeResponse()))
+      );
+      const result = await requestImportHelperProposal(makeRequest(), {
+        endpoint,
+        authToken: "test-secret",
+        fetchImpl,
+      });
+      expect(result.status).toBe("ready");
+      expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(
+        new URL("http://127.0.0.1:18787/import"),
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            authorization: "Bearer test-secret",
+          }),
+        })
+      );
+    }
+  );
 
   it("sends only the schema payload and keeps credentials in the auth header", async () => {
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});

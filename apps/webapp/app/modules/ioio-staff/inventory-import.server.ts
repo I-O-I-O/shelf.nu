@@ -42,7 +42,10 @@ import {
   ImportAssetModelConflictError,
   resolveImportAssetModel,
 } from "./import-asset-model.server";
-import { requestImportHelperProposal } from "./import-helper-client.server";
+import {
+  requestImportHelperProposal,
+  type ImportHelperManualReason,
+} from "./import-helper-client.server";
 import {
   createMouserEnrichmentRequest,
   createImportHelperRequest,
@@ -901,6 +904,25 @@ function spreadsheetHeaderField(
 }
 const PDF_AI_ANALYSIS_REQUIRED_MESSAGE =
   "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items.";
+const PDF_HELPER_FAILURE_MESSAGES: Record<ImportHelperManualReason, string> = {
+  helper_not_configured:
+    "AI-assisted document analysis is not configured. Ask an administrator to check the document helper.",
+  network_error:
+    "The Claude document helper is unavailable. Try again in a moment.",
+  timeout:
+    "Claude document analysis timed out. Try again or upload a smaller PDF.",
+  unauthorized_401:
+    "The Claude document helper could not authenticate. Ask an administrator to check its configuration.",
+  invalid_request_400:
+    "The Claude document helper could not accept this document. Try a smaller PDF or contact an administrator.",
+  helper_busy_503: "The Claude document helper is busy. Try again in a moment.",
+  helper_inference_502:
+    "The Claude document helper could not analyze this document. Try again.",
+  helper_http_error:
+    "The Claude document helper is unavailable. Try again in a moment.",
+  invalid_response:
+    "The Claude document helper returned an invalid response. Try again.",
+};
 const PDF_OCR_REQUIRED_MESSAGE =
   "This PDF requires OCR before it can be analyzed.";
 const PDF_OCR_UNRECOVERABLE_MESSAGE =
@@ -5093,7 +5115,13 @@ export async function prepareStaffInventoryImport({
         rows = fallbackPdfTable.rows;
         pdfSummary = fallbackPdfTable.pdfSummary;
       } else {
-        throw importError(PDF_AI_ANALYSIS_REQUIRED_MESSAGE);
+        throw importError(
+          PDF_HELPER_FAILURE_MESSAGES[
+            helperResult.status === "manual"
+              ? helperResult.reason
+              : "invalid_response"
+          ]
+        );
       }
     }
   }

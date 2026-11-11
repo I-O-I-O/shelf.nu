@@ -149,6 +149,8 @@ function classifyHttpFailure(status: number): ImportHelperManualReason {
       return "helper_inference_502";
     case 503:
       return "helper_busy_503";
+    case 504:
+      return "timeout";
     default:
       return "helper_http_error";
   }
@@ -195,16 +197,19 @@ export async function requestImportHelperProposal(
   const timeoutMs = config.timeoutMs ?? DEFAULT_IMPORT_HELPER_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await (config.fetchImpl ?? fetch)(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${authToken}`,
-      },
-      body: requestBody,
-      redirect: "error",
-      signal: controller.signal,
-    });
+    const response = await (config.fetchImpl ?? fetch)(
+      new URL("/import", endpoint),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${authToken}`,
+        },
+        body: requestBody,
+        redirect: "error",
+        signal: controller.signal,
+      }
+    );
     if (!response.ok) {
       const reason = classifyHttpFailure(response.status);
       logResult(reason, response.status);

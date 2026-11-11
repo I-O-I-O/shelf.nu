@@ -7,6 +7,7 @@ import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
+import type * as ImportHelperClient from "./import-helper-client.server";
 import type { MouserEnrichmentRequest } from "./import-helper-contract.server";
 
 const database = vi.hoisted(() => ({
@@ -530,6 +531,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -3965,6 +3968,164 @@ describe("staff inventory import safety", () => {
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
   });
 
+  it("sends readable stock-list PDF text through /import and previews six candidates without an Anthropic key", async () => {
+    preparePdfImportMocks("operation-stock-list-helper");
+    vi.stubEnv("IOIO_IMPORT_HELPER_URL", "http://127.0.0.1:18787");
+    vi.stubEnv("IOIO_IMPORT_HELPER_AUTH_TOKEN", "test-helper-secret");
+    vi.stubEnv("ANTHROPIC_API_KEY", undefined);
+    const items = [
+      [
+        "A1-1",
+        "Assorted wires - mixed sizes and thicknesses",
+        25,
+        "Mixed electrical/prototyping wires",
+      ],
+      [
+        "A1-2",
+        "Arduino cables and assorted connector cables",
+        30,
+        "Assorted connector cables",
+      ],
+      [
+        "A1-3",
+        "U-shaped PCB / breadboard jumper wires",
+        150,
+        "Breadboard jumper wires",
+      ],
+      ["A1-4", "Electroluminescent wire", 10, "Lighting wire"],
+      ["A1-5", "Battery holders / enclosures", 40, "Battery enclosures"],
+      [
+        "A1-6",
+        "9V battery snaps / DC power connector leads",
+        100,
+        "Battery connector leads",
+      ],
+    ] as const;
+    // Typical PDF text extraction separates the table's cells into text lines.
+    const pageText = [
+      "Workshop stock estimate",
+      "Location Item Estimated quantity Description",
+      ...items.map((row) => row.join("\n")),
+    ].join("\n");
+    const buffer = makePdfFromPages([{ text: pageText }]);
+    await expect(
+      parseStaffImportFile({
+        filename: "stock-list.pdf",
+        contentType: "application/pdf",
+        buffer,
+      })
+    ).rejects.toThrow("AI-assisted document analysis is required");
+    const { pageText: _pageText, ...proposal } = makeGenericHelperReadyResult({
+      pageText,
+      items: items.map((row) => ({
+        productName: row[1],
+        quantity: row[2],
+        quantityStatus: "UNKNOWN",
+        description: row[3],
+        evidenceText: row.join("\n"),
+      })),
+    }).proposal;
+    const realClient = await vi.importActual<typeof ImportHelperClient>(
+      "./import-helper-client.server"
+    );
+    mockRequestImportHelperProposal.mockImplementationOnce(
+      realClient.requestImportHelperProposal
+    );
+    // why: mock only the helper HTTP boundary; run real PDF extraction, client,
+    // strict response validation, and preview mapping without Claude inference.
+    const fetchMock = vi.fn((_url: URL, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      expect(body.document.pages[0].text).toContain(items[0][1]);
+      expect(body.document.pages[0].text).toContain(items[5][1]);
+      expect(String(init.body)).not.toContain("test-helper-secret");
+      return Promise.resolve(Response.json(proposal));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("https://shelf.test/staff/import"),
+      file: new File([buffer], "stock-list.pdf", { type: "application/pdf" }),
+    });
+    expect(prepared.status).toBe("PREPARED");
+    if (prepared.status !== "PREPARED") throw new Error("Expected preview");
+    expect(prepared.proposal.rows.map((row) => row.title)).toEqual(
+      items.map((row) => row[1])
+    );
+    expect(prepared.proposal.rows).toHaveLength(6);
+    expect(
+      prepared.proposal.rows.every(
+        (row) => row.quantity === null && row.quantityStatus === "UNKNOWN"
+      )
+    ).toBe(true);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      new URL("http://127.0.0.1:18787/import"),
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          authorization: "Bearer test-helper-secret",
+        }),
+      })
+    );
+    expect(JSON.stringify(prepared)).not.toContain("test-helper-secret");
+    expect(JSON.stringify(prepared)).not.toContain("127.0.0.1:18787");
+  });
+
+  it.each([
+    ["unavailable", "The Claude document helper is unavailable"],
+    ["timeout", "Claude document analysis timed out"],
+    ["malformed", "The Claude document helper returned an invalid response"],
+  ])(
+    "reports a useful %s error for readable PDFs",
+    async (failure, message) => {
+      preparePdfImportMocks(`operation-helper-${failure}`);
+      vi.stubEnv("IOIO_IMPORT_HELPER_URL", "http://127.0.0.1:18787");
+      vi.stubEnv("IOIO_IMPORT_HELPER_AUTH_TOKEN", "test-helper-secret");
+      vi.stubEnv("IOIO_IMPORT_HELPER_TIMEOUT_MS", "5");
+      const realClient = await vi.importActual<typeof ImportHelperClient>(
+        "./import-helper-client.server"
+      );
+      mockRequestImportHelperProposal.mockImplementationOnce(
+        realClient.requestImportHelperProposal
+      );
+      // why: simulate helper HTTP failures while exercising real client error classification.
+      const fetchMock = vi.fn((_url: URL, init: RequestInit) => {
+        if (failure === "unavailable")
+          return Promise.reject(new TypeError("ECONNREFUSED"));
+        if (failure === "malformed")
+          return Promise.resolve(new Response("not-json", { status: 200 }));
+        return new Promise<Response>(
+          (_resolve, reject) =>
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true }
+            )
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(
+        prepareStaffInventoryImport({
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+          request: new Request("https://shelf.test/staff/import"),
+          file: new File(
+            [
+              makePdfFromPages([
+                {
+                  text: "Workshop purchase list\nUSB-C cables x4\nAA rechargeable batteries x8",
+                },
+              ]),
+            ],
+            "purchase-list.pdf",
+            { type: "application/pdf" }
+          ),
+        })
+      ).rejects.toThrow(message);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(database.ioioWriteOperation.create).not.toHaveBeenCalled();
+      expect(database.ioioImportItem.createMany).not.toHaveBeenCalled();
+    }
+  );
+
   it("uses generic Claude for a readable text-based purchase list", async () => {
     preparePdfImportMocks("operation-generic-purchase-list");
     const pageText =
@@ -4297,7 +4458,7 @@ describe("staff inventory import safety", () => {
     );
   });
 
-  it("asks for AI analysis when readable unknown-format text has no safe helper or table result", async () => {
+  it("reports a busy helper when readable unknown-format text has no deterministic rows", async () => {
     preparePdfImportMocks("operation-generic-unavailable");
     const pageText = "Northstar invoice\nItem K-42\nUSB adapter\n4\n21,50";
     mockRequestImportHelperProposal.mockResolvedValue({
@@ -4318,7 +4479,7 @@ describe("staff inventory import safety", () => {
         ),
       })
     ).rejects.toThrow(
-      "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items."
+      "The Claude document helper is busy. Try again in a moment."
     );
 
     expect(loggerInfo).toHaveBeenCalledWith(
@@ -4358,7 +4519,7 @@ describe("staff inventory import safety", () => {
         ),
       })
     ).rejects.toThrow(
-      "This PDF contains readable text, but AI-assisted document analysis is required to identify product line items."
+      "AI-assisted document analysis is not configured. Ask an administrator to check the document helper."
     );
 
     const [helperRequest] = mockRequestImportHelperProposal.mock.calls[0];
