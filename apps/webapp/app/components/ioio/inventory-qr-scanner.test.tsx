@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, createMemoryRouter, RouterProvider } from "react-router";
 import { expect, it, vi } from "vitest";
 import { ImportButton } from "~/components/assets/import-button";
 import { InventoryQrScanner } from "./inventory-qr-scanner";
@@ -7,7 +7,24 @@ import { InventoryQrScanner } from "./inventory-qr-scanner";
 // why: camera hardware is unavailable in happy-dom; opening the existing
 // scanner dialog is enough to verify the trigger still invokes it.
 vi.mock("~/components/scanner/code-scanner", () => ({
-  CodeScanner: () => <div>Camera scanner</div>,
+  CodeScanner: ({
+    onCodeDetectionSuccess,
+  }: {
+    onCodeDetectionSuccess: (result: { value: string }) => void;
+  }) => (
+    <div>
+      Camera scanner
+      <button
+        onClick={() =>
+          onCodeDetectionSuccess({
+            value: "/ioio/browse?location=container-a1-3",
+          })
+        }
+      >
+        Read container
+      </button>
+    </div>
+  ),
 }));
 
 it("uses Import's neutral button style for the staff Scan QR trigger", () => {
@@ -30,4 +47,31 @@ it("uses Import's neutral button style for the staff Scan QR trigger", () => {
 
   fireEvent.click(scanButton);
   expect(screen.getByText("Camera scanner")).toBeInTheDocument();
+});
+
+it("pushes the resolved container filter so Back returns to the previous inventory view", async () => {
+  // why: scanning performs an HTTP resolution request; camera hardware and the server are external to this navigation test.
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(
+      new Response(
+        JSON.stringify({ destination: "/ioio?location=container-a1-3" })
+      )
+    );
+  try {
+    const router = createMemoryRouter(
+      [{ path: "/ioio", element: <InventoryQrScanner audience="student" /> }],
+      { initialEntries: ["/ioio?q=cables"] }
+    );
+    render(<RouterProvider router={router} />);
+    fireEvent.click(screen.getByRole("button", { name: "Scan QR code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Read container" }));
+    await waitFor(() =>
+      expect(router.state.location.search).toBe("?location=container-a1-3")
+    );
+    await router.navigate(-1);
+    expect(router.state.location.search).toBe("?q=cables");
+  } finally {
+    fetch.mockRestore();
+  }
 });

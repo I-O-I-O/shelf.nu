@@ -65,7 +65,10 @@ export function StudentAssetPlaceholder({
     "id" | "title" | "type" | "mainImage" | "thumbnailImage" | "assetModel"
   > & { kitImage?: string | null };
   className?: string;
-  variant?: Extract<AssetImageFrameVariant, "card" | "detail" | "thumbnail">;
+  variant?: Extract<
+    AssetImageFrameVariant,
+    "card" | "catalog" | "detail" | "thumbnail"
+  >;
   imageFit?: "contain" | "cover";
 }) {
   return (
@@ -537,7 +540,10 @@ export function AssetCard({
         aria-label={`View ${formatStudentTitle(asset.title, asset.type)}`}
         className="block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-700"
       >
-        <StudentAssetPlaceholder asset={asset} />
+        <StudentAssetPlaceholder
+          asset={asset}
+          variant={variant === "inventory" ? "catalog" : "card"}
+        />
       </Link>
       <div
         className={`flex min-w-0 flex-col ${

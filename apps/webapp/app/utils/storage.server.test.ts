@@ -667,6 +667,51 @@ it("enforces the requested final byte cap after canonical processing and before 
 });
 
 describe("image presentation URL stability", () => {
+  it.each([
+    "assets/org/qualified.webp",
+    "/assets/org/qualified.webp",
+    "/storage/v1/object/sign/assets/org/qualified.webp?token=secret",
+    "https://old-storage.example/storage/v1/object/sign/assets/org/qualified.webp?token=secret",
+  ])("resolves stored reference %s to its object key", async (objectPath) => {
+    storageSignMock.mockClear();
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/qualified" },
+      error: null,
+    });
+    expect(
+      await resolveStorageImageUrl({
+        bucketName: "assets",
+        objectPath,
+        isPublic: false,
+      })
+    ).toBe("https://storage.example/qualified");
+    // Equivalent references share the cached signature after normalization.
+    if (storageSignMock.mock.calls.length)
+      expect(storageSignMock).toHaveBeenCalledWith(
+        "org/qualified.webp",
+        259200
+      );
+  });
+
+  it("resolves a relative legacy signed URL without treating the token as part of the key", async () => {
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/legacy" },
+      error: null,
+    });
+    expect(
+      await resolveStorageImageUrl({
+        bucketName: "assets",
+        legacyUrl:
+          "/storage/v1/object/sign/assets/org/legacy-relative.webp?token=secret",
+        isPublic: false,
+      })
+    ).toBe("https://storage.example/legacy");
+    expect(storageSignMock).toHaveBeenCalledWith(
+      "org/legacy-relative.webp",
+      259200
+    );
+  });
+
   it("reuses a signature across concurrent and repeated loader reads", async () => {
     storageSignMock.mockResolvedValue({
       data: { signedUrl: "https://storage.example/stable?token=one" },

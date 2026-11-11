@@ -159,11 +159,16 @@ const homeData = {
   returnSubmitted: false,
 };
 
-function renderHome() {
+function renderHome(
+  overrides: Omit<Partial<typeof homeData>, "locationId"> & {
+    locationId?: string | null;
+  } = {},
+  initialEntry = "/ioio"
+) {
   const Stub = createRoutesStub([
     {
       path: "/ioio",
-      loader: () => homeData,
+      loader: () => ({ ...homeData, ...overrides }),
       Component: () => (
         <StudentCheckoutProvider>
           <IoioHome />
@@ -172,7 +177,7 @@ function renderHome() {
       HydrateFallback: () => null,
     },
   ]);
-  return render(<Stub initialEntries={["/ioio"]} />);
+  return render(<Stub initialEntries={[initialEntry]} />);
 }
 
 describe("IOIO student Home inventory", () => {
@@ -203,6 +208,17 @@ describe("IOIO student Home inventory", () => {
     expect(screen.getByRole("link", { name: "Arduino Nano" })).toHaveAttribute(
       "href",
       "/ioio/browse/arduino-nano"
+    );
+    const grid = screen
+      .getByRole("link", { name: "Arduino Nano" })
+      .closest("article")?.parentElement;
+    expect(grid).toHaveClass(
+      "grid-cols-1",
+      "sm:grid-cols-2",
+      "lg:grid-cols-3",
+      "xl:grid-cols-4",
+      "2xl:grid-cols-5",
+      "min-[1920px]:grid-cols-6"
     );
     expect(screen.getByText("5 ready to borrow")).toBeInTheDocument();
     expect(
@@ -287,6 +303,27 @@ describe("IOIO student Home inventory", () => {
     ).toBeNull();
   });
 
+  it("shows an empty container's active location path and lets the user clear it", async () => {
+    renderHome(
+      {
+        assets: [],
+        locationId: "electronics-bay",
+        hasSearchOrFilters: true,
+      },
+      "/ioio?location=electronics-bay"
+    );
+    expect(
+      await screen.findByText("No equipment matches your search")
+    ).toBeInTheDocument();
+    const chip = screen.getByRole("link", {
+      name: /Remove Location:.*Electronics Bay filter/,
+    });
+    expect(chip).toHaveAttribute("href", "/ioio");
+    expect(
+      screen.getByRole("link", { name: "Clear search and filters" })
+    ).toHaveAttribute("href", "/ioio");
+  });
+
   it("uses the requested query and validated filters in the student Shelf inventory read", async () => {
     const result = await homeLoader(
       createLoaderArgs({
@@ -302,19 +339,50 @@ describe("IOIO student Home inventory", () => {
       organizationId: "team-1",
       query: "Arduino",
       categoryId: "category-electronics",
-      locationId: null,
+      locationId: "electronics-bay",
     });
     expect(result.data).toMatchObject({
       query: "Arduino",
       categoryId: "category-electronics",
       itemType: "quantity",
-      locationId: null,
+      locationId: "electronics-bay",
       assets: [{ id: "arduino-nano" }],
     });
     expect(result.data).not.toHaveProperty("availability");
   });
 
-  it("accepts only a room-level location filter and combines it with category and item type", async () => {
+  it("rejects an unknown location instead of loading unfiltered inventory", async () => {
+    await expect(
+      homeLoader(
+        createLoaderArgs({
+          context: { getSession: () => ({ userId: "student-1" }) } as never,
+          request: new Request("http://localhost/ioio?location=foreign-bin"),
+        })
+      )
+    ).rejects.toMatchObject({ init: { status: 404 } });
+    expect(mocks.getStudentAssets).not.toHaveBeenCalled();
+  });
+
+  it("retains an empty container as an active filter", async () => {
+    mocks.getStudentAssets.mockResolvedValue([]);
+    const result = await homeLoader(
+      createLoaderArgs({
+        context: { getSession: () => ({ userId: "student-1" }) } as never,
+        request: new Request("http://localhost/ioio?location=electronics-bay"),
+      })
+    );
+    if (!("data" in result)) throw new Error("Expected Home loader data");
+    expect(result.data).toMatchObject({
+      assets: [],
+      locationId: "electronics-bay",
+      hasSearchOrFilters: true,
+    });
+    expect(mocks.getStudentAssets).toHaveBeenCalledWith(
+      expect.objectContaining({ locationId: "electronics-bay" })
+    );
+  });
+
+  it("accepts a room-level location filter and combines it with category and item type", async () => {
     const result = await homeLoader(
       createLoaderArgs({
         context: { getSession: () => ({ userId: "student-1" }) } as never,

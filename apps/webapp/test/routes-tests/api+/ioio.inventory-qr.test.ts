@@ -1,18 +1,18 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "~/database/db.server";
+import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import {
   getStudentAssets,
   getStudentKits,
   getStudentLocations,
 } from "~/modules/ioio-student/service.server";
-import { requireStudentRead } from "~/modules/ioio-student/route.server";
+import { loader } from "~/routes/api+/ioio.inventory-qr";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-import { loader } from "~/routes/api+/ioio.inventory-qr";
 
 // why: exercise the resolver's permission and organization scoping without connecting to a live database.
 vi.mock("~/database/db.server", () => ({
@@ -148,7 +148,7 @@ describe("IOIO inventory QR resolver", () => {
 
     expect(response.status).toBe(200);
     expect(await json(response)).toEqual({
-      destination: "/ioio/browse?location=container-4",
+      destination: "/ioio?location=container-4",
     });
   });
 
@@ -165,6 +165,26 @@ describe("IOIO inventory QR resolver", () => {
       args("https://shelf.nu/ioio/browse?location=missing-location")
     );
     expect(missingLocation.status).toBe(404);
+  });
+
+  it("resolves staff container labels only inside the current organization", async () => {
+    vi.mocked(db.location.findFirst).mockResolvedValue({
+      id: "container-4",
+    } as never);
+    const response = await loader(
+      args("https://shelf.nu/ioio/browse?location=container-4", "staff")
+    );
+    expect(await json(response)).toEqual({
+      destination: "/assets?location=container-4",
+    });
+    expect(db.location.findFirst).toHaveBeenCalledWith({
+      where: { id: "container-4", organizationId: "org-1" },
+      select: { id: true },
+    });
+    vi.mocked(db.location.findFirst).mockResolvedValue(null);
+    expect(
+      (await loader(args("/ioio?location=foreign-bin", "staff"))).status
+    ).toBe(404);
   });
 
   it("uses Staff asset permissions and the existing staff asset detail route", async () => {

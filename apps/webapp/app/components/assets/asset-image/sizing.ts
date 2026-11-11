@@ -1,4 +1,5 @@
 export const ASSET_IMAGE_FRAME_CLASSES = {
+  catalog: "h-36 sm:h-32",
   card: "mx-auto aspect-[4/3] max-h-[240px] max-w-[320px]",
   detail: "mx-auto h-[min(65vw,16rem)] w-full max-w-[440px] sm:h-64",
   thumbnail: "mx-auto aspect-square",

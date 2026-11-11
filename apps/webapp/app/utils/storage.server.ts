@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 
 import { parseFormData } from "@remix-run/form-data-parser";
@@ -57,14 +58,45 @@ export async function resolveStorageImageUrl({
   legacyUrl?: string | null;
   isPublic: boolean;
 }): Promise<string | null> {
-  const normalizedPath = objectPath?.trim() || null;
+  // Stored references may be bucket-qualified paths or legacy Storage URLs.
+  // Signing requires the object key, not a second bucket prefix or URL.
+  const reference = objectPath?.trim();
+  const normalizedPath = reference
+    ? extractLegacySupabaseObjectPath(reference, bucketName)
+    : null;
   const legacyPath = legacyUrl
     ? extractLegacySupabaseObjectPath(legacyUrl, bucketName)
     : null;
   const path = normalizedPath ?? legacyPath;
 
   if (!path) return legacyUrl ?? null;
-  if (isPublic) return getPublicFileURL({ filename: path, bucketName });
+  if (isPublic) {
+    try {
+      return getPublicFileURL({ filename: path, bucketName });
+    } catch {
+      // Never log the original URL: it can contain a signed token.
+      Logger.warn(
+        new ShelfError({
+          cause: null,
+          message: "Failed to resolve public storage image for presentation",
+          additionalData: {
+            bucketName,
+            objectKeyHash: createHash("sha256")
+              .update(path)
+              .digest("hex")
+              .slice(0, 16),
+          },
+          label,
+          shouldBeCaptured: false,
+        })
+      );
+      throw new ShelfError({
+        cause: null,
+        message: "Failed to resolve public storage image",
+        label,
+      });
+    }
+  }
   const key = `${bucketName}:${path}`;
   const cached = presentationImageUrls.get(key);
   if (cached) return cached;
@@ -80,7 +112,13 @@ export async function resolveStorageImageUrl({
       new ShelfError({
         cause: null,
         message: "Failed to resolve storage image for presentation",
-        additionalData: { bucketName, objectPath: path },
+        additionalData: {
+          bucketName,
+          objectKeyHash: createHash("sha256")
+            .update(path)
+            .digest("hex")
+            .slice(0, 16),
+        },
         label,
         shouldBeCaptured: false,
       })
@@ -96,11 +134,11 @@ function extractLegacySupabaseObjectPath(
   value: string,
   bucketName: StorageImageBucket
 ): string | null {
-  if (!value.includes("://")) {
-    return extractStoragePath(value, bucketName);
+  if (!value.includes("://") && !value.startsWith("/storage/")) {
+    return extractStoragePath(value.replace(/^\/+/, ""), bucketName);
   }
   try {
-    const pathname = new URL(value).pathname;
+    const pathname = new URL(value, "https://storage.invalid").pathname;
     const match = pathname.match(
       new RegExp(
         `/storage/v1/object/(?:public|sign|authenticated)/${bucketName}/(.+)$`

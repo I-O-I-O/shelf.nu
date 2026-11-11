@@ -35,6 +35,10 @@ import { ShelfError } from "~/utils/error";
 // search module). Import it here so the UNION searches the SAME custom-field
 // paths as the old Prisma OR clause — one list, no drift — and
 // re-export for this module's existing importers/tests.
+import {
+  inventorySearchTokens,
+  inventoryWordVariants,
+} from "./search-normalization";
 import { CUSTOM_FIELD_SEARCH_PATHS } from "./search.server";
 
 export { CUSTOM_FIELD_SEARCH_PATHS };
@@ -48,6 +52,23 @@ export type AssetSearchIdRow = { id: string };
  */
 function branchesForTerm(organizationId: string, term: string): Prisma.Sql {
   const like = `%${term}%`;
+  const tokens = inventorySearchTokens(term).slice(0, 12);
+  const match = (column: Prisma.Sql) =>
+    tokens.length
+      ? Prisma.sql`(${Prisma.join(
+          tokens.map(
+            (token) =>
+              Prisma.sql`(${Prisma.join(
+                inventoryWordVariants(token).map(
+                  (variant) => Prisma.sql`${column} ILIKE ${`%${variant}%`}`
+                ),
+                " OR "
+              )})`
+          ),
+          " AND "
+        )})`
+      : Prisma.sql`FALSE`;
+
   const customFieldPredicate = Prisma.join(
     CUSTOM_FIELD_SEARCH_PATHS.map(
       (jsonPath) =>
@@ -83,6 +104,16 @@ function branchesForTerm(organizationId: string, term: string): Prisma.Sql {
   // crossed orgs — safe to use standalone, not only under a caller's outer org
   // filter (see .claude/rules/org-scope-user-supplied-ids.md).
   return Prisma.sql`
+    SELECT a."id" FROM public."Asset" a
+      WHERE a."organizationId" = ${organizationId} AND ${match(
+        Prisma.sql`a."title"`
+      )}
+    UNION
+    SELECT a."id" FROM public."Asset" a
+      JOIN public."AssetModel" am ON am."id" = a."assetModelId"
+      WHERE a."organizationId" = ${organizationId} AND am."organizationId" = ${organizationId}
+        AND ${match(Prisma.sql`am."name"`)}
+    UNION
     SELECT a."id" FROM public."Asset" a
       WHERE a."organizationId" = ${organizationId} AND a."title" ILIKE ${like}
     UNION

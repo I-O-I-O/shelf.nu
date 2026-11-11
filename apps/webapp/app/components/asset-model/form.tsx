@@ -71,6 +71,8 @@ type AssetModelFormProps = {
     | "image"
     | "thumbnailImage"
   > & {
+    /** Present for existing models; creation presets need no persisted target. */
+    id?: AssetModel["id"];
     /** Assets of this model that currently show its cover image (i.e. have no
      * image of their own). Drives the blast-radius hint under the field. */
     _count?: { assets: number };
@@ -424,6 +426,14 @@ function FullPageForm({
         >
           <ImageFileField
             name="image"
+            pasteImages
+            pasteUploadUrl={
+              assetModel?.id
+                ? `/api/inventory-image-upload?kind=model&id=${encodeURIComponent(
+                    assetModel.id
+                  )}`
+                : undefined
+            }
             label="Image"
             currentImage={
               assetModel?.image ? (

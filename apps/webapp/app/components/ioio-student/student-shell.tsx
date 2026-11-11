@@ -538,6 +538,8 @@ function StudentShellContent({
   mobileMenuOpen: boolean;
   setMobileMenuOpen: Dispatch<SetStateAction<boolean>>;
 }) {
+  const { pathname } = useLocation();
+  const isCatalog = pathname.replace(/\/+$/u, "") === "/ioio";
   return (
     <div className="min-h-screen overflow-x-hidden bg-white text-gray-950">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-56 flex-col border-r border-red-100 bg-white p-4 md:flex">
@@ -583,7 +585,11 @@ function StudentShellContent({
           </div>
         </header>
 
-        <main className="mx-auto max-w-6xl px-4 pb-10 pt-6 sm:px-6 lg:px-8">
+        <main
+          className={`mx-auto w-full px-4 pb-10 pt-6 sm:px-6 lg:px-8 ${
+            isCatalog ? "" : "max-w-6xl"
+          }`}
+        >
           <div className="mb-3 hidden justify-end gap-2 md:flex">
             <StudentNotificationBell />
             <StudentBorrowListIndicator />

@@ -122,6 +122,21 @@ describe("buildAssetSearchUnion", () => {
     expect(countBarcode(two)).toBe(countBarcode(one) * 2);
   });
 
+  it.each(["battery", "batteries", "AA battery"])(
+    "binds plural alternatives for %s in the scoped name search",
+    (term) => {
+      const sql = buildAssetSearchUnion({
+        organizationId: orgId,
+        terms: [term],
+      });
+      expect(sql.values).toContain("%battery%");
+      expect(sql.values).toContain("%batteries%");
+      expect(sqlText(sql)).toContain('am."organizationId"');
+      expect(sqlText(sql)).toContain('am."name" ILIKE');
+      if (term.startsWith("AA")) expect(sql.values).toContain("%aa%");
+    }
+  );
+
   it("throws on empty terms (caller must guard)", () => {
     expect(() =>
       buildAssetSearchUnion({ organizationId: orgId, terms: [] })

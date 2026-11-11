@@ -24,7 +24,7 @@ describe("inventory QR destinations", () => {
           { kind: "location", locationId: parsed.locationId },
           "student"
         )
-      ).toBe("/ioio/browse?location=container-4");
+      ).toBe("/ioio?location=container-4");
       expect(
         getInventoryQrDestination(
           { kind: "location", locationId: parsed.locationId },
@@ -32,6 +32,13 @@ describe("inventory QR destinations", () => {
         )
       ).toBe("/assets?location=container-4");
     }
+  });
+
+  it("accepts current catalog location URLs as well as printed legacy URLs", () => {
+    expect(parseInventoryQrValue("/ioio?location=container-a1-3")).toEqual({
+      kind: "location",
+      locationId: "container-a1-3",
+    });
   });
 
   it("routes assets through each audience's existing inventory detail", () => {

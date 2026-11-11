@@ -23,7 +23,10 @@ export function parseInventoryQrValue(
   try {
     const url = new URL(trimmed, baseUrl);
     const locationId = url.searchParams.get("location");
-    if (url.pathname.replace(/\/+$/u, "") === "/ioio/browse" && locationId) {
+    if (
+      ["/ioio", "/ioio/browse"].includes(url.pathname.replace(/\/+$/u, "")) &&
+      locationId
+    ) {
       return { kind: "location", locationId };
     }
 
@@ -51,7 +54,7 @@ export function getInventoryQrDestination(
 ) {
   if (target.kind === "location") {
     const params = new URLSearchParams({ location: target.locationId });
-    return `${audience === "student" ? "/ioio/browse" : "/assets"}?${params}`;
+    return `${audience === "student" ? "/ioio" : "/assets"}?${params}`;
   }
 
   if (target.kind === "asset") {

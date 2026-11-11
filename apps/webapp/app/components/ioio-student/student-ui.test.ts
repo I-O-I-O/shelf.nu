@@ -546,11 +546,17 @@ describe("student checkout action", () => {
 });
 
 describe("student inventory cards", () => {
-  it.each(["Makey Kit", "Camera"])(
+  it.each([
+    "Makey Kit",
+    "Camera",
+    "Assorted electrical prototyping wires and connectors with mixed sizes and thicknesses",
+  ])(
     "shows room and assigned location for %s cards while keeping availability beside borrow",
     (title) => {
       const asset = checkoutAsset({
         title,
+        mainImage:
+          title === "Camera" ? "https://storage.example/camera.webp" : null,
         availableQuantity: 5,
         locations: [
           {
@@ -578,6 +584,12 @@ describe("student inventory cards", () => {
       render(createElement(RouterProvider, { router }));
 
       expect(screen.getByRole("link", { name: title })).toBeTruthy();
+      expect(screen.getByRole("link", { name: title })).toHaveClass(
+        "line-clamp-2"
+      );
+      expect(
+        screen.getByAltText(`Image of ${title}`).closest(".h-36")
+      ).toHaveClass("h-36", "sm:h-32");
       expect(screen.getByText("IOIO Lab - B477 · Container A1-1")).toBeTruthy();
       const availability = screen.getByText("5 ready to borrow");
       const borrowAction = screen.getByRole("button", {

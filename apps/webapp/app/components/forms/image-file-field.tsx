@@ -26,7 +26,7 @@
  * @see {@link file://../../atoms/file.ts} Validation atoms
  */
 import type { ChangeEvent, ReactNode } from "react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { WritableAtom } from "jotai";
 import { useSetAtom } from "jotai";
 import { defaultValidateFileAtom } from "~/atoms/file";
@@ -54,6 +54,10 @@ type ValidateFileAtom = WritableAtom<
 type ImageFileFieldProps = {
   /** Form field name the action reads the file from. */
   name: string;
+  /** Enable clipboard images within this field's owning form. */
+  pasteImages?: boolean;
+  /** Existing entities can persist pasted images immediately. */
+  pasteUploadUrl?: string;
   /** Accessible label of the file input (visually hidden). */
   label: string;
   /**
@@ -94,6 +98,8 @@ type ImageFileFieldProps = {
  */
 export function ImageFileField({
   name,
+  pasteImages = false,
+  pasteUploadUrl,
   label,
   currentImage,
   previewAlt,
@@ -109,6 +115,89 @@ export function ImageFileField({
   const validateFile = useSetAtom(validateFileAtom);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const hintId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const pasteBusy = useRef(false);
+  const [uploading, setUploading] = useState(false);
+  const [pasteError, setPasteError] = useState<string>();
+
+  useEffect(() => {
+    const input = inputRef.current;
+    const form = input?.closest("form");
+    if (!pasteImages || !input || !form || disabled) return;
+    const paste = async (event: ClipboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        (event.target instanceof Element &&
+          event.target.closest("form") !== form)
+      )
+        return;
+      const item = Array.from(event.clipboardData?.items ?? []).find(
+        (entry) => entry.kind === "file" && entry.type.startsWith("image/")
+      );
+      const file = item?.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      if (pasteBusy.current) return;
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      // Validate in a scratch input so rejection preserves the previous selection.
+      const candidate = document.createElement("input");
+      candidate.type = "file";
+      candidate.accept = input.accept;
+      candidate.files = transfer.files;
+      setPasteError(undefined);
+      validateFile({
+        target: candidate,
+        currentTarget: candidate,
+      } as ChangeEvent<HTMLInputElement>);
+      const accepted = candidate.files?.[0];
+      if (!accepted) return;
+      if (!pasteUploadUrl) {
+        input.files = candidate.files;
+        setPreviewUrl(URL.createObjectURL(accepted));
+        onFileChange?.(accepted);
+        return;
+      }
+      pasteBusy.current = true;
+      setUploading(true);
+      try {
+        const body = new FormData();
+        body.append(name, accepted);
+        const response = await fetch(pasteUploadUrl, { method: "POST", body });
+        const result = await response.json();
+        if (!response.ok || result.success !== true)
+          throw new Error(
+            typeof result.error === "string"
+              ? result.error
+              : "Image upload failed. Try again."
+          );
+        input.value = ""; // Already persisted; Save must not upload a second copy.
+        setPreviewUrl(URL.createObjectURL(accepted));
+        onFileChange?.(accepted);
+      } catch (cause) {
+        setPasteError(
+          cause instanceof Error
+            ? cause.message
+            : "Image upload failed. Try again."
+        );
+      } finally {
+        pasteBusy.current = false;
+        setUploading(false);
+      }
+    };
+    const submit = (event: Event) => {
+      if (pasteBusy.current) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    form.addEventListener("paste", paste);
+    form.addEventListener("submit", submit, true);
+    return () => {
+      form.removeEventListener("paste", paste);
+      form.removeEventListener("submit", submit, true);
+    };
+  }, [disabled, name, onFileChange, pasteImages, pasteUploadUrl, validateFile]);
 
   // Each object URL pins its file in memory until revoked: release the old
   // one when the preview changes, and the last one on unmount.
@@ -124,6 +213,7 @@ export function ImageFileField({
    * @param event - Change event of the file input
    */
   function handleChange(event: ChangeEvent<HTMLInputElement>) {
+    setPasteError(undefined);
     validateFile(event);
     // Read the file after validation: a rejected file has been cleared from
     // the input, and an accepted one may have been swapped for a copy with a
@@ -150,6 +240,7 @@ export function ImageFileField({
           {hint}
         </div>
         <Input
+          ref={inputRef}
           accept={ACCEPT_SUPPORTED_IMAGES}
           name={name}
           type="file"
@@ -157,11 +248,20 @@ export function ImageFileField({
           label={label}
           hideLabel
           aria-describedby={hintId}
-          error={error}
-          disabled={disabled}
+          error={pasteError ?? error}
+          disabled={disabled || uploading}
           className="mt-2"
           inputClassName="border-0 shadow-none p-0 rounded-none"
         />
+        {pasteImages ? (
+          <p className="mt-2 text-xs text-gray-500" role="status">
+            {uploading
+              ? "Uploading image…"
+              : pasteUploadUrl
+              ? "Paste an image anywhere in this form to upload it immediately."
+              : "Paste an image anywhere in this form; Save uploads it."}
+          </p>
+        ) : null}
         {belowInput ? <div className="order-last">{belowInput}</div> : null}
       </div>
     </div>

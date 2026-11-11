@@ -239,6 +239,8 @@ describe("student catalog source selectors", () => {
   });
 
   it.each([
+    ["container-a1-3", ["container-a1-3"]],
+    ["shelf-a1", ["shelf-a1", "container-a1-3"]],
     ["ioio-room", ["ioio-room", "section-a", "shelf-a1", "container-a1-1"]],
     ["storage-room", ["storage-room", "storage-section", "storage-shelf"]],
     [

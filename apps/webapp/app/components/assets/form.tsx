@@ -996,6 +996,14 @@ export const AssetForm = ({
         <FormRow rowLabel={"Main image"} className="pt-[10px]">
           <ImageFileField
             name="mainImage"
+            pasteImages
+            pasteUploadUrl={
+              asset?.id
+                ? `/api/inventory-image-upload?kind=asset&id=${encodeURIComponent(
+                    asset.id
+                  )}`
+                : undefined
+            }
             label="Main image"
             /*
               One picture for both tiers of the cascade. `clearMainImage` makes
@@ -1044,7 +1052,10 @@ export const AssetForm = ({
                 wide on upload.
               </>
             }
-            onFileChange={(file) => setHasPickedImage(Boolean(file))}
+            onFileChange={(file) => {
+              setHasPickedImage(Boolean(file));
+              if (file) setClearMainImage(false);
+            }}
             aboveInput={
               <>
                 <When

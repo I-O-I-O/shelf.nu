@@ -7,6 +7,11 @@ import {
 import type { AssetStatus, Organization } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { getAssetAvailabilityBatch } from "~/modules/asset/availability.server";
+import {
+  inventorySearchTokens,
+  inventoryWordVariants,
+  inventorySearchScore,
+} from "~/modules/asset/search-normalization";
 import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { getActiveCategoriesForOrganization } from "~/modules/category/service.server";
 import {
@@ -401,6 +406,51 @@ export async function getStudentAssets({
       ...(normalizedQuery
         ? {
             OR: [
+              ...(inventorySearchTokens(normalizedQuery).length
+                ? [
+                    {
+                      AND: inventorySearchTokens(normalizedQuery)
+                        .slice(0, 12)
+                        .map((token) => ({
+                          OR: inventoryWordVariants(token).flatMap(
+                            (variant) => [
+                              {
+                                title: {
+                                  contains: variant,
+                                  mode: "insensitive" as const,
+                                },
+                              },
+                              {
+                                description: {
+                                  contains: variant,
+                                  mode: "insensitive" as const,
+                                },
+                              },
+                              {
+                                assetModel: {
+                                  is: {
+                                    organizationId,
+                                    name: {
+                                      contains: variant,
+                                      mode: "insensitive" as const,
+                                    },
+                                  },
+                                },
+                              },
+                              {
+                                category: {
+                                  name: {
+                                    contains: variant,
+                                    mode: "insensitive" as const,
+                                  },
+                                },
+                              },
+                            ]
+                          ),
+                        })),
+                    },
+                  ]
+                : []),
               { title: { contains: normalizedQuery, mode: "insensitive" } },
               {
                 sequentialId: {
@@ -438,6 +488,20 @@ export async function getStudentAssets({
   const visibleRows = includeHidden
     ? rows
     : rows.filter((row) => !isIoioAssetHidden(row, organizationId));
+  if (normalizedQuery) {
+    const score = (row: (typeof visibleRows)[number]) =>
+      Math.max(
+        inventorySearchScore(row.title, normalizedQuery),
+        inventorySearchScore(row.assetModel?.name ?? "", normalizedQuery)
+      );
+    const scores = new Map(visibleRows.map((row) => [row.id, score(row)]));
+    visibleRows.sort(
+      (left, right) =>
+        (scores.get(right.id) ?? 0) - (scores.get(left.id) ?? 0) ||
+        left.title.localeCompare(right.title) ||
+        left.id.localeCompare(right.id)
+    );
+  }
   return shapeAssets(visibleRows, organizationId, archivedKitIds);
 }
 

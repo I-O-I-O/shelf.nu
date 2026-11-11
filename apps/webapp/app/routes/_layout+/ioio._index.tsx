@@ -7,7 +7,7 @@ import { InventoryQrScanner } from "~/components/ioio/inventory-qr-scanner";
 import {
   filterStudentInventory,
   getStudentAssetLocationDisplay,
-  getStudentLabAreaFilters,
+  getStudentLocationPath,
   groupStudentAssets,
 } from "~/components/ioio-student/inventory-presentation";
 import {
@@ -39,7 +39,7 @@ import {
 } from "~/modules/ioio-student/service.server";
 import { getIoioPhysicalUnitDisplayName } from "~/modules/kit/ioio-kit-presentation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { error, payload } from "~/utils/http.server";
 
 export const meta: MetaFunction<typeof loader> = () => [{ title: "IOIO Lab" }];
@@ -83,13 +83,20 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             ? requestedCategory
             : null;
           const requestedLocation = params.get("location");
-          const locationId = requestedLocation
-            ? getStudentLabAreaFilters(locations).some(
-                (area) => area.locationId === requestedLocation
-              )
-              ? requestedLocation
-              : null
-            : null;
+          if (
+            requestedLocation &&
+            !getStudentLocationPath(requestedLocation, locations)
+          ) {
+            throw new ShelfError({
+              cause: null,
+              message:
+                "This storage location is not available to your account.",
+              label: "Assets",
+              status: 404,
+              shouldBeCaptured: false,
+            });
+          }
+          const locationId = requestedLocation || null;
           const allAssets = await getStudentAssets({
             organizationId,
             query: params.get("q"),
@@ -552,7 +559,7 @@ export default function IoioHome() {
           Showing {assets.length} {assets.length === 1 ? "item" : "items"}
         </p>
         {assets.length ? (
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6">
             {assets.map((asset) => (
               <AssetCard key={asset.id} asset={asset} />
             ))}

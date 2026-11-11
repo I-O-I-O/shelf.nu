@@ -16,11 +16,11 @@
  * @see {@link file://./image-file-field.tsx}
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createStore, Provider } from "jotai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { assetImageValidateFileAtom } from "~/atoms/file";
+import { assetImageValidateFileAtom, fileErrorAtom } from "~/atoms/file";
 import {
   ASSET_MAX_IMAGE_UPLOAD_SIZE,
   DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
@@ -31,17 +31,23 @@ type FieldProps = Parameters<typeof ImageFileField>[0];
 
 /** Renders the field in its own jotai store so validation state never leaks. */
 function renderField(props: Partial<FieldProps> = {}) {
-  return render(
-    <Provider store={createStore()}>
-      <ImageFileField
-        name="image"
-        label="Main image"
-        previewAlt="Picked file"
-        currentImage={<img src="/saved.png" alt="Saved logo" />}
-        {...props}
-      />
+  const store = createStore();
+  const result = render(
+    <Provider store={store}>
+      <form>
+        <input aria-label="Description" />
+        <ImageFileField
+          name="image"
+          label="Main image"
+          previewAlt="Picked file"
+          currentImage={<img src="/saved.png" alt="Saved logo" />}
+          {...props}
+        />
+        <button type="submit">Save</button>
+      </form>
     </Provider>
   );
+  return { ...result, store };
 }
 
 /** The file input, found by its (visually hidden) label. */
@@ -59,6 +65,16 @@ function pngFile(name: string, size = 1024) {
   return new File([new Uint8Array(size)], name, { type: "image/png" });
 }
 
+function pasteImage(file: File) {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: {
+      items: [{ kind: "file", type: file.type, getAsFile: () => file }],
+    },
+  });
+  fireEvent(screen.getByLabelText("Description"), event);
+}
+
 const TOO_BIG = DEFAULT_MAX_IMAGE_UPLOAD_SIZE + 1;
 let objectUrlCount = 0;
 
@@ -74,6 +90,131 @@ afterEach(() => {
 });
 
 describe("ImageFileField", () => {
+  it.each(["mainImage", "image"])(
+    "uploads pasted %s through multipart and replaces the preview only after success",
+    async (name) => {
+      let finish!: (response: Response) => void;
+      // why: upload HTTP is external; control completion to test pending and success states.
+      const upload = vi.spyOn(globalThis, "fetch").mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          })
+      );
+      const changed = vi.fn();
+      renderField({
+        name,
+        pasteImages: true,
+        pasteUploadUrl: "/api/inventory-image-upload?kind=asset&id=one",
+        onFileChange: changed,
+      });
+      const file = pngFile("pasted.png");
+      pasteImage(file);
+      expect(screen.getByText("Uploading image…")).toBeInTheDocument();
+      expect(screen.getByAltText("Saved logo")).toBeInTheDocument();
+      expect(fileInput()).toBeDisabled();
+      const body = upload.mock.calls[0][1]?.body as FormData;
+      expect(body.get(name)).toBeInstanceOf(File);
+      expect((body.get(name) as File).name).toBe("pasted.png");
+      expect(
+        fileInput()
+          .closest("form")!
+          .dispatchEvent(
+            new Event("submit", { bubbles: true, cancelable: true })
+          )
+      ).toBe(false);
+      finish(new Response(JSON.stringify({ success: true })));
+      await waitFor(() =>
+        expect(screen.getByAltText("Picked file")).toHaveAttribute(
+          "src",
+          "blob:mock-1"
+        )
+      );
+      expect(fileInput()).not.toBeDisabled();
+      expect(fileInput().files).toHaveLength(0);
+      expect(changed).toHaveBeenCalledWith(file);
+    }
+  );
+
+  it("keeps the current preview and reports a failed upload", async () => {
+    // why: simulate storage failure without network access.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "Storage unavailable" }), {
+        status: 503,
+      })
+    );
+    renderField({
+      pasteImages: true,
+      pasteUploadUrl: "/api/inventory-image-upload",
+    });
+    const file = pngFile("pasted.png");
+    pasteImage(file);
+    expect(await screen.findByText("Storage unavailable")).toBeInTheDocument();
+    expect(screen.getByAltText("Saved logo")).toBeInTheDocument();
+    expect(screen.queryByAltText("Picked file")).toBeNull();
+  });
+
+  it("replaces an uploaded paste with a second image and releases the previous preview", async () => {
+    // why: storage HTTP is external; successful responses exercise repeated replacement.
+    vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({ success: true })))
+    );
+    renderField({
+      pasteImages: true,
+      pasteUploadUrl: "/api/inventory-image-upload",
+    });
+    pasteImage(pngFile("first.png"));
+    await waitFor(() =>
+      expect(screen.getByAltText("Picked file")).toHaveAttribute(
+        "src",
+        "blob:mock-1"
+      )
+    );
+    pasteImage(pngFile("second.png"));
+    await waitFor(() =>
+      expect(screen.getByAltText("Picked file")).toHaveAttribute(
+        "src",
+        "blob:mock-2"
+      )
+    );
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock-1");
+  });
+
+  it("leaves text paste untouched and ignores images outside its owning form", () => {
+    renderField({ pasteImages: true });
+    const text = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(text, "clipboardData", {
+      value: { items: [{ kind: "string", type: "text/plain" }] },
+    });
+    expect(screen.getByLabelText("Description").dispatchEvent(text)).toBe(true);
+    const outside = new Event("paste", { bubbles: true, cancelable: true });
+    expect(document.body.dispatchEvent(outside)).toBe(true);
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it.each(["oversize", "unsupported"])(
+    "rejects %s clipboard images without uploading or replacing a selection",
+    (kind) => {
+      // why: rejected clipboard files must never make an HTTP upload request.
+      const upload = vi.spyOn(globalThis, "fetch");
+      const { store } = renderField({
+        pasteImages: true,
+        pasteUploadUrl: "/api/inventory-image-upload",
+      });
+      const file =
+        kind === "oversize"
+          ? pngFile("huge.png", TOO_BIG)
+          : new File(["gif"], "image.gif", { type: "image/gif" });
+      pasteImage(file);
+      expect(store.get(fileErrorAtom)).toMatch(
+        kind === "oversize" ? /Max file size/ : /Allowed file types/
+      );
+      expect(upload).not.toHaveBeenCalled();
+      expect(screen.getByAltText("Saved logo")).toBeInTheDocument();
+      expect(screen.queryByAltText("Picked file")).toBeNull();
+    }
+  );
+
   it("shows the saved image until a file is picked", () => {
     renderField();
 

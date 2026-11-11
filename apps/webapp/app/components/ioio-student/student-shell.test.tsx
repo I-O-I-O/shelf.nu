@@ -111,7 +111,8 @@ describe("StudentShell account controls", () => {
     expect(
       within(mobileHeader).getByRole("link", { name: /Open borrowing list/ })
     ).toBeInTheDocument();
-    expect(screen.getByRole("main")).toHaveClass("pt-6");
+    expect(screen.getByRole("main")).toHaveClass("pt-6", "w-full");
+    expect(screen.getByRole("main")).not.toHaveClass("max-w-6xl");
     expect(
       screen.getAllByRole("button", { name: "Open notifications" })
     ).toHaveLength(2);
