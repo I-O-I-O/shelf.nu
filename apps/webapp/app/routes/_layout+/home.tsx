@@ -268,7 +268,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
       });
       return payload({ kind: "import-partial" as const, proposal, result });
     }
-    return payload({ kind: "import-result", result });
+    const proposal = await getStaffInventoryImportProposal({
+      context,
+      request,
+      operationId,
+    });
+    return payload({ kind: "import-complete" as const, proposal, result });
   } catch (cause) {
     const reason = makeShelfError(cause);
     return data(error(reason), { status: reason.status });

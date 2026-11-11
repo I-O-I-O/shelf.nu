@@ -1455,6 +1455,8 @@ describe("staff inventory import safety", () => {
       orderedQuantity?: number | null;
       quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
       sourceQuantity?: number;
+      sourceRoom?: string;
+      sourceOrganization?: string;
     };
     sourceLocations?: ReturnType<typeof inventorySourceLocations>;
     proposalRows?: StaffImportProposalRow[];
@@ -1480,6 +1482,8 @@ describe("staff inventory import safety", () => {
         type === "INDIVIDUAL"
           ? ("EXPLICIT_SERIALIZED_SOURCE" as const)
           : ("DEFAULT_QUANTITY" as const),
+      sourceRoom: sourceRow?.sourceRoom,
+      sourceOrganization: sourceRow?.sourceOrganization,
       quantity: sourceRow ? sourceRow.quantity : quantity,
       ...(sourceRow?.sourceQuantity !== undefined
         ? { sourceQuantity: sourceRow.sourceQuantity }
@@ -2219,6 +2223,81 @@ describe("staff inventory import safety", () => {
     ]);
     expect(mockCreateAsset).not.toHaveBeenCalled();
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
+  });
+
+  it("persists final reviewed values in the successful ledger and reopens them independently of later drafts", async () => {
+    const { operation, operationId, assetRows, ledgerRows } =
+      await applyNewImport({
+        quantity: 30,
+        sourceRow: {
+          title: "Arduino cables",
+          quantity: 30,
+          sourceRoom: "B477",
+          sourceOrganization: "IOIO Lab",
+        },
+        reviewDecisionRows: [
+          {
+            rowNumber: 2,
+            decision: "APPROVE",
+            title: "Reviewed Arduino cables",
+            quantity: 40,
+            categoryId: "category-electronics",
+            locationId: null,
+            type: "QUANTITY_TRACKED",
+            unitOfMeasure: "pcs",
+            consumptionType: "TWO_WAY",
+          },
+        ],
+      });
+    expect(assetRows[0]).toMatchObject({
+      title: "Reviewed Arduino cables",
+      quantity: 40,
+    });
+    expect(
+      ledgerRows.find((item) => item.unitIndex === null)?.writtenState
+        .reviewedRow
+    ).toMatchObject({
+      title: "Reviewed Arduino cables",
+      quantity: 40,
+      categoryLabel: "Electronics",
+      locationLabel: "Unassigned",
+    });
+    const description = JSON.parse(operation.description);
+    description.reviewDraft = [];
+    operation.description = JSON.stringify(description);
+    const reopened = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+    });
+    expect(reopened.appliedRowNumbers).toEqual([2]);
+    expect(reopened.implementations).toEqual([
+      expect.objectContaining({
+        rowNumber: 2,
+        title: "Reviewed Arduino cables",
+        quantity: 40,
+        categoryLabel: "Electronics",
+        locationLabel: "Unassigned",
+        sourceRoom: "B477",
+        sourceOrganization: "IOIO Lab",
+      }),
+    ]);
+    database.ioioWriteOperation.findMany.mockResolvedValue([operation]);
+    expect(
+      await getStaffInventoryImportDrafts({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+      })
+    ).toEqual([expect.objectContaining({ operationId, status: "SUCCEEDED" })]);
+    expect(database.ioioWriteOperation.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: "org-1",
+          userId: "staff-1",
+          status: { in: ["PREPARED", "SUCCEEDED", "PARTIAL"] },
+        }),
+      })
+    );
   });
 
   it("applies one approved row from a 20-row proposal and leaves the other 19 pending", async () => {
@@ -6489,6 +6568,7 @@ describe("staff inventory import revert", () => {
       status: "DONE",
       expectedPrior: { kind: "CREATE", rowKey: "row-1" },
       writtenState: { outcome: "created", assetId: "asset-1" },
+      updatedAt: new Date("2026-11-11T10:00:00Z"),
     };
     const operation = {
       id: proposal.operationId,
@@ -6516,6 +6596,41 @@ describe("staff inventory import revert", () => {
       revertedRowNumbers: [],
     });
   });
+
+  it.each(["FAILED", "CONFLICT"])(
+    "keeps a %s row pending even when every unit write succeeded",
+    async (status) => {
+      const proposal = createProposal("CREATE");
+      database.ioioWriteOperation.findFirst.mockResolvedValue({
+        status: "PARTIAL",
+        createdAt: new Date(),
+        description: JSON.stringify({ proposal, reviewDraft: [] }),
+      });
+      database.ioioImportItem.findMany.mockResolvedValue([
+        {
+          id: "root",
+          rowKey: "row-1",
+          unitIndex: null,
+          status,
+          writtenState: { outcome: "individual_units" },
+        },
+        {
+          id: "unit-1",
+          rowKey: "row-1",
+          unitIndex: 1,
+          status: "DONE",
+          targetAssetId: "asset-1",
+        },
+      ]);
+      const reopened = await getStaffInventoryImportProposal({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: proposal.operationId,
+      });
+      expect(reopened.appliedRowNumbers).toEqual([]);
+      expect(reopened.implementations).toEqual([]);
+    }
+  );
 
   it("reverts a newly created asset through Shelf's audited delete service", async () => {
     const proposal = createProposal("CREATE");

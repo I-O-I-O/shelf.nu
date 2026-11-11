@@ -267,6 +267,7 @@ export function StaffImportPanel({
     filename: string;
     rowCount: number;
     createdAt: string;
+    status?: string;
   }>;
 }) {
   const location = useLocation();
@@ -289,7 +290,13 @@ export function StaffImportPanel({
   );
   const [notice, setNotice] = useState<string | null>(initialNotice);
   const [dismissedError, setDismissedError] = useState(false);
-  const storedProposal = responseProposal ?? initialProposal;
+  const requestedOperationId = new URLSearchParams(location.search).get(
+    "importOperation"
+  );
+  const storedProposal =
+    initialProposal?.operationId === requestedOperationId
+      ? initialProposal
+      : responseProposal ?? initialProposal;
   const proposal =
     storedProposal?.operationId === dismissedOperationId
       ? null
@@ -330,8 +337,10 @@ export function StaffImportPanel({
     ]
   );
 
+  const displayedResponseRef = useRef<StaffImportProposal | null>(null);
   useEffect(() => {
-    if (!responseProposal) return;
+    if (!responseProposal || displayedResponseRef.current === responseProposal)
+      return;
     if (dismissedOperationId === "__pending__") {
       if (
         responseProposal === pendingUploadPreviousProposalRef.current ||
@@ -342,6 +351,7 @@ export function StaffImportPanel({
       pendingUploadPreviousProposalRef.current = null;
     }
     if (dismissedOperationId === responseProposal.operationId) return;
+    displayedResponseRef.current = responseProposal;
     setDismissedOperationId(null);
     setNotice(null);
     setDismissedError(false);
@@ -449,7 +459,7 @@ export function StaffImportPanel({
       {!proposal && savedDrafts.length > 0 ? (
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
           <h3 className="text-sm font-bold text-gray-900">
-            Continue saved import
+            Saved imports and implemented history
           </h3>
           <ul className="mt-2 space-y-2">
             {savedDrafts.map((draft) => (
@@ -461,7 +471,10 @@ export function StaffImportPanel({
                   className="text-sm font-semibold text-red-800 underline hover:text-red-950"
                 >
                   {draft.filename} · {draft.rowCount}{" "}
-                  {draft.rowCount === 1 ? "row" : "rows"} · Draft
+                  {draft.rowCount === 1 ? "row" : "rows"} ·{" "}
+                  {draft.status === "SUCCEEDED" || draft.status === "PARTIAL"
+                    ? "Implemented history"
+                    : "Draft"}
                 </Link>
               </li>
             ))}
@@ -500,7 +513,7 @@ export function StaffImportPanel({
 }
 
 function StaffImportProposalView({
-  proposal,
+  proposal: initialProposal,
   actionPath,
   onReset,
   canCreateCategory,
@@ -510,6 +523,9 @@ function StaffImportProposalView({
   onReset: (notice?: string | null) => void;
   canCreateCategory: boolean;
 }) {
+  // Only server-returned persisted proposals drive Pending/Implemented state.
+  const [proposal, setProposal] = useState(initialProposal);
+  useEffect(() => setProposal(initialProposal), [initialProposal]);
   const fetcher = useFetcher<StaffImportActionResponse>();
   const draftFetcher = useFetcher<StaffImportActionResponse>();
   const revertFetcher = useFetcher<StaffImportActionResponse>();
@@ -919,23 +935,17 @@ function StaffImportProposalView({
     }
     if (fetcher.data.kind === "import-result") {
       setProposalState("applied");
-      onReset(
-        `Import finished. Created ${
-          fetcher.data.result.createdIds.length
-        }, updated ${fetcher.data.result.updatedIds.length}, reused ${
-          fetcher.data.result.reusedIds.length
-        }, failed ${fetcher.data.result.failedRows.length}, conflicts ${
-          fetcher.data.result.conflictRows?.length ?? 0
-        }.`
-      );
+      void revalidate();
       return;
     }
     if (fetcher.data.kind === "import-complete") {
+      setProposal(fetcher.data.proposal);
       setProposalState("applied");
       void revalidate();
       return;
     }
     if (fetcher.data.kind === "import-partial") {
+      setProposal(fetcher.data.proposal);
       setProposalState("review");
       void revalidate();
       return;
@@ -958,6 +968,7 @@ function StaffImportProposalView({
   useEffect(() => {
     if (revertFetcher.data?.error === null) {
       if (revertFetcher.data.kind === "import-rows-reverted") {
+        setProposal(revertFetcher.data.proposal);
         setSelectedImplementedRowNumbers([]);
         if (revertFetcher.data.result.revertedRowNumbers.length > 0) {
           void revalidate();
@@ -1178,7 +1189,7 @@ function StaffImportProposalView({
                   />
                 </th>
                 <th className="w-[190px] p-2">Product</th>
-                <th className="w-16 p-2">Qty</th>
+                <th className="w-[120px] p-2 pr-4">Qty</th>
                 <th className="w-[148px] p-2">Category</th>
                 <th className="w-[188px] p-2">Location</th>
                 <th className="w-20 p-2">Image</th>
@@ -1696,7 +1707,7 @@ function StaffImportProposalView({
                           </div>
                         </details>
                       </td>
-                      <td className="w-28 p-2 align-top tabular-nums">
+                      <td className="w-[120px] p-2 pr-4 align-top tabular-nums">
                         <Input
                           label={`Quantity for ${row.title}`}
                           hideLabel
@@ -1718,8 +1729,8 @@ function StaffImportProposalView({
                           aria-describedby={quantityStateId}
                           error={quantityError}
                           hideErrorText
-                          className="w-24"
-                          inputClassName={`h-9 px-2 py-1 text-sm font-semibold tabular-nums ${
+                          className="w-full min-w-0 max-w-[96px] [&_.inner-label]:sr-only"
+                          inputClassName={`h-9 w-full min-w-0 max-w-full px-2 py-1 text-sm font-semibold tabular-nums ${
                             quantityInput === "" && !quantityError
                               ? "border-amber-400 bg-amber-50"
                               : quantityError
@@ -1729,7 +1740,7 @@ function StaffImportProposalView({
                         />
                         <p
                           id={quantityStateId}
-                          className={`mt-1 max-w-28 text-xs ${
+                          className={`mt-1 max-w-[96px] break-words text-xs ${
                             quantityError
                               ? "text-error-600"
                               : quantityInput === ""
@@ -2477,6 +2488,9 @@ function StaffImportProposalView({
               </thead>
               <tbody className={IMPORT_REVIEW_TABLE_BODY_CLASS}>
                 {implementedRows.map((row) => {
+                  const implementation = proposal.implementations?.find(
+                    (item) => item.rowNumber === row.rowNumber
+                  );
                   const decision = reviewDecisions[row.rowNumber];
                   const canRevert = revertibleRowNumbers.has(row.rowNumber);
                   const location = proposal.locationOptions?.find(
@@ -2520,22 +2534,67 @@ function StaffImportProposalView({
                         />
                       </td>
                       <td className="break-words p-2 align-top font-semibold text-gray-950">
-                        {row.title || `Row ${row.rowNumber}`}
+                        {implementation?.title ??
+                          decision?.title ??
+                          row.title ??
+                          `Row ${row.rowNumber}`}
+                        {implementation?.assetIds.map((assetId) => (
+                          <Link
+                            key={assetId}
+                            to={`/assets/${assetId}`}
+                            className="mt-1 block text-xs font-normal text-red-800 underline"
+                          >
+                            View Shelf asset
+                          </Link>
+                        ))}
+                        {implementation?.assetModelId ? (
+                          <Link
+                            to={`/settings/asset-models/${implementation.assetModelId}/edit`}
+                            className="mt-1 block text-xs font-normal text-red-800 underline"
+                          >
+                            View Shelf model
+                          </Link>
+                        ) : null}
+                        {implementation?.implementedAt ? (
+                          <time
+                            dateTime={implementation.implementedAt}
+                            className="mt-1 block text-xs font-normal text-gray-500"
+                          >
+                            Implemented{" "}
+                            {new Date(
+                              implementation.implementedAt
+                            ).toLocaleString()}
+                          </time>
+                        ) : null}
                       </td>
                       <td className="whitespace-nowrap p-2 align-top font-semibold tabular-nums text-gray-700">
-                        {decision?.quantity ??
+                        {implementation?.quantity ??
+                          decision?.quantity ??
                           row.receivedQuantity ??
                           row.quantity ??
                           "—"}
                       </td>
                       <td className="break-words p-2 align-top text-gray-700">
-                        {category ||
-                          row.category ||
-                          row.suggestedCategory ||
-                          "—"}
+                        {implementation
+                          ? implementation.categoryLabel ?? "—"
+                          : category ||
+                            row.category ||
+                            row.suggestedCategory ||
+                            "—"}
                       </td>
                       <td className="break-words p-2 align-top text-gray-700">
-                        {location?.pathLabel ?? row.locationLabel ?? "—"}
+                        {implementation?.locationLabel ??
+                          location?.pathLabel ??
+                          row.locationLabel ??
+                          "—"}
+                        {implementation?.sourceRoom ? (
+                          <p className="mt-1 text-xs text-gray-500">
+                            Room {implementation.sourceRoom}
+                            {implementation.sourceOrganization
+                              ? ` · ${implementation.sourceOrganization}`
+                              : ""}
+                          </p>
+                        ) : null}
                       </td>
                       <td className="p-2 align-top">
                         {imageSource ? (

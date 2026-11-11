@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getStaffSystemStatus: vi.fn(),
   countPendingHandbookReviews: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
+  getStaffInventoryImportProposal: vi.fn(),
 }));
 
 // why: the loader's database reads are mocked so the fresh-organization case
@@ -51,7 +52,7 @@ vi.mock("~/modules/ioio-staff/system-status.server", () => ({
 vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   applyStaffInventoryImport: mocks.applyStaffInventoryImport,
   cancelStaffInventoryImport: vi.fn(),
-  getStaffInventoryImportProposal: vi.fn(),
+  getStaffInventoryImportProposal: mocks.getStaffInventoryImportProposal,
   prepareStaffInventoryImport: vi.fn(),
 }));
 
@@ -238,6 +239,9 @@ describe("IOIO staff dashboard loader", () => {
       ignoredRows: 0,
     };
     mocks.applyStaffInventoryImport.mockResolvedValue(resultData);
+    mocks.getStaffInventoryImportProposal.mockResolvedValue({
+      appliedRowNumbers: [1],
+    });
     const form = new FormData();
     form.set("intent", "apply-import");
     form.set("operationId", "operation-1");
@@ -264,7 +268,8 @@ describe("IOIO staff dashboard loader", () => {
     );
     expect(result).toMatchObject({
       error: null,
-      kind: "import-result",
+      kind: "import-complete",
+      proposal: { appliedRowNumbers: [1] },
       result: resultData,
     });
   });

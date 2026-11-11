@@ -351,6 +351,19 @@ export type StaffImportProposalRow = StaffImportRow & {
   reason: string;
 };
 
+export type StaffImportImplementation = {
+  rowNumber: number;
+  title: string | null;
+  quantity: number | null;
+  categoryLabel: string | null;
+  locationLabel: string | null;
+  sourceRoom: string | null;
+  sourceOrganization: string | null;
+  implementedAt: string;
+  assetIds: string[];
+  assetModelId: string | null;
+};
+
 export type StaffImportProposal = {
   version: 1;
   proposalHash: string;
@@ -374,6 +387,7 @@ export type StaffImportProposal = {
   savedReviewDecisions?: StaffImportReviewDecision[];
   /** Rows completed by the canonical import service's row ledger. */
   appliedRowNumbers?: number[];
+  implementations?: StaffImportImplementation[];
   /** Rows resolved as ignored by the canonical import service's row ledger. */
   ignoredRowNumbers?: number[];
   /** Rows whose applied changes have since been reverted. */
@@ -462,6 +476,7 @@ export function getStaffImportProposalHash(
     proposalHash: _proposalHash,
     savedReviewDecisions: _savedReviewDecisions,
     appliedRowNumbers: _appliedRowNumbers,
+    implementations: _implementations,
     ignoredRowNumbers: _ignoredRowNumbers,
     ...content
   } = proposal as StaffImportProposal;
@@ -5926,6 +5941,73 @@ export async function getStaffInventoryImportProposal({
     ...proposal,
     savedReviewDecisions: readStoredReviewDraft(operation.description),
     appliedRowNumbers,
+    implementations: proposal.rows
+      .filter((row) => appliedRows.has(row.rowNumber))
+      .map((row) => {
+        const root = ledgerItems.find(
+          (item) =>
+            item.rowKey === `row-${row.rowNumber}` && item.unitIndex === null
+        )!;
+        const state =
+          root.writtenState &&
+          typeof root.writtenState === "object" &&
+          !Array.isArray(root.writtenState)
+            ? root.writtenState
+            : {};
+        const snapshot = state.reviewedRow;
+        const reviewed =
+          snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+            ? snapshot
+            : null;
+        const decision = readStoredReviewDraft(operation.description).find(
+          (item) => item.rowNumber === row.rowNumber
+        );
+        const assetIds = [
+          root.targetAssetId,
+          state.assetId,
+          ...(Array.isArray(state.assetIds) ? state.assetIds : []),
+        ].filter((id): id is string => typeof id === "string");
+        return {
+          rowNumber: row.rowNumber,
+          title:
+            typeof reviewed?.title === "string"
+              ? reviewed.title
+              : decision?.title ?? row.title,
+          quantity:
+            typeof reviewed?.quantity === "number"
+              ? reviewed.quantity
+              : decision?.quantity ??
+                row.receivedQuantity ??
+                row.quantity ??
+                null,
+          categoryLabel: reviewed
+            ? typeof reviewed.categoryLabel === "string"
+              ? reviewed.categoryLabel
+              : null
+            : proposal.categoryOptions?.find(
+                (option) =>
+                  option.id === (decision?.categoryId ?? row.categoryId)
+              )?.name ??
+              row.categoryLabel ??
+              null,
+          locationLabel: reviewed
+            ? typeof reviewed.locationLabel === "string"
+              ? reviewed.locationLabel
+              : null
+            : proposal.locationOptions?.find(
+                (option) =>
+                  option.id === (decision?.locationId ?? row.locationId)
+              )?.pathLabel ??
+              row.locationLabel ??
+              null,
+          sourceRoom: row.sourceRoom ?? null,
+          sourceOrganization: row.sourceOrganization ?? null,
+          implementedAt: root.updatedAt.toISOString(),
+          assetIds: [...new Set(assetIds)],
+          assetModelId:
+            typeof state.assetModelId === "string" ? state.assetModelId : null,
+        };
+      }),
     ignoredRowNumbers: getResolvedImportRowNumbers({
       proposal,
       ledgerItems,
@@ -6027,6 +6109,10 @@ function getResolvedImportRowNumbers({
         : rowItems.filter((item) => item.unitIndex === null);
       return (
         countedItems.length > 0 &&
+        (status !== "DONE" ||
+          rowItems.some(
+            (item) => item.unitIndex === null && item.status === "DONE"
+          )) &&
         countedItems.every((item) => item.status === status)
       );
     })
@@ -6046,12 +6132,12 @@ export async function getStaffInventoryImportDrafts({
       organizationId,
       userId,
       operationType: STAFF_IMPORT_OPERATION,
-      status: "PREPARED",
+      status: { in: ["PREPARED", "SUCCEEDED", "PARTIAL"] },
       createdAt: {
         gte: new Date(Date.now() - STAFF_IMPORT_REVIEW_RETENTION_MS),
       },
     },
-    select: { id: true, description: true, createdAt: true },
+    select: { id: true, description: true, createdAt: true, status: true },
     orderBy: { updatedAt: "desc" },
     take: 10,
   });
@@ -6061,6 +6147,7 @@ export async function getStaffInventoryImportDrafts({
       return [
         {
           operationId: operation.id,
+          status: operation.status,
           filename: proposal.source.filename,
           rowCount: proposal.rows.length,
           createdAt: operation.createdAt.toISOString(),
@@ -8828,6 +8915,32 @@ export async function applyStaffInventoryImport({
       throw importError("An import row is missing its ledger entry.");
     }
 
+    // Record the actual reviewed values atomically with the successful root row.
+    // Unit ledger entries retain their existing recovery/revert evidence.
+    const markReviewedItemDone = (
+      args: Parameters<typeof markImportLedgerItemDone>[0]
+    ) => {
+      if (args.itemId !== itemId) return markImportLedgerItemDone(args);
+      const state =
+        args.writtenState &&
+        typeof args.writtenState === "object" &&
+        !Array.isArray(args.writtenState)
+          ? args.writtenState
+          : {};
+      return markImportLedgerItemDone({
+        ...args,
+        writtenState: {
+          ...state,
+          reviewedRow: {
+            title: row.title ?? null,
+            quantity: row.receivedQuantity ?? row.quantity ?? null,
+            categoryLabel: row.categoryLabel ?? null,
+            locationLabel: row.locationLabel ?? null,
+          },
+        },
+      });
+    };
+
     const parentHeartbeat = await db.ioioWriteOperation.updateMany({
       where: { id: operationId, organizationId, userId, status: "APPLYING" },
       data: { updatedAt: new Date() },
@@ -8994,7 +9107,7 @@ export async function applyStaffInventoryImport({
           row,
         });
       }
-      const markedDone = await markImportLedgerItemDone({
+      const markedDone = await markReviewedItemDone({
         operationId,
         organizationId,
         itemId,
@@ -9475,7 +9588,7 @@ export async function applyStaffInventoryImport({
                   type: AssetType.INDIVIDUAL,
                   quantity: null,
                 });
-                const markedDone = await markImportLedgerItemDone({
+                const markedDone = await markReviewedItemDone({
                   operationId,
                   organizationId,
                   itemId: unitItem.id,
@@ -9500,7 +9613,7 @@ export async function applyStaffInventoryImport({
                   return { status: "IN_PROGRESS", operationId };
                 }
                 if (evidence === "WRITTEN") {
-                  const markedDone = await markImportLedgerItemDone({
+                  const markedDone = await markReviewedItemDone({
                     operationId,
                     organizationId,
                     itemId: unitItem.id,
@@ -9603,7 +9716,7 @@ export async function applyStaffInventoryImport({
             });
             if (!markedFailed) return { status: "IN_PROGRESS", operationId };
           } else {
-            const markedDone = await markImportLedgerItemDone({
+            const markedDone = await markReviewedItemDone({
               operationId,
               organizationId,
               itemId,
@@ -9677,7 +9790,7 @@ export async function applyStaffInventoryImport({
             row,
           });
         }
-        const markedDone = await markImportLedgerItemDone({
+        const markedDone = await markReviewedItemDone({
           operationId,
           organizationId,
           itemId,
@@ -9977,7 +10090,7 @@ export async function applyStaffInventoryImport({
         });
       }
       writeStarted = true;
-      const markedDone = await markImportLedgerItemDone({
+      const markedDone = await markReviewedItemDone({
         operationId,
         organizationId,
         itemId,
@@ -10017,7 +10130,7 @@ export async function applyStaffInventoryImport({
           organizationId,
         });
         if (observed === "TARGET") {
-          const markedDone = await markImportLedgerItemDone({
+          const markedDone = await markReviewedItemDone({
             operationId,
             organizationId,
             itemId,

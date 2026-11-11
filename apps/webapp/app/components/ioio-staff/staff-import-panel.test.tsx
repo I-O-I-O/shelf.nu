@@ -80,6 +80,161 @@ function renderPanel(
 }
 
 describe("StaffImportPanel review gate", () => {
+  it.each([false, true])(
+    "shows persisted successful rows after apply (partial: %s), keeping failures pending",
+    async (partial) => {
+      const rows = [
+        {
+          rowNumber: 1,
+          title: "Arduino Nano",
+          action: "CREATE",
+          assetId: null,
+          categoryId: "category-1",
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          quantity: 30,
+          receivedQuantity: 30,
+          type: "QUANTITY_TRACKED",
+          reason: "New item",
+        },
+        ...(partial
+          ? [
+              {
+                rowNumber: 2,
+                title: "Failed battery holders",
+                action: "CREATE",
+                assetId: null,
+                categoryId: "category-1",
+                locationId: null,
+                currentQuantity: null,
+                currentCategoryId: null,
+                currentLocationId: null,
+                quantity: 10,
+                receivedQuantity: 10,
+                type: "QUANTITY_TRACKED",
+                reason: "New item",
+              },
+            ]
+          : []),
+      ] as StaffImportProposal["rows"];
+      // why: exercise the real review form and server-response handoff without inventory writes.
+      const action = vi.fn(async ({ request }: { request: Request }) => {
+        const form = await request.formData();
+        if (form.get("intent") === "save-draft")
+          return {
+            error: null,
+            kind: "import-draft-saved",
+            operationId: "operation-1",
+          };
+        const decisions = JSON.parse(String(form.get("reviewDecisions")));
+        expect(decisions[0].quantity).toBe(40);
+        return {
+          error: null,
+          kind: partial ? "import-partial" : "import-complete",
+          proposal: {
+            version: 1,
+            operationId: "operation-1",
+            organizationId: "org-1",
+            proposalHash: "proposal-hash",
+            source: {
+              filename: "inventory.pdf",
+              size: 100,
+              sha256: "a".repeat(64),
+            },
+            rows,
+            counts: { CREATE: rows.length },
+            createdAt: new Date().toISOString(),
+            categoryOptions: [{ id: "category-1", name: "Electronics" }],
+            locationOptions: [],
+            savedReviewDecisions: decisions,
+            appliedRowNumbers: [1],
+            implementations: [
+              {
+                rowNumber: 1,
+                title: "Arduino Nano",
+                quantity: 40,
+                categoryLabel: "Electronics",
+                locationLabel: "B477 / A1-2",
+                sourceRoom: "B477",
+                sourceOrganization: "IOIO Lab",
+                implementedAt: "2026-11-11T10:00:00.000Z",
+                assetIds: ["asset-1"],
+                assetModelId: "model-1",
+              },
+            ],
+          },
+          result: {
+            createdIds: ["asset-1"],
+            updatedIds: [],
+            reusedIds: [],
+            failedRows: partial
+              ? [{ rowNumber: 2, reason: "Write failed" }]
+              : [],
+            conflictRows: [],
+            remainingRows: partial ? 1 : 0,
+          },
+        };
+      });
+      renderPanel({}, true, { rows }, action);
+      fireEvent.change(screen.getByLabelText("Quantity for Arduino Nano"), {
+        target: { value: "40" },
+      });
+      fireEvent.click(screen.getByLabelText("Approve Arduino Nano for import"));
+      if (partial)
+        fireEvent.click(
+          screen.getByLabelText("Approve Failed battery holders for import")
+        );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Apply approved changes" })
+        ).toBeEnabled()
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      );
+      const link = await screen.findByRole("link", {
+        name: "View Shelf asset",
+      });
+      const implemented = link.closest("table")!;
+      expect(screen.getByText("Implemented")).toBeInTheDocument();
+      expect(within(implemented).getByText("Arduino Nano")).toBeInTheDocument();
+      expect(within(implemented).getByText("40")).toBeInTheDocument();
+      expect(within(implemented).getByText("Electronics")).toBeInTheDocument();
+      expect(within(implemented).getByText("B477 / A1-2")).toBeInTheDocument();
+      expect(
+        within(implemented).getByText("Room B477 · IOIO Lab")
+      ).toBeInTheDocument();
+      expect(link).toHaveAttribute("href", "/assets/asset-1");
+      expect(implemented.querySelector("time")).toHaveAttribute(
+        "datetime",
+        "2026-11-11T10:00:00.000Z"
+      );
+      expect(screen.queryByLabelText("Quantity for Arduino Nano")).toBeNull();
+      if (partial) {
+        expect(
+          screen.getByLabelText("Quantity for Failed battery holders")
+        ).toBeInTheDocument();
+        expect(
+          within(implemented).queryByText("Failed battery holders")
+        ).toBeNull();
+      }
+    }
+  );
+
+  it("caps the quantity input inside a spaced column while retaining responsive table scrolling", () => {
+    renderPanel({ quantity: 1000000, receivedQuantity: 1000000 });
+    const input = screen.getByLabelText("Quantity for Arduino Nano");
+    expect(input).toHaveValue(1000000);
+    expect(input.closest("label")?.className).toContain("max-w-[96px]");
+    expect(input.closest("td")?.className).toContain("w-[120px]");
+    expect(input.closest("td")?.className).toContain("pr-4");
+    expect(
+      screen.getByRole("columnheader", { name: "Qty" }).className
+    ).toContain("w-[120px]");
+  });
+
   it("offers a PDF-only upload with the reviewed import explanation", () => {
     const { container } = renderPanel({});
 
@@ -813,7 +968,7 @@ describe("StaffImportPanel review gate", () => {
 
     await waitFor(() => {
       expect(screen.queryByText("Applying approved changes...")).toBeNull();
-      expect(screen.getByText(/Import finished/)).toBeTruthy();
+      expect(screen.getByText("Pending review")).toBeTruthy();
     });
   });
 
