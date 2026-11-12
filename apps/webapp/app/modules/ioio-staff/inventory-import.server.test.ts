@@ -176,6 +176,7 @@ import {
   prepareStaffInventoryImport,
   revertStaffInventoryImportRow,
   saveStaffInventoryImportDraft,
+  skipStaffInventoryImportRow,
   summarizeStaffImportRows,
   type StaffImportProposal,
   type StaffImportProposalRow,
@@ -1690,12 +1691,14 @@ describe("staff inventory import safety", () => {
       return { count: data.length };
     });
     database.ioioImportItem.findMany.mockImplementation(({ where }) =>
-      ledgerRows.filter(
-        (item) =>
-          item.operationId === where.operationId &&
-          item.organizationId === where.organizationId &&
-          (!where.status || item.status === where.status)
-      )
+      ledgerRows
+        .filter(
+          (item) =>
+            item.operationId === where.operationId &&
+            item.organizationId === where.organizationId &&
+            (!where.status || item.status === where.status)
+        )
+        .map((item) => ({ ...item }))
     );
     database.ioioImportItem.findFirst.mockImplementation(
       ({ where }) =>
@@ -1742,7 +1745,19 @@ describe("staff inventory import safety", () => {
     database.asset.findMany.mockImplementation(({ where }) => {
       const availableAssets = [...existingAssets, ...assetRows];
       if (typeof where.title === "string")
-        return availableAssets.filter((asset) => asset.title === where.title);
+        return availableAssets
+          .filter((asset) => asset.title === where.title)
+          .map((asset) => {
+            const locationId = "locationId" in asset ? asset.locationId : null;
+            return {
+              ...asset,
+              assetLocations:
+                asset.assetLocations ??
+                (locationId
+                  ? [{ locationId, quantity: asset.quantity, assetKitId: null }]
+                  : []),
+            };
+          });
       if (where.title?.startsWith)
         return availableAssets.filter((asset) =>
           asset.title.startsWith(where.title.startsWith)
@@ -2416,6 +2431,271 @@ describe("staff inventory import safety", () => {
     expect(reopened.appliedRowNumbers).toEqual([2]);
     expect(reopened.ignoredRowNumbers).toEqual([]);
   });
+
+  function pendingPushButtonsDraft(firstBin = "A3-10") {
+    const locations = shelfInventoryLocations();
+    const rows = classifyStaffImportRows({
+      rows: Array.from({ length: 45 }, (_, index) => ({
+        rowNumber: index + 1,
+        title:
+          index === 0 || index === 44
+            ? "Push buttons"
+            : `A3 stock ${index + 1}`,
+        category: "Electronics",
+        location: null,
+        quantity: 25,
+        receivedQuantity: 25,
+        type: "QUANTITY_TRACKED",
+        sourceRoom: "B477",
+        sourceOrganization: "IOIO Lab",
+        sourceStorageLocation:
+          index === 0 ? firstBin : index === 44 ? "A3-10" : "A3-1",
+      })),
+      assets: [],
+      categories: [{ id: "category-electronics", name: "Electronics" }],
+      locations,
+    });
+    const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      categoryId: row.categoryId,
+      locationId: row.locationId,
+      quantity: 25,
+      type: "QUANTITY_TRACKED",
+      productChoice: "NEW",
+    }));
+    return { locations, rows, decisions };
+  }
+
+  it("removes the last duplicate-blocked row persistently without touching 44 implementations or any asset", async () => {
+    const { locations, rows, decisions } = pendingPushButtonsDraft();
+    const state = await applyNewImport({
+      quantity: 25,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      sourceLocations: locations,
+      applyOnlyRowNumbers: rows.slice(0, 44).map((row) => row.rowNumber),
+    });
+    const args = {
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: state.operationId,
+      proposalHash: state.proposalHash,
+    };
+    expect(
+      await applyStaffInventoryImport({
+        ...args,
+        applyOnlyRowNumber: 45,
+        reviewDecisions: JSON.stringify(decisions),
+      })
+    ).toMatchObject({
+      succeededRows: 0,
+      remainingRows: 1,
+      conflictRows: [
+        {
+          rowNumber: 45,
+          reason: expect.stringContaining("exact-title asset appeared"),
+        },
+      ],
+    });
+    const before = structuredClone(state.assetRows);
+    await expect(
+      skipStaffInventoryImportRow({ ...args, rowNumber: 45 })
+    ).resolves.toMatchObject({ rowNumber: 45 });
+    expect(state.operation.status).toBe("SUCCEEDED");
+    expect(
+      state.ledgerRows.find((item) => item.rowKey === "row-45")
+    ).toMatchObject({
+      status: "SKIPPED",
+      errorCode: "CREATE_TARGET_CHANGED_AFTER_REVIEW",
+    });
+    const reloaded = await getStaffInventoryImportProposal(args);
+    expect(reloaded).toMatchObject({
+      reviewClosed: true,
+      ignoredRowNumbers: [45],
+    });
+    expect(reloaded.appliedRowNumbers).toHaveLength(44);
+    expect(reloaded.implementations).toHaveLength(44);
+    expect(
+      reloaded.savedReviewDecisions?.find(
+        (decision) => decision.rowNumber === 45
+      )?.decision
+    ).toBe("IGNORE");
+    expect(JSON.parse(state.operation.description).result).toMatchObject({
+      remainingRows: 0,
+      skippedRows: 1,
+      succeededRows: 44,
+    });
+    await skipStaffInventoryImportRow({ ...args, rowNumber: 45 });
+    expect(
+      (await getStaffInventoryImportProposal(args)).ignoredRowNumbers
+    ).toEqual([45]);
+    await expect(
+      skipStaffInventoryImportRow({ ...args, rowNumber: 1 })
+    ).rejects.toThrow("already implemented");
+    expect(state.assetRows).toEqual(before);
+    expect(mockCreateAsset).toHaveBeenCalledTimes(44);
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+  });
+
+  it("removes an unverified candidate while preserving recorded writes and physical-unit entries", async () => {
+    const state = await applyNewImport({
+      quantity: 25,
+      creationFailure: "Unconfirmed write",
+    });
+    const root = state.ledgerRows[0];
+    root.writtenState = { outcome: "created", assetId: "existing-asset" };
+    root.targetAssetId = "existing-asset";
+    const unit = { ...root, id: "unit-1", unitIndex: 1, status: "DONE" };
+    state.ledgerRows.push(unit);
+    const before = structuredClone(unit);
+    await skipStaffInventoryImportRow({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: state.operationId,
+      proposalHash: state.proposalHash,
+      rowNumber: 2,
+    });
+    expect(root).toMatchObject({
+      status: "SKIPPED",
+      targetAssetId: "existing-asset",
+      writtenState: { outcome: "created", assetId: "existing-asset" },
+    });
+    expect(unit).toEqual(before);
+    expect(state.operation.status).toBe("SUCCEEDED");
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+  });
+
+  it("releases the draft lease if candidate removal fails before persistence", async () => {
+    const state = await applyNewImport({
+      quantity: 25,
+      creationFailure: "Rejected",
+    });
+    // why: model a database failure at the ledger mutation boundary.
+    database.ioioImportItem.updateMany.mockRejectedValueOnce(
+      new Error("Ledger unavailable")
+    );
+    await expect(
+      skipStaffInventoryImportRow({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: state.operationId,
+        proposalHash: state.proposalHash,
+        rowNumber: 2,
+      })
+    ).rejects.toThrow("Ledger unavailable");
+    expect(state.operation.status).toBe("PREPARED");
+    expect(state.ledgerRows[0].status).toBe("CONFLICT");
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+  });
+
+  it("requires staff access before removing draft rows", async () => {
+    mockStaffAccess.mockRejectedValueOnce(new Error("Staff access required"));
+    await expect(
+      skipStaffInventoryImportRow({
+        context: { getSession: () => ({ userId: "student-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: "another-staff-draft",
+        proposalHash: "hash",
+        rowNumber: 1,
+      })
+    ).rejects.toThrow("Staff access required");
+    expect(database.ioioImportItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("recognizes its own same-title stock in another bin during a single Apply", async () => {
+    const { locations, rows, decisions } = pendingPushButtonsDraft("A3-1");
+    const state = await applyNewImport({
+      quantity: 25,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      sourceLocations: locations,
+    });
+    expect(state.result).toMatchObject({
+      succeededRows: 45,
+      remainingRows: 0,
+      conflictRows: [],
+    });
+    expect(state.assetRows).toHaveLength(45);
+    expect(state.assetRows[44]).toMatchObject({
+      title: "Push buttons",
+      locationId: "bin-A3-10",
+    });
+  });
+
+  it.each(["other-bin", "moved-asset", "unrelated-asset"])(
+    "scopes duplicate protection to proven own creations: %s",
+    async (scenario) => {
+      const { locations, rows, decisions } = pendingPushButtonsDraft("A3-1");
+      const external: Array<{
+        id: string;
+        title: string;
+        type: "QUANTITY_TRACKED";
+        quantity: number;
+        categoryId: string;
+        assetLocations: Array<{
+          locationId: string;
+          quantity: number;
+          assetKitId: null;
+        }>;
+      }> = [];
+      const state = await applyNewImport({
+        quantity: 25,
+        proposalRows: rows,
+        reviewDecisionRows: decisions,
+        sourceLocations: locations,
+        existingAssets: external,
+        applyOnlyRowNumbers: rows.slice(0, 44).map((row) => row.rowNumber),
+      });
+      if (scenario === "moved-asset")
+        state.assetRows[0].locationId = "bin-A3-10";
+      if (scenario === "unrelated-asset")
+        external.push({
+          id: "foreign",
+          title: "Push buttons",
+          type: "QUANTITY_TRACKED",
+          quantity: 25,
+          categoryId: "category-electronics",
+          assetLocations: [
+            { locationId: "bin-A3-11", quantity: 25, assetKitId: null },
+          ],
+        });
+      const args = {
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: state.operationId,
+        proposalHash: state.proposalHash,
+        applyOnlyRowNumber: 45,
+        reviewDecisions: JSON.stringify(decisions),
+      };
+      const result = await applyStaffInventoryImport(args);
+      if (scenario === "other-bin") {
+        expect(result).toMatchObject({
+          succeededRows: 1,
+          remainingRows: 0,
+          conflictRows: [],
+        });
+        expect(state.assetRows).toHaveLength(45);
+        expect(state.assetRows[44].locationId).toBe("bin-A3-10");
+        expect(await applyStaffInventoryImport(args)).toMatchObject({
+          remainingRows: 0,
+        });
+        expect(state.assetRows).toHaveLength(45);
+      } else {
+        expect(result).toMatchObject({
+          succeededRows: 0,
+          remainingRows: 1,
+          conflictRows: [
+            { reason: expect.stringContaining("exact-title asset appeared") },
+          ],
+        });
+        expect(state.assetRows).toHaveLength(44);
+      }
+    }
+  );
 
   it.each([
     "LOCATION_CHANGED_AFTER_REVIEW",

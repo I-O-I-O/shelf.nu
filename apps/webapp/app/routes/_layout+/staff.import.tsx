@@ -11,6 +11,7 @@ import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import {
   applyStaffInventoryImport,
   cancelStaffInventoryImport,
+  skipStaffInventoryImportRow,
   getStaffInventoryImportDrafts,
   getStaffInventoryImportProposal,
   prepareStaffInventoryImport,
@@ -36,6 +37,7 @@ const ImportIntentSchema = z.enum([
   "apply-row",
   "apply-selected",
   "cancel-import",
+  "skip-row",
   "save-draft",
   "process-import-image",
   "revert-row",
@@ -254,6 +256,36 @@ export async function action({ context, request }: ActionFunctionArgs) {
         reviewDecisions,
       });
       return payload({ kind: "import-draft-saved" as const, ...result });
+    }
+    if (intent === "skip-row") {
+      const rowNumber = z.coerce
+        .number()
+        .int()
+        .positive()
+        .parse(formData.get("rowNumber"));
+      const proposalHash = z
+        .string()
+        .min(1)
+        .parse(formData.get("proposalHash"));
+      const result = await skipStaffInventoryImportRow({
+        context,
+        request,
+        operationId,
+        proposalHash,
+        rowNumber,
+      });
+      if ("status" in result)
+        return payload({ kind: "import-in-progress" as const, operationId });
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({
+        kind: "import-row-skipped" as const,
+        proposal,
+        rowNumber,
+      });
     }
     if (intent === "cancel-import") {
       const result = await cancelStaffInventoryImport({

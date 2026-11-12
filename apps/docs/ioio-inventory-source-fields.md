@@ -93,8 +93,9 @@ Likely merge conflicts are confined to the IOIO import/helper modules and panel.
 ## Pending review and canonical containers
 
 Review completion is derived from the existing import ledger, not merely the
-parent operation's status. A resolved row requires its root and all physical
-units to be DONE or SKIPPED consistently. Missing, PENDING, IN_FLIGHT, FAILED,
+parent operation's status. Implemented rows require a DONE root and all physical
+units DONE. Explicit removal resolves a candidate through its SKIPPED root while
+preserving any physical-unit write evidence. Missing, PENDING, IN_FLIGHT, FAILED,
 and CONFLICT rows keep the review open. Partial Apply persists PREPARED with no
 completion timestamp while any row remains unresolved. Reloading a legacy
 SUCCEEDED/PARTIAL session with unresolved rows reopens that staff-owned session
@@ -181,3 +182,47 @@ payload forwarding, restored checkbox state, creation failures and preservation
 of written/physical-unit evidence. No migration or environment changes are
 required; restart Shelf. Existing wrongly created records are not repaired by
 this retry change.
+
+## Remove from draft
+
+Every pending row has Edit and Remove from draft actions, including duplicate,
+failed and unresolved candidates. Removal uses the shared staff import engine's
+`skip-row` action, independently of approval, quantity, images and canonical
+readiness. It persists `reviewDraft.decision: IGNORE` and root ledger status
+`SKIPPED`. Source proposal rows and hashes remain immutable. Pending excludes
+those roots after reload; a persisted removed-row count explains the difference
+between products found and Implemented rows.
+
+Removal claims the staff-owned parent operation, changes only its candidate root
+and review metadata, then recomputes completion from the ledger. Removing the last
+pending row completes the parent; earlier implementations remain intact. The
+action is idempotent and refuses to remove fully implemented rows. Active writes
+must finish before removal. Failure releases the parent lease for retry.
+
+No asset create, update, move or delete service is called. Existing assets,
+recorded target IDs, written results, physical-unit entries and original rejection
+reasons remain untouched. A SKIPPED candidate does not assert that an uncertain
+past inventory write was undone or reconciled. The history/evidence is retained.
+
+The exact-title guard previously compared current assets against only the
+original preview's match candidates. A prior partial Apply could therefore make
+its own new asset look like an external asset that appeared after review. Title
+alone still cannot establish that a legacy uncertain write belongs to this row.
+Completed same-row results are excluded from reapplication by the ledger.
+
+For explicitly new quantity stock in different source bins, the guard now
+recognizes a creation proven by a completed root in this same operation, in the
+same source room, and still placed exclusively at that original source bin.
+Such an item is not an unrelated duplicate of stock in the requested different
+bin. The check reads current ledger evidence so earlier rows in the same Apply
+are recognized as well as rows from a prior partial Apply. Same-bin, moved and unrelated assets retain the existing duplicate guard.
+This exception never adopts or replays an uncertain same-row write by title.
+Staff can remove an unwanted candidate instead of resolving that conflict.
+
+Tests cover 44 implemented products plus one duplicate-blocked Push buttons row,
+its removal, persisted IGNORE/SKIPPED state, closed review on reload, unchanged
+assets/history, and preserved unit evidence. Staff and legacy Home route wiring,
+UI editing/removal, failed ledger persistence and duplicate protection are covered.
+No migration or environment change is required. Restart Shelf; the helper is
+unchanged. Future integrations touching Home/staff import routes, the IOIO import
+service or review panel may require manual reconciliation.

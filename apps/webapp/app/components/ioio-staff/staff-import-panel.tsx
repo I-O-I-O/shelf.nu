@@ -55,6 +55,12 @@ type StaffImportActionResponse =
         issues: ImportReviewIssue[];
       }>;
     }
+  | {
+      error: null;
+      kind: "import-row-skipped";
+      proposal: StaffImportProposal;
+      rowNumber: number;
+    }
   | { error: null; kind: "import-proposal"; proposal: StaffImportProposal }
   | {
       error: null;
@@ -278,6 +284,7 @@ export function StaffImportPanel({
   const responseProposal =
     response?.error === null &&
     (response.kind === "import-proposal" ||
+      response.kind === "import-row-skipped" ||
       response.kind === "import-partial" ||
       response.kind === "import-complete")
       ? response.proposal
@@ -941,6 +948,15 @@ function StaffImportProposalView({
       void revalidate();
       return;
     }
+    if (fetcher.data.kind === "import-row-skipped") {
+      setProposal(fetcher.data.proposal);
+      setProposalState(
+        fetcher.data.proposal.reviewClosed ? "applied" : "review"
+      );
+      setEditRowNumber(null);
+      void revalidate();
+      return;
+    }
     if (fetcher.data.kind === "import-complete") {
       setProposal(fetcher.data.proposal);
       setProposalState("applied");
@@ -1010,6 +1026,13 @@ function StaffImportProposalView({
             {proposal.rows.length}{" "}
             {proposal.rows.length === 1 ? "product" : "products"} found
           </p>
+          {ignoredRowNumbers.size > 0 ? (
+            <p className="mt-1 text-xs text-gray-500">
+              {ignoredRowNumbers.size}{" "}
+              {ignoredRowNumbers.size === 1 ? "row removed" : "rows removed"}{" "}
+              from draft
+            </p>
+          ) : null}
           <p className="mt-1 text-xs text-gray-500">
             {reviewClosed
               ? "Review closed. Applied rows appear below."
@@ -1092,6 +1115,8 @@ function StaffImportProposalView({
         <p className="mt-3 text-sm text-gray-500" role="status">
           {fetcher.formData?.get("intent") === "cancel-import"
             ? "Cancelling import proposal..."
+            : fetcher.formData?.get("intent") === "skip-row"
+            ? "Removing row from draft..."
             : "Applying approved changes..."}
         </p>
       ) : null}
@@ -1171,6 +1196,14 @@ function StaffImportProposalView({
             </div>
           ) : null}
         </>
+      ) : null}
+      {response?.error === null && response.kind === "import-row-skipped" ? (
+        <p role="status" className="mt-3 text-sm text-gray-700">
+          Removed{" "}
+          {proposal.rows.find((row) => row.rowNumber === response.rowNumber)
+            ?.title ?? "the row"}{" "}
+          from this draft. Existing Shelf assets were not changed.
+        </p>
       ) : null}
       {proposalState === "in-progress" ? (
         <p role="status" className="mt-3 text-sm text-amber-700">
@@ -1260,7 +1293,7 @@ function StaffImportProposalView({
                 <th className="w-[188px] p-2">Location</th>
                 <th className="w-20 p-2">Image</th>
                 <th className="w-28 p-2">Status</th>
-                <th className="w-[88px] p-2">Edit</th>
+                <th className="w-[148px] p-2">Actions</th>
               </tr>
             </thead>
             <tbody className={IMPORT_REVIEW_TABLE_BODY_CLASS}>
@@ -1965,6 +1998,57 @@ function StaffImportProposalView({
                           >
                             Edit
                           </button>
+                        )}
+                        {isResolved ? null : (
+                          <fetcher.Form
+                            method="post"
+                            action={actionPath}
+                            onSubmit={() =>
+                              updateDecision(row.rowNumber, {
+                                decision: "IGNORE",
+                              })
+                            }
+                            className="mt-2"
+                          >
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="skip-row"
+                            />
+                            <input
+                              type="hidden"
+                              name="operationId"
+                              value={proposal.operationId}
+                            />
+                            <input
+                              type="hidden"
+                              name="proposalHash"
+                              value={proposal.proposalHash}
+                            />
+                            <input
+                              type="hidden"
+                              name="rowNumber"
+                              value={row.rowNumber}
+                            />
+                            <button
+                              type="submit"
+                              aria-label={`Remove ${
+                                row.title || `row ${row.rowNumber}`
+                              } from draft`}
+                              title="Skips this import row without deleting any Shelf asset"
+                              disabled={
+                                fetcher.state !== "idle" ||
+                                [
+                                  "expired",
+                                  "cancelled",
+                                  "in-progress",
+                                ].includes(proposalState)
+                              }
+                              className="rounded-md border border-gray-300 px-2 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                            >
+                              Remove from draft
+                            </button>
+                          </fetcher.Form>
                         )}
                       </td>
                     </tr>

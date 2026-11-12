@@ -6237,6 +6237,10 @@ function getResolvedImportRowNumbers({
       const rowItems = ledgerItems.filter(
         (item) => item.rowKey === `row-${row.rowNumber}`
       );
+      if (status === "SKIPPED")
+        return rowItems.some(
+          (item) => item.unitIndex === null && item.status === "SKIPPED"
+        );
       const unitItems = rowItems.filter((item) => item.unitIndex !== null);
       const countedItems = unitItems.length
         ? unitItems
@@ -6381,6 +6385,187 @@ export async function saveStaffInventoryImportDraft({
     rows: decisions.length,
   });
   return { operationId, saved: true };
+}
+
+/** Candidate-only dismissal. Preserve all inventory records and ledger write evidence. */
+export async function skipStaffInventoryImportRow({
+  context,
+  request,
+  operationId,
+  proposalHash,
+  rowNumber,
+}: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
+  operationId: string;
+  proposalHash: string;
+  rowNumber: number;
+}): Promise<
+  | { operationId: string; rowNumber: number }
+  | { status: "IN_PROGRESS"; operationId: string }
+> {
+  const { organizationId, userId } = await requireIoioStaffAccess({
+    context,
+    request,
+  });
+  const operation = await db.ioioWriteOperation.findFirst({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+    },
+  });
+  if (
+    !operation ||
+    operation.organizationId !== organizationId ||
+    operation.userId !== userId ||
+    operation.operationType !== STAFF_IMPORT_OPERATION ||
+    isStaffImportExpired(operation.createdAt)
+  )
+    throw staffImportUnavailableError();
+  if (operation.status === "APPLYING")
+    return { status: "IN_PROGRESS", operationId };
+  if (!["PREPARED", "SUCCEEDED", "PARTIAL"].includes(operation.status))
+    throw staffImportUnavailableError();
+  const proposal = readStoredProposal(operation.description);
+  if (proposal.proposalHash !== proposalHash)
+    throw importError(
+      "The import proposal changed. Reload it before removing a row."
+    );
+  if (
+    !Number.isSafeInteger(rowNumber) ||
+    !proposal.rows.some((row) => row.rowNumber === rowNumber)
+  )
+    throw importError("Choose a row from this import draft.");
+  await ensureProposalLedger(proposal);
+  const ledger = await getImportLedgerItems({ operationId, organizationId });
+  if (
+    getResolvedImportRowNumbers({
+      proposal,
+      ledgerItems: ledger,
+      status: "DONE",
+    }).includes(rowNumber)
+  )
+    throw importError(
+      "This row is already implemented. Removing a draft row cannot undo inventory changes."
+    );
+  const rowItems = ledger.filter((item) => item.rowKey === `row-${rowNumber}`);
+  const root = rowItems.find((item) => item.unitIndex === null);
+  if (!root) throw importError("The draft row is missing its ledger entry.");
+  if (rowItems.some((item) => item.status === "IN_FLIGHT"))
+    return { status: "IN_PROGRESS", operationId };
+  const leaseStartedAt = new Date();
+  const claim = await db.ioioWriteOperation.updateMany({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: operation.status,
+      description: operation.description,
+    },
+    data: { status: "APPLYING", updatedAt: leaseStartedAt },
+  });
+  if (claim.count !== 1) return { status: "IN_PROGRESS", operationId };
+  let finalized = false;
+  try {
+    const skipped = await db.ioioImportItem.updateMany({
+      where: {
+        id: root.id,
+        operationId,
+        organizationId,
+        unitIndex: null,
+        status: root.status,
+        updatedAt: root.updatedAt,
+      },
+      // Do not clear target IDs, writtenState, unit entries or the original rejection reason.
+      data: { status: "SKIPPED", heartbeatAt: null },
+    });
+    if (skipped.count !== 1) return { status: "IN_PROGRESS", operationId };
+    const finalLedger = await getImportLedgerItems({
+      operationId,
+      organizationId,
+    });
+    const remainingRows = getPendingImportRowNumbers(
+      proposal,
+      finalLedger
+    ).length;
+    const reviewDraft = readStoredReviewDraft(operation.description);
+    const previous = reviewDraft.find(
+      (decision) => decision.rowNumber === rowNumber
+    );
+    const decisions = [
+      ...reviewDraft.filter((decision) => decision.rowNumber !== rowNumber),
+      { ...previous, rowNumber, decision: "IGNORE" as const },
+    ];
+    const rootItems = finalLedger.filter((item) => item.unitIndex === null);
+    const { status: _status, ...summary } = summarizeStaffImportRows(
+      rootItems.map((item) => item.status as StaffImportLedgerStatus)
+    );
+    const ids = {
+      createdIds: [] as string[],
+      updatedIds: [] as string[],
+      reusedIds: [] as string[],
+    };
+    for (const item of rootItems.filter((item) => item.status === "DONE"))
+      summarizeDoneItem(item, ids);
+    const stored = JSON.parse(operation.description) as Record<string, unknown>;
+    const result: StaffImportResult = {
+      operationId,
+      ...ids,
+      ...summary,
+      failedRows: [],
+      conflictRows: [],
+      ignoredRows: summary.skippedRows,
+      reviewedRows: decisions.filter((decision) => decision.decision !== null)
+        .length,
+      remainingRows,
+    };
+    const saved = await db.ioioWriteOperation.updateMany({
+      where: {
+        id: operationId,
+        organizationId,
+        userId,
+        status: "APPLYING",
+        updatedAt: leaseStartedAt,
+        description: operation.description,
+      },
+      data: {
+        status: remainingRows ? "PREPARED" : "SUCCEEDED",
+        completedAt: remainingRows ? null : new Date(),
+        failureCode: null,
+        description: JSON.stringify({
+          ...stored,
+          proposal,
+          reviewDraft: decisions,
+          result,
+        }),
+      },
+    });
+    if (saved.count !== 1) return { status: "IN_PROGRESS", operationId };
+    finalized = true;
+    Logger.info({
+      event: "ioio_staff_import_row_skipped",
+      operationId,
+      organizationId,
+      userId,
+      rowNumber,
+      remainingRows,
+    });
+    return { operationId, rowNumber };
+  } finally {
+    if (!finalized)
+      await db.ioioWriteOperation.updateMany({
+        where: {
+          id: operationId,
+          organizationId,
+          userId,
+          status: "APPLYING",
+          updatedAt: leaseStartedAt,
+          description: operation.description,
+        },
+        data: { status: "PREPARED" },
+      });
+  }
 }
 
 export async function cancelStaffInventoryImport({
@@ -9534,7 +9719,13 @@ export async function applyStaffInventoryImport({
       if (createLike) {
         const existing = await db.asset.findMany({
           where: { organizationId, title: row.title },
-          select: { id: true },
+          select: {
+            id: true,
+            assetLocations: {
+              where: { assetKitId: null },
+              select: { locationId: true },
+            },
+          },
         });
         const originalRow = proposal.rows.find(
           (candidate) => candidate.rowNumber === row.rowNumber
@@ -9544,9 +9735,73 @@ export async function applyStaffInventoryImport({
         );
         const explicitlyNew =
           decisionsByRow.get(row.rowNumber)?.productChoice === "NEW";
+        const duplicateLedger =
+          explicitlyNew && existing.length > 0 && row.sourceStorageLocation
+            ? await getImportLedgerItems({ operationId, organizationId })
+            : initialLedgerItems;
+        const completedSourceRows = new Set(
+          getResolvedImportRowNumbers({
+            proposal,
+            ledgerItems: duplicateLedger,
+            status: "DONE",
+          })
+        );
+        const isOwnCreationInAnotherBin = (
+          asset: (typeof existing)[number]
+        ) => {
+          if (
+            !explicitlyNew ||
+            row.type !== "QUANTITY_TRACKED" ||
+            !row.sourceStorageLocation ||
+            !row.sourceRoom
+          )
+            return false;
+          return duplicateLedger.some((item) => {
+            if (
+              item.unitIndex !== null ||
+              item.status !== "DONE" ||
+              !item.writtenState ||
+              typeof item.writtenState !== "object" ||
+              Array.isArray(item.writtenState)
+            )
+              return false;
+            const written = item.writtenState as Record<
+              string,
+              Prisma.JsonValue
+            >;
+            if (written.outcome !== "created" || written.assetId !== asset.id)
+              return false;
+            const source = proposal.rows.find(
+              (candidate) => item.rowKey === `row-${candidate.rowNumber}`
+            );
+            if (
+              !source ||
+              !completedSourceRows.has(source.rowNumber) ||
+              source.rowNumber === row.rowNumber ||
+              source.type !== "QUANTITY_TRACKED" ||
+              source.sourceRoom !== row.sourceRoom ||
+              !source.sourceStorageLocation ||
+              source.sourceStorageLocation === row.sourceStorageLocation
+            )
+              return false;
+            const origin = resolveExplicitImportRow(
+              source,
+              proposal.locationOptions ?? []
+            ).locationId;
+            return Boolean(
+              origin &&
+                asset.assetLocations.length &&
+                asset.assetLocations.every(
+                  (placement) => placement.locationId === origin
+                )
+            );
+          });
+        };
         if (
           existing.some(
-            (asset) => !explicitlyNew || !reviewedDuplicateIds.has(asset.id)
+            (asset) =>
+              (!explicitlyNew || !reviewedDuplicateIds.has(asset.id)) &&
+              !isOwnCreationInAnotherBin(asset)
           )
         ) {
           const reason =

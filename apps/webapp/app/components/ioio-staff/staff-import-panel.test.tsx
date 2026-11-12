@@ -283,8 +283,8 @@ describe("StaffImportPanel review gate", () => {
     expect(screen.getByRole("columnheader", { name: "Location" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Image" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "Status" })).toBeTruthy();
-    const editHeader = screen.getByRole("columnheader", { name: "Edit" });
-    expect(editHeader.className).toContain("w-[88px]");
+    const editHeader = screen.getByRole("columnheader", { name: "Actions" });
+    expect(editHeader.className).toContain("w-[148px]");
     expect(screen.getByRole("table").className).toContain("min-w-[920px]");
     expect(screen.getByText("Ready")).toBeTruthy();
     expect(screen.getByText("Development Boards Drawer")).toBeTruthy();
@@ -2252,6 +2252,134 @@ describe("StaffImportPanel review gate", () => {
       ).toBeNull();
     }
   );
+
+  it("offers Edit and Remove for the final blocked row, persists removal and retains implemented history on reload", async () => {
+    const reason =
+      "An exact-title asset appeared after review. Re-review this row before applying it.";
+    const rows: StaffImportProposal["rows"] = Array.from(
+      { length: 45 },
+      (_, index) => ({
+        rowNumber: index + 1,
+        title: index === 44 ? "Push buttons" : `A3 item ${index + 1}`,
+        category: "Electronics",
+        categoryId: "category-1",
+        location: null,
+        locationId: null,
+        quantity: index === 44 ? null : 25,
+        receivedQuantity: 25,
+        type: "QUANTITY_TRACKED",
+        action: "CREATE",
+        assetId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "Inventory",
+        ...(index === 44 ? { applyBlockedReason: reason } : {}),
+      })
+    );
+    let persisted: StaffImportProposal = {
+      version: 1,
+      operationId: "operation-1",
+      organizationId: "org-1",
+      proposalHash: "hash",
+      source: {
+        filename: "IOIO_Lab_B477_A3_Claude_Import.pdf",
+        size: 100,
+        sha256: "a".repeat(64),
+      },
+      rows,
+      counts: {
+        CREATE: 45,
+        INCREASE_QUANTITY: 0,
+        NO_CHANGE: 0,
+        POSSIBLE_DUPLICATE: 0,
+        NEEDS_REVIEW: 0,
+        IGNORE: 0,
+        UPDATE_QUANTITY: 0,
+        UPDATE_LOCATION: 0,
+        UPDATE_CATEGORY: 0,
+        AMBIGUOUS: 0,
+        REJECT: 0,
+      },
+      createdAt: new Date().toISOString(),
+      categoryOptions: [{ id: "category-1", name: "Electronics" }],
+      locationOptions: [],
+      appliedRowNumbers: Array.from({ length: 44 }, (_, index) => index + 1),
+      ignoredRowNumbers: [],
+      reviewClosed: false,
+    };
+    // why: emulate persistence at the action boundary without invoking inventory writes.
+    const action = vi.fn(async ({ request }: { request: Request }) => {
+      const form = await request.formData();
+      if (form.get("intent") === "save-draft")
+        return {
+          error: null,
+          kind: "import-draft-saved",
+          operationId: "operation-1",
+        };
+      expect(Object.fromEntries(form)).toMatchObject({
+        intent: "skip-row",
+        operationId: "operation-1",
+        proposalHash: "hash",
+        rowNumber: "45",
+      });
+      persisted = {
+        ...persisted,
+        ignoredRowNumbers: [45],
+        savedReviewDecisions: [{ rowNumber: 45, decision: "IGNORE" }],
+        reviewClosed: true,
+      };
+      return {
+        error: null,
+        kind: "import-row-skipped",
+        proposal: persisted,
+        rowNumber: 45,
+      };
+    });
+    const view = renderPanel({}, true, persisted, action);
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(
+      screen.getByRole("group", { name: "Edit Push buttons" })
+    ).toBeInTheDocument();
+    const remove = screen.getByRole("button", {
+      name: "Remove Push buttons from draft",
+    });
+    expect(remove).toBeEnabled();
+    fireEvent.click(remove);
+    expect(
+      await screen.findByText(
+        "Removed Push buttons from this draft. Existing Shelf assets were not changed."
+      )
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("region", { name: "Pending review (0)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Implemented (44)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Remove Push buttons from draft" })
+    ).toBeNull();
+    expect(
+      screen.getByText("Review closed. Applied rows appear below.")
+    ).toBeInTheDocument();
+    view.unmount();
+    renderPanel({}, true, persisted, action);
+    expect(
+      screen.getByRole("region", { name: "Pending review (0)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Implemented (44)" })
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 row removed from draft")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Remove Push buttons from draft" })
+    ).toBeNull();
+  });
 
   it("shows the exact missing source bin and blocks unassigned Apply", () => {
     renderPanel({

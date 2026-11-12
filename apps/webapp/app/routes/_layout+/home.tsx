@@ -28,6 +28,7 @@ import {
 import {
   applyStaffInventoryImport,
   cancelStaffInventoryImport,
+  skipStaffInventoryImportRow,
   getStaffInventoryImportProposal,
   prepareStaffInventoryImport,
 } from "~/modules/ioio-staff/inventory-import.server";
@@ -111,6 +112,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "apply-row",
         "apply-selected",
         "cancel-import",
+        "skip-row",
         "save-dashboard",
         "reset-dashboard",
       ])
@@ -207,6 +209,36 @@ export async function action({ context, request }: ActionFunctionArgs) {
       .min(1)
       .max(100)
       .parse(formData.get("operationId"));
+    if (intent === "skip-row") {
+      const rowNumber = z.coerce
+        .number()
+        .int()
+        .positive()
+        .parse(formData.get("rowNumber"));
+      const proposalHash = z
+        .string()
+        .min(1)
+        .parse(formData.get("proposalHash"));
+      const result = await skipStaffInventoryImportRow({
+        context,
+        request,
+        operationId,
+        proposalHash,
+        rowNumber,
+      });
+      if ("status" in result)
+        return payload({ kind: "import-in-progress" as const, operationId });
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({
+        kind: "import-row-skipped" as const,
+        proposal,
+        rowNumber,
+      });
+    }
     if (intent === "cancel-import") {
       const result = await cancelStaffInventoryImport({
         context,

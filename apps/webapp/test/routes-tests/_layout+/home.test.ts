@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getStaffSystemStatus: vi.fn(),
   countPendingHandbookReviews: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
+  skipStaffInventoryImportRow: vi.fn(),
   getStaffInventoryImportProposal: vi.fn(),
 }));
 
@@ -51,6 +52,7 @@ vi.mock("~/modules/ioio-staff/system-status.server", () => ({
 // /staff/import; isolate route payload wiring from the database-backed engine.
 vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   applyStaffInventoryImport: mocks.applyStaffInventoryImport,
+  skipStaffInventoryImportRow: mocks.skipStaffInventoryImportRow,
   cancelStaffInventoryImport: vi.fn(),
   getStaffInventoryImportProposal: mocks.getStaffInventoryImportProposal,
   prepareStaffInventoryImport: vi.fn(),
@@ -100,6 +102,46 @@ describe("IOIO staff dashboard loader", () => {
     });
     mocks.findUnique.mockResolvedValue({ staffDashboardPreferences: null });
     mocks.countPendingHandbookReviews.mockResolvedValue(0);
+  });
+
+  it("routes draft removal separately from inventory Apply", async () => {
+    mocks.skipStaffInventoryImportRow.mockResolvedValue({
+      operationId: "operation-1",
+      rowNumber: 45,
+    });
+    mocks.getStaffInventoryImportProposal.mockResolvedValue({
+      operationId: "operation-1",
+      ignoredRowNumbers: [45],
+      appliedRowNumbers: Array.from({ length: 44 }, (_, index) => index + 1),
+      reviewClosed: true,
+    });
+    const form = new FormData();
+    form.set("intent", "skip-row");
+    form.set("operationId", "operation-1");
+    form.set("proposalHash", "hash");
+    form.set("rowNumber", "45");
+    const result = await action(
+      createActionArgs({
+        request: new Request("http://localhost/staff/import", {
+          method: "POST",
+          body: form,
+        }),
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      })
+    );
+    expect(mocks.skipStaffInventoryImportRow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: "operation-1",
+        proposalHash: "hash",
+        rowNumber: 45,
+      })
+    );
+    expect(mocks.applyStaffInventoryImport).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      error: null,
+      kind: "import-row-skipped",
+      proposal: { ignoredRowNumbers: [45], reviewClosed: true },
+    });
   });
 
   it("loads a fresh organization with empty operational data", async () => {
