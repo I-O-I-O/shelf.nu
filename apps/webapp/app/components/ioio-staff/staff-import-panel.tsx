@@ -535,7 +535,6 @@ function StaffImportProposalView({
   useEffect(() => setProposal(initialProposal), [initialProposal]);
   const fetcher = useFetcher<StaffImportActionResponse>();
   const draftFetcher = useFetcher<StaffImportActionResponse>();
-  const revertFetcher = useFetcher<StaffImportActionResponse>();
   const { revalidate } = useRevalidator();
   const {
     data: draftResponse,
@@ -552,8 +551,6 @@ function StaffImportProposalView({
   const [reviewPage, setReviewPage] = useState(0);
   const [allowSameFileReimport, setAllowSameFileReimport] = useState(false);
   const [editRowNumber, setEditRowNumber] = useState<number | null>(null);
-  const [selectedImplementedRowNumbers, setSelectedImplementedRowNumbers] =
-    useState<number[]>([]);
   const savedDecisionByRow = new Map(
     (proposal.savedReviewDecisions ?? []).map((decision) => [
       decision.rowNumber,
@@ -700,7 +697,6 @@ function StaffImportProposalView({
   const appliedRowNumbers = new Set(proposal.appliedRowNumbers ?? []);
   const ignoredRowNumbers = new Set(proposal.ignoredRowNumbers ?? []);
   const revertedRowNumbers = new Set(proposal.revertedRowNumbers ?? []);
-  const revertibleRowNumbers = new Set(proposal.revertibleRowNumbers ?? []);
   const isAppliedRow = (rowNumber: number) =>
     appliedRowNumbers.has(rowNumber) && !revertedRowNumbers.has(rowNumber);
   const isResolvedRow = (rowNumber: number) =>
@@ -765,17 +761,6 @@ function StaffImportProposalView({
   const implementedRows = proposal.rows.filter((row) =>
     isAppliedRow(row.rowNumber)
   );
-  const selectedRevertibleRows = selectedImplementedRowNumbers.filter(
-    (rowNumber) => revertibleRowNumbers.has(rowNumber)
-  );
-  const revertibleImplementedRows = implementedRows.filter((row) =>
-    revertibleRowNumbers.has(row.rowNumber)
-  );
-  const allRevertibleRowsSelected =
-    revertibleImplementedRows.length > 0 &&
-    selectedRevertibleRows.length === revertibleImplementedRows.length;
-  const someRevertibleRowsSelected =
-    selectedRevertibleRows.length > 0 && !allRevertibleRowsSelected;
   const firstReviewRow = pendingReviewRows.length
     ? reviewPage * IMPORT_REVIEW_PAGE_SIZE + 1
     : 0;
@@ -1000,20 +985,6 @@ function StaffImportProposalView({
       onReset("Import cancelled. No inventory changes were applied.");
     }
   }, [fetcher.data, onReset, revalidate]);
-
-  useEffect(() => {
-    if (revertFetcher.data?.error === null) {
-      if (revertFetcher.data.kind === "import-rows-reverted") {
-        setProposal(revertFetcher.data.proposal);
-        setSelectedImplementedRowNumbers([]);
-        if (revertFetcher.data.result.revertedRowNumbers.length > 0) {
-          void revalidate();
-        }
-      } else if (revertFetcher.data.kind === "import-row-reverted") {
-        void revalidate();
-      }
-    }
-  }, [revalidate, revertFetcher.data]);
 
   return (
     <div className="mt-5 border-t border-gray-100 pt-5">
@@ -2556,74 +2527,16 @@ function StaffImportProposalView({
             id="implemented-import-rows"
             title="Implemented"
             count={implementedRows.length}
-            selectedCount={selectedRevertibleRows.length}
-            selectedLabel="selected"
-            actions={
-              selectedRevertibleRows.length > 0 ? (
-                <revertFetcher.Form
-                  method="post"
-                  action={actionPath}
-                  className="flex min-w-0 flex-wrap items-center gap-2"
-                >
-                  <input type="hidden" name="intent" value="revert-selected" />
-                  <input
-                    type="hidden"
-                    name="operationId"
-                    value={proposal.operationId}
-                  />
-                  <input
-                    type="hidden"
-                    name="rowNumbers"
-                    value={JSON.stringify(selectedRevertibleRows)}
-                  />
-                  <Button
-                    type="submit"
-                    variant="danger"
-                    size="md"
-                    disabled={revertFetcher.state !== "idle"}
-                    className="whitespace-nowrap"
-                  >
-                    {revertFetcher.state !== "idle"
-                      ? "Reverting…"
-                      : "Revert selected"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="md"
-                    className="whitespace-nowrap"
-                    onClick={() => setSelectedImplementedRowNumbers([])}
-                  >
-                    Cancel
-                  </Button>
-                </revertFetcher.Form>
-              ) : null
-            }
           />
+          <p className="px-3 pb-3 text-xs text-gray-500">
+            Manage implemented inventory through Shelf. Import review cannot
+            delete or revert assets.
+          </p>
           <div className="overflow-x-auto">
             <table className={IMPORT_REVIEW_TABLE_CLASS}>
               <thead className={IMPORT_REVIEW_TABLE_HEAD_CLASS}>
                 <tr>
-                  <th className="w-10 p-2">
-                    <ImportReviewCheckbox
-                      ariaLabel="Select all implemented rows that can be reverted"
-                      checked={allRevertibleRowsSelected}
-                      indeterminate={someRevertibleRowsSelected}
-                      disabled={
-                        revertibleImplementedRows.length === 0 ||
-                        revertFetcher.state !== "idle"
-                      }
-                      onChange={(checked) =>
-                        setSelectedImplementedRowNumbers(
-                          checked
-                            ? revertibleImplementedRows.map(
-                                (row) => row.rowNumber
-                              )
-                            : []
-                        )
-                      }
-                    />
-                  </th>
+                  <th className="w-10 p-2" aria-hidden="true" />
                   <th className="w-[190px] p-2">Product</th>
                   <th className="w-16 p-2">Qty</th>
                   <th className="w-[148px] p-2">Category</th>
@@ -2641,7 +2554,6 @@ function StaffImportProposalView({
                     (item) => item.rowNumber === row.rowNumber
                   );
                   const decision = reviewDecisions[row.rowNumber];
-                  const canRevert = revertibleRowNumbers.has(row.rowNumber);
                   const location = proposal.locationOptions?.find(
                     (option) =>
                       option.id === (decision?.locationId ?? row.locationId)
@@ -2652,9 +2564,6 @@ function StaffImportProposalView({
                           (option) => option.id === decision.categoryId
                         )?.name
                       : null;
-                  const checked = selectedImplementedRowNumbers.includes(
-                    row.rowNumber
-                  );
                   const imageSource =
                     row.productImageProposal?.status === "IMAGE_FOUND"
                       ? importProductImagePreview(row.productImageProposal)
@@ -2662,26 +2571,7 @@ function StaffImportProposalView({
                         row.existingAssetModelImageUrl;
                   return (
                     <tr key={row.rowNumber}>
-                      <td className="w-10 p-2 align-top">
-                        <ImportReviewCheckbox
-                          ariaLabel={`Select ${
-                            row.title || `row ${row.rowNumber}`
-                          } to revert`}
-                          checked={checked}
-                          disabled={
-                            !canRevert || revertFetcher.state !== "idle"
-                          }
-                          onChange={(nextChecked) =>
-                            setSelectedImplementedRowNumbers((current) =>
-                              nextChecked
-                                ? [...current, row.rowNumber]
-                                : current.filter(
-                                    (number) => number !== row.rowNumber
-                                  )
-                            )
-                          }
-                        />
-                      </td>
+                      <td className="w-10 p-2 align-top" aria-hidden="true" />
                       <td className="break-words p-2 align-top font-semibold text-gray-950">
                         {implementation?.title ??
                           decision?.title ??
@@ -2757,7 +2647,7 @@ function StaffImportProposalView({
                         )}
                       </td>
                       <td className="p-2 align-top text-xs font-semibold text-gray-600">
-                        {canRevert ? "Implemented" : "Revert unavailable"}
+                        Implemented
                       </td>
                       <td aria-hidden="true" className="p-2 align-top" />
                     </tr>
@@ -2766,18 +2656,6 @@ function StaffImportProposalView({
               </tbody>
             </table>
           </div>
-          {revertFetcher.data?.error ? (
-            <p className="mt-2 text-sm text-red-700" role="alert">
-              {revertFetcher.data.error.message}
-            </p>
-          ) : revertFetcher.data?.kind === "import-rows-reverted" &&
-            revertFetcher.data.result.failedRows.length > 0 ? (
-            <p className="mt-2 text-sm text-amber-800" role="status">
-              Reverted {revertFetcher.data.result.revertedRowNumbers.length};{" "}
-              {revertFetcher.data.result.failedRows.length} could not be
-              reverted.
-            </p>
-          ) : null}
         </section>
       ) : null}
     </div>

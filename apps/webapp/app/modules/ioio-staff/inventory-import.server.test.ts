@@ -50,6 +50,7 @@ const mockUpdateAsset = vi.hoisted(() => vi.fn());
 const mockDeleteAsset = vi.hoisted(() => vi.fn());
 const mockReplaceAssetPlacements = vi.hoisted(() => vi.fn());
 const mockCreateAssetModel = vi.hoisted(() => vi.fn());
+const mockDeleteAssetModel = vi.hoisted(() => vi.fn());
 const mockUpdateAssetMainImage = vi.hoisted(() => vi.fn());
 const mockUpdateAssetModelDescriptionIfUnchanged = vi.hoisted(() => vi.fn());
 const mockUpdateAssetModelImage = vi.hoisted(() => vi.fn());
@@ -83,6 +84,7 @@ vi.mock("~/modules/asset/service.server", () => ({
 // to Shelf's model tables or invoking model side effects.
 vi.mock("~/modules/asset-model/service.server", () => ({
   createAssetModel: mockCreateAssetModel,
+  deleteAssetModel: mockDeleteAssetModel,
   updateAssetModelDescriptionIfUnchanged:
     mockUpdateAssetModelDescriptionIfUnchanged,
   updateAssetModelImage: mockUpdateAssetModelImage,
@@ -166,6 +168,7 @@ import {
 } from "./import-review";
 import {
   applyStaffInventoryImport,
+  cancelStaffInventoryImport,
   classifyStaffImportRows,
   getIndividualUnitImportLimitError,
   getStaffImportProposalHash,
@@ -178,7 +181,6 @@ import {
   saveStaffInventoryImportDraft,
   skipStaffInventoryImportRow,
   summarizeStaffImportRows,
-  type StaffImportProposal,
   type StaffImportProposalRow,
   type StaffImportReviewDecision,
   type StaffImportResult,
@@ -1404,6 +1406,8 @@ describe("staff inventory import safety", () => {
     reviewDecisionRows,
     sourceLocations,
     creationFailure,
+    creationFailureAtIndex,
+    productChoice,
   }: {
     quantity: number;
     type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
@@ -1413,6 +1417,7 @@ describe("staff inventory import safety", () => {
       type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
       quantity?: number | null;
       categoryId?: string | null;
+      assetModelId?: string | null;
       assetLocations?: Array<{
         locationId: string;
         quantity: number | null;
@@ -1467,6 +1472,8 @@ describe("staff inventory import safety", () => {
     };
     sourceLocations?: ReturnType<typeof inventorySourceLocations>;
     creationFailure?: string;
+    creationFailureAtIndex?: number;
+    productChoice?: "NEW" | "EXISTING";
     proposalRows?: StaffImportProposalRow[];
     reviewDecisionRows?: StaffImportReviewDecision[];
   }) {
@@ -1587,6 +1594,7 @@ describe("staff inventory import safety", () => {
     let modelId: string | null = null;
     let modelIdentityKey: string | null = null;
     let claimAttempted = false;
+    let assetCreateAttempt = 0;
     if (denyStaffAccess) {
       mockStaffAccess.mockRejectedValue(new Error("Staff access denied."));
     } else {
@@ -1657,6 +1665,8 @@ describe("staff inventory import safety", () => {
         ) {
           return { count: 0 };
         }
+        if (where.createdAt?.lt && operation.createdAt >= where.createdAt.lt)
+          return { count: 0 };
         if (where.status && where.status !== operation.status) {
           return { count: 0 };
         }
@@ -1762,15 +1772,49 @@ describe("staff inventory import safety", () => {
         return availableAssets.filter((asset) =>
           asset.title.startsWith(where.title.startsWith)
         );
-      return [];
+      return existingAssets.length
+        ? availableAssets.map((asset) => {
+            const locationId = "locationId" in asset ? asset.locationId : null;
+            return {
+              ...asset,
+              assetLocations:
+                asset.assetLocations ??
+                (locationId
+                  ? [{ locationId, quantity: asset.quantity, assetKitId: null }]
+                  : []),
+            };
+          })
+        : [];
     });
-    database.asset.findFirst.mockResolvedValue(null);
+    database.asset.findFirst.mockImplementation(
+      ({ where }) =>
+        existingAssets.find((asset) => asset.id === where.id) ?? null
+    );
+    if (existingAssets.length) {
+      mockUpdateAsset.mockImplementation((input) => {
+        const asset = existingAssets.find(
+          (candidate) => candidate.id === input.id
+        );
+        if (asset) {
+          if (input.quantity !== undefined) asset.quantity = input.quantity;
+          if (input.categoryId !== undefined)
+            asset.categoryId = input.categoryId;
+        }
+        return { id: input.id };
+      });
+    }
     database.category.findFirst.mockResolvedValue(null);
     database.qr.findFirst.mockResolvedValue(null);
     if (!selectedLocationId)
       database.location.findMany.mockResolvedValue(sourceLocations ?? []);
     mockCreateAsset.mockImplementation((asset) => {
-      if (creationFailure) throw new Error(creationFailure);
+      assetCreateAttempt += 1;
+      if (
+        creationFailure &&
+        (!creationFailureAtIndex ||
+          creationFailureAtIndex === assetCreateAttempt)
+      )
+        throw new Error(creationFailure);
       const created = {
         ...asset,
         id: asset.id ?? `asset-${assetRows.length + 1}`,
@@ -1798,6 +1842,7 @@ describe("staff inventory import safety", () => {
                       decision: "APPROVE",
                       title: row.title,
                       assetId: null,
+                      ...(productChoice ? { productChoice } : {}),
                       categoryId: useExistingCategory ? row.categoryId : null,
                       newCategoryName: newCategoryName ?? null,
                       approveNewCategory,
@@ -2432,6 +2477,149 @@ describe("staff inventory import safety", () => {
     expect(reopened.ignoredRowNumbers).toEqual([]);
   });
 
+  it("preserves all A1/A2 IDs, models, quantities and placements through A3, A4, removal and Cancel", async () => {
+    const locations = shelfInventoryLocations();
+    for (const shelf of ["A1", "A2"])
+      locations.push({
+        id: `shelf-${shelf}`,
+        name: `Shelf ${shelf}`,
+        parentId: "section-a",
+        pathLabel: `IOIO Lab - B477 · Section A · Shelf ${shelf}`,
+        operational: false,
+        currentUnits: 0,
+      });
+    for (const [bin] of inventorySourceRows)
+      locations.push({
+        id: `bin-${bin}`,
+        name: `Container ${bin}`,
+        parentId: `shelf-${bin.split("-")[0]}`,
+        pathLabel: `IOIO Lab - B477 · Section A · Shelf ${
+          bin.split("-")[0]
+        } · Container ${bin}`,
+        operational: false,
+        currentUnits: 0,
+      });
+    const protectedInventory = inventorySourceRows.map(
+      ([bin, title, quantity]) => ({
+        id: `existing-${bin}`,
+        title,
+        type: "QUANTITY_TRACKED" as const,
+        quantity,
+        categoryId: "category-electronics",
+        assetModelId: `model-${bin}`,
+        assetLocations: [
+          { locationId: `bin-${bin}`, quantity, assetKitId: null },
+        ],
+      })
+    );
+    const original = structuredClone(protectedInventory);
+    const makeRows = (shelf: "A3" | "A4") =>
+      classifyStaffImportRows({
+        rows: [
+          {
+            rowNumber: 1,
+            title: `${shelf} inventory`,
+            type: "QUANTITY_TRACKED",
+            quantity: 25,
+            receivedQuantity: 25,
+            category: "Electronics",
+            location: null,
+            sourceRoom: "B477",
+            sourceStorageLocation: shelf === "A3" ? "A3-10" : "A4-8",
+          },
+          {
+            rowNumber: 2,
+            title: `${shelf} blocked candidate`,
+            type: "QUANTITY_TRACKED",
+            quantity: 25,
+            receivedQuantity: 25,
+            category: "Electronics",
+            location: null,
+          },
+        ],
+        assets: protectedInventory,
+        categories: [{ id: "category-electronics", name: "Electronics" }],
+        locations,
+      });
+    const decisionsFor = (
+      rows: StaffImportProposalRow[]
+    ): StaffImportReviewDecision[] =>
+      rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        decision: row.rowNumber === 1 ? "APPROVE" : null,
+        title: row.title,
+        type: "QUANTITY_TRACKED",
+        quantity: 25,
+        categoryId: "category-electronics",
+        locationId: row.locationId,
+        productChoice: "NEW",
+      }));
+    const a3Rows = makeRows("A3");
+    const a3 = await applyNewImport({
+      quantity: 25,
+      proposalRows: a3Rows,
+      reviewDecisionRows: decisionsFor(a3Rows),
+      sourceLocations: locations,
+      existingAssets: protectedInventory,
+    });
+    expect(a3.result).toMatchObject({ succeededRows: 1, remainingRows: 1 });
+    const blocked = a3.ledgerRows.find((item) => item.rowKey === "row-2")!;
+    blocked.status = "CONFLICT";
+    blocked.errorCode = "CREATE_TARGET_CHANGED_AFTER_REVIEW";
+    const ctx = {
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+    };
+    await skipStaffInventoryImportRow({
+      ...ctx,
+      operationId: a3.operationId,
+      proposalHash: a3.proposalHash,
+      rowNumber: 2,
+    });
+    expect(a3.operation.status).toBe("SUCCEEDED");
+    expect(protectedInventory).toEqual(original);
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+    expect(mockDeleteAssetModel).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+    const a3Written = structuredClone(a3.assetRows);
+    const withA3 = [...protectedInventory, ...a3.assetRows];
+    const a4Rows = makeRows("A4");
+    const a4 = await applyNewImport({
+      quantity: 25,
+      proposalRows: a4Rows,
+      reviewDecisionRows: decisionsFor(a4Rows),
+      sourceLocations: locations,
+      existingAssets: withA3,
+    });
+    expect(a4.result).toMatchObject({ succeededRows: 1, remainingRows: 1 });
+    await cancelStaffInventoryImport({ ...ctx, operationId: a4.operationId });
+    expect(a4.operation.status).toBe("CANCELLED");
+    expect(protectedInventory).toEqual(original);
+    expect(a3.assetRows).toEqual(a3Written);
+    expect(a4.assetRows).toHaveLength(1);
+    expect(
+      withA3
+        .slice(0, 11)
+        .map((asset) => [
+          asset.id,
+          asset.assetModelId,
+          asset.quantity,
+          asset.assetLocations,
+        ])
+    ).toEqual(
+      original.map((asset) => [
+        asset.id,
+        asset.assetModelId,
+        asset.quantity,
+        asset.assetLocations,
+      ])
+    );
+    expect(mockDeleteAsset).not.toHaveBeenCalled();
+    expect(mockDeleteAssetModel).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+    expect(mockReplaceAssetPlacements).not.toHaveBeenCalled();
+  });
+
   function pendingPushButtonsDraft(firstBin = "A3-10") {
     const locations = shelfInventoryLocations();
     const rows = classifyStaffImportRows({
@@ -2483,6 +2671,9 @@ describe("staff inventory import safety", () => {
       operationId: state.operationId,
       proposalHash: state.proposalHash,
     };
+    expect(
+      state.ledgerRows.find((item) => item.rowKey === "row-45")?.status
+    ).toBe("PENDING");
     expect(
       await applyStaffInventoryImport({
         ...args,
@@ -4069,6 +4260,313 @@ describe("staff inventory import safety", () => {
     }
   );
 
+  it("validates later rows against successful same-batch writes to the same asset", async () => {
+    const existing = {
+      id: "shared-existing-asset",
+      title: "Shared stock",
+      type: "QUANTITY_TRACKED" as const,
+      quantity: 10,
+      categoryId: "category-electronics",
+      assetModelId: null,
+      assetLocations: [
+        { locationId: "location-a", quantity: 10, assetKitId: null },
+      ],
+    };
+    const expectedAssetState = {
+      assetId: existing.id,
+      title: existing.title,
+      type: existing.type,
+      quantity: 10,
+      categoryId: existing.categoryId,
+      locationIds: ["location-a"],
+      assetModelId: null,
+    };
+    const rows: StaffImportProposalRow[] = [1, 2, 3].map(
+      (rowNumber) =>
+        ({
+          rowNumber,
+          title: existing.title,
+          action: "UPDATE_QUANTITY",
+          assetId: existing.id,
+          type: "QUANTITY_TRACKED",
+          quantity: 10,
+          receivedQuantity: 10,
+          category: "Electronics",
+          categoryId: existing.categoryId,
+          location: null,
+          locationId: null,
+          currentQuantity: 10,
+          currentCategoryId: existing.categoryId,
+          currentLocationId: "location-a",
+          expectedAssetState,
+          reason: "Reviewed update",
+        }) as StaffImportProposalRow
+    );
+    const decisions: StaffImportReviewDecision[] = rows.map((row, index) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      assetId: existing.id,
+      quantity: 11 + index,
+      categoryId: existing.categoryId,
+      locationId: null,
+      type: "QUANTITY_TRACKED",
+    }));
+    const state = await applyNewImport({
+      quantity: 1,
+      useExistingCategory: true,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      existingAssets: [existing],
+      sourceLocations: [],
+      applyOnlyRowNumbers: [1],
+    });
+    expect(state.result).toMatchObject({ succeededRows: 1, remainingRows: 2 });
+
+    const result = await applyStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: state.operationId,
+      proposalHash: state.proposalHash,
+      reviewDecisions: JSON.stringify(decisions),
+      applyOnlyRowNumbers: [2, 3],
+    });
+
+    expect(result).toMatchObject({
+      succeededRows: 2,
+      remainingRows: 0,
+      conflictRows: [],
+    });
+    expect(state.assetRows).toHaveLength(0);
+    expect(
+      state.ledgerRows.filter((item) => item.status === "DONE")
+    ).toHaveLength(3);
+    expect(existing.quantity).toBe(34);
+  });
+
+  it.each([3, 45, 42])(
+    "applies every row in a %i-row create batch in one Apply",
+    async (count) => {
+      const rows: StaffImportProposalRow[] = Array.from(
+        { length: count },
+        (_, index) => {
+          const a3PushButtonsFinalRow = count === 45 && index === 44;
+          const sparkFunLastRow = count === 42 && index === 41;
+          return {
+            rowNumber: index + 1,
+            title: a3PushButtonsFinalRow
+              ? "Push buttons"
+              : sparkFunLastRow
+              ? "SparkFun WIG-11029 board/module"
+              : `Unique IOIO item ${index + 1}`,
+            action: "CREATE",
+            assetId: null,
+            type: "QUANTITY_TRACKED",
+            quantity: 1,
+            receivedQuantity: 1,
+            category: "Electronics",
+            categoryId: "category-electronics",
+            location: null,
+            locationId: a3PushButtonsFinalRow
+              ? "bin-A3-10"
+              : sparkFunLastRow
+              ? "bin-A4-1"
+              : null,
+            ...(a3PushButtonsFinalRow || sparkFunLastRow
+              ? {
+                  sourceRoom: "B477",
+                  sourceOrganization: "IOIO Lab",
+                  sourceStorageLocation: a3PushButtonsFinalRow
+                    ? "A3-10"
+                    : "A4-1",
+                  locationLabel: a3PushButtonsFinalRow
+                    ? "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10"
+                    : "IOIO Lab - B477 · Section A · Shelf A4 · Container A4-1",
+                }
+              : {}),
+            currentQuantity: null,
+            currentCategoryId: null,
+            currentLocationId: null,
+            reason: "New item",
+          } as StaffImportProposalRow;
+        }
+      );
+      const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        decision: "APPROVE",
+        title: row.title,
+        quantity: 1,
+        categoryId: "category-electronics",
+        locationId: row.locationId ?? null,
+        type: "QUANTITY_TRACKED",
+        productChoice: "NEW",
+      }));
+      const { result, assetRows, ledgerRows, operation } = await applyNewImport(
+        {
+          quantity: 1,
+          useExistingCategory: true,
+          proposalRows: rows,
+          reviewDecisionRows: decisions,
+          sourceLocations:
+            count === 45 || count === 42
+              ? [
+                  ...shelfInventoryLocations(),
+                  ...(count === 42
+                    ? [
+                        {
+                          id: "bin-A4-1",
+                          name: "Container A4-1",
+                          parentId: "shelf-A4",
+                          pathLabel:
+                            "IOIO Lab - B477 · Section A · Shelf A4 · Container A4-1",
+                          operational: false,
+                          currentUnits: 0,
+                        },
+                      ]
+                    : []),
+                ]
+              : undefined,
+        }
+      );
+
+      expect(result).toMatchObject({
+        totalRows: count,
+        succeededRows: count,
+        remainingRows: 0,
+        conflictRows: [],
+      });
+      expect(assetRows).toHaveLength(count);
+      expect(ledgerRows.filter((item) => item.status === "DONE")).toHaveLength(
+        count
+      );
+      expect(operation.status).toBe("SUCCEEDED");
+      if (count === 42)
+        expect(assetRows[41]).toMatchObject({
+          title: "SparkFun WIG-11029 board/module",
+          locationId: "bin-A4-1",
+        });
+      if (count === 45)
+        expect(assetRows[44]).toMatchObject({
+          title: "Push buttons",
+          locationId: "bin-A3-10",
+        });
+    }
+  );
+
+  it("continues applying later rows after row 20 fails in a 42-row batch", async () => {
+    const rows: StaffImportProposalRow[] = Array.from(
+      { length: 42 },
+      (_, index) =>
+        ({
+          rowNumber: index + 1,
+          title: `A4 unique item ${index + 1}`,
+          action: "CREATE",
+          assetId: null,
+          type: "QUANTITY_TRACKED",
+          quantity: 1,
+          receivedQuantity: 1,
+          category: "Electronics",
+          categoryId: "category-electronics",
+          location: null,
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "New item",
+        }) as StaffImportProposalRow
+    );
+    const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      quantity: 1,
+      categoryId: "category-electronics",
+      type: "QUANTITY_TRACKED",
+      productChoice: "NEW",
+    }));
+    const { result, assetRows, ledgerRows } = await applyNewImport({
+      quantity: 1,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      creationFailure: "Injected failure for row 20.",
+      creationFailureAtIndex: 20,
+    });
+
+    expect(result).toMatchObject({
+      succeededRows: 41,
+      remainingRows: 1,
+    });
+    expect(assetRows).toHaveLength(41);
+    expect(ledgerRows.find((item) => item.rowKey === "row-20")?.status).toBe(
+      "CONFLICT"
+    );
+    expect(ledgerRows.filter((item) => item.status === "DONE")).toHaveLength(
+      41
+    );
+  });
+
+  it("keeps exact-title duplicate protection row-scoped within a batch", async () => {
+    const rows: StaffImportProposalRow[] = [1, 2, 3].map(
+      (rowNumber) =>
+        ({
+          rowNumber,
+          title: `Unique product ${rowNumber}`,
+          action: "CREATE",
+          assetId: null,
+          type: "QUANTITY_TRACKED",
+          quantity: 1,
+          receivedQuantity: 1,
+          category: "Electronics",
+          categoryId: "category-electronics",
+          location: null,
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "New item",
+        }) as StaffImportProposalRow
+    );
+    const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: "APPROVE",
+      title: row.title,
+      quantity: 1,
+      categoryId: "category-electronics",
+      type: "QUANTITY_TRACKED",
+      productChoice: "NEW",
+    }));
+    const state = await applyNewImport({
+      quantity: 1,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      existingAssets: [
+        {
+          id: "existing-duplicate",
+          title: "Unique product 2",
+          type: "QUANTITY_TRACKED",
+          quantity: 1,
+          categoryId: "category-electronics",
+          assetLocations: [],
+        },
+      ],
+    });
+
+    expect(state.result).toMatchObject({
+      succeededRows: 2,
+      remainingRows: 1,
+      conflictRows: [
+        {
+          rowNumber: 2,
+          reason: expect.stringContaining("exact-title asset appeared"),
+        },
+      ],
+    });
+    expect(state.assetRows.map((asset) => asset.title)).toEqual([
+      "Unique product 1",
+      "Unique product 3",
+    ]);
+  });
+
   it("resumes after three DONE units without recreating them", async () => {
     const {
       result: firstResult,
@@ -4132,6 +4630,7 @@ describe("staff inventory import safety", () => {
     const { assetRows } = await applyNewImport({
       quantity: 2,
       type: "INDIVIDUAL",
+      productChoice: "NEW",
       existingAssets: [{ id: "existing-asset", title: "Arduino Nano #001" }],
     });
 
@@ -7268,292 +7767,24 @@ describe("spreadsheet manual table selection", () => {
   });
 });
 
-describe("staff inventory import revert", () => {
-  const createProposal = (action: "CREATE" | "INCREASE_QUANTITY") => {
-    const content = {
-      version: 1 as const,
-      operationId: "revert-operation",
-      organizationId: "org-1",
-      source: { filename: "inventory.csv", size: 42, sha256: "sha" },
-      rows: [
-        {
+describe("import reversal is forbidden", () => {
+  it.each(["CREATE", "INCREASE_QUANTITY", "UPDATE_LOCATION"])(
+    "cannot undo %s even through the direct server entrypoint",
+    async () => {
+      await expect(
+        revertStaffInventoryImportRow({
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+          request: new Request("http://localhost/staff/import"),
+          operationId: "old-completed-import",
           rowNumber: 1,
-          title: "Arduino Nano",
-          action,
-          assetId: action === "CREATE" ? null : "asset-1",
-          categoryId: null,
-          locationId: null,
-          currentQuantity: action === "CREATE" ? null : 2,
-          currentCategoryId: null,
-          currentLocationId: null,
-          quantity: 3,
-          receivedQuantity: 3,
-          type: "QUANTITY_TRACKED" as const,
-          reason: "Imported inventory",
-        },
-      ],
-      counts: {} as StaffImportProposal["counts"],
-      createdAt: new Date().toISOString(),
-    };
-    return {
-      ...content,
-      proposalHash: getStaffImportProposalHash(content),
-    } as StaffImportProposal;
-  };
-
-  const setupOperation = (
-    proposal: StaffImportProposal,
-    ledgerItem: Record<string, unknown>,
-    status = "SUCCEEDED"
-  ) => {
-    const operation = {
-      id: proposal.operationId,
-      status,
-      createdAt: new Date(),
-      description: JSON.stringify({
-        proposal,
-        reviewDraft: [{ rowNumber: 1, decision: "APPROVE" }],
-      }),
-    };
-    database.ioioWriteOperation.findFirst.mockImplementation(() => ({
-      ...operation,
-    }));
-    database.ioioWriteOperation.updateMany.mockImplementation(
-      ({ where, data }) => {
-        if (where.status !== operation.status) return { count: 0 };
-        Object.assign(operation, data);
-        return { count: 1 };
-      }
-    );
-    database.ioioImportItem.findMany.mockResolvedValue([ledgerItem]);
-    database.ioioImportItem.updateMany.mockImplementation(({ where, data }) => {
-      if (
-        where.operationId === operation.id &&
-        where.rowKey === ledgerItem.rowKey &&
-        where.status === ledgerItem.status
-      ) {
-        Object.assign(ledgerItem, data);
-        if (data.writtenState) ledgerItem.writtenState = null;
-        return { count: 1 };
-      }
-      return { count: 0 };
-    });
-    return operation;
-  };
-
-  const revert = (rowNumber = 1) =>
-    revertStaffInventoryImportRow({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      operationId: "revert-operation",
-      rowNumber,
-    });
-
-  it("reopens a completed import as a read-only proposal with implemented rows", async () => {
-    const proposal = createProposal("CREATE");
-    const ledgerItem = {
-      id: "ledger-1",
-      rowKey: "row-1",
-      unitIndex: null,
-      status: "DONE",
-      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
-      writtenState: { outcome: "created", assetId: "asset-1" },
-      updatedAt: new Date("2026-11-11T10:00:00Z"),
-    };
-    const operation = {
-      id: proposal.operationId,
-      status: "SUCCEEDED",
-      createdAt: new Date(),
-      description: JSON.stringify({
-        proposal,
-        reviewDraft: [],
-        revertedRowNumbers: [1],
-      }),
-    };
-    database.ioioWriteOperation.findFirst.mockResolvedValue(operation);
-    database.ioioImportItem.findMany.mockResolvedValue([ledgerItem]);
-
-    const reopened = await getStaffInventoryImportProposal({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      operationId: proposal.operationId,
-    });
-
-    expect(reopened).toMatchObject({
-      reviewClosed: true,
-      appliedRowNumbers: [1],
-      revertibleRowNumbers: [1],
-      revertedRowNumbers: [],
-    });
-  });
-
-  it.each(["FAILED", "CONFLICT"])(
-    "keeps a %s row pending even when every unit write succeeded",
-    async (status) => {
-      const proposal = createProposal("CREATE");
-      database.ioioWriteOperation.findFirst.mockResolvedValue({
-        status: "PARTIAL",
-        createdAt: new Date(),
-        description: JSON.stringify({ proposal, reviewDraft: [] }),
-      });
-      database.ioioImportItem.findMany.mockResolvedValue([
-        {
-          id: "root",
-          rowKey: "row-1",
-          unitIndex: null,
-          status,
-          writtenState: { outcome: "individual_units" },
-        },
-        {
-          id: "unit-1",
-          rowKey: "row-1",
-          unitIndex: 1,
-          status: "DONE",
-          targetAssetId: "asset-1",
-        },
-      ]);
-      const reopened = await getStaffInventoryImportProposal({
-        context: { getSession: () => ({ userId: "staff-1" }) } as never,
-        request: new Request("http://localhost/staff/import"),
-        operationId: proposal.operationId,
-      });
-      expect(reopened.appliedRowNumbers).toEqual([]);
-      expect(reopened.implementations).toEqual([]);
-      expect(reopened.reviewClosed).toBe(false);
+        })
+      ).rejects.toThrow("cannot delete, archive, or undo");
+      expect(mockDeleteAsset).not.toHaveBeenCalled();
+      expect(mockUpdateAsset).not.toHaveBeenCalled();
+      expect(mockReplaceAssetPlacements).not.toHaveBeenCalled();
+      expect(database.ioioImportItem.updateMany).not.toHaveBeenCalled();
     }
   );
-
-  it("reverts a newly created asset through Shelf's audited delete service", async () => {
-    const proposal = createProposal("CREATE");
-    const timestamp = new Date();
-    const ledgerItem = {
-      id: "ledger-1",
-      rowKey: "row-1",
-      unitIndex: null,
-      status: "DONE",
-      updatedAt: timestamp,
-      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
-      writtenState: { outcome: "created", assetId: "asset-1" },
-    };
-    const operation = setupOperation(proposal, ledgerItem, "PREPARED");
-    database.asset.findFirst.mockResolvedValue({
-      id: "asset-1",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-
-    await expect(revert()).resolves.toEqual({
-      operationId: "revert-operation",
-      rowNumber: 1,
-      reverted: true,
-    });
-
-    expect(mockDeleteAsset).toHaveBeenCalledWith({
-      id: "asset-1",
-      organizationId: "org-1",
-      actorUserId: "staff-1",
-    });
-    expect(mockUpdateAsset).not.toHaveBeenCalled();
-    expect(ledgerItem).toMatchObject({ status: "PENDING", writtenState: null });
-    expect(JSON.parse(operation.description)).toMatchObject({
-      revertedRowNumbers: [1],
-      reviewDraft: [{ rowNumber: 1, decision: null }],
-      revertHistory: [
-        {
-          rowNumber: 1,
-          ledgerItems: [
-            {
-              status: "DONE",
-              writtenState: { outcome: "created", assetId: "asset-1" },
-            },
-          ],
-        },
-      ],
-    });
-    expect(operation.status).toBe("PREPARED");
-
-    const proposalAfterRevert = await getStaffInventoryImportProposal({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      operationId: proposal.operationId,
-    });
-    expect(proposalAfterRevert).toMatchObject({
-      appliedRowNumbers: [],
-      revertedRowNumbers: [1],
-      reviewClosed: false,
-      savedReviewDecisions: [{ rowNumber: 1, decision: null }],
-    });
-
-    await expect(revert()).rejects.toThrow("already been reverted");
-    expect(mockDeleteAsset).toHaveBeenCalledTimes(1);
-  });
-
-  it("restores an updated asset only when the imported value is still current", async () => {
-    const proposal = createProposal("INCREASE_QUANTITY");
-    const updatedAt = new Date();
-    const snapshot = {
-      kind: "ASSET_UPDATE",
-      action: "INCREASE_QUANTITY",
-      assetId: "asset-1",
-      before: { quantity: 2, categoryId: null, manualLocationIds: [] },
-      target: { quantity: 5 },
-    };
-    setupOperation(proposal, {
-      id: "ledger-1",
-      rowKey: "row-1",
-      unitIndex: null,
-      status: "DONE",
-      updatedAt,
-      expectedPrior: snapshot,
-      writtenState: {
-        outcome: "updated",
-        assetId: "asset-1",
-        action: "INCREASE_QUANTITY",
-      },
-    });
-    database.asset.findFirst.mockResolvedValue({
-      id: "asset-1",
-      quantity: 5,
-      categoryId: null,
-      updatedAt,
-      assetLocations: [],
-    });
-
-    await revert();
-
-    expect(mockUpdateAsset).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: "asset-1",
-        quantity: 2,
-        organizationId: "org-1",
-        userId: "staff-1",
-      })
-    );
-    expect(mockDeleteAsset).not.toHaveBeenCalled();
-  });
-
-  it("refuses to delete a created asset after it has changed", async () => {
-    const proposal = createProposal("CREATE");
-    const operation = setupOperation(proposal, {
-      id: "ledger-1",
-      rowKey: "row-1",
-      unitIndex: null,
-      status: "DONE",
-      updatedAt: new Date("2026-01-01T00:00:00.500Z"),
-      expectedPrior: { kind: "CREATE", rowKey: "row-1" },
-      writtenState: { outcome: "created", assetId: "asset-1" },
-    });
-    database.asset.findFirst.mockResolvedValue({
-      id: "asset-1",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      updatedAt: new Date("2026-01-01T00:00:01.000Z"),
-    });
-
-    await expect(revert()).rejects.toThrow("changed after it was created");
-
-    expect(mockDeleteAsset).not.toHaveBeenCalled();
-    expect(operation.status).toBe("SUCCEEDED");
-  });
 });
 
 describe("Staff Import PDF-only upload validation", () => {

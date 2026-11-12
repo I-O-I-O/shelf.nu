@@ -5,11 +5,7 @@ import JSZip from "jszip";
 import { db } from "~/database/db.server";
 import {
   BULK_CREATE_MAX,
-  createAsset,
-  deleteAsset,
-  replaceAssetPlacements,
   updateAssetMainImage,
-  updateAsset,
 } from "~/modules/asset/service.server";
 import {
   updateAssetModelDescriptionIfUnchanged,
@@ -55,6 +51,12 @@ import {
   type MouserLineItemInput,
   type ImportHelperRequest,
 } from "./import-helper-contract.server";
+import {
+  createImportAsset,
+  updateImportAsset,
+  assertImportInventoryOperation,
+  IMPORT_NON_DESTRUCTIVE_MESSAGE,
+} from "./import-inventory-writes.server";
 import {
   claimImportLedgerItem,
   ensureImportLedgerItems,
@@ -6149,62 +6151,10 @@ export async function getStaffInventoryImportProposal({
     revertedRowNumbers: readStoredRevertedRows(operation.description).filter(
       (rowNumber) => !appliedRows.has(rowNumber)
     ),
-    revertibleRowNumbers: getRevertibleImportRowNumbers({
-      proposal,
-      ledgerItems,
-    }),
+    revertibleRowNumbers: [],
     reviewClosed:
       getPendingImportRowNumbers(proposal, ledgerItems).length === 0,
   };
-}
-
-function getRevertibleImportRowNumbers({
-  proposal,
-  ledgerItems,
-}: {
-  proposal: StaffImportProposal;
-  ledgerItems: ImportLedgerItem[];
-}) {
-  return proposal.rows.flatMap((row) => {
-    const rowItems = ledgerItems.filter(
-      (item) => item.rowKey === `row-${row.rowNumber}`
-    );
-    const root = rowItems.find((item) => item.unitIndex === null);
-    if (root?.status !== "DONE") return [];
-    const written = root.writtenState;
-    if (!written || typeof written !== "object" || Array.isArray(written))
-      return [];
-    const outcome = (written as Record<string, Prisma.JsonValue>).outcome;
-    if (outcome === "created") return [row.rowNumber];
-    if (outcome === "individual_units") {
-      const units = rowItems.filter((item) => item.unitIndex !== null);
-      return units.length > 0 &&
-        units.every((item) => {
-          if (item.status !== "DONE" || !item.writtenState) return false;
-          if (
-            typeof item.writtenState !== "object" ||
-            Array.isArray(item.writtenState)
-          )
-            return false;
-          return (
-            (item.writtenState as Record<string, Prisma.JsonValue>).outcome ===
-            "created"
-          );
-        })
-        ? [row.rowNumber]
-        : [];
-    }
-    if (outcome !== "updated") return [];
-    const snapshot = readImportAssetRecoverySnapshot(root.expectedPrior);
-    if (!snapshot) return [];
-    if (
-      snapshot.action === "UPDATE_LOCATION" &&
-      !snapshot.before.manualLocations
-    ) {
-      return [];
-    }
-    return [row.rowNumber];
-  });
 }
 
 function readStoredRevertedRows(description: string) {
@@ -6637,334 +6587,16 @@ function readStoredReviewDraft(description: string) {
   }
 }
 
-async function assertImportedAssetCanBeDeleted({
-  assetId,
-  organizationId,
-  lastImportWriteAt,
-}: {
-  assetId: string;
-  organizationId: string;
-  lastImportWriteAt: Date;
-}) {
-  const asset = await db.asset.findFirst({
-    where: { id: assetId, organizationId },
-    select: { id: true, createdAt: true, updatedAt: true },
-  });
-  if (!asset || asset.updatedAt.getTime() > lastImportWriteAt.getTime()) {
-    throw importError(
-      "This imported item changed after it was created, so it cannot be safely reverted."
-    );
-  }
-  const [
-    custody,
-    bookings,
-    consumption,
-    kits,
-    reports,
-    notes,
-    tags,
-    fields,
-    audits,
-    auditScans,
-    purchases,
-    qrCodes,
-  ] = await Promise.all([
-    db.custody.count({ where: { assetId } }),
-    db.bookingAsset.count({ where: { assetId } }),
-    db.consumptionLog.count({ where: { assetId } }),
-    db.assetKit.count({ where: { assetId } }),
-    db.reportFound.count({ where: { assetId } }),
-    db.note.count({ where: { assetId } }),
-    db.tag.count({
-      where: { organizationId, assets: { some: { id: assetId } } },
-    }),
-    db.assetCustomFieldValue.count({ where: { assetId } }),
-    db.auditAsset.count({ where: { assetId } }),
-    db.auditScan.count({ where: { assetId } }),
-    db.purchaseItem.count({ where: { linkedAssetId: assetId } }),
-    db.qr.findMany({
-      where: { assetId, organizationId },
-      select: { _count: { select: { scans: true } } },
-    }),
-  ]);
-  if (
-    custody ||
-    bookings ||
-    consumption ||
-    kits ||
-    reports ||
-    notes ||
-    tags ||
-    fields ||
-    audits ||
-    auditScans ||
-    purchases ||
-    qrCodes.some(({ _count }) => _count.scans > 0)
-  ) {
-    throw importError(
-      "This imported item now has related activity, so it cannot be safely reverted."
-    );
-  }
-}
-
-function readWrittenState(item: ImportLedgerItem) {
-  if (
-    !item.writtenState ||
-    typeof item.writtenState !== "object" ||
-    Array.isArray(item.writtenState)
-  ) {
-    return null;
-  }
-  return item.writtenState as Record<string, Prisma.JsonValue>;
-}
-
+/** Legacy entrypoint is intentionally fail-closed, including direct server callers. */
 export async function revertStaffInventoryImportRow({
   context,
   request,
-  operationId,
-  rowNumber,
 }: Pick<Parameters<typeof requireIoioStaffAccess>[0], "context" | "request"> & {
   operationId: string;
   rowNumber: number;
-}) {
-  const { organizationId, userId } = await requireIoioStaffAccess({
-    context,
-    request,
-  });
-  const operation = await db.ioioWriteOperation.findFirst({
-    where: {
-      id: operationId,
-      organizationId,
-      userId,
-      operationType: STAFF_IMPORT_OPERATION,
-      status: { in: ["PREPARED", "SUCCEEDED", "PARTIAL"] },
-    },
-    select: { status: true, description: true, createdAt: true },
-  });
-  if (!operation || isStaffImportExpired(operation.createdAt)) {
-    throw staffImportUnavailableError();
-  }
-  const proposal = readStoredProposal(operation.description);
-  const row = proposal.rows.find(
-    (candidate) => candidate.rowNumber === rowNumber
-  );
-  if (!row) throw importError("This import row is not available to revert.");
-  const revertedRowNumbers = readStoredRevertedRows(operation.description);
-  const rowItems = (
-    await getImportLedgerItems({ operationId, organizationId })
-  ).filter((item) => item.rowKey === `row-${rowNumber}`);
-  const root = rowItems.find((item) => item.unitIndex === null);
-  if (revertedRowNumbers.includes(rowNumber) && root?.status !== "DONE") {
-    throw importError("This import row has already been reverted.");
-  }
-  if (!root || root.status !== "DONE") {
-    throw importError("This import row is not fully implemented.");
-  }
-
-  const claimed = await db.ioioWriteOperation.updateMany({
-    where: {
-      id: operationId,
-      organizationId,
-      userId,
-      operationType: STAFF_IMPORT_OPERATION,
-      status: operation.status,
-    },
-    data: { status: "REVERTING" },
-  });
-  if (claimed.count !== 1) throw staffImportUnavailableError();
-
-  try {
-    const written = readWrittenState(root);
-    if (!written) throw importError("This row has no safe revert record.");
-
-    if (written.outcome === "updated") {
-      const snapshot = readImportAssetRecoverySnapshot(root.expectedPrior);
-      if (!snapshot) throw importError("This row has no safe revert record.");
-      if (written.action !== snapshot.action) {
-        throw importError("This row's saved revert record is inconsistent.");
-      }
-      if (
-        snapshot.action === "UPDATE_LOCATION" &&
-        !snapshot.before.manualLocations
-      ) {
-        throw importError(
-          "The original location quantities were not recorded, so this change cannot be safely reverted."
-        );
-      }
-      const assetVersion = await db.asset.findFirst({
-        where: { id: snapshot.assetId, organizationId },
-        select: { updatedAt: true },
-      });
-      if (
-        !assetVersion ||
-        assetVersion.updatedAt.getTime() > root.updatedAt.getTime()
-      ) {
-        throw importError(
-          "This inventory item changed after import, so the change was not reverted."
-        );
-      }
-      const observed = await inspectAssetRecoverySnapshot({
-        snapshot,
-        organizationId,
-      });
-      if (observed !== "TARGET") {
-        throw importError(
-          "This inventory item changed after import, so the change was not reverted."
-        );
-      }
-      if (
-        snapshot.action === "INCREASE_QUANTITY" ||
-        snapshot.action === "UPDATE_QUANTITY"
-      ) {
-        await updateAsset({
-          id: snapshot.assetId,
-          organizationId,
-          userId,
-          request,
-          quantity: snapshot.before.quantity,
-        });
-      } else if (snapshot.action === "UPDATE_CATEGORY") {
-        await updateAsset({
-          id: snapshot.assetId,
-          organizationId,
-          userId,
-          request,
-          categoryId: snapshot.before.categoryId,
-        });
-      } else {
-        await replaceAssetPlacements({
-          assetId: snapshot.assetId,
-          organizationId,
-          userId,
-          placements: snapshot.before.manualLocations ?? [],
-        });
-      }
-    } else {
-      const createdAssets =
-        written.outcome === "created" && typeof written.assetId === "string"
-          ? [{ assetId: written.assetId, lastImportWriteAt: root.updatedAt }]
-          : written.outcome === "individual_units"
-          ? rowItems.flatMap((item) => {
-              if (item.unitIndex === null || item.status !== "DONE") return [];
-              const unitWritten = readWrittenState(item);
-              return unitWritten?.outcome === "created" &&
-                typeof unitWritten.assetId === "string"
-                ? [
-                    {
-                      assetId: unitWritten.assetId,
-                      lastImportWriteAt: item.updatedAt,
-                    },
-                  ]
-                : [];
-            })
-          : [];
-      if (!createdAssets.length) {
-        throw importError(
-          "This import row did not create an inventory item to revert."
-        );
-      }
-      for (const asset of createdAssets) {
-        await assertImportedAssetCanBeDeleted({ ...asset, organizationId });
-      }
-      for (const asset of createdAssets) {
-        await deleteAsset({
-          id: asset.assetId,
-          organizationId,
-          actorUserId: userId,
-        });
-      }
-    }
-
-    const nextRevertedRowNumbers = [
-      ...new Set([...revertedRowNumbers, rowNumber]),
-    ].sort((left, right) => left - right);
-    const stored = JSON.parse(operation.description) as Record<string, unknown>;
-    const storedReviewDraft = Array.isArray(stored.reviewDraft)
-      ? stored.reviewDraft.map((entry) => {
-          if (
-            !entry ||
-            typeof entry !== "object" ||
-            Array.isArray(entry) ||
-            (entry as { rowNumber?: unknown }).rowNumber !== rowNumber
-          ) {
-            return entry;
-          }
-          return { ...entry, decision: null };
-        })
-      : [];
-    const revertedLedgerItems = rowItems.map((item) => ({
-      id: item.id,
-      rowKey: item.rowKey,
-      unitIndex: item.unitIndex,
-      kind: item.kind,
-      status: item.status,
-      expectedPrior: item.expectedPrior,
-      writtenState: item.writtenState,
-      targetAssetId: item.targetAssetId,
-      targetKitId: item.targetKitId,
-      qrId: item.qrId,
-    }));
-    const resetLedger = await db.ioioImportItem.updateMany({
-      where: {
-        operationId,
-        organizationId,
-        rowKey: `row-${rowNumber}`,
-        status: "DONE",
-      },
-      data: {
-        status: "PENDING",
-        writtenState: Prisma.DbNull,
-        targetAssetId: null,
-        targetKitId: null,
-        qrId: null,
-        heartbeatAt: null,
-        errorCode: null,
-        errorMessage: null,
-      },
-    });
-    if (resetLedger.count !== rowItems.length) {
-      throw staffImportUnavailableError();
-    }
-    const previousRevertHistory = Array.isArray(stored.revertHistory)
-      ? stored.revertHistory
-      : [];
-    const completed = await db.ioioWriteOperation.updateMany({
-      where: { id: operationId, organizationId, userId, status: "REVERTING" },
-      data: {
-        status: operation.status,
-        description: JSON.stringify({
-          ...stored,
-          reviewDraft: storedReviewDraft,
-          revertedRowNumbers: nextRevertedRowNumbers,
-          revertHistory: [
-            ...previousRevertHistory,
-            {
-              rowNumber,
-              userId,
-              at: new Date().toISOString(),
-              ledgerItems: revertedLedgerItems,
-            },
-          ],
-          lastReverted: { rowNumber, userId, at: new Date().toISOString() },
-        }),
-      },
-    });
-    if (completed.count !== 1) throw staffImportUnavailableError();
-    Logger.info({
-      event: "ioio_staff_import_row_reverted",
-      operationId,
-      rowNumber,
-      organizationId,
-      userId,
-    });
-    return { operationId, rowNumber, reverted: true };
-  } catch (cause) {
-    await db.ioioWriteOperation.updateMany({
-      where: { id: operationId, organizationId, userId, status: "REVERTING" },
-      data: { status: operation.status },
-    });
-    throw cause;
-  }
+}): Promise<{ operationId: string; rowNumber: number; reverted: true }> {
+  await requireIoioStaffAccess({ context, request });
+  throw importError(IMPORT_NON_DESTRUCTIVE_MESSAGE);
 }
 
 function readStoredImportResult(description: string): StaffImportResult {
@@ -7367,13 +6999,23 @@ async function makeSuggestedImageRequest(
 
 async function applyImportAssetModelEnrichment({
   assetModelId,
+  operationId,
   organizationId,
   row,
 }: {
   assetModelId: string;
+  operationId: string;
   organizationId: string;
   row: StaffImportProposalRow;
 }) {
+  assertImportInventoryOperation("ENRICH_MODEL");
+  Logger.info({
+    event: "ioio_import_canonical_write_attempt",
+    importSessionId: operationId,
+    candidateId: `row-${row.rowNumber}`,
+    operationType: "ENRICH_MODEL",
+    assetModelId,
+  });
   const description = row.assetModelDescription?.trim();
   if (
     description &&
@@ -7587,6 +7229,106 @@ function readImportAssetRecoverySnapshot(
     return null;
   }
   return snapshot;
+}
+
+function getImportSnapshotStartingState(
+  expected: ImportExpectedAssetState,
+  snapshot: ImportAssetRecoverySnapshot
+): boolean {
+  return (
+    expected.assetId === snapshot.assetId &&
+    expected.quantity === snapshot.before.quantity &&
+    expected.categoryId === snapshot.before.categoryId &&
+    stableJson(expected.locationIds) ===
+      stableJson([...snapshot.before.manualLocationIds].sort())
+  );
+}
+
+function applyImportSnapshotTarget(
+  expected: ImportExpectedAssetState,
+  snapshot: ImportAssetRecoverySnapshot
+): ImportExpectedAssetState {
+  const next = { ...expected };
+  switch (snapshot.action) {
+    case "INCREASE_QUANTITY":
+    case "UPDATE_QUANTITY":
+      if (snapshot.target.quantity !== undefined)
+        next.quantity = snapshot.target.quantity;
+      break;
+    case "UPDATE_CATEGORY":
+      if (snapshot.target.categoryId !== undefined)
+        next.categoryId = snapshot.target.categoryId;
+      break;
+    case "UPDATE_LOCATION":
+      if (snapshot.target.manualLocationIds !== undefined)
+        next.locationIds = [...snapshot.target.manualLocationIds].sort();
+      break;
+  }
+  return next;
+}
+
+function getImportExecutionAssetStates({
+  proposal,
+  decisions,
+  ledgerItems,
+}: {
+  proposal: StaffImportProposal;
+  decisions: StaffImportReviewDecision[];
+  ledgerItems: ImportLedgerItem[];
+}) {
+  const states = new Map<string, ImportExpectedAssetState>();
+  const decisionsByRow = new Map(
+    decisions.map((decision) => [decision.rowNumber, decision])
+  );
+  for (const row of proposal.rows) {
+    const decision = decisionsByRow.get(row.rowNumber);
+    if (!decision || decision.productChoice === "NEW") continue;
+    const assetId =
+      decision.assetId !== undefined ? decision.assetId : row.assetId;
+    if (!assetId) continue;
+    const expected =
+      assetId === row.assetId
+        ? row.expectedAssetState
+        : row.matchCandidates?.find((candidate) => candidate.id === assetId)
+            ?.expectedAssetState;
+    if (expected && !states.has(assetId)) states.set(assetId, expected);
+  }
+
+  const rootsByRow = new Map(
+    ledgerItems
+      .filter((item) => item.unitIndex === null)
+      .map((item) => [item.rowKey, item])
+  );
+  for (const row of proposal.rows) {
+    const item = rootsByRow.get(`row-${row.rowNumber}`);
+    if (
+      item?.status !== "DONE" ||
+      !item.writtenState ||
+      typeof item.writtenState !== "object" ||
+      Array.isArray(item.writtenState)
+    )
+      continue;
+    const writtenState = item.writtenState as Record<string, unknown>;
+    if (
+      writtenState.outcome !== "updated" ||
+      typeof writtenState.assetId !== "string"
+    )
+      continue;
+    const snapshot = readImportAssetRecoverySnapshot(item.expectedPrior);
+    const expected = states.get(writtenState.assetId);
+    if (
+      snapshot &&
+      snapshot.assetId === writtenState.assetId &&
+      expected &&
+      getImportSnapshotStartingState(expected, snapshot)
+    ) {
+      states.set(
+        writtenState.assetId,
+        applyImportSnapshotTarget(expected, snapshot)
+      );
+    }
+  }
+  return states;
 }
 
 function getSnapshotValue(
@@ -7989,7 +7731,10 @@ async function buildIndividualUnitImportPlan({
       "A positive received quantity is required for individual units."
     );
   }
+  assertImportInventoryOperation("CREATE_ASSET_MODEL");
   const modelResolution = await resolveImportAssetModel({
+    importSessionId: operationId,
+    importCandidateId: `row-${row.rowNumber}`,
     organizationId,
     userId,
     name: row.title,
@@ -8000,6 +7745,14 @@ async function buildIndividualUnitImportPlan({
     defaultValuation: null,
     preferredModelId: id(),
   });
+  if (modelResolution.status === "RESOLVED")
+    Logger.info({
+      event: "ioio_import_canonical_write",
+      importSessionId: operationId,
+      candidateId: `row-${row.rowNumber}`,
+      operationType: "RESOLVE_ASSET_MODEL",
+      assetModelId: modelResolution.assetModelId,
+    });
   if (modelResolution.status === "CONFLICT") {
     throw new ImportAssetModelConflictError(
       modelResolution.code,
@@ -8027,18 +7780,23 @@ async function buildIndividualUnitImportPlan({
 
 async function ensureIndividualAssetModel({
   plan,
+  operationId,
   row,
   organizationId,
   userId,
   applyEnrichment = false,
 }: {
   plan: IndividualUnitImportPlan;
+  operationId: string;
   row: StaffImportProposalRow;
   organizationId: string;
   userId: string;
   applyEnrichment?: boolean;
 }) {
+  assertImportInventoryOperation("CREATE_ASSET_MODEL");
   const resolution = await resolveImportAssetModel({
+    importSessionId: operationId,
+    importCandidateId: `row-${row.rowNumber}`,
     organizationId,
     userId,
     name: row.title,
@@ -8049,6 +7807,14 @@ async function ensureIndividualAssetModel({
     defaultValuation: null,
     preferredModelId: plan.assetModelId,
   });
+  if (resolution.status === "RESOLVED")
+    Logger.info({
+      event: "ioio_import_canonical_write",
+      importSessionId: operationId,
+      candidateId: `row-${row.rowNumber}`,
+      operationType: "RESOLVE_ASSET_MODEL",
+      assetModelId: resolution.assetModelId,
+    });
   if (resolution.status === "CONFLICT") {
     throw new ImportAssetModelConflictError(resolution.code, resolution.reason);
   }
@@ -8063,6 +7829,7 @@ async function ensureIndividualAssetModel({
   }
   if (applyEnrichment) {
     await applyImportAssetModelEnrichment({
+      operationId,
       assetModelId: resolution.assetModelId,
       organizationId,
       row,
@@ -8384,7 +8151,17 @@ export async function applyStaffInventoryImport({
       throw importError("Approve or ignore at least one row before Apply.");
     }
   }
+  let reviewedExpectedAssetStates = new Map<string, ImportExpectedAssetState>();
   if (!isResume && decisions.length > 0) {
+    const reviewWriteEvidence = await getImportLedgerItems({
+      operationId,
+      organizationId,
+    });
+    reviewedExpectedAssetStates = getImportExecutionAssetStates({
+      proposal,
+      decisions,
+      ledgerItems: reviewWriteEvidence,
+    });
     if (
       decisions.some(
         (decision) =>
@@ -8655,6 +8432,29 @@ export async function applyStaffInventoryImport({
       }
       const selectedAssetId =
         decision.assetId !== undefined ? decision.assetId : row.assetId;
+      if (row.sourceStorageLocation && selectedAssetId) {
+        const selected = assets.find((asset) => asset.id === selectedAssetId);
+        const locationId =
+          decision.locationId ??
+          resolveExplicitImportRow(row, proposal.locationOptions ?? [])
+            .locationId;
+        if (
+          selected &&
+          !selected.assetLocations.some(
+            (placement) =>
+              placement.locationId === locationId &&
+              placement.assetKitId === null
+          )
+        ) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_LOCATION",
+            message:
+              "Import cannot move an existing item out of its current location. Choose Create new or use Shelf's placement workflow.",
+          });
+          return true;
+        }
+      }
+
       if (selectedAssetId) {
         const currentAsset = assets.find(
           (asset) => asset.id === selectedAssetId
@@ -8682,12 +8482,15 @@ export async function applyStaffInventoryImport({
           });
           return true;
         }
-        const expectedAssetState =
+        const sourceExpectedAssetState =
           selectedAssetId === row.assetId
             ? row.expectedAssetState
             : row.matchCandidates?.find(
                 (candidate) => candidate.id === selectedAssetId
               )?.expectedAssetState;
+        const expectedAssetState =
+          reviewedExpectedAssetStates.get(selectedAssetId) ??
+          sourceExpectedAssetState;
         if (
           !currentAsset ||
           !expectedAssetState ||
@@ -8766,13 +8569,17 @@ export async function applyStaffInventoryImport({
       const selectedAsset = selectedAssetId
         ? assets.find((asset) => asset.id === selectedAssetId)
         : undefined;
-      const expectedAssetState = selectedAssetId
+      const sourceExpectedAssetState = selectedAssetId
         ? selectedAssetId === row.assetId
           ? row.expectedAssetState
           : row.matchCandidates?.find(
               (candidate) => candidate.id === selectedAssetId
             )?.expectedAssetState
         : undefined;
+      const expectedAssetState = selectedAssetId
+        ? reviewedExpectedAssetStates.get(selectedAssetId) ??
+          sourceExpectedAssetState
+        : sourceExpectedAssetState;
       if (
         selectedAsset &&
         decision.type != null &&
@@ -9048,7 +8855,11 @@ export async function applyStaffInventoryImport({
       return {
         ...classifiedTracking,
         ...(resolvedDecision.productChoice === "NEW"
-          ? { action: "CREATE" as const }
+          ? {
+              action: "CREATE" as const,
+              assetId: null,
+              existingAssetModelId: null,
+            }
           : {}),
         minQuantity: resolvedDecision.minQuantity ?? null,
         unitOfMeasure: resolvedDecision.unitOfMeasure ?? null,
@@ -9168,6 +8979,20 @@ export async function applyStaffInventoryImport({
   });
   const finalBlocked = rowsToApply.flatMap((row) => {
     const decision = decisionsByRow.get(row.rowNumber);
+    if (row.action === "UPDATE_LOCATION")
+      return [
+        {
+          rowNumber: row.rowNumber,
+          title: row.title,
+          issues: [
+            {
+              code: "INVALID_LOCATION" as const,
+              message:
+                "Import cannot replace existing asset locations. Use Shelf's placement workflow.",
+            },
+          ],
+        },
+      ];
     if (row.action === "IGNORE")
       return decision?.decision === "IGNORE"
         ? []
@@ -9439,6 +9264,13 @@ export async function applyStaffInventoryImport({
       .filter((item) => item.unitIndex === null)
       .map((item) => [item.rowKey, item])
   );
+  // Advance a separate per-asset execution state only for writes this import
+  // ledger proves completed. This also restores the baseline on resume.
+  const batchExpectedAssetStates = getImportExecutionAssetStates({
+    proposal,
+    decisions,
+    ledgerItems: initialLedgerItems,
+  });
   const applicableActions = new Set([
     "CREATE",
     "INCREASE_QUANTITY",
@@ -9674,6 +9506,7 @@ export async function applyStaffInventoryImport({
     if (row.action === "NO_CHANGE") {
       if (row.existingAssetModelId) {
         await applyImportAssetModelEnrichment({
+          operationId,
           assetModelId: row.existingAssetModelId,
           organizationId,
           row,
@@ -9695,6 +9528,7 @@ export async function applyStaffInventoryImport({
 
     if (row.assetId && row.existingAssetModelId) {
       await applyImportAssetModelEnrichment({
+        operationId,
         assetModelId: row.existingAssetModelId,
         organizationId,
         row,
@@ -9788,8 +9622,14 @@ export async function applyStaffInventoryImport({
               source,
               proposal.locationOptions ?? []
             ).locationId;
+            const destination = resolveExplicitImportRow(
+              row,
+              proposal.locationOptions ?? []
+            ).locationId;
             return Boolean(
               origin &&
+                destination &&
+                destination !== origin &&
                 asset.assetLocations.length &&
                 asset.assetLocations.every(
                   (placement) => placement.locationId === origin
@@ -9935,6 +9775,7 @@ export async function applyStaffInventoryImport({
 
           try {
             await ensureIndividualAssetModel({
+              operationId,
               plan: unitPlan,
               row,
               organizationId,
@@ -10141,6 +9982,7 @@ export async function applyStaffInventoryImport({
 
               try {
                 await ensureIndividualAssetModel({
+                  operationId,
                   plan: unitPlan,
                   row,
                   organizationId,
@@ -10213,7 +10055,9 @@ export async function applyStaffInventoryImport({
 
               try {
                 writeStarted = true;
-                await createAsset({
+                await createImportAsset({
+                  importSessionId: operationId,
+                  importCandidateId: `row-${row.rowNumber}`,
                   title: unitPlan.units[unitIndex].title,
                   description: buildImportedDescription(
                     proposal.source.filename,
@@ -10388,7 +10232,9 @@ export async function applyStaffInventoryImport({
           return { status: "IN_PROGRESS", operationId };
         }
         writeStarted = true;
-        const asset = await createAsset({
+        const asset = await createImportAsset({
+          importSessionId: operationId,
+          importCandidateId: `row-${row.rowNumber}`,
           title: row.title,
           description:
             type === "QUANTITY_TRACKED" && row.assetModelDescription?.trim()
@@ -10479,8 +10325,11 @@ export async function applyStaffInventoryImport({
           "The referenced Shelf asset is not in this organization."
         );
       if (
-        !row.expectedAssetState ||
-        !matchesExpectedAssetState(row.expectedAssetState, asset)
+        !batchExpectedAssetStates.has(asset.id) ||
+        !matchesExpectedAssetState(
+          batchExpectedAssetStates.get(asset.id)!,
+          asset
+        )
       ) {
         const reason =
           "The selected asset changed after review. Re-review its quantity, category, location, or product before applying.";
@@ -10576,7 +10425,9 @@ export async function applyStaffInventoryImport({
           return { status: "IN_PROGRESS", operationId };
         }
         writeStarted = true;
-        await updateAsset({
+        await updateImportAsset({
+          importSessionId: operationId,
+          importCandidateId: `row-${row.rowNumber}`,
           id: asset.id,
           userId,
           organizationId,
@@ -10610,7 +10461,9 @@ export async function applyStaffInventoryImport({
           return { status: "IN_PROGRESS", operationId };
         }
         writeStarted = true;
-        await updateAsset({
+        await updateImportAsset({
+          importSessionId: operationId,
+          importCandidateId: `row-${row.rowNumber}`,
           id: asset.id,
           userId,
           organizationId,
@@ -10663,7 +10516,9 @@ export async function applyStaffInventoryImport({
           return { status: "IN_PROGRESS", operationId };
         }
         writeStarted = true;
-        await updateAsset({
+        await updateImportAsset({
+          importSessionId: operationId,
+          importCandidateId: `row-${row.rowNumber}`,
           id: asset.id,
           userId,
           organizationId,
@@ -10727,7 +10582,9 @@ export async function applyStaffInventoryImport({
           return { status: "IN_PROGRESS", operationId };
         }
         writeStarted = true;
-        await updateAsset({
+        await updateImportAsset({
+          importSessionId: operationId,
+          importCandidateId: `row-${row.rowNumber}`,
           id: asset.id,
           userId,
           organizationId,
@@ -10765,6 +10622,12 @@ export async function applyStaffInventoryImport({
         });
         continue;
       }
+      const expectedAfterWrite = batchExpectedAssetStates.get(asset.id);
+      if (expectedAfterWrite && recoverySnapshot)
+        batchExpectedAssetStates.set(
+          asset.id,
+          applyImportSnapshotTarget(expectedAfterWrite, recoverySnapshot)
+        );
       updatedIds.push(asset.id);
     } catch (cause) {
       const reason =
@@ -10790,6 +10653,14 @@ export async function applyStaffInventoryImport({
             },
           });
           if (markedDone) {
+            const expectedAfterWrite = batchExpectedAssetStates.get(
+              recoverySnapshot.assetId
+            );
+            if (expectedAfterWrite)
+              batchExpectedAssetStates.set(
+                recoverySnapshot.assetId,
+                applyImportSnapshotTarget(expectedAfterWrite, recoverySnapshot)
+              );
             updatedIds.push(recoverySnapshot.assetId);
             continue;
           }

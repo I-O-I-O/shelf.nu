@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { db } from "~/database/db.server";
 import { createAssetModel } from "~/modules/asset-model/service.server";
+import { Logger } from "~/utils/logger";
 
 type ImportAssetModelIdentityInput = {
   name: string;
@@ -85,6 +86,8 @@ export async function resolveImportAssetModel({
   defaultCategoryId,
   defaultValuation,
   preferredModelId,
+  importSessionId,
+  importCandidateId,
 }: ImportAssetModelIdentityInput & {
   organizationId: string;
   userId: string;
@@ -92,6 +95,8 @@ export async function resolveImportAssetModel({
   defaultCategoryId?: string | null;
   defaultValuation?: number | null;
   preferredModelId?: string;
+  importSessionId?: string;
+  importCandidateId?: string;
 }): Promise<ImportAssetModelResolution> {
   const identity = getImportAssetModelIdentity({
     name,
@@ -222,6 +227,13 @@ export async function resolveImportAssetModel({
       defaultValuation,
       userId,
       organizationId,
+    });
+    Logger.info({
+      event: "ioio_import_canonical_write",
+      importSessionId: importSessionId ?? null,
+      candidateId: importCandidateId ?? null,
+      operationType: "CREATE_ASSET_MODEL",
+      assetModelId: model.id,
     });
     return {
       status: "RESOLVED",

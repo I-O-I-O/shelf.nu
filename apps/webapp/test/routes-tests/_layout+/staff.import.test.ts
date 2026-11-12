@@ -483,92 +483,31 @@ describe("staff inventory import route", () => {
     });
   });
 
-  it("routes a row revert through the server-side import service", async () => {
-    mocks.revertStaffInventoryImportRow.mockResolvedValue({
-      operationId: "operation-1",
-      rowNumber: 3,
-      reverted: true,
-    });
-    const form = new FormData();
-    form.set("intent", "revert-row");
-    form.set("operationId", "operation-1");
-    form.set("rowNumber", "3");
-
-    const result = await action(
-      createActionArgs({
-        request: new Request("http://localhost/staff/import", {
-          method: "POST",
-          body: form,
-        }),
-        context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      })
-    );
-
-    expect(mocks.revertStaffInventoryImportRow).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "operation-1", rowNumber: 3 })
-    );
-    expect(result).toMatchObject({
-      error: null,
-      kind: "import-row-reverted",
-      result: { rowNumber: 3, reverted: true },
-    });
-  });
-
-  it("reverts only the selected implemented rows through the server service", async () => {
-    mocks.revertStaffInventoryImportRow
-      .mockResolvedValueOnce({
-        operationId: "operation-1",
-        rowNumber: 1,
-        reverted: true,
-      })
-      .mockResolvedValueOnce({
-        operationId: "operation-1",
-        rowNumber: 3,
-        reverted: true,
+  it.each(["revert-row", "revert-selected"])(
+    "rejects retired destructive import intent %s without calling a mutation service",
+    async (intent) => {
+      const form = new FormData();
+      form.set("intent", intent);
+      form.set("operationId", "operation-1");
+      form.set("rowNumber", "3");
+      form.set("rowNumbers", "[1,3]");
+      const result = await action(
+        createActionArgs({
+          request: new Request("http://localhost/staff/import", {
+            method: "POST",
+            body: form,
+          }),
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        })
+      );
+      expect(result).toMatchObject({
+        data: {
+          error: { message: expect.stringContaining("cannot delete or undo") },
+        },
+        init: { status: 403 },
       });
-    const proposal = {
-      operationId: "operation-1",
-      rows: [],
-      appliedRowNumbers: [2],
-      revertedRowNumbers: [1, 3],
-    };
-    mocks.getStaffInventoryImportProposal.mockResolvedValue(proposal);
-    const form = new FormData();
-    form.set("intent", "revert-selected");
-    form.set("operationId", "operation-1");
-    form.set("rowNumbers", JSON.stringify([1, 3]));
-
-    const result = await action(
-      createActionArgs({
-        request: new Request("http://localhost/staff/import", {
-          method: "POST",
-          body: form,
-        }),
-        context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      })
-    );
-
-    expect(mocks.revertStaffInventoryImportRow).toHaveBeenCalledTimes(2);
-    expect(mocks.revertStaffInventoryImportRow).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ operationId: "operation-1", rowNumber: 1 })
-    );
-    expect(mocks.revertStaffInventoryImportRow).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ operationId: "operation-1", rowNumber: 3 })
-    );
-    expect(mocks.revertStaffInventoryImportRow).not.toHaveBeenCalledWith(
-      expect.objectContaining({ rowNumber: 2 })
-    );
-    expect(result).toMatchObject({
-      error: null,
-      kind: "import-rows-reverted",
-      proposal,
-      result: {
-        operationId: "operation-1",
-        revertedRowNumbers: [1, 3],
-        failedRows: [],
-      },
-    });
-  });
+      expect(mocks.revertStaffInventoryImportRow).not.toHaveBeenCalled();
+      expect(mocks.applyStaffInventoryImport).not.toHaveBeenCalled();
+    }
+  );
 });

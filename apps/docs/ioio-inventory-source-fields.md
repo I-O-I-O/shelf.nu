@@ -226,3 +226,57 @@ UI editing/removal, failed ledger persistence and duplicate protection are cover
 No migration or environment change is required. Restart Shelf; the helper is
 unchanged. Future integrations touching Home/staff import routes, the IOIO import
 service or review panel may require manual reconciliation.
+
+## Non-destructive inventory invariant
+
+Import may create inventory, set reviewed positive quantities/categories, assign
+locations to new records and manage its own ledger. It cannot delete/archive
+Asset or AssetModel records, clear categories, zero stock, change tracking type,
+or replace/remove existing placements. Existing location changes must use Shelf's
+separate placement workflow: the canonical single-location updater deliberately
+removes manual placements before replacing them, so import cannot call that mode.
+
+`import-inventory-writes.server.ts` is the server write boundary. It exposes only
+validated creation and an allowlisted existing-asset patch. Unsupported lifecycle,
+placement and non-positive-quantity fields fail before reaching a canonical
+mutation. Original Shelf create/update services retain their own row locking,
+placement constraints and transactions. Per-row ledger/reconciliation remains
+necessary for interrupted requests; a whole batch is not wrapped around nested
+canonical service transactions. Failed rows do not roll back or delete earlier
+successful inventory. No cleanup deletes are used as compensation.
+
+The former implemented-row Revert flow violated this invariant. It could call
+canonical `deleteAsset` for created stock/units, restore an earlier quantity
+(including zero), or replace old placements. Native deleteAsset hard-deletes the
+Asset and its cascading relations and records ASSET_DELETED transactionally.
+The import implementation first appeared with commit `0edee7f3c`. This code path
+is a confirmed capability; attributing a particular missing record to it still
+requires live ActivityEvent and import `revertHistory` evidence.
+
+Implemented history is now read-only. Legacy HTTP revert intents are rejected,
+and the direct server revert entrypoint is fail-closed too. Historical revert
+metadata remains readable for investigation; no recovery evidence is erased.
+Remove from draft and Cancel remain import-metadata-only operations. Duplicate
+and stale-write handling records conflicts or verified idempotent results and
+never deletes/replaces an existing inventory record to resolve a title match.
+Preview-image expiry affects temporary Image records only, not Asset/AssetModel
+records or their placements. There is no completed-session inventory cleanup.
+
+Canonical write logs contain importSessionId, candidateId, operationType and
+asset/model IDs. Model resolution/enrichment carries the same scope. No import
+canonical write is a DELETE operation. Audit data excludes credentials and raw
+source document payloads.
+
+Regression coverage includes the eleven A1/A2 source bins with existing IDs,
+model links, counts and placements. A3 and A4 imports, final-row removal, Cancel,
+duplicate/stale protection and retired reversal leave that existing inventory
+intact. Boundary tests exercise forged delete/archive/location/zero-quantity
+requests directly on the server, rather than relying on disabled controls.
+
+No migration is required. Deploy/restart Shelf to activate these protections;
+local changes alone do not secure a still-running older server. Recovery is a
+separate evidence-led operation: capture the before state, distinguish archive,
+visibility, placement and hard deletion, use canonical restore services for
+surviving records, and reconstruct only verified hard deletions. Never reset,
+seed or purge the database as part of recovery. Source quantities are evidence,
+not authorization to duplicate records that have not been proven missing.

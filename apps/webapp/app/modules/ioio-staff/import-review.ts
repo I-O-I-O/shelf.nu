@@ -366,6 +366,11 @@ export function validateImportRowForApply({
     );
   if (row.applyBlockedReason)
     add("SOURCE_REVIEW_REQUIRED", row.applyBlockedReason);
+  if (row.action === "UPDATE_LOCATION")
+    add(
+      "INVALID_LOCATION",
+      "Import cannot replace existing asset locations. Use Shelf's placement workflow."
+    );
   if (canonicalIssue) issues.push(canonicalIssue);
   const knownFields = new Set([
     "Item name",
