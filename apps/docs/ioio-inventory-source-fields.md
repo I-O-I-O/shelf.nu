@@ -133,3 +133,51 @@ all 45 rows are implemented. FAILED and CONFLICT ledger rows remain pending.
 No migration or environment changes are required; restart Shelf to load the fix.
 The existing IOIO import orchestration, readiness rules and review panel are the
 likely conflict points for future upstream integrations.
+
+## Reviewed approval through Apply
+
+A checked, eligible row is represented as `reviewDecisions[rowNumber].decision`
+with the literal value `APPROVE`. The form submits `intent=apply-import`,
+`operationId`, `proposalHash`, and a `reviewDecisions` JSON array containing the
+numeric `rowNumber`, that approval value, reviewed quantity/category/location
+IDs, tracking and product choices. The action forwards this JSON unchanged;
+the server parser accepts the same literal and selects `APPROVE` decisions.
+The row number joins to proposal rows and ledger `row-${rowNumber}` within the
+authenticated operation/organization. Helper candidate IDs and PDF source refs
+are extraction evidence, not alternate approval keys.
+
+The remaining mismatch was later in execution: a pending review row could be
+Ready and APPROVE while its earlier ledger entry remained FAILED/CONFLICT.
+Apply immediately continued past those terminal rejection entries without
+claiming or executing the corrected row. This reproduced `succeededRows: 0`,
+`remainingRows: 1`, despite a valid reviewed payload. The partial-result panel
+also omitted the stored rejection reason.
+
+After current values pass readiness and canonical validation, Apply can requeue
+only known pre-write errors (location/category changes, a changed create target,
+or ROW_REJECTED), with no written result, target IDs or physical-unit entries.
+The existing ledger ID and idempotency keys remain stable. Requeue is conditional
+on the previous status, code and timestamp while the parent Apply lease is held.
+Successful/ignored rows are never reset. Uncertain writes, physical-unit plans
+and inconsistent terminal rows require reconciliation and return explicit review
+issues before a new Apply claim. These restrictions are exposed to the shared
+readiness validator on reload, so blocked rows are not misleadingly Ready.
+
+Reviewed quantity, category ID, exact source-container location ID, and product
+choice determine execution. Canonical category names come from current validated
+records, avoiding a late exact-label rejection after normalized validation.
+Images are optional. Unsupported actions or missing actionable changes produce
+row failures rather than being silently skipped. Selection logs record row
+numbers, approval and exclusion reasons without source content or credentials.
+Partial and complete results show the applied count; failures/conflicts list
+product names and reasons. Corrected pre-write rejections can be retried without
+replaying completed rows. Unknown write outcomes are never blindly retried.
+
+The 45-row regression first implements 44 items, persists/reloads approval for
+Push buttons, then retries a prior rejection at A3-10 with reviewed quantity 37,
+Electronics and no image. It verifies one creation, one applied result, 45 final
+implemented rows, zero pending and closed review. Separate tests exercise action
+payload forwarding, restored checkbox state, creation failures and preservation
+of written/physical-unit evidence. No migration or environment changes are
+required; restart Shelf. Existing wrongly created records are not repaired by
+this retry change.

@@ -304,6 +304,8 @@ export type StaffImportPdfSummary = {
 export type StaffImportProposalRow = StaffImportRow & {
   action: StaffImportAction;
   reviewState?: StaffImportReviewState;
+  /** Derived from pending ledger state; never part of the immutable source proposal. */
+  applyBlockedReason?: string | null;
   minQuantity?: number | null;
   unitOfMeasure?: string | null;
   consumptionType?: "ONE_WAY" | "TWO_WAY" | null;
@@ -6046,11 +6048,18 @@ export async function getStaffInventoryImportProposal({
     status: "DONE",
   });
   const appliedRows = new Set(appliedRowNumbers);
-  const displayRows = proposal.rows.map((row) =>
-    appliedRows.has(row.rowNumber)
-      ? row
-      : resolveExplicitImportRow(row, proposal.locationOptions ?? [])
-  );
+  const pending = new Set(getPendingImportRowNumbers(proposal, ledgerItems));
+  const displayRows = proposal.rows.map((row) => {
+    if (!pending.has(row.rowNumber)) return row;
+    const root = ledgerItems.find(
+      (item) =>
+        item.rowKey === `row-${row.rowNumber}` && item.unitIndex === null
+    );
+    return {
+      ...resolveExplicitImportRow(row, proposal.locationOptions ?? []),
+      applyBlockedReason: getImportLedgerReviewBlock(root, ledgerItems),
+    };
+  });
   return {
     ...proposal,
     rows: displayRows,
@@ -7899,6 +7908,101 @@ function summarizeDoneItem(
   if (written.outcome === "reused") summary.reusedIds.push(written.assetId);
 }
 
+function canRetryReviewedImportRejection(
+  item: ImportLedgerItem,
+  ledgerItems: ImportLedgerItem[]
+): boolean {
+  const preWriteCodes = new Set([
+    "LOCATION_CHANGED_AFTER_REVIEW",
+    "CATEGORY_CHANGED_AFTER_REVIEW",
+    "CREATE_TARGET_CHANGED_AFTER_REVIEW",
+    "ROW_REJECTED",
+  ]);
+  return (
+    ["FAILED", "CONFLICT"].includes(item.status) &&
+    preWriteCodes.has(item.errorCode ?? "") &&
+    item.unitIndex === null &&
+    item.writtenState == null &&
+    !item.targetAssetId &&
+    !item.targetKitId &&
+    !item.qrId &&
+    !ledgerItems.some(
+      (entry) => entry.rowKey === item.rowKey && entry.unitIndex !== null
+    )
+  );
+}
+
+function getImportLedgerReviewBlock(
+  item: ImportLedgerItem | undefined,
+  ledgerItems: ImportLedgerItem[]
+): string | null {
+  if (
+    !item ||
+    !["FAILED", "CONFLICT", "DONE", "SKIPPED"].includes(item.status) ||
+    canRetryReviewedImportRejection(item, ledgerItems)
+  )
+    return null;
+  return `${
+    item.errorMessage ?? "The earlier attempt did not complete consistently."
+  } The saved write evidence requires reconciliation before this row can be retried.`;
+}
+
+/** A corrected review may retry only rejections known to precede inventory writes.
+ * Unknown write outcomes and physical-unit plans retain their recovery evidence. */
+async function requeueReviewedImportRejection({
+  item,
+  row,
+  ledgerItems,
+  operationId,
+  organizationId,
+}: {
+  item: ImportLedgerItem;
+  row: StaffImportProposalRow;
+  ledgerItems: ImportLedgerItem[];
+  operationId: string;
+  organizationId: string;
+}): Promise<ImportLedgerItem | null> {
+  const retryable = canRetryReviewedImportRejection(item, ledgerItems);
+  Logger.info({
+    event: "ioio_staff_import_reviewed_retry",
+    rowNumber: row.rowNumber,
+    priorStatus: item.status,
+    priorErrorCode: item.errorCode,
+    retryable,
+  });
+  if (!retryable)
+    return {
+      ...item,
+      errorMessage: `${
+        item.errorMessage ?? "The earlier attempt did not complete."
+      } The saved write evidence requires reconciliation before this row can be retried.`,
+    };
+  const reset = await db.ioioImportItem.updateMany({
+    where: {
+      id: item.id,
+      operationId,
+      organizationId,
+      unitIndex: null,
+      status: item.status,
+      errorCode: item.errorCode,
+      updatedAt: item.updatedAt,
+      writtenState: { equals: Prisma.AnyNull },
+      targetAssetId: null,
+      targetKitId: null,
+      qrId: null,
+    },
+    data: {
+      status: "PENDING",
+      kind: row.action,
+      heartbeatAt: null,
+      errorCode: null,
+      errorMessage: null,
+    },
+  });
+  if (reset.count !== 1) return null;
+  return getImportLedgerItem({ operationId, organizationId, itemId: item.id });
+}
+
 export async function applyStaffInventoryImport({
   context,
   request,
@@ -8107,14 +8211,35 @@ export async function applyStaffInventoryImport({
   }
   if (!isResume) {
     const ledger = await getImportLedgerItems({ operationId, organizationId });
-    const completed = new Map(
-      ledger
-        .filter(
-          (item) =>
-            item.unitIndex === null && ["DONE", "SKIPPED"].includes(item.status)
-        )
-        .map((item) => [Number(item.rowKey.replace(/^row-/, "")), item.status])
-    );
+    const completed = new Map([
+      ...getResolvedImportRowNumbers({
+        proposal,
+        ledgerItems: ledger,
+        status: "DONE",
+      }).map((number) => [number, "DONE"] as const),
+      ...getResolvedImportRowNumbers({
+        proposal,
+        ledgerItems: ledger,
+        status: "SKIPPED",
+      }).map((number) => [number, "SKIPPED"] as const),
+    ]);
+    Logger.info({
+      event: "ioio_staff_import_apply_selection",
+      operationId,
+      rows: proposal.rows
+        .filter((row) => inScope(row.rowNumber))
+        .map((row) => ({
+          rowNumber: row.rowNumber,
+          decision: decisionsByRow.get(row.rowNumber)?.decision ?? null,
+          reason: completed.has(row.rowNumber)
+            ? "ALREADY_RESOLVED"
+            : decisionsByRow.get(row.rowNumber)?.decision === "APPROVE"
+            ? "APPROVED_FOR_VALIDATION"
+            : decisionsByRow.get(row.rowNumber)?.decision === "IGNORE"
+            ? "EXPLICIT_IGNORE"
+            : "NOT_APPROVED",
+        })),
+    });
     completedForValidation = new Set(completed.keys());
     if (scopedRows?.some((number) => completed.has(number))) {
       return blockedResponse(
@@ -8599,7 +8724,9 @@ export async function applyStaffInventoryImport({
           ? decision.locationId
           : row.locationId;
       const selectedCategoryLabel = selectedCategoryId
-        ? proposal.categoryOptions?.find(
+        ? applyCategories.find((category) => category.id === selectedCategoryId)
+            ?.name ??
+          proposal.categoryOptions?.find(
             (category) => category.id === selectedCategoryId
           )?.name ??
           newlyCreatedCategory?.name ??
@@ -8802,15 +8929,18 @@ export async function applyStaffInventoryImport({
       operationId,
       organizationId,
     });
-    const completedRowNumbers = new Set(
-      existingLedgerItems
-        .filter(
-          (item) =>
-            item.unitIndex === null &&
-            (item.status === "DONE" || item.status === "SKIPPED")
-        )
-        .map((item) => Number(item.rowKey.replace(/^row-/, "")))
-    );
+    const completedRowNumbers = new Set([
+      ...getResolvedImportRowNumbers({
+        proposal,
+        ledgerItems: existingLedgerItems,
+        status: "DONE",
+      }),
+      ...getResolvedImportRowNumbers({
+        proposal,
+        ledgerItems: existingLedgerItems,
+        status: "SKIPPED",
+      }),
+    ]);
     for (const row of proposal.rows) {
       if (
         !inScope(row.rowNumber) ||
@@ -8852,8 +8982,22 @@ export async function applyStaffInventoryImport({
     ).length,
   });
   const finalBlocked = rowsToApply.flatMap((row) => {
-    if (row.action === "IGNORE") return [];
     const decision = decisionsByRow.get(row.rowNumber);
+    if (row.action === "IGNORE")
+      return decision?.decision === "IGNORE"
+        ? []
+        : [
+            {
+              rowNumber: row.rowNumber,
+              title: row.title,
+              issues: [
+                {
+                  code: "SOURCE_REVIEW_REQUIRED" as const,
+                  message: `${row.title}: the approved row has a stale Ignore action. Review its product choice again.`,
+                },
+              ],
+            },
+          ];
     const explicitTarget = row.sourceStorageLocation
       ? resolveExplicitImportRow(row, proposal.locationOptions ?? []).locationId
       : null;
@@ -8908,6 +9052,36 @@ export async function applyStaffInventoryImport({
       finalBlocked,
       rowsToApply.filter((row) => row.action !== "IGNORE").length
     );
+  if (!isResume) {
+    const ledger = await getImportLedgerItems({ operationId, organizationId });
+    const blocked = rowsToApply.flatMap((row) => {
+      if (decisionsByRow.get(row.rowNumber)?.decision !== "APPROVE") return [];
+      const item = ledger.find(
+        (entry) =>
+          entry.rowKey === `row-${row.rowNumber}` && entry.unitIndex === null
+      );
+      const reason = getImportLedgerReviewBlock(item, ledger);
+      return reason
+        ? [
+            {
+              rowNumber: row.rowNumber,
+              title: row.title,
+              issues: [
+                {
+                  code: "SOURCE_REVIEW_REQUIRED" as const,
+                  message: `${row.title}: ${reason}`,
+                },
+              ],
+            },
+          ]
+        : [];
+    });
+    if (blocked.length)
+      return blockedResponse(
+        blocked,
+        rowsToApply.filter((row) => row.action !== "IGNORE").length
+      );
+  }
   const individualUnitLimitError =
     getIndividualUnitImportLimitError(rowsToApply);
   if (individualUnitLimitError) throw importError(individualUnitLimitError);
@@ -9131,6 +9305,21 @@ export async function applyStaffInventoryImport({
       return { status: "IN_PROGRESS", operationId };
 
     let ledgerItem = ledgerByRowKey.get(`row-${row.rowNumber}`)!;
+    if (
+      !isResume &&
+      decisionsByRow.get(row.rowNumber)?.decision === "APPROVE" &&
+      ["FAILED", "CONFLICT"].includes(ledgerItem.status)
+    ) {
+      const retried = await requeueReviewedImportRejection({
+        item: ledgerItem,
+        row,
+        ledgerItems: initialLedgerItems,
+        operationId,
+        organizationId,
+      });
+      if (!retried) return { status: "IN_PROGRESS", operationId };
+      ledgerItem = retried;
+    }
     if (ledgerItem.status === "DONE") {
       summarizeDoneItem(ledgerItem, { createdIds, updatedIds, reusedIds });
       continue;
@@ -9272,12 +9461,28 @@ export async function applyStaffInventoryImport({
       continue;
     }
     if (!applicableActions.has(row.action)) {
-      const skipped = await markImportLedgerItemSkipped({
-        operationId,
-        organizationId,
-        itemId,
-      });
-      if (!skipped) return { status: "IN_PROGRESS", operationId };
+      if (
+        row.action === "IGNORE" &&
+        decisionsByRow.get(row.rowNumber)?.decision === "IGNORE"
+      ) {
+        const skipped = await markImportLedgerItemSkipped({
+          operationId,
+          organizationId,
+          itemId,
+        });
+        if (!skipped) return { status: "IN_PROGRESS", operationId };
+      } else {
+        const reason = `The approved row has no supported apply action (${row.action}). Review its product choice again.`;
+        const failed = await markImportLedgerItemFailed({
+          operationId,
+          organizationId,
+          itemId,
+          errorCode: "ROW_REJECTED",
+          errorMessage: reason,
+        });
+        if (!failed) return { status: "IN_PROGRESS", operationId };
+        failedRows.push({ rowNumber: row.rowNumber, reason });
+      }
       continue;
     }
 
@@ -10057,12 +10262,17 @@ export async function applyStaffInventoryImport({
           ? "UPDATE_LOCATION"
           : null;
       if (!action) {
-        const skipped = await markImportLedgerItemSkipped({
+        const reason =
+          "The approved row has no actionable reviewed change. Review its quantity or product choice.";
+        const failed = await markImportLedgerItemFailed({
           operationId,
           organizationId,
           itemId,
+          errorCode: "ROW_REJECTED",
+          errorMessage: reason,
         });
-        if (!skipped) return { status: "IN_PROGRESS", operationId };
+        if (!failed) return { status: "IN_PROGRESS", operationId };
+        failedRows.push({ rowNumber: row.rowNumber, reason });
         continue;
       }
       const before = {

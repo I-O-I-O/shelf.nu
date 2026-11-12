@@ -45,6 +45,7 @@ export type ImportReviewRow = {
   categoryOptional?: boolean;
   mouserLineItem?: boolean;
   reviewConflictReason?: string | null;
+  applyBlockedReason?: string | null;
   uncertainFields?: string[];
 };
 
@@ -363,6 +364,8 @@ export function validateImportRowForApply({
       "INVALID_INVENTORY_SETTINGS",
       `Review the stock unit, minimum quantity, and consumption settings for ${title}.`
     );
+  if (row.applyBlockedReason)
+    add("SOURCE_REVIEW_REQUIRED", row.applyBlockedReason);
   if (canonicalIssue) issues.push(canonicalIssue);
   const knownFields = new Set([
     "Item name",

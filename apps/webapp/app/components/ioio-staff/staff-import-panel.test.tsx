@@ -2018,122 +2018,240 @@ describe("StaffImportPanel review gate", () => {
     ).toBeNull();
   });
 
-  it("keeps 45-row review open with 44 implemented rows despite a stale closed flag, and closes only after final Apply", async () => {
-    const rows: StaffImportProposal["rows"] = Array.from(
-      { length: 45 },
-      (_, index) => ({
-        rowNumber: index + 1,
-        title: index === 44 ? "Push buttons" : `A3 item ${index + 1}`,
-        category: "Electronics",
-        categoryId: "category-1",
-        location: "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
-        locationLabel:
-          "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
-        locationId: "bin-A3-10",
-        locationResolution: "MATCH",
-        sourceRoom: "B477",
-        sourceStorageLocation: "A3-10",
-        roomLocationId: "room-b477",
-        quantity: 25,
-        receivedQuantity: 25,
-        type: "QUANTITY_TRACKED",
-        action: "CREATE",
-        assetId: null,
-        currentQuantity: null,
-        currentCategoryId: null,
-        currentLocationId: null,
-        reason: "Inventory",
-      })
-    );
-    const proposal = {
-      version: 1,
-      operationId: "operation-1",
-      organizationId: "org-1",
-      proposalHash: "hash",
-      source: {
-        filename: "IOIO_Lab_B477_A3_Claude_Import.pdf",
-        size: 100,
-        sha256: "a".repeat(64),
-      },
-      rows,
-      counts: {},
-      createdAt: new Date().toISOString(),
-      categoryOptions: [{ id: "category-1", name: "Electronics" }],
-      locationOptions: [
-        {
-          id: "bin-A3-10",
-          name: "Container A3-10",
-          parentId: "shelf-A3",
-          pathLabel: rows[44].locationLabel,
-          operational: false,
-          currentUnits: 0,
+  it.each([false, true])(
+    "applies the final Ready row with current approval and no image (restored approval: %s)",
+    async (restoredApproval) => {
+      const rows: StaffImportProposal["rows"] = Array.from(
+        { length: 45 },
+        (_, index) => ({
+          rowNumber: index + 1,
+          title: index === 44 ? "Push buttons" : `A3 item ${index + 1}`,
+          category: "Electronics",
+          categoryId: "category-1",
+          location: "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
+          locationLabel:
+            "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
+          locationId: "bin-A3-10",
+          locationResolution: "MATCH",
+          sourceRoom: "B477",
+          sourceStorageLocation: "A3-10",
+          roomLocationId: "room-b477",
+          quantity: 25,
+          receivedQuantity: 25,
+          type: "QUANTITY_TRACKED",
+          action: "CREATE",
+          assetId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "Inventory",
+        })
+      );
+      const proposal = {
+        version: 1,
+        operationId: "operation-1",
+        organizationId: "org-1",
+        proposalHash: "hash",
+        source: {
+          filename: "IOIO_Lab_B477_A3_Claude_Import.pdf",
+          size: 100,
+          sha256: "a".repeat(64),
         },
-      ],
-      appliedRowNumbers: Array.from({ length: 44 }, (_, index) => index + 1),
-      reviewClosed: true,
-    } as StaffImportProposal;
-    // why: emulate the action response while exercising real UI eligibility and form payload.
-    const action = vi.fn(async ({ request }: { request: Request }) => {
-      const form = await request.formData();
-      if (form.get("intent") === "save-draft")
+        rows,
+        counts: {},
+        createdAt: new Date().toISOString(),
+        categoryOptions: [{ id: "category-1", name: "Electronics" }],
+        locationOptions: [
+          {
+            id: "bin-A3-10",
+            name: "Container A3-10",
+            parentId: "shelf-A3",
+            pathLabel: rows[44].locationLabel,
+            operational: false,
+            currentUnits: 0,
+          },
+        ],
+        appliedRowNumbers: Array.from({ length: 44 }, (_, index) => index + 1),
+        reviewClosed: true,
+        savedReviewDecisions: restoredApproval
+          ? [
+              {
+                rowNumber: 45,
+                decision: "APPROVE",
+                title: "Push buttons",
+                quantity: 37,
+                categoryId: "category-1",
+                locationId: "bin-A3-10",
+                type: "QUANTITY_TRACKED",
+                productChoice: "NEW",
+              },
+            ]
+          : [],
+      } as StaffImportProposal;
+      // why: emulate the action response while exercising real UI eligibility and form payload.
+      const action = vi.fn(async ({ request }: { request: Request }) => {
+        const form = await request.formData();
+        if (form.get("intent") === "save-draft")
+          return {
+            error: null,
+            kind: "import-draft-saved",
+            operationId: "operation-1",
+          };
+        expect(
+          JSON.parse(String(form.get("reviewDecisions")))[44]
+        ).toMatchObject({
+          rowNumber: 45,
+          decision: "APPROVE",
+          categoryId: "category-1",
+          locationId: "bin-A3-10",
+          quantity: 37,
+          acceptSuggestedImage: false,
+        });
         return {
           error: null,
-          kind: "import-draft-saved",
-          operationId: "operation-1",
+          kind: "import-complete",
+          proposal: {
+            ...proposal,
+            appliedRowNumbers: rows.map((row) => row.rowNumber),
+          },
+          result: {
+            createdIds: ["push-buttons"],
+            updatedIds: [],
+            reusedIds: [],
+            failedRows: [],
+            conflictRows: [],
+            remainingRows: 0,
+            succeededRows: 1,
+          },
         };
-      expect(JSON.parse(String(form.get("reviewDecisions")))[44]).toMatchObject(
-        { decision: "APPROVE", locationId: "bin-A3-10", quantity: 25 }
+      });
+      renderPanel({}, true, proposal, action);
+      expect(
+        screen.getByRole("region", { name: "Pending review (1)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("region", { name: "Implemented (44)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("Review closed. Applied rows appear below.")
+      ).toBeNull();
+      const apply = screen.getByRole("button", {
+        name: "Apply approved changes",
+      });
+      if (restoredApproval) expect(apply).toBeEnabled();
+      else expect(apply).toBeDisabled();
+      expect(
+        screen.getByLabelText("Location for Push buttons")
+      ).toHaveTextContent("Container A3-10");
+      if (!restoredApproval) {
+        fireEvent.change(screen.getByLabelText("Quantity for Push buttons"), {
+          target: { value: "37" },
+        });
+        fireEvent.click(
+          screen.getByLabelText("Approve Push buttons for import")
+        );
+      }
+      expect(
+        within(
+          screen.getByRole("region", { name: "Pending review (1)" })
+        ).getByText("1 approved")
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText("Quantity for Push buttons")).toHaveValue(
+        37
       );
-      return {
-        error: null,
-        kind: "import-complete",
-        proposal: {
-          ...proposal,
-          appliedRowNumbers: rows.map((row) => row.rowNumber),
-        },
-        result: {
-          createdIds: ["push-buttons"],
-          updatedIds: [],
-          reusedIds: [],
-          failedRows: [],
-          conflictRows: [],
-          remainingRows: 0,
-        },
-      };
-    });
-    renderPanel({}, true, proposal, action);
-    expect(
-      screen.getByRole("region", { name: "Pending review (1)" })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Implemented (44)" })
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText("Review closed. Applied rows appear below.")
-    ).toBeNull();
-    const apply = screen.getByRole("button", {
-      name: "Apply approved changes",
-    });
-    expect(apply).toBeDisabled();
-    expect(
-      screen.getByLabelText("Location for Push buttons")
-    ).toHaveTextContent("Container A3-10");
-    fireEvent.click(screen.getByLabelText("Approve Push buttons for import"));
-    expect(apply).toBeEnabled();
-    fireEvent.click(apply);
-    expect(
-      await screen.findByText("Review closed. Applied rows appear below.")
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Pending review (0)" })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Implemented (45)" })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Apply approved changes" })
-    ).toBeDisabled();
-  });
+      expect(apply).toBeEnabled();
+      fireEvent.click(apply);
+      expect(
+        await screen.findByText("Review closed. Applied rows appear below.")
+      ).toBeInTheDocument();
+      expect(screen.getByText("Applied 1 approved item.")).toBeInTheDocument();
+      expect(
+        screen.getByRole("region", { name: "Pending review (0)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("region", { name: "Implemented (45)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      ).toBeDisabled();
+    }
+  );
+
+  it.each(["failedRows", "conflictRows"])(
+    "shows why an approved row in %s was not created",
+    async (failureKind) => {
+      // why: emulate a canonical write failure at the action boundary; the review UI stays real.
+      const action = vi.fn(async ({ request }: { request: Request }) => {
+        const form = await request.formData();
+        if (form.get("intent") === "save-draft")
+          return {
+            error: null,
+            kind: "import-draft-saved",
+            operationId: "operation-1",
+          };
+        return {
+          error: null,
+          kind: "import-partial",
+          proposal: {
+            version: 1,
+            operationId: "operation-1",
+            organizationId: "org-1",
+            proposalHash: "hash",
+            source: { filename: "A3.pdf", size: 100, sha256: "a".repeat(64) },
+            rows: [
+              {
+                rowNumber: 1,
+                title: "Push buttons",
+                action: "CREATE",
+                assetId: null,
+                categoryId: "category-1",
+                locationId: null,
+                quantity: 25,
+                receivedQuantity: 25,
+                type: "QUANTITY_TRACKED",
+                reason: "New item",
+              },
+            ],
+            counts: {},
+            createdAt: new Date().toISOString(),
+            categoryOptions: [{ id: "category-1", name: "Electronics" }],
+            locationOptions: [],
+            appliedRowNumbers: [],
+            reviewClosed: false,
+          },
+          result: {
+            createdIds: [],
+            updatedIds: [],
+            reusedIds: [],
+            succeededRows: 0,
+            remainingRows: 1,
+            failedRows: [],
+            conflictRows: [],
+            [failureKind]: [
+              {
+                rowNumber: 1,
+                reason: "Storage rejected the item; no creation was confirmed.",
+              },
+            ],
+          },
+        };
+      });
+      renderPanel({ title: "Push buttons" }, true, {}, action);
+      fireEvent.click(screen.getByLabelText("Approve Push buttons for import"));
+      fireEvent.click(
+        screen.getByRole("button", { name: "Apply approved changes" })
+      );
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Push buttons: Storage rejected the item; no creation was confirmed."
+      );
+      expect(
+        screen.getByRole("region", { name: "Pending review (1)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("Review closed. Applied rows appear below.")
+      ).toBeNull();
+    }
+  );
 
   it("shows the exact missing source bin and blocks unassigned Apply", () => {
     renderPanel({

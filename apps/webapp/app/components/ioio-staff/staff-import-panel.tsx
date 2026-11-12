@@ -949,6 +949,23 @@ function StaffImportProposalView({
     }
     if (fetcher.data.kind === "import-partial") {
       setProposal(fetcher.data.proposal);
+      const failures = [
+        ...fetcher.data.result.failedRows,
+        ...(fetcher.data.result.conflictRows ?? []),
+      ];
+      setServerIssues(
+        Object.fromEntries(
+          failures.map((failure) => [
+            failure.rowNumber,
+            [
+              {
+                code: "SOURCE_REVIEW_REQUIRED" as const,
+                message: failure.reason,
+              },
+            ],
+          ])
+        )
+      );
       setProposalState("review");
       void revalidate();
       return;
@@ -1102,12 +1119,58 @@ function StaffImportProposalView({
           </ul>
         </div>
       ) : null}
-      {response?.error === null && response.kind === "import-partial" ? (
-        <p role="status" className="mt-3 text-sm text-green-700">
-          Applied {response.result.succeededRows} approved{" "}
-          {response.result.succeededRows === 1 ? "item" : "items"}.{" "}
-          {response.result.remainingRows ?? 0} rows remain in this draft.
-        </p>
+      {response?.error === null &&
+      (response.kind === "import-partial" ||
+        response.kind === "import-complete") ? (
+        <>
+          <p
+            role="status"
+            className={`mt-3 text-sm ${
+              response.result.failedRows.length ||
+              response.result.conflictRows?.length
+                ? "text-amber-800"
+                : "text-green-700"
+            }`}
+          >
+            Applied{" "}
+            {response.result.succeededRows ??
+              response.result.createdIds.length +
+                response.result.updatedIds.length +
+                response.result.reusedIds.length}{" "}
+            approved{" "}
+            {(response.result.succeededRows ??
+              response.result.createdIds.length +
+                response.result.updatedIds.length +
+                response.result.reusedIds.length) === 1
+              ? "item"
+              : "items"}
+            .
+            {response.kind === "import-partial"
+              ? ` ${
+                  response.result.remainingRows ?? 0
+                } rows remain in this draft.`
+              : null}
+          </p>
+          {response.result.failedRows.length ||
+          response.result.conflictRows?.length ? (
+            <div role="alert" className="mt-3 text-sm text-amber-800">
+              <p>These approved rows could not be applied:</p>
+              <ul>
+                {[
+                  ...response.result.failedRows,
+                  ...(response.result.conflictRows ?? []),
+                ].map((failure, index) => (
+                  <li key={`${failure.rowNumber}-${index}`}>
+                    {proposal.rows.find(
+                      (row) => row.rowNumber === failure.rowNumber
+                    )?.title ?? `Row ${failure.rowNumber}`}
+                    : {failure.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
       ) : null}
       {proposalState === "in-progress" ? (
         <p role="status" className="mt-3 text-sm text-amber-700">

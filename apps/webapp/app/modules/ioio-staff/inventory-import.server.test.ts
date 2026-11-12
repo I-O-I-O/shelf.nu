@@ -160,7 +160,10 @@ vi.mock("./pdf-ocr.server", () => ({
 }));
 
 import { validateImportHelperResponse } from "./import-helper-contract.server";
-import { resolveImportReviewState } from "./import-review";
+import {
+  resolveImportReviewState,
+  validateImportRowForApply,
+} from "./import-review";
 import {
   applyStaffInventoryImport,
   classifyStaffImportRows,
@@ -1399,6 +1402,7 @@ describe("staff inventory import safety", () => {
     proposalRows,
     reviewDecisionRows,
     sourceLocations,
+    creationFailure,
   }: {
     quantity: number;
     type?: "INDIVIDUAL" | "QUANTITY_TRACKED";
@@ -1461,6 +1465,7 @@ describe("staff inventory import safety", () => {
       sourceOrganization?: string;
     };
     sourceLocations?: ReturnType<typeof inventorySourceLocations>;
+    creationFailure?: string;
     proposalRows?: StaffImportProposalRow[];
     reviewDecisionRows?: StaffImportReviewDecision[];
   }) {
@@ -1750,8 +1755,13 @@ describe("staff inventory import safety", () => {
     if (!selectedLocationId)
       database.location.findMany.mockResolvedValue(sourceLocations ?? []);
     mockCreateAsset.mockImplementation((asset) => {
-      assetRows.push(asset);
-      return { id: asset.id };
+      if (creationFailure) throw new Error(creationFailure);
+      const created = {
+        ...asset,
+        id: asset.id ?? `asset-${assetRows.length + 1}`,
+      };
+      assetRows.push(created);
+      return { id: created.id };
     });
 
     const result = await applyStaffInventoryImport({
@@ -2407,83 +2417,260 @@ describe("staff inventory import safety", () => {
     expect(reopened.ignoredRowNumbers).toEqual([]);
   });
 
-  it("keeps 44 implemented A3 rows and one unapproved Push buttons row open across reload, then applies the final exact bin", async () => {
-    const locations = shelfInventoryLocations();
-    const rows = classifyStaffImportRows({
-      rows: Array.from({ length: 45 }, (_, index) => ({
-        rowNumber: index + 1,
-        title: index === 44 ? "Push buttons" : `A3 inventory ${index + 1}`,
-        category: "Electronics",
-        location: null,
+  it.each([
+    "LOCATION_CHANGED_AFTER_REVIEW",
+    "CATEGORY_CHANGED_AFTER_REVIEW",
+    "ROW_REJECTED",
+  ])(
+    "applies the final approved Ready Push buttons row after correcting a pre-write %s rejection",
+    async (errorCode) => {
+      const locations = shelfInventoryLocations();
+      const rows = classifyStaffImportRows({
+        rows: Array.from({ length: 45 }, (_, index) => ({
+          rowNumber: index + 1,
+          title: index === 44 ? "Push buttons" : `A3 inventory ${index + 1}`,
+          category: "Electronics",
+          location: null,
+          quantity: 25,
+          receivedQuantity: 25,
+          type: "QUANTITY_TRACKED",
+          sourceOrganization: "IOIO Lab",
+          sourceRoom: "B477",
+          sourceStorageLocation: index === 44 ? "A3-10" : "A3-1",
+        })),
+        assets: [],
+        categories: [{ id: "category-electronics", name: "Electronics" }],
+        locations,
+      });
+      rows[44] = {
+        ...rows[44],
+        category: "Stale helper category",
+        categoryId: null,
+        sourceQuantity: 25,
+        productImageProposal: { status: "IMAGE_NOT_FOUND" },
+      };
+      const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        decision: row.rowNumber === 45 ? null : "APPROVE",
+        title: row.title,
         quantity: 25,
-        receivedQuantity: 25,
+        categoryId: "category-electronics",
+        locationId: row.locationId,
         type: "QUANTITY_TRACKED",
-        sourceOrganization: "IOIO Lab",
-        sourceRoom: "B477",
-        sourceStorageLocation: index === 44 ? "A3-10" : "A3-1",
-      })),
-      assets: [],
-      categories: [{ id: "category-electronics", name: "Electronics" }],
-      locations,
-    });
-    const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
-      rowNumber: row.rowNumber,
-      decision: row.rowNumber === 45 ? null : "APPROVE",
-      title: row.title,
+        productChoice: "NEW",
+      }));
+      const {
+        result,
+        operation,
+        operationId,
+        proposalHash,
+        assetRows,
+        ledgerRows,
+      } = await applyNewImport({
+        quantity: 25,
+        proposalRows: rows,
+        reviewDecisionRows: decisions,
+        sourceLocations: locations,
+      });
+      expect(result).toMatchObject({ succeededRows: 44, remainingRows: 1 });
+      expect(operation.status).toBe("PREPARED");
+      // Exercise repair of an already-persisted prematurely closed legacy session.
+      operation.status = "PARTIAL";
+      const args = {
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId,
+      };
+      const reopened = await getStaffInventoryImportProposal(args);
+      expect(reopened.reviewClosed).toBe(false);
+      expect(reopened.appliedRowNumbers).toHaveLength(44);
+      expect(operation.status).toBe("PREPARED");
+      expect(reopened.rows[44]).toMatchObject({
+        locationId: "bin-A3-10",
+        roomLocationId: "room-b477",
+        locationLabel: expect.stringContaining("Shelf A3 · Container A3-10"),
+      });
+      const rejected = ledgerRows.find((item) => item.rowKey === "row-45")!;
+      rejected.status = errorCode === "ROW_REJECTED" ? "FAILED" : "CONFLICT";
+      rejected.errorCode = errorCode;
+      rejected.errorMessage =
+        "Previous source values were rejected before any write.";
+      decisions[44] = {
+        ...decisions[44],
+        decision: "APPROVE",
+        quantity: 37,
+        categoryId: "category-electronics",
+        locationId: "bin-A3-10",
+      };
+      await saveStaffInventoryImportDraft({
+        ...args,
+        reviewDecisions: JSON.stringify(decisions),
+      });
+      const reloaded = await getStaffInventoryImportProposal(args);
+      expect(
+        reloaded.savedReviewDecisions?.find(
+          (decision) => decision.rowNumber === 45
+        )
+      ).toMatchObject({
+        decision: "APPROVE",
+        quantity: 37,
+        categoryId: "category-electronics",
+        locationId: "bin-A3-10",
+      });
+      expect(reloaded.rows[44].applyBlockedReason).toBeNull();
+      expect(
+        validateImportRowForApply({
+          row: reloaded.rows[44],
+          decision: reloaded.savedReviewDecisions?.find(
+            (decision) => decision.rowNumber === 45
+          ),
+          categoryAvailable: true,
+          locationAvailable: true,
+        }).ready
+      ).toBe(true);
+      if (errorCode === "CATEGORY_CHANGED_AFTER_REVIEW") {
+        mockGetCategories.mockResolvedValue([
+          {
+            id: "category-electronics",
+            name: " Electronics ",
+            color: "#2878b8",
+          },
+        ]);
+      }
+      const final = await applyStaffInventoryImport({
+        ...args,
+        proposalHash,
+        reviewDecisions: JSON.stringify(reloaded.savedReviewDecisions),
+      });
+      expect(final).toMatchObject({
+        succeededRows: 1,
+        remainingRows: 0,
+        failedRows: [],
+        conflictRows: [],
+        createdIds: [expect.any(String)],
+      });
+      expect(assetRows).toHaveLength(45);
+      expect(assetRows[44]).toMatchObject({
+        title: "Push buttons",
+        quantity: 37,
+        categoryId: "category-electronics",
+        locationId: "bin-A3-10",
+      });
+      expect(mockUpdateAssetMainImage).not.toHaveBeenCalled();
+      expect(ledgerRows.filter((row) => row.status === "DONE")).toHaveLength(
+        45
+      );
+      expect((await getStaffInventoryImportProposal(args)).reviewClosed).toBe(
+        true
+      );
+    }
+  );
+
+  it("reports a creation failure and blocks unproven retries instead of silently applying zero rows", async () => {
+    const state = await applyNewImport({
       quantity: 25,
-      categoryId: "category-electronics",
-      locationId: row.locationId,
-      type: "QUANTITY_TRACKED",
-      productChoice: "NEW",
-    }));
-    const {
-      result,
-      operation,
-      operationId,
-      proposalHash,
-      assetRows,
-      ledgerRows,
-    } = await applyNewImport({
-      quantity: 25,
-      proposalRows: rows,
-      reviewDecisionRows: decisions,
-      sourceLocations: locations,
+      creationFailure: "Storage rejected Push buttons.",
     });
-    expect(result).toMatchObject({ succeededRows: 44, remainingRows: 1 });
-    expect(operation.status).toBe("PREPARED");
-    // Exercise repair of an already-persisted prematurely closed legacy session.
-    operation.status = "PARTIAL";
-    const args = {
+    expect(state.result).toMatchObject({
+      succeededRows: 0,
+      createdIds: [],
+      remainingRows: 1,
+      conflictRows: [
+        { rowNumber: 2, reason: "Storage rejected Push buttons." },
+      ],
+    });
+    expect(state.assetRows).toHaveLength(0);
+    expect(state.operation.status).toBe("PREPARED");
+    const reviewDecisions = JSON.stringify(
+      JSON.parse(state.operation.description).reviewDraft
+    );
+    const result = await applyStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
       request: new Request("http://localhost/staff/import"),
-      operationId,
-    };
-    const reopened = await getStaffInventoryImportProposal(args);
-    expect(reopened.reviewClosed).toBe(false);
-    expect(reopened.appliedRowNumbers).toHaveLength(44);
-    expect(operation.status).toBe("PREPARED");
-    expect(reopened.rows[44]).toMatchObject({
-      locationId: "bin-A3-10",
-      roomLocationId: "room-b477",
-      locationLabel: expect.stringContaining("Shelf A3 · Container A3-10"),
+      operationId: state.operationId,
+      proposalHash: state.proposalHash,
+      reviewDecisions,
     });
-    decisions[44].decision = "APPROVE";
-    const final = await applyStaffInventoryImport({
-      ...args,
-      proposalHash,
-      reviewDecisions: JSON.stringify(decisions),
+    expect(result).toMatchObject({
+      status: "NEEDS_REVIEW",
+      blockedRows: [
+        {
+          issues: [
+            {
+              code: "SOURCE_REVIEW_REQUIRED",
+              message: expect.stringContaining(
+                "Storage rejected Push buttons."
+              ),
+            },
+          ],
+        },
+      ],
     });
-    expect(final).toMatchObject({ remainingRows: 0 });
-    expect(assetRows).toHaveLength(45);
-    expect(assetRows[44]).toMatchObject({
-      title: "Push buttons",
-      locationId: "bin-A3-10",
+    expect(mockCreateAsset).toHaveBeenCalledOnce();
+    expect(state.ledgerRows[0].status).toBe("CONFLICT");
+    const reloaded = await getStaffInventoryImportProposal({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId: state.operationId,
     });
-    expect(ledgerRows.filter((row) => row.status === "DONE")).toHaveLength(45);
-    expect((await getStaffInventoryImportProposal(args)).reviewClosed).toBe(
-      true
+    expect(reloaded.rows[0].applyBlockedReason).toContain(
+      "requires reconciliation"
     );
+    expect(
+      validateImportRowForApply({
+        row: reloaded.rows[0],
+        decision: reloaded.savedReviewDecisions?.[0],
+        categoryAvailable: true,
+        locationAvailable: true,
+      })
+    ).toMatchObject({
+      ready: false,
+      issues: [{ code: "SOURCE_REVIEW_REQUIRED" }],
+    });
   });
+
+  it.each(["written-state", "physical-unit"])(
+    "never clears pre-write rejection codes when %s evidence exists",
+    async (evidence) => {
+      const state = await applyNewImport({
+        quantity: 25,
+        creationFailure: "Storage did not confirm creation.",
+      });
+      const root = state.ledgerRows[0];
+      root.errorCode = "LOCATION_CHANGED_AFTER_REVIEW";
+      if (evidence === "written-state")
+        root.writtenState = { outcome: "created", assetId: "possibly-created" };
+      else
+        state.ledgerRows.push({
+          ...root,
+          id: "physical-unit",
+          unitIndex: 1,
+          status: "DONE",
+          targetAssetId: "existing-unit",
+        });
+      const result = await applyStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: state.operationId,
+        proposalHash: state.proposalHash,
+        reviewDecisions: JSON.stringify(
+          JSON.parse(state.operation.description).reviewDraft
+        ),
+      });
+      expect(result).toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            issues: [
+              { message: expect.stringContaining("requires reconciliation") },
+            ],
+          },
+        ],
+      });
+      expect(mockCreateAsset).toHaveBeenCalledOnce();
+      expect(root.status).toBe("CONFLICT");
+    }
+  );
 
   it.each(["FAILED", "CONFLICT"])(
     "never closes a 45-row import when the final row is %s",
@@ -2531,7 +2718,20 @@ describe("staff inventory import safety", () => {
         proposalHash: state.proposalHash,
         reviewDecisions: JSON.stringify(decisions),
       });
-      expect(retried).toMatchObject({ remainingRows: 1 });
+      expect(retried).toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedRows: [
+          {
+            rowNumber: 45,
+            issues: [
+              {
+                code: "SOURCE_REVIEW_REQUIRED",
+                message: expect.stringContaining("requires reconciliation"),
+              },
+            ],
+          },
+        ],
+      });
       expect(state.operation.status).toBe("PREPARED");
       const reopened = await getStaffInventoryImportProposal({
         context: { getSession: () => ({ userId: "staff-1" }) } as never,

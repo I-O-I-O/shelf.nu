@@ -194,7 +194,20 @@ describe("staff inventory import route", () => {
     form.set("intent", "apply-import");
     form.set("operationId", "operation-1");
     form.set("proposalHash", "reviewed-hash");
-    form.set("reviewDecisions", JSON.stringify([{ rowNumber: 1 }]));
+    const reviewedRows = [
+      {
+        rowNumber: 45,
+        decision: "APPROVE",
+        title: "Push buttons",
+        quantity: 37,
+        categoryId: "category-electronics",
+        locationId: "bin-A3-10",
+        productChoice: "NEW",
+        type: "QUANTITY_TRACKED",
+        acceptSuggestedImage: false,
+      },
+    ];
+    form.set("reviewDecisions", JSON.stringify(reviewedRows));
     const request = new Request("http://localhost/staff/import", {
       method: "POST",
       body: form,
@@ -211,7 +224,7 @@ describe("staff inventory import route", () => {
       expect.objectContaining({
         operationId: "operation-1",
         proposalHash: "reviewed-hash",
-        reviewDecisions: expect.any(String),
+        reviewDecisions: JSON.stringify(reviewedRows),
       })
     );
     expect(result).toMatchObject({
