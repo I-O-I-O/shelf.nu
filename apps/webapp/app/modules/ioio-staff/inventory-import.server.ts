@@ -3993,6 +3993,9 @@ function classifyRow(
     assetId: null,
     categoryId: category?.id ?? null,
     locationId: location?.id ?? null,
+    ...(row.sourceStorageLocation
+      ? { roomLocationId: explicitLocation?.roomLocationId ?? null }
+      : {}),
     locationResolution: locationResolution.status,
     currentQuantity: null,
     currentCategoryId: null,
@@ -4015,7 +4018,11 @@ function classifyRow(
         : categoryResolution.status === "ARCHIVED_MATCH"
         ? categoryResolution.category.name
         : null,
-    locationLabel: location?.pathLabel ?? "Unassigned",
+    locationLabel:
+      location?.pathLabel ??
+      (row.sourceStorageLocation
+        ? `Location ${row.sourceStorageLocation} not found`
+        : "Unassigned"),
     locationContext: location
       ? {
           currentUnits: location.currentUnits ?? 0,
@@ -5902,6 +5909,85 @@ async function ensureProposalLedger(proposal: StaffImportProposal) {
   });
 }
 
+/** Reopen legacy terminal sessions only when the row ledger proves work remains.
+ * Keep every ledger entry intact: recovery/idempotency still govern retries. */
+async function reopenIncompleteImportOperation({
+  operationId,
+  organizationId,
+  userId,
+  status,
+  proposal,
+  ledgerItems,
+}: {
+  operationId: string;
+  organizationId: string;
+  userId: string;
+  status: string;
+  proposal: StaffImportProposal;
+  ledgerItems: ImportLedgerItem[];
+}) {
+  if (
+    !["SUCCEEDED", "PARTIAL"].includes(status) ||
+    !getPendingImportRowNumbers(proposal, ledgerItems).length
+  )
+    return false;
+  const updated = await db.ioioWriteOperation.updateMany({
+    where: {
+      id: operationId,
+      organizationId,
+      userId,
+      operationType: STAFF_IMPORT_OPERATION,
+      status: status as "SUCCEEDED" | "PARTIAL",
+    },
+    data: { status: "PREPARED", completedAt: null },
+  });
+  if (updated.count !== 1) throw staffImportUnavailableError();
+  return true;
+}
+
+function getPendingImportRowNumbers(
+  proposal: StaffImportProposal,
+  ledgerItems: ImportLedgerItem[]
+) {
+  const resolved = new Set([
+    ...getResolvedImportRowNumbers({ proposal, ledgerItems, status: "DONE" }),
+    ...getResolvedImportRowNumbers({
+      proposal,
+      ledgerItems,
+      status: "SKIPPED",
+    }),
+  ]);
+  return proposal.rows
+    .filter((row) => !resolved.has(row.rowNumber))
+    .map((row) => row.rowNumber);
+}
+
+/** Project canonical location fields without changing the immutable proposal/hash. */
+function resolveExplicitImportRow(
+  row: StaffImportProposalRow,
+  locations: ImportLocationOption[]
+): StaffImportProposalRow {
+  if (!row.sourceStorageLocation) return row;
+  const resolved = resolveExplicitInventoryLocation(
+    {
+      sourceRoom: row.sourceRoom ?? null,
+      sourceStorageLocation: row.sourceStorageLocation,
+    },
+    locations
+  );
+  return {
+    ...row,
+    locationId: resolved?.location.id ?? null,
+    roomLocationId: resolved?.roomLocationId ?? null,
+    location: resolved?.location.pathLabel ?? row.sourceStorageLocation,
+    locationLabel:
+      resolved?.location.pathLabel ??
+      `Location ${row.sourceStorageLocation} not found`,
+    suggestedLocationId: resolved?.location.id ?? null,
+    locationResolution: resolved ? "MATCH" : "UNMATCHED",
+  };
+}
+
 export async function getStaffInventoryImportProposal({
   context,
   request,
@@ -5946,15 +6032,38 @@ export async function getStaffInventoryImportProposal({
     operationId,
     organizationId,
   });
+  await reopenIncompleteImportOperation({
+    operationId,
+    organizationId,
+    userId,
+    status: operation.status,
+    proposal,
+    ledgerItems,
+  });
   const appliedRowNumbers = getResolvedImportRowNumbers({
     proposal,
     ledgerItems,
     status: "DONE",
   });
   const appliedRows = new Set(appliedRowNumbers);
+  const displayRows = proposal.rows.map((row) =>
+    appliedRows.has(row.rowNumber)
+      ? row
+      : resolveExplicitImportRow(row, proposal.locationOptions ?? [])
+  );
   return {
     ...proposal,
-    savedReviewDecisions: readStoredReviewDraft(operation.description),
+    rows: displayRows,
+    savedReviewDecisions: readStoredReviewDraft(operation.description).map(
+      (decision) => {
+        const row = displayRows.find(
+          (row) => row.rowNumber === decision.rowNumber
+        );
+        return row?.sourceStorageLocation
+          ? { ...decision, locationId: row.locationId }
+          : decision;
+      }
+    ),
     appliedRowNumbers,
     implementations: proposal.rows
       .filter((row) => appliedRows.has(row.rowNumber))
@@ -6035,7 +6144,8 @@ export async function getStaffInventoryImportProposal({
       proposal,
       ledgerItems,
     }),
-    reviewClosed: operation.status !== "PREPARED",
+    reviewClosed:
+      getPendingImportRowNumbers(proposal, ledgerItems).length === 0,
   };
 }
 
@@ -6124,10 +6234,9 @@ function getResolvedImportRowNumbers({
         : rowItems.filter((item) => item.unitIndex === null);
       return (
         countedItems.length > 0 &&
-        (status !== "DONE" ||
-          rowItems.some(
-            (item) => item.unitIndex === null && item.status === "DONE"
-          )) &&
+        rowItems.some(
+          (item) => item.unitIndex === null && item.status === status
+        ) &&
         countedItems.every((item) => item.status === status)
       );
     })
@@ -6243,6 +6352,7 @@ export async function saveStaffInventoryImportDraft({
       userId,
       operationType: STAFF_IMPORT_OPERATION,
       status: "PREPARED",
+      description: operation.description,
     },
     data: {
       description: JSON.stringify({
@@ -7826,8 +7936,21 @@ export async function applyStaffInventoryImport({
   }
   if (operation.operationType !== STAFF_IMPORT_OPERATION)
     throw importError("Unsupported operation.");
-  if (operation.status === "SUCCEEDED" || operation.status === "PARTIAL")
-    return readStoredImportResult(operation.description);
+  if (operation.status === "SUCCEEDED" || operation.status === "PARTIAL") {
+    // Historical result-only records contain no resumable proposal/ledger plan.
+    if (!(JSON.parse(operation.description) as { proposal?: unknown }).proposal)
+      return readStoredImportResult(operation.description);
+    const reopened = await reopenIncompleteImportOperation({
+      operationId,
+      organizationId,
+      userId,
+      status: operation.status,
+      proposal: readStoredProposal(operation.description),
+      ledgerItems: await getImportLedgerItems({ operationId, organizationId }),
+    });
+    if (!reopened) return readStoredImportResult(operation.description);
+    operation.status = "PREPARED";
+  }
   if (
     operation.status === "PREPARED" &&
     isStaffImportExpired(operation.createdAt)
@@ -7877,6 +8000,17 @@ export async function applyStaffInventoryImport({
           applyOnlyRowNumbers?.includes(decision.rowNumber))
       )
         decision.decision = "APPROVE";
+    }
+  }
+  for (const decision of decisions) {
+    const row = proposal.rows.find(
+      (row) => row.rowNumber === decision.rowNumber
+    );
+    if (row?.sourceStorageLocation && !decision.locationId) {
+      decision.locationId = resolveExplicitImportRow(
+        row,
+        proposal.locationOptions ?? []
+      ).locationId;
     }
   }
   const hasFullReviewDecisions = Boolean(reviewDecisions);
@@ -8019,7 +8153,7 @@ export async function applyStaffInventoryImport({
     const blockedRows = selected.flatMap((row) => {
       const decision = decisionsByRow.get(row.rowNumber)!;
       const validation = validateImportRowForApply({
-        row,
+        row: resolveExplicitImportRow(row, proposal.locationOptions ?? []),
         decision,
         categoryAvailable: Boolean(
           (decision.categoryId &&
@@ -8168,6 +8302,24 @@ export async function applyStaffInventoryImport({
         decision.locationId !== undefined
           ? decision.locationId
           : row.locationId;
+      if (row.sourceStorageLocation) {
+        const explicit = resolveExplicitInventoryLocation(
+          {
+            sourceRoom: row.sourceRoom ?? null,
+            sourceStorageLocation: row.sourceStorageLocation,
+          },
+          locations
+        );
+        if (!explicit || locationId !== explicit.location.id) {
+          canonicalIssues.set(row.rowNumber, {
+            code: "INVALID_LOCATION",
+            message: !explicit
+              ? `Location ${row.sourceStorageLocation} not found.`
+              : `Use the exact source location ${row.sourceStorageLocation} for ${row.title}.`,
+          });
+          return true;
+        }
+      }
       if (locationId) {
         const currentLocation = locations.find(
           (location) => location.id === locationId
@@ -8702,6 +8854,19 @@ export async function applyStaffInventoryImport({
   const finalBlocked = rowsToApply.flatMap((row) => {
     if (row.action === "IGNORE") return [];
     const decision = decisionsByRow.get(row.rowNumber);
+    const explicitTarget = row.sourceStorageLocation
+      ? resolveExplicitImportRow(row, proposal.locationOptions ?? []).locationId
+      : null;
+    const explicitIssue: ImportReviewIssue | undefined =
+      row.sourceStorageLocation &&
+      (!explicitTarget || row.locationId !== explicitTarget)
+        ? {
+            code: "INVALID_LOCATION",
+            message: !explicitTarget
+              ? `Location ${row.sourceStorageLocation} not found.`
+              : `Use the exact source location ${row.sourceStorageLocation} for ${row.title}.`,
+          }
+        : undefined;
     const validation = validateImportRowForApply({
       row,
       decision: {
@@ -8719,12 +8884,14 @@ export async function applyStaffInventoryImport({
       },
       categoryAvailable: Boolean(row.categoryId) || row.mouserLineItem === true,
       locationAvailable: true,
-      canonicalIssue: row.reviewConflictReason
-        ? {
-            code: "CANONICAL_DATA_CHANGED",
-            message: `${row.title}: ${row.reviewConflictReason}`,
-          }
-        : undefined,
+      canonicalIssue:
+        explicitIssue ??
+        (row.reviewConflictReason
+          ? {
+              code: "CANONICAL_DATA_CHANGED",
+              message: `${row.title}: ${row.reviewConflictReason}`,
+            }
+          : undefined),
     });
     return validation.ready
       ? []
@@ -10275,19 +10442,10 @@ export async function applyStaffInventoryImport({
       decisions.filter(({ decision }) => decision !== null).length,
     ...rowSummary,
   };
-  const remainingRows = proposal.rows.filter((row) => {
-    const rowItems = finalLedgerItems.filter(
-      (item) => item.rowKey === `row-${row.rowNumber}`
-    );
-    const unitItems = rowItems.filter((item) => item.unitIndex !== null);
-    const countedItems = unitItems.length
-      ? unitItems
-      : rowItems.filter((item) => item.unitIndex === null);
-    return (
-      countedItems.length === 0 ||
-      countedItems.some((item) => item.status === "PENDING")
-    );
-  }).length;
+  const remainingRows = getPendingImportRowNumbers(
+    proposal,
+    finalLedgerItems
+  ).length;
   result.remainingRows = remainingRows;
   const keepReviewing = remainingRows > 0;
   const completed = await db.ioioWriteOperation.updateMany({

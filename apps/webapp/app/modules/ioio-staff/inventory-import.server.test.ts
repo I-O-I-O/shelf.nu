@@ -189,6 +189,8 @@ import {
   inventorySourceRows,
   inventorySourceText,
   inventorySourceLocations,
+  shelfSourceCodes,
+  shelfInventoryLocations,
 } from "../../../test/factories/ioio-inventory-source";
 
 import {
@@ -2405,6 +2407,142 @@ describe("staff inventory import safety", () => {
     expect(reopened.ignoredRowNumbers).toEqual([]);
   });
 
+  it("keeps 44 implemented A3 rows and one unapproved Push buttons row open across reload, then applies the final exact bin", async () => {
+    const locations = shelfInventoryLocations();
+    const rows = classifyStaffImportRows({
+      rows: Array.from({ length: 45 }, (_, index) => ({
+        rowNumber: index + 1,
+        title: index === 44 ? "Push buttons" : `A3 inventory ${index + 1}`,
+        category: "Electronics",
+        location: null,
+        quantity: 25,
+        receivedQuantity: 25,
+        type: "QUANTITY_TRACKED",
+        sourceOrganization: "IOIO Lab",
+        sourceRoom: "B477",
+        sourceStorageLocation: index === 44 ? "A3-10" : "A3-1",
+      })),
+      assets: [],
+      categories: [{ id: "category-electronics", name: "Electronics" }],
+      locations,
+    });
+    const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+      rowNumber: row.rowNumber,
+      decision: row.rowNumber === 45 ? null : "APPROVE",
+      title: row.title,
+      quantity: 25,
+      categoryId: "category-electronics",
+      locationId: row.locationId,
+      type: "QUANTITY_TRACKED",
+      productChoice: "NEW",
+    }));
+    const {
+      result,
+      operation,
+      operationId,
+      proposalHash,
+      assetRows,
+      ledgerRows,
+    } = await applyNewImport({
+      quantity: 25,
+      proposalRows: rows,
+      reviewDecisionRows: decisions,
+      sourceLocations: locations,
+    });
+    expect(result).toMatchObject({ succeededRows: 44, remainingRows: 1 });
+    expect(operation.status).toBe("PREPARED");
+    // Exercise repair of an already-persisted prematurely closed legacy session.
+    operation.status = "PARTIAL";
+    const args = {
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      operationId,
+    };
+    const reopened = await getStaffInventoryImportProposal(args);
+    expect(reopened.reviewClosed).toBe(false);
+    expect(reopened.appliedRowNumbers).toHaveLength(44);
+    expect(operation.status).toBe("PREPARED");
+    expect(reopened.rows[44]).toMatchObject({
+      locationId: "bin-A3-10",
+      roomLocationId: "room-b477",
+      locationLabel: expect.stringContaining("Shelf A3 · Container A3-10"),
+    });
+    decisions[44].decision = "APPROVE";
+    const final = await applyStaffInventoryImport({
+      ...args,
+      proposalHash,
+      reviewDecisions: JSON.stringify(decisions),
+    });
+    expect(final).toMatchObject({ remainingRows: 0 });
+    expect(assetRows).toHaveLength(45);
+    expect(assetRows[44]).toMatchObject({
+      title: "Push buttons",
+      locationId: "bin-A3-10",
+    });
+    expect(ledgerRows.filter((row) => row.status === "DONE")).toHaveLength(45);
+    expect((await getStaffInventoryImportProposal(args)).reviewClosed).toBe(
+      true
+    );
+  });
+
+  it.each(["FAILED", "CONFLICT"])(
+    "never closes a 45-row import when the final row is %s",
+    async (status) => {
+      const rows = Array.from({ length: 45 }, (_, index) => ({
+        rowNumber: index + 1,
+        title: `Item ${index + 1}`,
+        category: "Electronics",
+        location: null,
+        categoryId: "category-electronics",
+        locationId: null,
+        quantity: 1,
+        receivedQuantity: 1,
+        type: "QUANTITY_TRACKED" as const,
+        action: "CREATE" as const,
+        assetId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New item",
+      }));
+      const decisions: StaffImportReviewDecision[] = rows.map((row) => ({
+        rowNumber: row.rowNumber,
+        decision: "APPROVE",
+        title: row.title,
+        quantity: 1,
+        categoryId: "category-electronics",
+        type: "QUANTITY_TRACKED",
+        productChoice: "NEW",
+      }));
+      const state = await applyNewImport({
+        quantity: 1,
+        proposalRows: rows,
+        reviewDecisionRows: decisions,
+        applyOnlyRowNumbers: rows.slice(0, 44).map((row) => row.rowNumber),
+      });
+      const pending = state.ledgerRows.find(
+        (item) => item.rowKey === "row-45"
+      )!;
+      pending.status = status;
+      const retried = await applyStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: state.operationId,
+        proposalHash: state.proposalHash,
+        reviewDecisions: JSON.stringify(decisions),
+      });
+      expect(retried).toMatchObject({ remainingRows: 1 });
+      expect(state.operation.status).toBe("PREPARED");
+      const reopened = await getStaffInventoryImportProposal({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        operationId: state.operationId,
+      });
+      expect(reopened).toMatchObject({ reviewClosed: false });
+      expect(reopened.appliedRowNumbers).toHaveLength(44);
+    }
+  );
+
   it("applies only the requested row and preserves the other approved draft decisions", async () => {
     const proposalRows: StaffImportProposalRow[] = Array.from(
       { length: 3 },
@@ -4213,6 +4351,175 @@ describe("staff inventory import safety", () => {
         `Source storage location: ${bin}`
       );
     }
+  });
+
+  it("preserves role-labelled A3/A4/A5 containers through PDF preview and canonical Apply", async () => {
+    preparePdfImportMocks("operation-shelf-containers");
+    const locations = shelfInventoryLocations();
+    database.location.findMany.mockResolvedValue(locations);
+    database.location.count.mockResolvedValue(locations.length);
+    mockRequestImportHelperProposal.mockResolvedValue({
+      status: "manual",
+      reason: "network_error",
+    });
+    const text = [
+      "Organization: IOIO Lab",
+      "Room: B477",
+      "Location | Item | Estimated quantity | Description",
+      ...shelfSourceCodes.map(
+        (code) => `${code} | Buttons ${code} | 25 | Push buttons`
+      ),
+    ].join("\n");
+    const prepared = await prepareStaffInventoryImport({
+      context: { getSession: () => ({ userId: "staff-1" }) } as never,
+      request: new Request("http://localhost/staff/import"),
+      file: new File([makePdfFromPages([{ text }])], "A3-A4-A5.pdf", {
+        type: "application/pdf",
+      }),
+    });
+    if (prepared.status !== "PREPARED") throw new Error("Expected preview");
+    for (const [index, code] of shelfSourceCodes.entries()) {
+      const row = prepared.proposal.rows[index];
+      expect(row).toMatchObject({
+        sourceStorageLocation: code,
+        sourceRoom: "B477",
+        roomLocationId: "room-b477",
+        locationId: `bin-${code}`,
+        locationResolution: "MATCH",
+        locationLabel: expect.stringContaining(`Container ${code}`),
+      });
+      const { result, assetRows } = await applyNewImport({
+        quantity: 25,
+        proposalRows: prepared.proposal.rows.map((row) => ({
+          ...row,
+          locationId: null,
+        })),
+        sourceLocations: locations,
+        applyOnlyRowNumber: row.rowNumber,
+        reviewDecisionRows: [
+          {
+            rowNumber: row.rowNumber,
+            decision: "APPROVE",
+            title: row.title,
+            quantity: 25,
+            locationId: null,
+            categoryId: "category-electronics",
+            type: "QUANTITY_TRACKED",
+            productChoice: "NEW",
+          },
+        ],
+      });
+      expect(result).toMatchObject({ succeededRows: 1, failedRowsCount: 0 });
+      expect(assetRows).toHaveLength(1);
+      expect(assetRows[0].locationId).toBe(`bin-${code}`);
+    }
+  });
+
+  it.each(["room-b477", "shelf-A3", "bin-A3-11"])(
+    "rejects replacing explicit A3-10 with %s at Apply",
+    async (locationId) => {
+      const locations = shelfInventoryLocations();
+      const [row] = classifyStaffImportRows({
+        rows: [
+          {
+            rowNumber: 1,
+            title: "Push buttons",
+            quantity: 25,
+            receivedQuantity: 25,
+            type: "QUANTITY_TRACKED",
+            category: "Electronics",
+            location: null,
+            sourceRoom: "B477",
+            sourceStorageLocation: "A3-10",
+          },
+        ],
+        assets: [],
+        categories: [{ id: "category-electronics", name: "Electronics" }],
+        locations,
+      });
+      const { result, assetRows } = await applyNewImport({
+        quantity: 25,
+        sourceLocations: locations,
+        proposalRows: [row],
+        reviewDecisionRows: [
+          {
+            rowNumber: 1,
+            decision: "APPROVE",
+            title: row.title,
+            quantity: 25,
+            type: "QUANTITY_TRACKED",
+            categoryId: "category-electronics",
+            locationId,
+            productChoice: "NEW",
+          },
+        ],
+      });
+      expect(result).toMatchObject({
+        status: "NEEDS_REVIEW",
+        blockedRows: [{ rowNumber: 1, issues: [{ code: "INVALID_LOCATION" }] }],
+      });
+      expect(assetRows).toHaveLength(0);
+    }
+  );
+
+  it("keeps a missing exact container unresolved and never creates at its ancestors", async () => {
+    const locations = shelfInventoryLocations().filter(
+      (location) => location.id !== "bin-A3-10"
+    );
+    const [row] = classifyStaffImportRows({
+      rows: [
+        {
+          rowNumber: 1,
+          title: "Push buttons",
+          quantity: 25,
+          receivedQuantity: 25,
+          type: "QUANTITY_TRACKED",
+          category: "Electronics",
+          location: null,
+          sourceRoom: "B477",
+          sourceStorageLocation: "A3-10",
+        },
+      ],
+      assets: [],
+      categories: [{ id: "category-electronics", name: "Electronics" }],
+      locations,
+    });
+    expect(row).toMatchObject({
+      locationId: null,
+      locationResolution: "UNMATCHED",
+      locationLabel: "Location A3-10 not found",
+    });
+    const { result, assetRows } = await applyNewImport({
+      quantity: 25,
+      sourceLocations: locations,
+      proposalRows: [row],
+      reviewDecisionRows: [
+        {
+          rowNumber: 1,
+          decision: "APPROVE",
+          title: row.title,
+          quantity: 25,
+          type: "QUANTITY_TRACKED",
+          categoryId: "category-electronics",
+          locationId: null,
+          productChoice: "NEW",
+        },
+      ],
+    });
+    expect(result).toMatchObject({
+      status: "NEEDS_REVIEW",
+      blockedRows: [
+        {
+          issues: [
+            {
+              code: "MISSING_LOCATION",
+              message: expect.stringContaining("Location A3-10 not found"),
+            },
+          ],
+        },
+      ],
+    });
+    expect(assetRows).toHaveLength(0);
   });
 
   it("keeps document room context separate even when a generic helper suggests the room as storage", async () => {
@@ -6632,6 +6939,7 @@ describe("staff inventory import revert", () => {
       });
       expect(reopened.appliedRowNumbers).toEqual([]);
       expect(reopened.implementations).toEqual([]);
+      expect(reopened.reviewClosed).toBe(false);
     }
   );
 

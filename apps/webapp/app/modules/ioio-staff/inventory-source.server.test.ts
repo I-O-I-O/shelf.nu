@@ -8,6 +8,8 @@ import {
   inventorySourceRows,
   inventorySourceText,
   inventorySourceLocations,
+  shelfSourceCodes,
+  shelfInventoryLocations,
 } from "../../../test/factories/ioio-inventory-source";
 
 const pages = (text = inventorySourceText()) => [
@@ -44,6 +46,38 @@ describe("explicit IOIO source inventory fields", () => {
       }
     }
   );
+  it.each(shelfSourceCodes)(
+    "parses %s and resolves the role-labelled canonical container, never its room/shelf",
+    (code) => {
+      const source = parseExplicitInventorySources(
+        pages(
+          `Organization: IOIO Lab\nRoom: B477\nLocation | Item | Quantity\n${code} | Push buttons | 25`
+        )
+      )[0];
+      expect(source.sourceStorageLocation).toBe(code);
+      const resolved = resolveExplicitInventoryLocation(
+        source,
+        shelfInventoryLocations()
+      );
+      expect(resolved).toMatchObject({
+        location: {
+          id: `bin-${code}`,
+          name: `Container ${code}`,
+          parentId: `shelf-${code.split("-")[0]}`,
+        },
+        roomLocationId: "room-b477",
+      });
+      expect(
+        resolveExplicitInventoryLocation(
+          source,
+          shelfInventoryLocations().filter(
+            (location) => location.id !== `bin-${code}`
+          )
+        )
+      ).toBeNull();
+    }
+  );
+
   it("keeps the explicit inline IOIO example's room, bin, item and estimated count distinct", () => {
     const rows = parseExplicitInventorySources(
       pages(

@@ -56,3 +56,50 @@ export function a3InventoryText(count = 48) {
     ),
   ].join("\n");
 }
+
+export const shelfSourceCodes = [
+  "A3-1",
+  "A3-9",
+  "A3-10",
+  "A3-11",
+  "A4-8",
+  "A5-7",
+] as const;
+
+/** Canonical Shelf labels include roles; the source contains only bin codes. */
+export function shelfInventoryLocations() {
+  const room = {
+    id: "room-b477",
+    name: "IOIO Lab - B477",
+    parentId: null,
+    pathLabel: "IOIO Lab - B477",
+  };
+  const section = {
+    id: "section-a",
+    name: "Section A",
+    parentId: room.id,
+    pathLabel: `${room.pathLabel} · Section A`,
+  };
+  const shelves = ["A3", "A4", "A5"].map((code) => ({
+    id: `shelf-${code}`,
+    name: `Shelf ${code}`,
+    parentId: section.id,
+    pathLabel: `${section.pathLabel} · Shelf ${code}`,
+  }));
+  return [
+    room,
+    section,
+    ...shelves,
+    ...shelfSourceCodes.map((code) => {
+      const shelf = shelves.find(
+        (shelf) => shelf.name === `Shelf ${code.split("-")[0]}`
+      )!;
+      return {
+        id: `bin-${code}`,
+        name: `Container ${code}`,
+        parentId: shelf.id,
+        pathLabel: `${shelf.pathLabel} · Container ${code}`,
+      };
+    }),
+  ].map((location) => ({ ...location, operational: false, currentUnits: 0 }));
+}

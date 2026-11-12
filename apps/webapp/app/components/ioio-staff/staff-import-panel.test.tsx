@@ -888,7 +888,7 @@ describe("StaffImportPanel review gate", () => {
     ).toBeDisabled();
   });
 
-  it("enables Apply after required decisions have been auto-saved", async () => {
+  it("enables Apply immediately and still auto-saves required decisions", async () => {
     const saveAction = vi.fn(() =>
       Promise.resolve({
         error: null,
@@ -910,7 +910,7 @@ describe("StaffImportPanel review gate", () => {
         screen.getByRole("button", { name: "Apply approved changes" })
       ).toBeEnabled();
     });
-    expect(saveAction).toHaveBeenCalledOnce();
+    await waitFor(() => expect(saveAction).toHaveBeenCalledOnce());
     expect(screen.getByLabelText("Tracking mode")).toHaveValue(
       "QUANTITY_TRACKED"
     );
@@ -1005,7 +1005,7 @@ describe("StaffImportPanel review gate", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The proposal changed; review it again."
     );
-    expect(applyAction).toHaveBeenCalledTimes(2);
+    expect(applyAction).toHaveBeenCalled();
     expect(screen.queryByText("Applying approved changes...")).toBeNull();
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
@@ -2018,16 +2018,154 @@ describe("StaffImportPanel review gate", () => {
     ).toBeNull();
   });
 
+  it("keeps 45-row review open with 44 implemented rows despite a stale closed flag, and closes only after final Apply", async () => {
+    const rows: StaffImportProposal["rows"] = Array.from(
+      { length: 45 },
+      (_, index) => ({
+        rowNumber: index + 1,
+        title: index === 44 ? "Push buttons" : `A3 item ${index + 1}`,
+        category: "Electronics",
+        categoryId: "category-1",
+        location: "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
+        locationLabel:
+          "IOIO Lab - B477 · Section A · Shelf A3 · Container A3-10",
+        locationId: "bin-A3-10",
+        locationResolution: "MATCH",
+        sourceRoom: "B477",
+        sourceStorageLocation: "A3-10",
+        roomLocationId: "room-b477",
+        quantity: 25,
+        receivedQuantity: 25,
+        type: "QUANTITY_TRACKED",
+        action: "CREATE",
+        assetId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "Inventory",
+      })
+    );
+    const proposal = {
+      version: 1,
+      operationId: "operation-1",
+      organizationId: "org-1",
+      proposalHash: "hash",
+      source: {
+        filename: "IOIO_Lab_B477_A3_Claude_Import.pdf",
+        size: 100,
+        sha256: "a".repeat(64),
+      },
+      rows,
+      counts: {},
+      createdAt: new Date().toISOString(),
+      categoryOptions: [{ id: "category-1", name: "Electronics" }],
+      locationOptions: [
+        {
+          id: "bin-A3-10",
+          name: "Container A3-10",
+          parentId: "shelf-A3",
+          pathLabel: rows[44].locationLabel,
+          operational: false,
+          currentUnits: 0,
+        },
+      ],
+      appliedRowNumbers: Array.from({ length: 44 }, (_, index) => index + 1),
+      reviewClosed: true,
+    } as StaffImportProposal;
+    // why: emulate the action response while exercising real UI eligibility and form payload.
+    const action = vi.fn(async ({ request }: { request: Request }) => {
+      const form = await request.formData();
+      if (form.get("intent") === "save-draft")
+        return {
+          error: null,
+          kind: "import-draft-saved",
+          operationId: "operation-1",
+        };
+      expect(JSON.parse(String(form.get("reviewDecisions")))[44]).toMatchObject(
+        { decision: "APPROVE", locationId: "bin-A3-10", quantity: 25 }
+      );
+      return {
+        error: null,
+        kind: "import-complete",
+        proposal: {
+          ...proposal,
+          appliedRowNumbers: rows.map((row) => row.rowNumber),
+        },
+        result: {
+          createdIds: ["push-buttons"],
+          updatedIds: [],
+          reusedIds: [],
+          failedRows: [],
+          conflictRows: [],
+          remainingRows: 0,
+        },
+      };
+    });
+    renderPanel({}, true, proposal, action);
+    expect(
+      screen.getByRole("region", { name: "Pending review (1)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Implemented (44)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Review closed. Applied rows appear below.")
+    ).toBeNull();
+    const apply = screen.getByRole("button", {
+      name: "Apply approved changes",
+    });
+    expect(apply).toBeDisabled();
+    expect(
+      screen.getByLabelText("Location for Push buttons")
+    ).toHaveTextContent("Container A3-10");
+    fireEvent.click(screen.getByLabelText("Approve Push buttons for import"));
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+    expect(
+      await screen.findByText("Review closed. Applied rows appear below.")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Pending review (0)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Implemented (45)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+  });
+
+  it("shows the exact missing source bin and blocks unassigned Apply", () => {
+    renderPanel({
+      title: "Push buttons",
+      sourceStorageLocation: "A3-10",
+      sourceRoom: "B477",
+      locationId: null,
+      locationResolution: "UNMATCHED",
+    });
+    expect(screen.getByText(/Location A3-10 not found/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Apply approved changes" })
+    ).toBeDisabled();
+  });
+
   it("keeps previously ignored rows out of Apply", () => {
     renderPanel({}, true, {
       ignoredRowNumbers: [1],
       savedReviewDecisions: [{ rowNumber: 1, decision: "IGNORE" }],
     });
 
-    expect(screen.getAllByText("Ignored")).toHaveLength(1);
     expect(
-      screen.getByRole("checkbox", { name: "Approve Arduino Nano for import" })
-    ).toBeDisabled();
+      screen.getByRole("region", { name: "Pending review (0)" })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "Approve Arduino Nano for import",
+      })
+    ).toBeNull();
+    expect(
+      screen.getByText("Review closed. Applied rows appear below.")
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
     ).toBeDisabled();

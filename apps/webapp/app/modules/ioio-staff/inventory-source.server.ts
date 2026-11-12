@@ -235,7 +235,11 @@ export function resolveExplicitInventoryLocation<
     .filter(
       (location) =>
         !location.operational &&
-        location.name.trim().toUpperCase() === source.sourceStorageLocation
+        location.name
+          .trim()
+          .toUpperCase()
+          .replace(/^(?:CONTAINER|BIN)\s+/u, "") ===
+          source.sourceStorageLocation.trim().toUpperCase()
     )
     .flatMap<{ location: T; roomLocationId: string | null }>((location) => {
       let parent = location.parentId ? byId.get(location.parentId) : undefined;

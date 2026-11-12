@@ -624,7 +624,16 @@ function StaffImportProposalView({
             row.productImageProposal?.status === "IMAGE_FOUND" &&
             row.productImageProposal.autoAccepted === true,
         } satisfies ReviewDecision;
-        return [row.rowNumber, { ...defaults, ...restoredSavedDecision }];
+        return [
+          row.rowNumber,
+          {
+            ...defaults,
+            ...restoredSavedDecision,
+            ...(row.sourceStorageLocation
+              ? { locationId: row.locationId }
+              : {}),
+          },
+        ];
       })
     )
   );
@@ -688,9 +697,11 @@ function StaffImportProposalView({
   const isAppliedRow = (rowNumber: number) =>
     appliedRowNumbers.has(rowNumber) && !revertedRowNumbers.has(rowNumber);
   const isResolvedRow = (rowNumber: number) =>
-    proposal.reviewClosed ||
-    isAppliedRow(rowNumber) ||
-    ignoredRowNumbers.has(rowNumber);
+    isAppliedRow(rowNumber) || ignoredRowNumbers.has(rowNumber);
+  const pendingReviewRows = proposal.rows.filter(
+    (row) => !isResolvedRow(row.rowNumber)
+  );
+  const reviewClosed = pendingReviewRows.length === 0;
   const approvedCount = proposal.rows.filter(
     (row) =>
       !isResolvedRow(row.rowNumber) &&
@@ -718,20 +729,12 @@ function StaffImportProposalView({
   const pendingAutoSave = useRef<string | null>(null);
   const canApply =
     approvedCount > 0 &&
-    !proposal.reviewClosed &&
-    serializedReviewDecisions === lastAutoSavedDecisions &&
+    !reviewClosed &&
     fetcher.state === "idle" &&
-    draftFetcher.state === "idle" &&
-    (proposalState === "review" || proposalState === "error");
+    !["cancelled", "expired", "in-progress"].includes(proposalState);
   const totalReviewPages = Math.max(
     1,
-    Math.ceil(
-      proposal.rows.filter((row) => !isAppliedRow(row.rowNumber)).length /
-        IMPORT_REVIEW_PAGE_SIZE
-    )
-  );
-  const pendingReviewRows = proposal.rows.filter(
-    (row) => !isAppliedRow(row.rowNumber)
+    Math.ceil(pendingReviewRows.length / IMPORT_REVIEW_PAGE_SIZE)
   );
   const reviewRows = pendingReviewRows.slice(
     reviewPage * IMPORT_REVIEW_PAGE_SIZE,
@@ -776,7 +779,7 @@ function StaffImportProposalView({
 
   useEffect(() => {
     if (
-      proposal.reviewClosed ||
+      reviewClosed ||
       draftState !== "idle" ||
       serializedReviewDecisions === lastAutoSavedDecisions ||
       (draftResponse?.error === null &&
@@ -806,7 +809,7 @@ function StaffImportProposalView({
     draftState,
     lastAutoSavedDecisions,
     proposal.operationId,
-    proposal.reviewClosed,
+    reviewClosed,
     serializedReviewDecisions,
     submitDraft,
   ]);
@@ -991,7 +994,7 @@ function StaffImportProposalView({
             {proposal.rows.length === 1 ? "product" : "products"} found
           </p>
           <p className="mt-1 text-xs text-gray-500">
-            {proposal.reviewClosed
+            {reviewClosed
               ? "Review closed. Applied rows appear below."
               : "Draft · Review edits save automatically. Nothing changes in Shelf until Apply."}
           </p>
@@ -1031,7 +1034,7 @@ function StaffImportProposalView({
               value={serializedReviewDecisions}
             />
           </fetcher.Form>
-          {!proposal.reviewClosed ? (
+          {!reviewClosed ? (
             <fetcher.Form
               method="post"
               action={actionPath}
@@ -1201,8 +1204,7 @@ function StaffImportProposalView({
               {reviewRows.map((row) => {
                 const isApplied = isAppliedRow(row.rowNumber);
                 const isIgnored = ignoredRowNumbers.has(row.rowNumber);
-                const isResolved =
-                  proposal.reviewClosed || isApplied || isIgnored;
+                const isResolved = reviewClosed || isApplied || isIgnored;
                 const decision = reviewDecisions[row.rowNumber];
                 const selectedLocation = decision?.locationId
                   ? proposal.locationOptions?.find(

@@ -41,6 +41,7 @@ export type ImportReviewRow = {
   helperCandidate?: unknown;
   categoryResolution?: string;
   locationResolution?: string;
+  sourceStorageLocation?: string | null;
   categoryOptional?: boolean;
   mouserLineItem?: boolean;
   reviewConflictReason?: string | null;
@@ -288,13 +289,26 @@ export function validateImportRowForApply({
     decision?.locationId !== undefined ? decision.locationId : row.locationId;
   if (
     !locationId &&
-    ["AMBIGUOUS", "UNMATCHED", "OPERATIONAL"].includes(
-      row.locationResolution ?? ""
-    )
+    (Boolean(row.sourceStorageLocation) ||
+      ["AMBIGUOUS", "UNMATCHED", "OPERATIONAL"].includes(
+        row.locationResolution ?? ""
+      ))
   )
     add(
       "MISSING_LOCATION",
-      `Choose a location for ${title} before importing it.`
+      row.sourceStorageLocation
+        ? `Location ${row.sourceStorageLocation} not found. Choose its exact container before importing ${title}.`
+        : `Choose a location for ${title} before importing it.`
+    );
+  if (
+    row.sourceStorageLocation &&
+    row.locationId &&
+    locationId &&
+    locationId !== row.locationId
+  )
+    add(
+      "INVALID_LOCATION",
+      `Use the exact source location ${row.sourceStorageLocation} for ${title}.`
     );
   if (locationId && !locationAvailable)
     add(
