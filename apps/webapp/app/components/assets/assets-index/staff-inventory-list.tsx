@@ -100,7 +100,6 @@ import {
   getStaffInventoryActionTargets,
   getStaffInventoryEditTarget,
   type StaffInventoryDisplayRow,
-  summarizeStaffInventory,
 } from "~/modules/asset/staff-inventory-view";
 import type { AssetsFromViewItem } from "~/modules/asset/types";
 import { getPrimaryLocation, isQuantityTracked } from "~/modules/asset/utils";
@@ -197,7 +196,7 @@ export function StaffInventoryList({
   headerActions,
   customEmptyStateContent,
 }: StaffInventoryListProps) {
-  const { items, locations } = useLoaderData<AssetIndexLoaderData>();
+  const { items } = useLoaderData<AssetIndexLoaderData>();
   const rows = useMemo(
     () =>
       buildStaffInventoryDisplayRows(
@@ -345,23 +344,12 @@ export function StaffInventoryList({
 
     removeSelectedItems(rows.flatMap(getStaffInventoryActionTargets));
   };
-  const inventorySummary = useMemo(
-    () =>
-      summarizeStaffInventory(
-        rows.map((item) => getStaffInventoryQuantities(item))
-      ),
-    [rows]
-  );
-
   return (
     <div className="flex flex-col gap-4 pb-5 pt-4">
       <section className="overflow-hidden rounded border border-gray-200 bg-white">
         <div className="flex flex-col gap-3 border-b border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Inventory</h2>
-            <p className="text-sm text-gray-500">
-              Canonical quantities and current availability
-            </p>
           </div>
           {headerActions ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -369,21 +357,6 @@ export function StaffInventoryList({
             </div>
           ) : null}
         </div>
-        <dl className="grid grid-cols-2 divide-x border-b border-gray-200 bg-gray-50/50 sm:grid-cols-4">
-          <InventorySummaryStat
-            label="Total quantity"
-            value={inventorySummary.totalQuantity}
-          />
-          <InventorySummaryStat
-            label="Available"
-            value={inventorySummary.available}
-          />
-          <InventorySummaryStat label="In use" value={inventorySummary.inUse} />
-          <InventorySummaryStat
-            label="Out of service"
-            value={inventorySummary.outOfService}
-          />
-        </dl>
         <StaffInventoryFilters />
         {selectedItems.length > 0 ? (
           <InventoryBulkActionBar
@@ -500,35 +473,10 @@ export function StaffInventoryList({
           onExpire={clearUndoAction}
         />
       ) : null}
-      <BulkCategoryUpdateDialog onSuccess={rememberBulkAction} />
-      <BulkLocationUpdateDialog
-        ioioLocations={locations.map(({ id, name, parentId }) => ({
-          id,
-          name,
-          parentId,
-        }))}
-        strict
-        onSuccess={rememberBulkAction}
-      />
+      <BulkCategoryUpdateDialog />
+      <BulkLocationUpdateDialog />
       <BulkArchiveDialog onSuccess={rememberBulkAction} />
       <BulkTrashDialog onSuccess={rememberBulkAction} />
-    </div>
-  );
-}
-
-function InventorySummaryStat({
-  label,
-  value,
-}: {
-  label: string;
-  value: number;
-}) {
-  return (
-    <div className="min-w-0 p-3 sm:px-4 sm:py-3">
-      <dt className="truncate text-xs font-medium text-gray-500">{label}</dt>
-      <dd className="mt-1 text-lg font-semibold tabular-nums text-gray-900">
-        {value.toLocaleString()}
-      </dd>
     </div>
   );
 }
@@ -711,7 +659,7 @@ function StaffInventoryFilters() {
             sortInventoryLocationItems(
               items as InventoryLocationOption[],
               locations as InventoryLocationOption[]
-            )
+            ) as typeof items
           }
           renderItem={(item) =>
             renderInventoryLocationOption(

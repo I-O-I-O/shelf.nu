@@ -234,6 +234,7 @@ export async function simpleModeLoader({
     {
       search,
       totalAssets,
+      totalInventoryQuantity,
       perPage,
       page,
       categories,
@@ -322,6 +323,7 @@ export async function simpleModeLoader({
       userId,
       excludeAssetIds,
       ioioHiddenOnly,
+      includeTotalInventoryQuantity: excludeAssetIds !== undefined,
     }),
     getTagsForBookingTagsFilter({
       organizationId,
@@ -645,6 +647,7 @@ export async function simpleModeLoader({
       search,
       page,
       totalItems: totalAssets,
+      totalInventoryQuantity,
       perPage,
       totalPages,
       modelName,

@@ -112,12 +112,14 @@ export type StaffInventorySummary = {
 };
 
 export function summarizeStaffInventory(
-  quantities: LogicalInventoryQuantity[]
+  quantities: LogicalInventoryQuantity[],
+  allFilteredQuantity?: number
 ): StaffInventorySummary {
-  const totalQuantity = quantities.reduce(
+  const pageQuantity = quantities.reduce(
     (sum, item) => sum + Math.max(0, item.totalQuantity),
     0
   );
+  const totalQuantity = allFilteredQuantity ?? pageQuantity;
   const available = quantities.reduce(
     (sum, item) =>
       sum +

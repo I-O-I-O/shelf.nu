@@ -781,6 +781,8 @@ export async function getAssets(params: {
   excludeAssetIds?: string[];
   /** IOIO staff Inventory view showing hidden assets and products only. */
   ioioHiddenOnly?: boolean;
+  /** Calculate the full filtered inventory quantity, independent of pagination. */
+  includeTotalInventoryQuantity?: boolean;
 }) {
   let {
     organizationId,
@@ -803,6 +805,7 @@ export async function getAssets(params: {
     availableToBookOnly,
     excludeAssetIds,
     ioioHiddenOnly,
+    includeTotalInventoryQuantity = false,
   } = params;
 
   try {
@@ -1141,11 +1144,11 @@ export async function getAssets(params: {
      * and ordering config.
      *
      * @param assetWhere - The Prisma where clause to fetch and count against
-     * @returns A tuple of `[assets, totalAssets]`
+     * @returns The paginated rows, matching row count, and optional quantity aggregate
      */
     const baseDb = db as unknown as PrismaClient;
-    const fetchAssetsForWhere = (assetWhere: Prisma.AssetWhereInput) =>
-      Promise.all([
+    const fetchAssetsForWhere = async (assetWhere: Prisma.AssetWhereInput) => {
+      const [assets, totalAssets] = await Promise.all([
         baseDb.asset.findMany({
           skip,
           take,
@@ -1171,11 +1174,38 @@ export async function getAssets(params: {
         db.asset.count({ where: assetWhere }),
       ]);
 
-    const [assets, totalAssets] = await fetchAssetsForWhere(where);
+      const totalInventoryQuantity = includeTotalInventoryQuantity
+        ? await db.asset
+            .groupBy({
+              by: ["type"],
+              where: assetWhere,
+              _count: { _all: true },
+              _sum: { quantity: true },
+            })
+            .then((groups) =>
+              groups.reduce(
+                (total, group) =>
+                  total +
+                  (group.type === AssetType.QUANTITY_TRACKED
+                    ? group._sum.quantity ?? 0
+                    : group._count._all),
+                0
+              )
+            )
+        : undefined;
+
+      return { assets, totalAssets, totalInventoryQuantity };
+    };
+
+    const { assets, totalAssets, totalInventoryQuantity } =
+      await fetchAssetsForWhere(where);
 
     return {
       assets: await resolveAssetImagesForPresentation(assets),
       totalAssets,
+      ...(totalInventoryQuantity === undefined
+        ? {}
+        : { totalInventoryQuantity }),
     };
   } catch (cause) {
     // A deliberate client error — e.g. the >65k bind-param ceiling 400 thrown by
@@ -6010,6 +6040,7 @@ export async function getPaginatedAndFilterableAssets({
   userId,
   excludeAssetIds,
   ioioHiddenOnly,
+  includeTotalInventoryQuantity,
 }: {
   request: LoaderFunctionArgs["request"];
   organizationId: Organization["id"];
@@ -6034,6 +6065,8 @@ export async function getPaginatedAndFilterableAssets({
   excludeAssetIds?: string[];
   /** Optional staff-only presentation filter for the canonical IOIO hidden flag. */
   ioioHiddenOnly?: boolean;
+  /** Optional unpaginated quantity aggregate for staff Inventory summaries. */
+  includeTotalInventoryQuantity?: boolean;
 }) {
   const currentFilterParams = new URLSearchParams(filters || "");
   const searchParams = filters
@@ -6107,7 +6140,7 @@ export async function getPaginatedAndFilterableAssets({
         totalAssetModels,
       },
       teamMembersData,
-      { assets, totalAssets },
+      { assets, totalAssets, totalInventoryQuantity },
     ] = await Promise.all([
       getEntitiesWithSelectedValues({
         organizationId,
@@ -6150,6 +6183,7 @@ export async function getPaginatedAndFilterableAssets({
         availableToBookOnly: isSelfService,
         excludeAssetIds,
         ioioHiddenOnly,
+        includeTotalInventoryQuantity,
       }),
     ]);
 
@@ -6160,6 +6194,9 @@ export async function getPaginatedAndFilterableAssets({
       perPage,
       search,
       totalAssets,
+      ...(totalInventoryQuantity === undefined
+        ? {}
+        : { totalInventoryQuantity }),
       totalCategories,
       totalTags,
       categories: excludeCategoriesQuery ? [] : categories,

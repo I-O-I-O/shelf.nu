@@ -96,6 +96,9 @@ vitest.mock("~/database/db.server", () => ({
       findMany: vitest.fn().mockResolvedValue([]),
       findUnique: vitest.fn().mockResolvedValue(null),
       count: vitest.fn().mockResolvedValue(0),
+      // why: staff Inventory's page-wide quantity summary uses an unpaginated
+      // grouped aggregate rather than summing only the rows on the current page.
+      groupBy: vitest.fn().mockResolvedValue([]),
       update: vitest.fn().mockResolvedValue({}),
       updateMany: vitest.fn().mockResolvedValue({ count: 0 }),
       deleteMany: vitest.fn().mockResolvedValue({ count: 0 }),
@@ -5849,6 +5852,7 @@ describe("placeUnplacedUnits", () => {
 describe("getAssets search via UNION", () => {
   const findManyMock = vi.mocked(db.asset.findMany);
   const countMock = vi.mocked(db.asset.count);
+  const groupByMock = vi.mocked(db.asset.groupBy);
   // why: the UNION runs as a raw query; mock it to return a known id set so we
   // can assert getAssets threads those ids into the Prisma where.
   const queryRawMock = vi.mocked(db.$queryRaw);
@@ -5856,6 +5860,7 @@ describe("getAssets search via UNION", () => {
   beforeEach(() => {
     findManyMock.mockReset().mockResolvedValue([]);
     countMock.mockReset().mockResolvedValue(0);
+    groupByMock.mockReset().mockResolvedValue([]);
     queryRawMock.mockReset().mockResolvedValue([{ id: "a1" }, { id: "a2" }]);
   });
 
@@ -5893,6 +5898,86 @@ describe("getAssets search via UNION", () => {
       OR: [{ ioioHidden: true }, { assetModel: { is: { ioioHidden: true } } }],
     });
     expect(where.availableToBook).toBeUndefined();
+  });
+
+  it("summarizes all filtered inventory instead of only the current page", async () => {
+    groupByMock.mockResolvedValue([
+      {
+        type: AssetType.QUANTITY_TRACKED,
+        _count: { _all: 127 },
+        _sum: { quantity: 3367 },
+      },
+      {
+        type: AssetType.INDIVIDUAL,
+        _count: { _all: 25 },
+        _sum: { quantity: null },
+      },
+    ]);
+
+    const result = await getAssets({
+      ...base,
+      perPage: 100,
+      excludeAssetIds: ["trashed-asset"],
+      locationIds: ["a3-location"],
+      includeTotalInventoryQuantity: true,
+    });
+
+    expect(result.totalInventoryQuantity).toBe(3392);
+    expect(groupByMock).toHaveBeenCalledWith({
+      by: ["type"],
+      where: {
+        organizationId: "org_1",
+        id: { notIn: ["trashed-asset"] },
+        assetLocations: { some: { locationId: { in: ["a3-location"] } } },
+      },
+      _count: { _all: true },
+      _sum: { quantity: true },
+    });
+  });
+
+  it("keeps the full inventory total increasing when a new page of imports displaces older rows", async () => {
+    groupByMock
+      .mockResolvedValueOnce([
+        {
+          type: AssetType.QUANTITY_TRACKED,
+          _count: { _all: 127 },
+          _sum: { quantity: 3367 },
+        },
+        {
+          type: AssetType.INDIVIDUAL,
+          _count: { _all: 25 },
+          _sum: { quantity: null },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          type: AssetType.QUANTITY_TRACKED,
+          _count: { _all: 177 },
+          _sum: { quantity: 3659 },
+        },
+        {
+          type: AssetType.INDIVIDUAL,
+          _count: { _all: 25 },
+          _sum: { quantity: null },
+        },
+      ]);
+
+    const before = await getAssets({
+      ...base,
+      perPage: 100,
+      includeTotalInventoryQuantity: true,
+    });
+    const after = await getAssets({
+      ...base,
+      perPage: 100,
+      includeTotalInventoryQuantity: true,
+    });
+
+    expect(before.totalInventoryQuantity).toBe(3392);
+    expect(after.totalInventoryQuantity).toBe(3684);
+    expect(after.totalInventoryQuantity).toBeGreaterThan(
+      before.totalInventoryQuantity!
+    );
   });
 
   it("fail-closed: whitespace-only search matches nothing, no UNION", async () => {

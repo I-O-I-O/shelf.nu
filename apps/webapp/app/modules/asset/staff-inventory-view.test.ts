@@ -113,6 +113,22 @@ describe("staff inventory presentation helpers", () => {
     });
   });
 
+  it("uses the full filtered result quantity when the current page sum falls", () => {
+    const beforePage = summarizeStaffInventory(
+      [{ totalQuantity: 977, availableQuantity: 977 }],
+      3392
+    );
+    const afterPage = summarizeStaffInventory(
+      [{ totalQuantity: 757, availableQuantity: 757 }],
+      3684
+    );
+
+    expect(beforePage.totalQuantity).toBe(3392);
+    expect(afterPage.totalQuantity).toBe(3684);
+    expect(afterPage.totalQuantity).toBeGreaterThan(beforePage.totalQuantity);
+    expect(afterPage.available).toBe(757);
+  });
+
   it("does not count out-of-service stock as in use", () => {
     expect(
       summarizeStaffInventory([
