@@ -867,7 +867,7 @@ describe("import helper contract", () => {
     [400, "invalid_request_400"],
     [401, "unauthorized_401"],
     [502, "helper_inference_502"],
-    [504, "timeout"],
+    [504, "processing_timeout"],
   ] as const)("classifies helper HTTP %s", async (status, classification) => {
     const loggerInfo = vi.spyOn(Logger, "info").mockImplementation(() => {});
     const fetchImpl = vi.fn(() =>

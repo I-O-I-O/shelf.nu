@@ -40,3 +40,19 @@ export function inventorySourceLocations() {
     })),
   ].map((location) => ({ ...location, operational: false, currentUnits: 0 }));
 }
+
+/** A3-sized readable inventory: 48 complete rows across six bin sections. */
+export function a3InventoryText(count = 48) {
+  return [
+    "Organization: IOIO Lab",
+    "Room: B477",
+    "Location | Item | Estimated quantity | Description",
+    ...Array.from(
+      { length: count },
+      (_, index) =>
+        `A3-${Math.floor(index / 8) + 1} | Workshop component ${index + 1} | ${
+          (index + 1) * 25
+        } | Prototyping component variant ${index + 1}`
+    ),
+  ].join("\n");
+}

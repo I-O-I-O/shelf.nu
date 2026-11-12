@@ -4400,7 +4400,8 @@ describe("staff inventory import safety", () => {
 
   it.each([
     ["unavailable", "The Claude document helper is unavailable"],
-    ["timeout", "Claude document analysis timed out"],
+    ["timeout", "Claude analysis exceeded the request limit"],
+    ["processing", "Claude analysis exceeded the processing limit"],
     ["malformed", "The Claude document helper returned an invalid response"],
   ])(
     "reports a useful %s error for readable PDFs",
@@ -4408,7 +4409,7 @@ describe("staff inventory import safety", () => {
       preparePdfImportMocks(`operation-helper-${failure}`);
       vi.stubEnv("IOIO_IMPORT_HELPER_URL", "http://127.0.0.1:18787");
       vi.stubEnv("IOIO_IMPORT_HELPER_AUTH_TOKEN", "test-helper-secret");
-      vi.stubEnv("IOIO_IMPORT_HELPER_TIMEOUT_MS", "5");
+      vi.stubEnv("IOIO_IMPORT_HELPER_ANALYSIS_TIMEOUT_MS", "5");
       const realClient = await vi.importActual<typeof ImportHelperClient>(
         "./import-helper-client.server"
       );
@@ -4417,6 +4418,8 @@ describe("staff inventory import safety", () => {
       );
       // why: simulate helper HTTP failures while exercising real client error classification.
       const fetchMock = vi.fn((_url: URL, init: RequestInit) => {
+        if (failure === "processing")
+          return Promise.resolve(new Response("", { status: 504 }));
         if (failure === "unavailable")
           return Promise.reject(new TypeError("ECONNREFUSED"));
         if (failure === "malformed")

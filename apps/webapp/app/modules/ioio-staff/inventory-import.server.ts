@@ -938,8 +938,10 @@ const PDF_HELPER_FAILURE_MESSAGES: Record<ImportHelperManualReason, string> = {
     "AI-assisted document analysis is not configured. Ask an administrator to check the document helper.",
   network_error:
     "The Claude document helper is unavailable. Try again in a moment.",
+  processing_timeout:
+    "Claude analysis exceeded the processing limit. The import was not changed.",
   timeout:
-    "Claude document analysis timed out. Try again or upload a smaller PDF.",
+    "Claude analysis exceeded the request limit. The import was not changed.",
   unauthorized_401:
     "The Claude document helper could not authenticate. Ask an administrator to check its configuration.",
   invalid_request_400:
@@ -5197,6 +5199,19 @@ export async function prepareStaffInventoryImport({
       helperRequest.relevantLocations.map(({ id }) => id)
     );
     const helperResult = await requestImportHelperProposal(helperRequest);
+    if (
+      helperResult.status === "manual" &&
+      (helperResult.diagnostic ||
+        helperResult.reason === "timeout" ||
+        helperResult.reason === "processing_timeout")
+    ) {
+      throw importError(
+        `${PDF_HELPER_FAILURE_MESSAGES[helperResult.reason]} ${
+          helperResult.diagnostic ?? ""
+        }`
+      );
+    }
+
     Logger.info({
       event: "ioio_staff_import_pdf_analysis_selected",
       ...parsed.pdfDiagnostics,

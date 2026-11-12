@@ -6,14 +6,17 @@ import {
   type AnyImportHelperRequest,
   type AnyImportHelperResponse,
 } from "./import-helper-contract.server";
+import { analyzeInventoryChunks } from "./inventory-document-chunks.server";
 
 export const DEFAULT_IMPORT_HELPER_TIMEOUT_MS = 20_000;
+export const INVENTORY_ANALYSIS_TIMEOUT_MS = 240_000;
 export const MAX_IMPORT_HELPER_RESPONSE_BYTES = 2_000_000;
 export const IMPORT_HELPER_HEALTH_TIMEOUT_MS = 1200;
 
 export type ImportHelperManualReason =
   | "helper_not_configured"
   | "network_error"
+  | "processing_timeout"
   | "timeout"
   | "unauthorized_401"
   | "invalid_request_400"
@@ -28,12 +31,13 @@ export type ImportHelperResultClassification =
 
 export type ImportHelperClientResult =
   | { status: "ready"; proposal: AnyImportHelperResponse }
-  | { status: "manual"; reason: ImportHelperManualReason };
+  | { status: "manual"; reason: ImportHelperManualReason; diagnostic?: string };
 
 export type ImportHelperClientConfig = {
   endpoint?: string;
   authToken?: string;
   timeoutMs?: number;
+  analysisTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 };
 
@@ -45,10 +49,19 @@ function getRuntimeConfig(): ImportHelperClientConfig {
     timeoutValue <= 120_000
       ? timeoutValue
       : DEFAULT_IMPORT_HELPER_TIMEOUT_MS;
+  const analysisTimeout = Number(
+    process.env.IOIO_IMPORT_HELPER_ANALYSIS_TIMEOUT_MS
+  );
   return {
     endpoint: process.env.IOIO_IMPORT_HELPER_URL?.trim(),
     authToken: process.env.IOIO_IMPORT_HELPER_AUTH_TOKEN?.trim(),
     timeoutMs,
+    analysisTimeoutMs:
+      Number.isSafeInteger(analysisTimeout) &&
+      analysisTimeout > 0 &&
+      analysisTimeout <= 300_000
+        ? analysisTimeout
+        : INVENTORY_ANALYSIS_TIMEOUT_MS,
   };
 }
 
@@ -150,7 +163,7 @@ function classifyHttpFailure(status: number): ImportHelperManualReason {
     case 503:
       return "helper_busy_503";
     case 504:
-      return "timeout";
+      return "processing_timeout";
     default:
       return "helper_http_error";
   }
@@ -158,7 +171,8 @@ function classifyHttpFailure(status: number): ImportHelperManualReason {
 
 export async function requestImportHelperProposal(
   requestInput: AnyImportHelperRequest | unknown,
-  config: ImportHelperClientConfig = getRuntimeConfig()
+  config: ImportHelperClientConfig = getRuntimeConfig(),
+  chunked = false
 ): Promise<ImportHelperClientResult> {
   const parsedRequest = importHelperRequestSchema.safeParse(requestInput);
   if (!parsedRequest.success) {
@@ -167,6 +181,11 @@ export async function requestImportHelperProposal(
     );
   }
 
+  if (!("mode" in parsedRequest.data) && !chunked) {
+    return analyzeInventoryChunks(parsedRequest.data, (chunk) =>
+      requestImportHelperProposal(chunk, config, true)
+    );
+  }
   const mode =
     "mode" in parsedRequest.data ? parsedRequest.data.mode : "GENERIC_IMPORT";
   const requestBody = JSON.stringify(parsedRequest.data);
@@ -183,6 +202,20 @@ export async function requestImportHelperProposal(
       requestMode: mode,
       requestBytes,
       durationMs: Date.now() - startedAt,
+      timeoutLayer:
+        result === "timeout"
+          ? "shelf_http_client"
+          : result === "processing_timeout"
+          ? "helper_processing"
+          : "none",
+      extractedTextLength:
+        "document" in parsedRequest.data &&
+        "pages" in parsedRequest.data.document
+          ? parsedRequest.data.document.pages.reduce(
+              (sum, page) => sum + page.text.length,
+              0
+            )
+          : 0,
     });
   };
 
@@ -194,7 +227,11 @@ export async function requestImportHelperProposal(
   }
 
   const controller = new AbortController();
-  const timeoutMs = config.timeoutMs ?? DEFAULT_IMPORT_HELPER_TIMEOUT_MS;
+  const timeoutMs = !("mode" in parsedRequest.data)
+    ? config.analysisTimeoutMs ??
+      config.timeoutMs ??
+      INVENTORY_ANALYSIS_TIMEOUT_MS
+    : config.timeoutMs ?? DEFAULT_IMPORT_HELPER_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await (config.fetchImpl ?? fetch)(

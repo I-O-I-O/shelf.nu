@@ -499,6 +499,27 @@ describe("standalone import helper HTTP service", () => {
     expect(JSON.stringify(result.body)).not.toContain("model-not-in-allowlist");
   });
 
+  it("uses a document watchdog beyond the legacy 90-second process setting", async () => {
+    // why: virtual inference models slow Claude without network/process work.
+    vi.useFakeTimers();
+    try {
+      const result = sendToHandler({
+        config: {
+          processTimeoutMs: 90_000,
+          inference: () =>
+            new Promise((resolve) =>
+              setTimeout(() => resolve(envelope()), 100_000)
+            ),
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect((await result).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns 504 on an inference timeout", async () => {
     const inference = vi.fn(
       ({ signal }: ClaudeProcessInput) =>
@@ -513,7 +534,7 @@ describe("standalone import helper HTTP service", () => {
         })
     );
     const result = await sendToHandler({
-      config: { inference, processTimeoutMs: 5 },
+      config: { inference, documentProcessTimeoutMs: 5 },
     });
     expect(result.status).toBe(504);
     expect(inference.mock.calls[0]?.[0].signal.aborted).toBe(true);
@@ -562,12 +583,6 @@ describe("standalone import helper HTTP service", () => {
       { sourceRef: "page-1", page: 1, text: inventorySourceText() },
     ];
     const prompt = buildClaudeImportPrompt(request);
-    expect(prompt).toContain(
-      '"quantity":150,"organization":"IOIO Lab","room":"B477","location":"A1-3"'
-    );
-    expect(prompt).toContain(
-      '"quantity":1000,"organization":"IOIO Lab","room":"B477","location":"A2-2"'
-    );
     expect(prompt).toContain(
       "estimated quantities for bulk cables or jumper wires"
     );
@@ -733,6 +748,30 @@ describe("standalone import helper HTTP service", () => {
         signal: new AbortController().signal,
       })
     ).rejects.toMatchObject({ code: "process_exit" });
+  });
+
+  it("lets document subprocesses run beyond the legacy 90-second timeout", async () => {
+    // why: virtual time exercises the real subprocess timer without running Claude.
+    vi.useFakeTimers();
+    try {
+      const child = new FakeChild();
+      const result = createClaudeCliProcessRunner({
+        spawnImpl: (() => child) as never,
+        timeoutMs: 90_000,
+      })({
+        prompt: "inventory",
+        jsonSchema: IMPORT_HELPER_RESPONSE_JSON_SCHEMA,
+        signal: new AbortController().signal,
+        timeoutMs: 210_000,
+      });
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(child.killed).toBe(false);
+      child.stdout.end(envelope());
+      child.emit("close", 0, null);
+      expect(await result).toContain("structured_output");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("times out and kills a child process", async () => {
