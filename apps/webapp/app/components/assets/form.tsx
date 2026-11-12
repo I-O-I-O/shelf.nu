@@ -28,6 +28,7 @@ import { fileErrorAtom, assetImageValidateFileAtom } from "~/atoms/file";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
 import { assetAdvancedSettingsSchema } from "~/modules/asset/advanced-settings";
+import { assetBorrowabilitySchema } from "~/modules/asset/borrowability";
 import { getPrimaryKit, isQuantityTracked } from "~/modules/asset/utils";
 import type {
   AssetEditLoaderData,
@@ -171,6 +172,7 @@ export const NewAssetFormSchema = z.object({
   // non-IOIO forms retain their existing behavior, but accept the selected
   // value so the edit action can persist it.
   returnHandling: assetAdvancedSettingsSchema.shape.returnHandling.optional(),
+  availableToBook: assetBorrowabilitySchema,
   consumptionType: z
     .nativeEnum(ConsumptionType, {
       errorMap: () => ({ message: "Please select a consumption type" }),

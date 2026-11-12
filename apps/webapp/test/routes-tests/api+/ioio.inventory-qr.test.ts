@@ -111,6 +111,21 @@ describe("IOIO inventory QR resolver", () => {
     });
   });
 
+  it("keeps a non-borrowable tool QR discoverable on its normal detail route", async () => {
+    vi.mocked(db.qr.findFirst).mockResolvedValue({
+      assetId: "caliper",
+      kitId: null,
+    } as never);
+    vi.mocked(getStudentAssets).mockResolvedValue([
+      { id: "caliper", availableToBook: false },
+    ] as never);
+    const response = await loader(args("cmv1234567"));
+    expect(response.status).toBe(200);
+    expect(await json(response)).toEqual({
+      destination: "/ioio/browse/caliper",
+    });
+  });
+
   it("blocks a student when the scanned asset is outside their visible inventory", async () => {
     vi.mocked(db.qr.findFirst).mockResolvedValue({
       assetId: "hidden-asset",

@@ -231,7 +231,11 @@ export const AssetImage = ({
    * wrong row. Without this gate, a list of N assets sharing one model fires N
    * requests at the two endpoints that already rate-limit after large imports.
    */
-  const canRepairImage = resolved.source === "asset";
+  // The authenticated proxy reads the current canonical object on every request;
+  // legacy repair endpoints would replace its usable URL with a storage URL.
+  const canRepairImage =
+    resolved.source === "asset" &&
+    !resolved.fullUrl.startsWith("/api/asset-image?");
   const mainImage = canRepairImage ? resolved.fullUrl : null;
 
   /**

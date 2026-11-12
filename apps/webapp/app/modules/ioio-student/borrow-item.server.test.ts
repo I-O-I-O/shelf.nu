@@ -186,6 +186,25 @@ describe("IOIO borrow_item", () => {
     expect(createBookingMock).not.toHaveBeenCalled();
   });
 
+  it("blocks a direct borrow proposal for a visible non-borrowable multimeter", async () => {
+    dbMock.asset.findFirst.mockResolvedValueOnce({
+      ...asset,
+      title: "Multimeter",
+      availableToBook: false,
+    });
+    await expect(
+      prepareBorrowItem(
+        { asset_id: asset.id, kit_id: null, quantity: 1, from, to },
+        { context, request }
+      )
+    ).rejects.toMatchObject({
+      message: "This item is not available for borrowing.",
+      status: 409,
+    });
+    expect(dbMock.ioioWriteOperation.create).not.toHaveBeenCalled();
+    expect(createBookingMock).not.toHaveBeenCalled();
+  });
+
   it("blocks new borrow proposals for a hidden product without changing availability", async () => {
     dbMock.asset.findFirst.mockResolvedValue({
       ...asset,
@@ -1969,7 +1988,7 @@ describe("IOIO borrow_item", () => {
         { context, request }
       )
     ).rejects.toMatchObject({
-      message: "This item is currently out of service and cannot be borrowed.",
+      message: "This item is not available for borrowing.",
       status: 409,
     });
   });

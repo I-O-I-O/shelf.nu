@@ -5,7 +5,6 @@ import { parseFormData } from "@remix-run/form-data-parser";
 import { LRUCache } from "lru-cache";
 import type { ResizeOptions } from "sharp";
 
-import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import {
   ASSET_MAX_IMAGE_UPLOAD_SIZE,
@@ -130,12 +129,15 @@ export async function resolveStorageImageUrl({
 /** Only interpret legacy URLs as Storage objects when their URL path explicitly
  * matches Supabase's object endpoint for the expected bucket. This avoids
  * converting unrelated CDN URLs into accidental object keys. */
-function extractLegacySupabaseObjectPath(
+export function extractLegacySupabaseObjectPath(
   value: string,
   bucketName: StorageImageBucket
 ): string | null {
   if (!value.includes("://") && !value.startsWith("/storage/")) {
-    return extractStoragePath(value.replace(/^\/+/, ""), bucketName);
+    const path = value.replace(/^\/+/, "");
+    return path.startsWith(`${bucketName}/`)
+      ? path.slice(bucketName.length + 1)
+      : path || null;
   }
   try {
     const pathname = new URL(value, "https://storage.invalid").pathname;

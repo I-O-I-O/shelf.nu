@@ -66,6 +66,43 @@ const createAssetWithoutImage = (): AssetForThumbnail => ({
 });
 
 describe("AssetImage thumbnail resilience", () => {
+  it("keeps a same-origin image stable on revalidation, replaces it by object version, and skips legacy repairs", async () => {
+    // why: no legacy signing/thumbnail HTTP call may replace a proxy URL.
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImage: "/api/asset-image?assetId=one&variant=main&v=original",
+      thumbnailImage: null,
+    };
+    const { rerender } = render(<AssetImage asset={asset} alt="Motor" />);
+    await act(async () => {
+      vi.runAllTimers();
+      await Promise.resolve();
+    });
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      asset.mainImage
+    );
+    rerender(<AssetImage asset={{ ...asset }} alt="Motor" />);
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      asset.mainImage
+    );
+    rerender(
+      <AssetImage
+        asset={{
+          ...asset,
+          mainImage: "/api/asset-image?assetId=one&variant=main&v=replacement",
+        }}
+        alt="Motor"
+      />
+    );
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      expect.stringContaining("v=replacement")
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     // why: jitter delay is `Math.random() * 3000`; pin it to 0 for deterministic

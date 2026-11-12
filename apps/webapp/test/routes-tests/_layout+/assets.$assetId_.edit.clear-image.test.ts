@@ -162,6 +162,41 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
     expect((response as Response).headers.get("Location")).toBe("/assets");
   });
 
+  it.each(["false", "true"])(
+    "persists staff-reviewed borrowability %s without changing visibility or status",
+    async (value) => {
+      await action(
+        buildArgs({ clearMainImage: "false", availableToBook: value })
+      );
+      expect(updateAsset).toHaveBeenCalledWith(
+        expect.objectContaining({ availableToBook: value === "true" })
+      );
+      const payload = vi.mocked(updateAsset).mock.calls[0][0];
+      expect(payload).not.toHaveProperty("status");
+      expect(payload).not.toHaveProperty("ioioHidden");
+    }
+  );
+
+  it("preserves borrowability when an older form does not submit it", async () => {
+    await action(buildArgs({ clearMainImage: "false" }));
+    expect(
+      vi.mocked(updateAsset).mock.calls[0][0].availableToBook
+    ).toBeUndefined();
+  });
+
+  it("applies reviewed borrowability to every active unit in a grouped product", async () => {
+    await action(
+      buildArgs({
+        clearMainImage: "false",
+        productGroup: "1",
+        availableToBook: "false",
+      })
+    );
+    expect(updateAsset).toHaveBeenCalledTimes(5);
+    for (const [payload] of vi.mocked(updateAsset).mock.calls)
+      expect(payload.availableToBook).toBe(false);
+  });
+
   it("persists the Return section choice on the edited physical asset", async () => {
     const response = await action(
       buildArgs({

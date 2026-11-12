@@ -541,7 +541,7 @@ describe("student checkout action", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Borrow" })).toBeNull();
-    expect(screen.getByText("Unavailable")).toBeTruthy();
+    expect(screen.getByText("Not available for borrowing")).toBeTruthy();
   });
 });
 

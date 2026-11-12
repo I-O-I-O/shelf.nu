@@ -3,6 +3,7 @@ import { AssetStatus, AssetType, BookingStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import type { LoaderFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";
+import { assertAssetBorrowable } from "~/modules/asset/borrowability.server";
 import {
   getPhysicalUnitBaseTitle,
   getPhysicalUnitNumberFromTitle,
@@ -117,12 +118,15 @@ function assertBorrowRole(role: string) {
   }
 }
 
-function assertStudentBorrowVisible(
+function assertStudentBorrowAllowed(
   asset: NonNullable<Awaited<ReturnType<typeof loadBorrowAsset>>>
 ) {
   if (isIoioAssetHidden(asset, asset.organizationId)) {
     throw borrowError("This item is hidden from student borrowing.", 409);
   }
+  // Individually tracked products validate the selected physical units below;
+  // a non-borrowable representative must not disable other eligible units.
+  if (asset.type !== AssetType.INDIVIDUAL) assertAssetBorrowable(asset);
 }
 
 function assertOperationStatus(
@@ -175,7 +179,7 @@ type BorrowPhysicalUnit = {
 
 function getPhysicalUnitUnavailableMessage(unit: BorrowPhysicalUnit) {
   if (!unit.availableToBook) {
-    return "This item is currently out of service and cannot be borrowed.";
+    return "This item is not available for borrowing.";
   }
   return `${unit.title} is no longer available.`;
 }
@@ -276,7 +280,7 @@ export async function resolvePhysicalUnitNumber(
       403
     );
   }
-  assertStudentBorrowVisible(requestedAsset);
+  assertStudentBorrowAllowed(requestedAsset);
   const normalizedUnitNumber = normalizePhysicalUnitNumber(unitNumber);
   if (!normalizedUnitNumber) {
     throw borrowError(
@@ -456,7 +460,7 @@ export async function getBorrowItemAvailability(
       403
     );
   }
-  assertStudentBorrowVisible(asset);
+  assertStudentBorrowAllowed(asset);
   const window =
     parsedFrom && parsedTo
       ? { from: parsedFrom, to: parsedTo }
@@ -645,7 +649,7 @@ export async function prepareBorrowItem(
       403
     );
   }
-  assertStudentBorrowVisible(requestedAsset);
+  assertStudentBorrowAllowed(requestedAsset);
   const requiresPhysicalUnit = requestedAsset.type === AssetType.INDIVIDUAL;
   const { from, to } = getImmediateBorrowingWindow(
     getEffectiveMaxBorrowDays(requestedAsset)
@@ -1053,7 +1057,7 @@ export async function acknowledgePreparationStaffReservation(
   ) {
     throw borrowError("Choose a valid preparation item and quantity.", 409);
   }
-  assertStudentBorrowVisible(asset);
+  assertStudentBorrowAllowed(asset);
   const candidateIds =
     asset.type === AssetType.INDIVIDUAL
       ? [...new Set(candidateAssetIds ?? [])].sort()
@@ -1148,7 +1152,7 @@ export async function requestPreparationForItem(
   if (!asset) {
     throw borrowError("The selected Shelf item is not in this workspace.", 403);
   }
-  assertStudentBorrowVisible(asset);
+  assertStudentBorrowAllowed(asset);
   if (!asset.requiresStaffPreparation) {
     throw borrowError(
       "This item can be borrowed directly without preparation.",
@@ -1913,7 +1917,7 @@ export async function borrowItem(
     if (!proposedAsset) {
       throw borrowError("The referenced Shelf asset no longer exists.", 404);
     }
-    assertStudentBorrowVisible(proposedAsset);
+    assertStudentBorrowAllowed(proposedAsset);
   }
 
   const existingMarkedBooking = await findMarkedBooking({
@@ -1982,7 +1986,7 @@ export async function borrowItem(
     const asset = await loadBorrowAsset(operation.assetId, auth.organizationId);
     if (!asset)
       throw borrowError("The referenced Shelf asset no longer exists.", 404);
-    if (!canResumeProcessing) assertStudentBorrowVisible(asset);
+    if (!canResumeProcessing) assertStudentBorrowAllowed(asset);
     const selectedPhysicalAssetIds =
       asset.type === AssetType.INDIVIDUAL
         ? getStoredSelectedAssetIds(operation.selectedAssetIds).length

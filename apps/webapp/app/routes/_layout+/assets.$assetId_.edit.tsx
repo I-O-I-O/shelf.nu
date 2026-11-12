@@ -175,6 +175,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             id: true,
             title: true,
             status: true,
+            availableToBook: true,
             assetLocations: { select: { locationId: true } },
             qrCodes: {
               take: 1,
@@ -188,6 +189,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             id: asset.id,
             title: asset.title,
             status: asset.status,
+            availableToBook: asset.availableToBook,
             assetLocations: asset.assetLocations.map(({ locationId }) => ({
               locationId,
             })),
@@ -199,6 +201,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       id: unit.id,
       title: unit.title,
       status: unit.status,
+      availableToBook: unit.availableToBook,
       assetLocations: unit.assetLocations,
       qrId: unit.qrCodes[0]?.id ?? null,
       qrCreatedAt: unit.qrCodes[0]?.createdAt ?? null,
@@ -650,6 +653,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
           return updateAsset({
             id: unit.id,
             ...(unitTitle ? { title: unitTitle } : {}),
+            availableToBook: parsedData.availableToBook,
             minQuantity: parsedData.minQuantity,
             requiresBorrowApproval: parsedData.requiresBorrowApproval,
             requiresStaffPreparation: parsedData.requiresStaffPreparation,
@@ -720,6 +724,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      availableToBook,
       requiresBorrowApproval,
       requiresStaffPreparation,
       requiresReturnPhoto,
@@ -799,6 +804,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      availableToBook,
       requiresBorrowApproval,
       requiresStaffPreparation,
       requiresReturnPhoto,
@@ -914,6 +920,11 @@ export default function AssetEditPage() {
         minQuantity={asset.minQuantity}
         consumptionType={asset.consumptionType}
         unitOfMeasure={asset.unitOfMeasure}
+        availableToBook={
+          productGroup
+            ? physicalUnits.some((unit) => unit.availableToBook)
+            : asset.availableToBook
+        }
         requiresBorrowApproval={asset.requiresBorrowApproval}
         requiresStaffPreparation={asset.requiresStaffPreparation}
         requiresReturnPhoto={asset.requiresReturnPhoto}

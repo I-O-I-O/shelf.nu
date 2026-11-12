@@ -2,51 +2,49 @@ import { OrganizationRoles, AssetStatus } from "@prisma/client";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createTeamMember } from "@factories";
+import { db } from "~/database/db.server";
+import { getAsset } from "~/modules/asset/service.server";
+import { createNote } from "~/modules/note/service.server";
+import { getUserByID } from "~/modules/user/service.server";
 import {
   action,
   loader,
 } from "~/routes/_layout+/assets.$assetId.overview.assign-custody";
-import { db } from "~/database/db.server";
+import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { ShelfError } from "~/utils/error";
 import { requirePermission } from "~/utils/roles.server";
-import { getAsset } from "~/modules/asset/service.server";
-import { getUserByID } from "~/modules/user/service.server";
-import { createNote } from "~/modules/note/service.server";
-import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { createTeamMember } from "@factories";
 
-const dbMocks = vi.hoisted(() => {
-  return {
-    asset: {
-      findUnique: vi.fn(),
-      update: vi.fn(),
-      // why: the status guard now rides on the UPDATE itself
-      // (`status: { not: CHECKED_OUT }`), so the action claims the asset with
-      // `updateMany` and branches on the returned count. Default to a hit.
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      // why: the action reads the asset's live status inside the tx and
-      // refuses the assignment when it is CHECKED_OUT, so a custody claim can
-      // never overwrite the "off the shelf" signal. Default to AVAILABLE so
-      // the pre-existing cases still exercise the happy path.
-      findFirst: vi.fn().mockResolvedValue({
-        status: "AVAILABLE",
-        title: "Test Asset",
-      }),
-    },
-    teamMember: {
-      findMany: vi.fn(),
-      count: vi.fn(),
-    },
-    custody: {
-      // why: action now clears stale custody before assignment
-      deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-      // why: the action refuses to assign over custody a KIT put on the asset,
-      // and reads this to detect it. Defaults to null — no kit-derived row —
-      // so every existing case exercises the ordinary assignment path.
-      findFirst: vi.fn().mockResolvedValue(null),
-    },
-  };
-});
+const dbMocks = vi.hoisted(() => ({
+  asset: {
+    findUnique: vi.fn(),
+    update: vi.fn(),
+    // why: the status guard now rides on the UPDATE itself
+    // (`status: { not: CHECKED_OUT }`), so the action claims the asset with
+    // `updateMany` and branches on the returned count. Default to a hit.
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    // why: the action reads the asset's live status inside the tx and
+    // refuses the assignment when it is CHECKED_OUT, so a custody claim can
+    // never overwrite the "off the shelf" signal. Default to AVAILABLE so
+    // the pre-existing cases still exercise the happy path.
+    findFirst: vi.fn().mockResolvedValue({
+      status: "AVAILABLE",
+      title: "Test Asset",
+    }),
+  },
+  teamMember: {
+    findMany: vi.fn(),
+    count: vi.fn(),
+  },
+  custody: {
+    // why: action now clears stale custody before assignment
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    // why: the action refuses to assign over custody a KIT put on the asset,
+    // and reads this to detect it. Defaults to null — no kit-derived row —
+    // so every existing case exercises the ordinary assignment path.
+    findFirst: vi.fn().mockResolvedValue(null),
+  },
+}));
 
 const teamMemberServiceMocks = vi.hoisted(() => ({
   getTeamMember: vi.fn(),
@@ -469,6 +467,7 @@ describe("assets.$assetId.overview.assign-custody action", () => {
         id: "asset-123",
         organizationId: "org-1",
         status: { not: AssetStatus.CHECKED_OUT },
+        availableToBook: true,
       },
       data: { status: AssetStatus.IN_CUSTODY },
     });
@@ -633,6 +632,7 @@ describe("assign-custody — CHECKED_OUT conflict", () => {
         id: TEST_ASSET_ID,
         organizationId: TEST_ORG_ID,
         status: { not: AssetStatus.CHECKED_OUT },
+        availableToBook: true,
       },
       data: { status: AssetStatus.IN_CUSTODY },
     });

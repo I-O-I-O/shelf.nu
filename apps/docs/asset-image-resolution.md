@@ -1,5 +1,57 @@
 # Shared asset image resolution
 
+## Private server image delivery follow-up
+
+Live inspection confirmed that Shelf's HTTPS page received HTTP Storage URLs
+containing an IP address and private port. Storage signing succeeded and the
+objects were readable server-side, but those image sources cross the browser's
+mixed-content boundary. No canonical image path was missing from the inspected
+staff/student queries. The database had seven asset main-image paths; all seven
+originals and their thumbnails were downloadable from private Storage.
+
+Asset web read boundaries now return `/api/asset-image` URLs scoped to the asset
+and image variant. The authenticated resource loader checks workspace ownership,
+student visibility and active archive markers, reads the current canonical path,
+and downloads bytes through Shelf's Supabase admin client. It derives Content-Type
+from raster signatures, rejects non-image responses, and never redirects to
+Storage. Failed delivery logs asset ID, model ID when inherited, object path,
+variant, failure class and status, without signed URLs, tokens or error payloads.
+Replacement paths change the URL version; no-image rows remain placeholders.
+Legacy repair endpoints cannot overwrite a proxy source with an internal URL.
+Native/mobile re-signing retains its existing behavior.
+
+Live verification used existing browser sessions through native browser control:
+staff inventory thumbnail, staff detail image and reload, student inventory
+thumbnail and reload, and direct student image delivery all displayed the cable
+asset correctly. Firefox Network Monitor confirmed HTTPS same-origin delivery:
+200 OK, image/webp, 16,080 response bytes, with no Storage redirect. The adjacent
+asset without an image retained its placeholder. Actual replacement of a live
+asset was not performed; replacement identity and revalidation are covered by
+focused automated tests. No canonical inventory records or Storage objects were
+changed by these checks.
+
+The patch is applied to the running development worktree and loaded by Vite.
+No schema or environment change, public Supabase exposure, or helper restart is
+required. Production builds must deploy/restart the webapp normally. The likely
+upstream conflicts remain the asset service, shared Storage utility and image
+component; new proxy files are localized.
+
+The focused follow-up suites passed 316 tests (one skipped). ESLint, Prettier,
+and `git diff --check` passed. The full TypeScript program still has unrelated
+repository errors; none are reported in the changed image files.
+
+Follow-up files:
+
+- `apps/webapp/app/modules/asset/image-proxy.server.ts` (new)
+- `apps/webapp/app/routes/api+/asset-image.ts` (new)
+- `apps/webapp/app/modules/asset/service.server.ts`
+- `apps/webapp/app/utils/storage.server.ts`
+- `apps/webapp/app/components/assets/asset-image/component.tsx`
+- `apps/webapp/app/modules/asset/service.server.test.ts`
+- `apps/webapp/app/components/assets/asset-image/component.test.tsx`
+- `apps/webapp/test/routes-tests/api+/asset-image.test.ts` (new)
+- `apps/docs/asset-image-resolution.md`
+
 ## Confirmed code defects
 
 Image uploads store `Asset.mainImageStoragePath` /

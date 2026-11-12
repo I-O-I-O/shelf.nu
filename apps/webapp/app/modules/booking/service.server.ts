@@ -67,6 +67,7 @@ import {
   assertAssetQuantitiesAvailable,
   getAssetAvailability,
 } from "~/modules/asset/availability.server";
+import { assertAssetsBorrowable } from "~/modules/asset/borrowability.server";
 import {
   reconcileManualPlacementsForStockDecrease,
   reportAmbiguousPlacementReconcile,
@@ -3121,6 +3122,8 @@ async function checkoutBookingWritesWithinTx(
       additionalData: { bookingId },
     });
   }
+
+  await assertAssetsBorrowable(tx, bookingAssetIds, organizationId);
 
   /**
    * Validate quantity availability for QUANTITY_TRACKED assets.

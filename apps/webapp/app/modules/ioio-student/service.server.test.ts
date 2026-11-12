@@ -63,6 +63,7 @@ describe("student catalog source selectors", () => {
     const makeAsset = (
       id: string,
       options: {
+        availableToBook?: boolean;
         ioioHidden?: boolean;
         modelHidden?: boolean;
         assetModelId?: string | null;
@@ -91,7 +92,7 @@ describe("student catalog source selectors", () => {
       status: "AVAILABLE",
       type: "QUANTITY_TRACKED",
       quantity: 5,
-      availableToBook: true,
+      availableToBook: options.availableToBook ?? true,
       maxBorrowDays: 45,
       extensionBorrowDays: null,
       requiresBorrowApproval: false,
@@ -104,6 +105,7 @@ describe("student catalog source selectors", () => {
     });
     vi.mocked(db.asset.findMany).mockResolvedValue([
       makeAsset("visible"),
+      makeAsset("caliper-lab-use-only", { availableToBook: false }),
       makeAsset("hidden-asset", { ioioHidden: true }),
       makeAsset("hidden-model-unit", {
         assetModelId: "hidden-model",
@@ -124,15 +126,26 @@ describe("student catalog source selectors", () => {
       includeHidden: true,
     });
 
-    expect(studentAssets.map(({ id }) => id)).toEqual(["visible"]);
+    expect(
+      studentAssets.find((row) => row.id === "caliper-lab-use-only")
+    ).toMatchObject({
+      availableToBook: false,
+      status: "AVAILABLE",
+      quantity: 5,
+    });
+    expect(studentAssets.map(({ id }) => id)).toEqual([
+      "visible",
+      "caliper-lab-use-only",
+    ]);
     expect(staffAssets.map(({ id }) => id)).toEqual([
       "visible",
+      "caliper-lab-use-only",
       "hidden-asset",
       "hidden-model-unit",
     ]);
     expect(
       staffAssets.slice(1).map(({ availableQuantity }) => availableQuantity)
-    ).toEqual([5, 5]);
+    ).toEqual([5, 5, 5]);
   });
 
   it("does not resolve a hidden asset through direct student detail access", async () => {

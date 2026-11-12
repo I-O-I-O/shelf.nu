@@ -347,6 +347,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
             id: assetId,
             organizationId,
             status: { not: AssetStatus.CHECKED_OUT },
+            availableToBook: true,
           },
           data: { status: AssetStatus.IN_CUSTODY },
         });
@@ -354,15 +355,18 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
         if (claimed.count === 0) {
           const blocked = await tx.asset.findFirst({
             where: { id: assetId, organizationId },
-            select: { title: true },
+            select: { title: true, availableToBook: true },
           });
 
           throw new ShelfError({
             cause: null,
             title: "Asset is checked out",
-            message: blocked
-              ? `"${blocked.title}" is currently checked out on a booking, so it cannot be given to a custodian. Check the booking in first.`
-              : "This asset could not be found in your workspace.",
+            message:
+              blocked?.availableToBook === false
+                ? "This item is not available for borrowing."
+                : blocked
+                ? `"${blocked.title}" is currently checked out on a booking, so it cannot be given to a custodian. Check the booking in first.`
+                : "This asset could not be found in your workspace.",
             additionalData: { userId, assetId, custodianId },
             label: "Assets",
             shouldBeCaptured: false,

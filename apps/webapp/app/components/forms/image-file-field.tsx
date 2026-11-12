@@ -33,6 +33,7 @@ import { defaultValidateFileAtom } from "~/atoms/file";
 import { ACCEPT_SUPPORTED_IMAGES } from "~/utils/constants";
 import { tw } from "~/utils/tw";
 import Input from "./input";
+import { useImagePaste } from "./use-image-paste";
 
 /** Hint for the default 4 MB limit of {@link defaultValidateFileAtom}. */
 export const IMAGE_HINT_4MB = "Accepts PNG, JPG, JPEG, or WebP (max.4 MB)";
@@ -116,88 +117,16 @@ export function ImageFileField({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const hintId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
-  const pasteBusy = useRef(false);
-  const [uploading, setUploading] = useState(false);
-  const [pasteError, setPasteError] = useState<string>();
-
-  useEffect(() => {
-    const input = inputRef.current;
-    const form = input?.closest("form");
-    if (!pasteImages || !input || !form || disabled) return;
-    const paste = async (event: ClipboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        (event.target instanceof Element &&
-          event.target.closest("form") !== form)
-      )
-        return;
-      const item = Array.from(event.clipboardData?.items ?? []).find(
-        (entry) => entry.kind === "file" && entry.type.startsWith("image/")
-      );
-      const file = item?.getAsFile();
-      if (!file) return;
-      event.preventDefault();
-      if (pasteBusy.current) return;
-      const transfer = new DataTransfer();
-      transfer.items.add(file);
-      // Validate in a scratch input so rejection preserves the previous selection.
-      const candidate = document.createElement("input");
-      candidate.type = "file";
-      candidate.accept = input.accept;
-      candidate.files = transfer.files;
-      setPasteError(undefined);
-      validateFile({
-        target: candidate,
-        currentTarget: candidate,
-      } as ChangeEvent<HTMLInputElement>);
-      const accepted = candidate.files?.[0];
-      if (!accepted) return;
-      if (!pasteUploadUrl) {
-        input.files = candidate.files;
-        setPreviewUrl(URL.createObjectURL(accepted));
-        onFileChange?.(accepted);
-        return;
-      }
-      pasteBusy.current = true;
-      setUploading(true);
-      try {
-        const body = new FormData();
-        body.append(name, accepted);
-        const response = await fetch(pasteUploadUrl, { method: "POST", body });
-        const result = await response.json();
-        if (!response.ok || result.success !== true)
-          throw new Error(
-            typeof result.error === "string"
-              ? result.error
-              : "Image upload failed. Try again."
-          );
-        input.value = ""; // Already persisted; Save must not upload a second copy.
-        setPreviewUrl(URL.createObjectURL(accepted));
-        onFileChange?.(accepted);
-      } catch (cause) {
-        setPasteError(
-          cause instanceof Error
-            ? cause.message
-            : "Image upload failed. Try again."
-        );
-      } finally {
-        pasteBusy.current = false;
-        setUploading(false);
-      }
-    };
-    const submit = (event: Event) => {
-      if (pasteBusy.current) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    };
-    form.addEventListener("paste", paste);
-    form.addEventListener("submit", submit, true);
-    return () => {
-      form.removeEventListener("paste", paste);
-      form.removeEventListener("submit", submit, true);
-    };
-  }, [disabled, name, onFileChange, pasteImages, pasteUploadUrl, validateFile]);
+  const { uploading, pasteError, clearPasteError } = useImagePaste({
+    inputRef,
+    name,
+    pasteImages,
+    pasteUploadUrl,
+    disabled,
+    validateFile,
+    setPreviewUrl,
+    onFileChange,
+  });
 
   // Each object URL pins its file in memory until revoked: release the old
   // one when the preview changes, and the last one on unmount.
@@ -213,7 +142,7 @@ export function ImageFileField({
    * @param event - Change event of the file input
    */
   function handleChange(event: ChangeEvent<HTMLInputElement>) {
-    setPasteError(undefined);
+    clearPasteError();
     validateFile(event);
     // Read the file after validation: a rejected file has been cleared from
     // the input, and an accepted one may have been swapped for a copy with a

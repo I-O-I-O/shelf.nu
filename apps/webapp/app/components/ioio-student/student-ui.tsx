@@ -514,11 +514,11 @@ export function AssetCard({
     ? asset.availableQuantity === 1
       ? "1 ready to borrow"
       : `${asset.availableQuantity} ready to borrow`
+    : !asset.availableToBook
+    ? "Not available for borrowing"
     : asset.status === "IN_CUSTODY" || asset.status === "CHECKED_OUT"
     ? "Currently on loan"
-    : asset.availableToBook
-    ? "None ready to borrow"
-    : "Temporarily unavailable";
+    : "None ready to borrow";
   const totalQuantity = asset.quantity ?? (asset.type === "INDIVIDUAL" ? 1 : 0);
   const locationSummary = asset.locations.length
     ? asset.locations
@@ -634,6 +634,25 @@ export function StudentCheckoutButton({
     const timeout = window.setTimeout(() => setJustAdded(false), 1400);
     return () => window.clearTimeout(timeout);
   }, [justAdded]);
+
+  if (!asset.availableToBook) {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded-full bg-gray-100 px-2.5 py-1.5 text-xs font-bold text-gray-500">
+          Not available for borrowing
+        </span>
+        {inCheckout ? (
+          <button
+            type="button"
+            onClick={() => removeItem(asset.id)}
+            className="text-xs underline"
+          >
+            Remove from borrow list
+          </button>
+        ) : null}
+      </div>
+    );
+  }
 
   if (!available && !inCheckout) {
     return (

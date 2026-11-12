@@ -6,6 +6,7 @@ import type {
   ReactNode,
 } from "react";
 import { ImagePlus, Upload } from "lucide-react";
+import { useImagePaste } from "~/components/forms/use-image-paste";
 import { Button } from "~/components/shared/button";
 import { tw } from "~/utils/tw";
 
@@ -20,6 +21,10 @@ type Props = {
   onChange?: ChangeEventHandler<HTMLInputElement>;
   onRemove?: () => void;
   uploading?: boolean;
+  pasteImages?: boolean;
+  pasteUploadUrl?: string;
+  validatePaste?: ChangeEventHandler<HTMLInputElement>;
+  onPasteSuccess?: (file: File | null) => void;
 };
 
 function setDroppedFile(input: HTMLInputElement, file: File) {
@@ -45,12 +50,31 @@ export function IoioImagePicker({
   onChange,
   onRemove,
   uploading = false,
+  pasteImages = false,
+  pasteUploadUrl,
+  validatePaste = () => {},
+  onPasteSuccess,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const inputId = useId();
   const helpId = `${inputId}-help`;
-  const [localPreviewUrl, setLocalPreviewUrl] = useState<string>();
+  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
+  const {
+    uploading: pasteUploading,
+    pasteError,
+    clearPasteError,
+  } = useImagePaste({
+    inputRef,
+    name,
+    pasteImages,
+    pasteUploadUrl,
+    disabled: disabled || uploading,
+    validateFile: validatePaste,
+    setPreviewUrl: setLocalPreviewUrl,
+    onFileChange: onPasteSuccess,
+  });
+  const busy = uploading || pasteUploading;
 
   useEffect(
     () => () => {
@@ -60,15 +84,16 @@ export function IoioImagePicker({
   );
 
   const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    clearPasteError();
     onChange?.(event);
     const file = event.currentTarget.files?.[0];
-    setLocalPreviewUrl(file ? URL.createObjectURL(file) : undefined);
+    setLocalPreviewUrl(file ? URL.createObjectURL(file) : null);
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragActive(false);
-    if (disabled || uploading) return;
+    if (disabled || busy) return;
 
     const file = event.dataTransfer.files[0];
     if (!file || !inputRef.current) return;
@@ -77,7 +102,8 @@ export function IoioImagePicker({
 
   const clearImage = () => {
     if (inputRef.current) inputRef.current.value = "";
-    setLocalPreviewUrl(undefined);
+    clearPasteError();
+    setLocalPreviewUrl(null);
     onRemove?.();
   };
 
@@ -102,7 +128,7 @@ export function IoioImagePicker({
         )}
         onDragEnter={(event) => {
           event.preventDefault();
-          if (!disabled && !uploading) setIsDragActive(true);
+          if (!disabled && !busy) setIsDragActive(true);
         }}
         onDragOver={(event) => event.preventDefault()}
         onDragLeave={(event) => {
@@ -118,14 +144,14 @@ export function IoioImagePicker({
             <div className="min-w-0">
               <p className="text-sm font-semibold text-gray-900">{label}</p>
               <p className="mt-1 text-xs text-gray-600">
-                {uploading ? "Uploading image..." : "Image selected"}
+                {busy ? "Uploading image..." : "Image selected"}
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
-                  disabled={disabled || uploading}
+                  disabled={disabled || busy}
                   onClick={() => inputRef.current?.click()}
                 >
                   Change image
@@ -135,7 +161,7 @@ export function IoioImagePicker({
                     type="button"
                     variant="secondary"
                     size="sm"
-                    disabled={disabled || uploading}
+                    disabled={disabled || busy}
                     onClick={clearImage}
                   >
                     Remove
@@ -156,7 +182,7 @@ export function IoioImagePicker({
             <button
               type="button"
               className="box-shadow-xs mt-1.5 inline-flex max-w-xl flex-row items-center justify-center gap-2 whitespace-nowrap rounded border border-primary-400 bg-primary-500 px-[14px] py-1.5 text-center text-sm font-semibold text-white focus:ring-2 enabled:hover:bg-primary-400 disabled:border-primary-300 disabled:bg-primary-300"
-              disabled={disabled || uploading}
+              disabled={disabled || busy}
               onClick={() => inputRef.current?.click()}
             >
               <Upload
@@ -178,15 +204,24 @@ export function IoioImagePicker({
         name={name}
         type="file"
         accept={accept}
-        disabled={disabled || uploading}
+        disabled={disabled || busy}
         onChange={handleInputChange}
         aria-label={label}
         aria-describedby={helpId}
         className="sr-only"
       />
-      {error ? (
+      {pasteImages ? (
+        <p role="status" className="mt-2 text-xs text-gray-500">
+          {busy
+            ? "Uploading image…"
+            : pasteUploadUrl
+            ? "Paste an image anywhere in this form to upload it immediately."
+            : "Paste an image anywhere in this form; Save uploads it."}
+        </p>
+      ) : null}
+      {pasteError || error ? (
         <p role="alert" className="mt-2 text-sm text-error-500">
-          {error}
+          {pasteError ?? error}
         </p>
       ) : null}
     </div>

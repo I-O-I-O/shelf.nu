@@ -372,7 +372,7 @@ export async function getAssetModelAvailability({
 
     const [total, custodyAgg, bookingAssetAgg, modelRequestAgg] =
       await Promise.all([
-        // Total INDIVIDUAL assets of this model in the org. QUANTITY_TRACKED
+        // Total borrowable INDIVIDUAL assets of this model in the org. QUANTITY_TRACKED
         // assets aren't part of the model-request flow (they have their own
         // quantity booking path from Phase 3b).
         client.asset.count({
@@ -380,6 +380,7 @@ export async function getAssetModelAvailability({
             organizationId,
             assetModelId,
             type: AssetType.INDIVIDUAL,
+            availableToBook: true,
           },
         }),
         // Units currently held by team members / users.
@@ -389,6 +390,7 @@ export async function getAssetModelAvailability({
               organizationId,
               assetModelId,
               type: AssetType.INDIVIDUAL,
+              availableToBook: true,
             },
           },
           _sum: { quantity: true },
@@ -401,6 +403,7 @@ export async function getAssetModelAvailability({
               organizationId,
               assetModelId,
               type: AssetType.INDIVIDUAL,
+              availableToBook: true,
             },
             bookingId: { not: bookingId },
             booking: {

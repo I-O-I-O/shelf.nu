@@ -147,6 +147,8 @@ vitest.mock("~/database/db.server", () => ({
       count: vitest.fn().mockResolvedValue(0),
     },
     asset: {
+      // why: the transactional borrowing-policy guard reads the current canonical flag.
+      findFirst: vitest.fn().mockResolvedValue(null),
       // why: assertAssetsBelongToOrg (checkout/create cross-org guard) calls
       // db.asset.findMany({ where:{ id:{ in }, organizationId }, select:{ id }}).
       // Echo the requested ids so the guard passes for happy-path tests; other
@@ -4519,6 +4521,38 @@ describe("checkoutBooking", () => {
       "Some of the selected assets do not exist in your workspace"
     );
     // fail-safe: no status transition, no booking write
+    expect(db.asset.updateMany).not.toHaveBeenCalled();
+    expect(db.booking.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a directly requested checkout when staff has disabled borrowing", async () => {
+    (
+      db.booking.findUniqueOrThrow as ReturnType<typeof vitest.fn>
+    ).mockResolvedValueOnce({
+      ...mockBookingData,
+      status: BookingStatus.RESERVED,
+      bookingAssets: [
+        {
+          id: "ba-1",
+          assetId: "asset-1",
+          quantity: 1,
+          asset: {
+            id: "asset-1",
+            title: "Caliper",
+            status: "AVAILABLE",
+            type: "INDIVIDUAL",
+            assetKits: [],
+            bookingAssets: [],
+          },
+        },
+      ],
+    });
+    (db.asset.findFirst as ReturnType<typeof vitest.fn>).mockResolvedValueOnce({
+      availableToBook: false,
+    });
+    await expect(checkoutBooking(mockCheckoutParams)).rejects.toMatchObject({
+      status: 409,
+    });
     expect(db.asset.updateMany).not.toHaveBeenCalled();
     expect(db.booking.update).not.toHaveBeenCalled();
   });

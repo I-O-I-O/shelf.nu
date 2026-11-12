@@ -172,9 +172,15 @@ import {
   readLegacyBackupLocation,
   type BackupLocationDetails,
 } from "./backup-placements";
+import {
+  assertAssetBorrowable,
+  assertAssetsBorrowable,
+} from "./borrowability.server";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
 import { setCustodyDrivenAssetStatus } from "./custody-status.server";
 import { assetIndexFields } from "./fields";
+import { getAssetImagePath, getAssetImageProxyUrl } from "./image-proxy.server";
+import type { AssetImageVariant } from "./image-proxy.server";
 import { validateContentImportRows } from "./import-preflight.server";
 import type {
   MoveAssetLocationUnitsArgs,
@@ -248,6 +254,7 @@ type StorageImageFields = {
 };
 
 type AssetImagePresentationFields = {
+  id?: string;
   mainImage?: string | null;
   thumbnailImage?: string | null;
   mainImageExpiration?: Date | null;
@@ -274,19 +281,33 @@ async function resolvePresentationImage(
 
 /** Resolve canonical paths (or supported legacy URLs) for a read response only. */
 export async function resolveAssetImagesForPresentation<T extends object>(
-  assets: T[]
+  assets: T[],
+  { sameOrigin = true }: { sameOrigin?: boolean } = {}
 ): Promise<T[]> {
   return Promise.all(
     assets.map(async (asset) => {
       const imageFields = asset as T & AssetImagePresentationFields;
+      const resolveAssetImageUrl = (
+        variant: AssetImageVariant,
+        options: Parameters<typeof resolveStorageImageUrl>[0]
+      ) => {
+        const path = getAssetImagePath(options);
+        return sameOrigin && imageFields.id
+          ? Promise.resolve(
+              path
+                ? getAssetImageProxyUrl(imageFields.id, variant, path)
+                : options.legacyUrl ?? null
+            )
+          : resolvePresentationImage(options);
+      };
       const [mainImage, thumbnailImage] = await Promise.all([
-        resolvePresentationImage({
+        resolveAssetImageUrl("main", {
           bucketName: "assets",
           objectPath: imageFields.mainImageStoragePath,
           legacyUrl: imageFields.mainImage,
           isPublic: false,
         }),
-        resolvePresentationImage({
+        resolveAssetImageUrl("thumbnail", {
           bucketName: "assets",
           objectPath: imageFields.thumbnailImageStoragePath,
           legacyUrl: imageFields.thumbnailImage,
@@ -297,13 +318,13 @@ export async function resolveAssetImagesForPresentation<T extends object>(
       const assetModel = imageFields.assetModel
         ? {
             ...imageFields.assetModel,
-            image: await resolvePresentationImage({
+            image: await resolveAssetImageUrl("model", {
               bucketName: "files",
               objectPath: imageFields.assetModel.imageStoragePath,
               legacyUrl: imageFields.assetModel.image,
               isPublic: true,
             }),
-            thumbnailImage: await resolvePresentationImage({
+            thumbnailImage: await resolveAssetImageUrl("model-thumbnail", {
               bucketName: "files",
               objectPath: imageFields.assetModel.thumbnailImageStoragePath,
               legacyUrl: imageFields.assetModel.thumbnailImage,
@@ -3327,6 +3348,7 @@ export async function updateAsset({
   consumptionType,
   unitOfMeasure,
   type,
+  availableToBook,
   requiresBorrowApproval,
   requiresStaffPreparation,
   requiresReturnPhoto,
@@ -3568,6 +3590,7 @@ export async function updateAsset({
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      availableToBook,
       requiresBorrowApproval,
       requiresStaffPreparation,
       requiresReturnPhoto,
@@ -3939,6 +3962,26 @@ export async function updateAsset({
     let quantityBeforeUpdate: number | null = null;
     let lockedAssetType: AssetType | null = null;
     const asset = await db.$transaction(async (tx) => {
+      if (availableToBook === true) {
+        const unresolvedIssue = await tx.ioioWriteOperation.findFirst({
+          where: {
+            organizationId,
+            assetId: id,
+            operationType: "REPORT_PROBLEM",
+            status: "SUCCEEDED",
+          },
+          select: { id: true },
+        });
+        if (unresolvedIssue)
+          throw new ShelfError({
+            cause: null,
+            label: "Assets",
+            status: 409,
+            shouldBeCaptured: false,
+            message:
+              "Resolve the existing issue report before enabling borrowing.",
+          });
+      }
       // Block lowering a QUANTITY_TRACKED asset's total below the units
       // already committed to custody, kits, or overlapping bookings. Lock the
       // asset row first so the read-then-write is race-safe (mirrors
@@ -7779,6 +7822,14 @@ export async function refreshExpiredAssetImages(
   assets = await Promise.all(
     assets.map(async (asset) => {
       const fields = asset as AssetImagePresentationFields;
+      // Web read boundaries have already resolved these authenticated URLs.
+      // Keep the legacy re-sign API usable by native/mobile bearer clients,
+      // which cannot use a browser cookie-authenticated relative image URL.
+      if (
+        fields.mainImage?.startsWith("/api/asset-image?") ||
+        fields.assetModel?.image?.startsWith("/api/asset-image?")
+      )
+        return asset;
       if (
         !fields.mainImageStoragePath &&
         !fields.thumbnailImageStoragePath &&
@@ -7786,7 +7837,9 @@ export async function refreshExpiredAssetImages(
         !fields.assetModel?.thumbnailImageStoragePath
       )
         return asset;
-      return (await resolveAssetImagesForPresentation([asset]))[0];
+      return (
+        await resolveAssetImagesForPresentation([asset], { sameOrigin: false })
+      )[0];
     })
   );
   const now = new Date();
@@ -8392,6 +8445,7 @@ export async function bulkCheckOutAssets({
      * 2. Update status of all assets to IN_CUSTODY
      */
     await db.$transaction(async (tx) => {
+      await assertAssetsBorrowable(tx, assetIdsToCustody, organizationId);
       // why: hard cross-org guard inside the tx. Mirrors the org-scoped
       // validation pattern used by `updateBookingAssets`. This throws before
       // any custody row is written if `custodianId` belongs to another
@@ -10637,6 +10691,8 @@ export async function checkOutQuantity({
           additionalData: { assetId, organizationId },
         });
       }
+
+      assertAssetBorrowable(asset);
 
       /** Step 3: Validate the asset is quantity-tracked */
       if (asset.type !== "QUANTITY_TRACKED") {

@@ -339,6 +339,37 @@ describe("getAssetModelAvailability", () => {
     db.booking.findUnique.mockResolvedValue(null);
   });
 
+  it("excludes non-borrowable tools from the model reservation pool and its occupancy totals", async () => {
+    // why: the external database count models three lab-only tools; only an
+    // explicitly borrowable query returns the correct empty borrowing pool.
+    (db.asset.count as ReturnType<typeof vitest.fn>).mockImplementation(
+      ({ where }) => Promise.resolve(where.availableToBook === true ? 0 : 3)
+    );
+    const result = await getAssetModelAvailability({
+      assetModelId: MODEL_ID,
+      organizationId: ORG_ID,
+      bookingId: BOOKING_ID,
+      from,
+      to,
+    });
+    expect(result.total).toBe(0);
+    expect(result.available).toBe(0);
+    expect(db.custody.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          asset: expect.objectContaining({ availableToBook: true }),
+        }),
+      })
+    );
+    expect(db.bookingAsset.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          asset: expect.objectContaining({ availableToBook: true }),
+        }),
+      })
+    );
+  });
+
   it("returns total − inCustody − reserved for a clean window", async () => {
     expect.assertions(1);
     // @ts-expect-error mocked
@@ -539,6 +570,22 @@ describe("upsertBookingModelRequest", () => {
       id: MODEL_ID,
       name: "Dell Latitude 5550",
     });
+  });
+
+  it("rejects a direct reservation request when all multimeters are non-borrowable", async () => {
+    (db.asset.count as ReturnType<typeof vitest.fn>).mockImplementation(
+      ({ where }) => Promise.resolve(where.availableToBook === true ? 0 : 3)
+    );
+    await expect(
+      upsertBookingModelRequest({
+        bookingId: BOOKING_ID,
+        assetModelId: MODEL_ID,
+        quantity: 1,
+        organizationId: ORG_ID,
+        userId: USER_ID,
+      })
+    ).rejects.toThrow("Only 0 can be reserved");
+    expect(db.bookingModelRequest.upsert).not.toHaveBeenCalled();
   });
 
   it("counts the units the booking already holds by name against the pool", async () => {

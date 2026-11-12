@@ -38,6 +38,7 @@ import {
   ASSET_RETURN_HANDLING,
   assetAdvancedSettingsSchema,
 } from "~/modules/asset/advanced-settings";
+import { assetBorrowabilitySchema } from "~/modules/asset/borrowability";
 import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
 import { isQuantityTracked } from "~/modules/asset/utils";
 import {
@@ -68,6 +69,7 @@ import {
   type BulkCreateSuccess,
 } from "./bulk-create-success-modal";
 import { Form } from "../custom-form";
+import { BorrowabilityField } from "./borrowability-field";
 import DynamicSelect from "../dynamic-select/dynamic-select";
 import FormRow from "../forms/form-row";
 import Input from "../forms/input";
@@ -155,6 +157,7 @@ export const NewAssetFormSchema = z.object({
       .optional()
   ),
   ...assetAdvancedSettingsSchema.shape,
+  availableToBook: assetBorrowabilitySchema,
   maxBorrowDays: z.coerce.number().int().min(1).max(365).default(45),
   extensionBorrowDays: z.coerce.number().int().min(1).max(365).optional(),
   consumptionType: z
@@ -230,6 +233,7 @@ type Props = Partial<
     | "minQuantity"
     | "consumptionType"
     | "unitOfMeasure"
+    | "availableToBook"
     | "requiresBorrowApproval"
     | "requiresStaffPreparation"
     | "requiresReturnPhoto"
@@ -334,6 +338,7 @@ export const IoioAssetCreateForm = ({
   minQuantity,
   consumptionType,
   unitOfMeasure,
+  availableToBook = true,
   requiresBorrowApproval,
   requiresStaffPreparation: initialRequiresStaffPreparation,
   requiresReturnPhoto,
@@ -1605,6 +1610,24 @@ export const IoioAssetCreateForm = ({
             </When>
             <IoioImagePicker
               name={isProductGroupEdit ? "image" : "mainImage"}
+              pasteImages
+              pasteUploadUrl={
+                isProductGroupEdit
+                  ? assetModelId
+                    ? `/api/inventory-image-upload?kind=model&id=${encodeURIComponent(
+                        assetModelId
+                      )}`
+                    : undefined
+                  : id
+                  ? `/api/inventory-image-upload?kind=asset&id=${encodeURIComponent(
+                      id
+                    )}`
+                  : undefined
+              }
+              validatePaste={validateFile}
+              onPasteSuccess={(file) => {
+                if (file) setClearMainImage(false);
+              }}
               accept={ACCEPT_SUPPORTED_IMAGES}
               disabled={disabled}
               uploading={disabled}
@@ -1616,10 +1639,10 @@ export const IoioAssetCreateForm = ({
                   : Boolean(hasOwnImage && !inheritableAssetModelImage)
               }
               onChange={(event) => {
+                validateFile(event);
                 if (event.currentTarget.files?.length) {
                   setClearMainImage(false);
                 }
-                validateFile(event);
               }}
               onRemove={() => setClearMainImage(true)}
             />
@@ -1736,6 +1759,23 @@ export const IoioAssetCreateForm = ({
             />
           </FormRow>
 
+          {id ? (
+            <FormRow
+              rowLabel="Borrowing"
+              subHeading={
+                isProductGroupEdit
+                  ? "Changing this setting applies to all active physical units of this product."
+                  : undefined
+              }
+              className="border-b-0 py-3"
+            >
+              <BorrowabilityField
+                key={`${id}:${availableToBook}`}
+                availableToBook={availableToBook}
+                disabled={disabled}
+              />
+            </FormRow>
+          ) : null}
           <AdvancedOptions>
             <div className="border-b border-gray-200 pb-2 pt-3">
               <h3 className="text-sm font-semibold text-gray-900">Borrowing</h3>

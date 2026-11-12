@@ -78,6 +78,7 @@ export interface UpdateAssetPayload {
   request: Request;
   /** Optional tracking-method transition from the asset edit form. */
   type?: Asset["type"];
+  availableToBook?: Asset["availableToBook"];
   requiresBorrowApproval?: Asset["requiresBorrowApproval"];
   requiresStaffPreparation?: Asset["requiresStaffPreparation"];
   requiresReturnPhoto?: Asset["requiresReturnPhoto"];

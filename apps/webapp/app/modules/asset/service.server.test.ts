@@ -1248,28 +1248,33 @@ describe("resolveAssetImagesForPresentation", () => {
     );
   });
 
-  it("keeps valid full images and other rows when one thumbnail fails to sign", async () => {
-    mockResolveStorageImageUrl.mockImplementation(
-      ({ objectPath, legacyUrl }) =>
-        objectPath === "broken-thumb"
-          ? Promise.reject(new Error("Storage unavailable"))
-          : Promise.resolve(objectPath ?? legacyUrl ?? null)
+  it("returns usable same-origin URLs without signing path-only rows", async () => {
+    mockResolveStorageImageUrl.mockRejectedValue(
+      new Error("Storage unavailable")
     );
     const result = await resolveAssetImagesForPresentation([
       {
         id: "one",
+        mainImage: null,
+        thumbnailImage: null,
         mainImageStoragePath: "full-one",
         thumbnailImageStoragePath: "broken-thumb",
       },
-      { id: "two", mainImageStoragePath: "full-two" },
+      {
+        id: "two",
+        mainImage: null,
+        thumbnailImage: null,
+        mainImageStoragePath: "full-two",
+      },
     ]);
-    expect(result).toMatchObject([
-      { mainImage: "full-one", thumbnailImage: null },
-      { mainImage: "full-two" },
-    ]);
+    expect(result[0].mainImage).toContain(
+      "/api/asset-image?assetId=one&variant=main&v="
+    );
+    expect(result[0].thumbnailImage).toContain("variant=thumbnail");
+    expect(result[1].mainImage).toContain("assetId=two");
   });
 
-  it("resolves path-only asset and model images through Shelf Storage URLs", async () => {
+  it("resolves asset and inherited model objects through the authenticated proxy", async () => {
     const [asset] = await resolveAssetImagesForPresentation([
       {
         id: "asset-1",
@@ -1285,27 +1290,59 @@ describe("resolveAssetImagesForPresentation", () => {
         },
       },
     ]);
+    for (const [variant, url] of Object.entries({
+      main: asset.mainImage,
+      thumbnail: asset.thumbnailImage,
+      model: asset.assetModel?.image,
+      "model-thumbnail": asset.assetModel?.thumbnailImage,
+    })) {
+      expect(url).toContain(
+        `/api/asset-image?assetId=asset-1&variant=${variant}&v=`
+      );
+      expect(url).not.toContain("http:");
+    }
+    expect(mockResolveStorageImageUrl).not.toHaveBeenCalledWith(
+      expect.objectContaining({ objectPath: "org/assets/motor-small.jpg" })
+    );
+  });
 
-    expect(asset.mainImage).toBe("assets:org/assets/motor-small.jpg");
-    expect(asset.thumbnailImage).toBe(
-      "assets:org/assets/motor-small-thumb.jpg"
+  it("keeps external URLs and no-image rows, with stable URLs until replacement", async () => {
+    const row = {
+      id: "one",
+      mainImage: null,
+      mainImageStoragePath: "original.webp",
+    };
+    const [first] = await resolveAssetImagesForPresentation([row]);
+    const [reloaded] = await resolveAssetImagesForPresentation([row]);
+    const [replacement] = await resolveAssetImagesForPresentation([
+      { ...row, mainImageStoragePath: "replacement.webp" },
+    ]);
+    expect(first.mainImage).toBe(reloaded.mainImage);
+    expect(first.mainImage).not.toBe(replacement.mainImage);
+    const result = await resolveAssetImagesForPresentation([
+      { id: "external", mainImage: "https://images.example/motor.jpg" },
+      { id: "empty", mainImage: null },
+    ]);
+    expect(result[0].mainImage).toBe("https://images.example/motor.jpg");
+    expect(result[1].mainImage).toBeNull();
+  });
+
+  it("preserves native signing behavior and never replaces an existing web proxy URL during refresh", async () => {
+    const [native] = await resolveAssetImagesForPresentation(
+      [{ id: "one", mainImage: null, mainImageStoragePath: "native.webp" }],
+      { sameOrigin: false }
     );
-    expect(asset.assetModel?.image).toBe("files:org/models/motor-small.jpg");
-    expect(asset.assetModel?.thumbnailImage).toBe(
-      "files:org/models/motor-small-thumb.jpg"
-    );
-    expect(mockResolveStorageImageUrl).toHaveBeenCalledWith({
-      bucketName: "assets",
-      objectPath: "org/assets/motor-small.jpg",
-      legacyUrl: null,
-      isPublic: false,
-    });
-    expect(mockResolveStorageImageUrl).toHaveBeenCalledWith({
-      bucketName: "files",
-      objectPath: "org/models/motor-small.jpg",
-      legacyUrl: null,
-      isPublic: true,
-    });
+    expect(native.mainImage).toBe("assets:native.webp");
+    const web = {
+      id: "one",
+      organizationId: "org-1",
+      mainImage: "/api/asset-image?assetId=one&variant=main&v=original",
+      mainImageStoragePath: "native.webp",
+      thumbnailImage: null,
+      mainImageExpiration: null,
+    };
+    const [refreshed] = await refreshExpiredAssetImages([web]);
+    expect(refreshed.mainImage).toBe(web.mainImage);
   });
 });
 
@@ -1439,6 +1476,27 @@ describe("checkOutQuantity — availability accounting", () => {
     (db.asset.updateMany as ReturnType<typeof vitest.fn>).mockResolvedValue({
       count: 1,
     });
+  });
+
+  it("rejects direct quantity checkout of a non-borrowable multimeter without changing stock or custody", async () => {
+    mockLock.mockResolvedValueOnce({
+      ...lockedAsset,
+      title: "Multimeter",
+      availableToBook: false,
+    });
+    await expect(
+      checkOutQuantity({
+        assetId: lockedAsset.id,
+        organizationId: "org-1",
+        userId: "user-1",
+        teamMemberId: "team-1",
+        quantity: 1,
+        role: OrganizationRoles.ADMIN,
+      })
+    ).rejects.toMatchObject({ status: 409 });
+    expect(mockCustodyCreate).not.toHaveBeenCalled();
+    expect(mockCreateConsumptionLog).not.toHaveBeenCalled();
+    expect(db.asset.updateMany).not.toHaveBeenCalled();
   });
 
   it("refuses units that are allocated to a kit", async () => {
@@ -2705,6 +2763,44 @@ describe("updateAsset asset-model activity", () => {
       tags: [],
       customFields: [],
     });
+  });
+
+  it.each([false, true])(
+    "persists canonical borrowability %s without changing asset status or stock",
+    async (availableToBook) => {
+      if (availableToBook)
+        (
+          db.ioioWriteOperation.findFirst as ReturnType<typeof vitest.fn>
+        ).mockResolvedValueOnce(null);
+      await updateAsset({
+        id: "asset-1",
+        organizationId: "org-1",
+        userId: "user-1",
+        request: new Request("http://localhost"),
+        availableToBook,
+      });
+      const data = (db.asset.update as ReturnType<typeof vitest.fn>).mock
+        .calls[0][0].data;
+      expect(data.availableToBook).toBe(availableToBook);
+      expect(data).not.toHaveProperty("status");
+      expect(data.quantity).toBeUndefined();
+    }
+  );
+
+  it("cannot re-enable borrowing around an unresolved out-of-service issue", async () => {
+    (
+      db.ioioWriteOperation.findFirst as ReturnType<typeof vitest.fn>
+    ).mockResolvedValueOnce({ id: "report-1" });
+    await expect(
+      updateAsset({
+        id: "asset-1",
+        organizationId: "org-1",
+        userId: "user-1",
+        request: new Request("http://localhost"),
+        availableToBook: true,
+      })
+    ).rejects.toMatchObject({ status: 409 });
+    expect(db.asset.update).not.toHaveBeenCalled();
   });
 
   it("does not claim the model was removed when the field is absent", async () => {
