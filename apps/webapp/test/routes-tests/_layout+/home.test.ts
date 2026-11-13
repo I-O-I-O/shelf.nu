@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getStaffSystemStatus: vi.fn(),
   countPendingHandbookReviews: vi.fn(),
   applyStaffInventoryImport: vi.fn(),
+  prepareStaffInventoryImport: vi.fn(),
   skipStaffInventoryImportRow: vi.fn(),
   getStaffInventoryImportProposal: vi.fn(),
 }));
@@ -55,7 +56,7 @@ vi.mock("~/modules/ioio-staff/inventory-import.server", () => ({
   skipStaffInventoryImportRow: mocks.skipStaffInventoryImportRow,
   cancelStaffInventoryImport: vi.fn(),
   getStaffInventoryImportProposal: mocks.getStaffInventoryImportProposal,
-  prepareStaffInventoryImport: vi.fn(),
+  prepareStaffInventoryImport: mocks.prepareStaffInventoryImport,
 }));
 
 // why: the dashboard loader delegates the canonical database count to Handbook;
@@ -103,6 +104,38 @@ describe("IOIO staff dashboard loader", () => {
     mocks.findUnique.mockResolvedValue({ staffDashboardPreferences: null });
     mocks.countPendingHandbookReviews.mockResolvedValue(0);
   });
+
+  it.each([1, 2, 20])(
+    "returns a review proposal for a %s-item dashboard upload without Apply",
+    async (count) => {
+      const proposal = {
+        operationId: "draft",
+        rows: Array.from({ length: count }, (_, index) => ({
+          rowNumber: index + 1,
+        })),
+      };
+      mocks.prepareStaffInventoryImport.mockResolvedValue({
+        status: "PREPARED",
+        proposal,
+      });
+      const form = new FormData();
+      form.set("intent", "analyze-file");
+      form.set(
+        "file",
+        new File(["%PDF-1.4"], "inventory.pdf", { type: "application/pdf" })
+      );
+      const response = await action(
+        createActionArgs({
+          request: new Request("http://localhost/home", {
+            method: "POST",
+            body: form,
+          }),
+        })
+      );
+      expect(response).toMatchObject({ kind: "import-proposal", proposal });
+      expect(mocks.applyStaffInventoryImport).not.toHaveBeenCalled();
+    }
+  );
 
   it("routes draft removal separately from inventory Apply", async () => {
     mocks.skipStaffInventoryImportRow.mockResolvedValue({

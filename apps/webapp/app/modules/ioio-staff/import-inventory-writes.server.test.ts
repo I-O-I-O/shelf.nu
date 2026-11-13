@@ -1,9 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertImportInventoryOperation,
-  createImportAsset,
-  updateImportAsset,
+  createImportAsset as unscopedCreateImportAsset,
+  updateImportAsset as unscopedUpdateImportAsset,
 } from "./import-inventory-writes.server";
+import { withImportPhase } from "./import-phase.server";
+const createImportAsset = (
+  input: Parameters<typeof unscopedCreateImportAsset>[0]
+) => withImportPhase("APPLY", () => unscopedCreateImportAsset(input));
+const updateImportAsset = (
+  input: Parameters<typeof unscopedUpdateImportAsset>[0]
+) => withImportPhase("APPLY", () => unscopedUpdateImportAsset(input));
 const canonical = vi.hoisted(() => ({ create: vi.fn(), update: vi.fn() }));
 // why: observe the canonical mutation boundary without touching a real database.
 vi.mock("~/modules/asset/service.server", () => ({
@@ -17,6 +24,32 @@ beforeEach(() => {
   canonical.update.mockResolvedValue({ id: "existing" });
 });
 describe("non-destructive import write boundary", () => {
+  it.each(["PREPARE", "REVIEW"] as const)(
+    "blocks canonical writers during %s",
+    async (phase) => {
+      await expect(
+        withImportPhase(phase, () =>
+          unscopedCreateImportAsset({
+            ...scope,
+            title: "Forbidden",
+            type: "QUANTITY_TRACKED",
+            quantity: 1,
+          } as never)
+        )
+      ).rejects.toThrow("explicit Apply");
+      await expect(
+        withImportPhase(phase, () =>
+          unscopedUpdateImportAsset({
+            ...scope,
+            id: "existing",
+            quantity: 5,
+          } as never)
+        )
+      ).rejects.toThrow("explicit Apply");
+      expect(canonical.create).not.toHaveBeenCalled();
+      expect(canonical.update).not.toHaveBeenCalled();
+    }
+  );
   it.each([
     "DELETE_ASSET",
     "DELETE_ASSET_MODEL",

@@ -305,15 +305,14 @@ export function StaffImportPanel({
       ? initialProposal
       : responseProposal ?? initialProposal;
   const proposal =
+    dismissedOperationId === "__pending__" ||
     storedProposal?.operationId === dismissedOperationId
       ? null
       : storedProposal;
-  const result =
-    response?.error === null &&
-    (response.kind === "import-result" || response.kind === "import-complete")
-      ? response.result
-      : null;
-  const errorMessage = response?.error?.message;
+  const errorMessage =
+    response?.error === null && response.kind === "import-result"
+      ? "The upload returned no saved review. No inventory success is confirmed. Reload and try again."
+      : response?.error?.message;
   const visibleErrorMessage = dismissedError ? null : errorMessage;
   const resetImportState = useCallback(
     (nextNotice: string | null = null) => {
@@ -488,20 +487,6 @@ export function StaffImportPanel({
           </ul>
         </div>
       ) : null}
-      {result ? (
-        <p
-          className={`mt-3 text-sm ${
-            result.failedRows.length || result.conflictRows?.length
-              ? "text-amber-700"
-              : "text-green-700"
-          }`}
-        >
-          Import finished. Created {result.createdIds.length}, updated{" "}
-          {result.updatedIds.length}, reused {result.reusedIds.length}, failed{" "}
-          {result.failedRows.length}, conflicts{" "}
-          {result.conflictRows?.length ?? 0}.
-        </p>
-      ) : null}
       {proposal ? (
         <StaffImportProposalView
           key={`${proposal.operationId}:${
@@ -543,11 +528,18 @@ function StaffImportProposalView({
   } = draftFetcher;
   const imageFetcher = useFetcher<StaffImportActionResponse>();
   const response = fetcher.data;
+  const unverifiedApply =
+    response?.error === null &&
+    (response.kind === "import-complete" ||
+      response.kind === "import-partial") &&
+    (response.result.persistenceVerified !== true ||
+      response.result.operationId !== initialProposal.operationId ||
+      response.proposal.operationId !== initialProposal.operationId);
   const isMouserInvoice =
     proposal.source.extractionProvider?.startsWith("mouser-") ?? false;
   const [proposalState, setProposalState] = useState<
     "review" | "in-progress" | "applied" | "cancelled" | "expired" | "error"
-  >("review");
+  >(initialProposal.reviewExpired ? "expired" : "review");
   const [reviewPage, setReviewPage] = useState(0);
   const [allowSameFileReimport, setAllowSameFileReimport] = useState(false);
   const [editRowNumber, setEditRowNumber] = useState<number | null>(null);
@@ -771,6 +763,7 @@ function StaffImportProposalView({
 
   useEffect(() => {
     if (
+      proposal.reviewExpired ||
       reviewClosed ||
       draftState !== "idle" ||
       serializedReviewDecisions === lastAutoSavedDecisions ||
@@ -801,6 +794,7 @@ function StaffImportProposalView({
     draftState,
     lastAutoSavedDecisions,
     proposal.operationId,
+    proposal.reviewExpired,
     reviewClosed,
     serializedReviewDecisions,
     submitDraft,
@@ -900,6 +894,10 @@ function StaffImportProposalView({
 
   useEffect(() => {
     if (!fetcher.data) return;
+    if (unverifiedApply) {
+      setProposalState("error");
+      return;
+    }
     if (!fetcher.data.error && fetcher.data.kind === "import-review-blocked") {
       const blockedRows = fetcher.data.blockedRows;
       setServerIssues(
@@ -926,11 +924,6 @@ function StaffImportProposalView({
       } else {
         setProposalState("error");
       }
-      return;
-    }
-    if (fetcher.data.kind === "import-result") {
-      setProposalState("applied");
-      void revalidate();
       return;
     }
     if (fetcher.data.kind === "import-row-skipped") {
@@ -984,7 +977,7 @@ function StaffImportProposalView({
       setProposalState("cancelled");
       onReset("Import cancelled. No inventory changes were applied.");
     }
-  }, [fetcher.data, onReset, revalidate]);
+  }, [fetcher.data, onReset, revalidate, unverifiedApply]);
 
   return (
     <div className="mt-5 border-t border-gray-100 pt-5">
@@ -994,8 +987,9 @@ function StaffImportProposalView({
             {proposal.source.filename}
           </h3>
           <p className="mt-1 text-sm font-semibold text-gray-700">
-            {proposal.rows.length}{" "}
-            {proposal.rows.length === 1 ? "product" : "products"} found
+            {pendingReviewRows.length}{" "}
+            {pendingReviewRows.length === 1 ? "product" : "products"} ready for
+            review
           </p>
           {ignoredRowNumbers.size > 0 ? (
             <p className="mt-1 text-xs text-gray-500">
@@ -1005,7 +999,9 @@ function StaffImportProposalView({
             </p>
           ) : null}
           <p className="mt-1 text-xs text-gray-500">
-            {reviewClosed
+            {proposal.reviewExpired
+              ? "History · Review expired. Upload the document again to start a new review."
+              : reviewClosed
               ? "Review closed. Applied rows appear below."
               : "Draft · Review edits save automatically. Nothing changes in Shelf until Apply."}
           </p>
@@ -1115,9 +1111,18 @@ function StaffImportProposalView({
           </ul>
         </div>
       ) : null}
+      {unverifiedApply ? (
+        <p role="alert" className="mt-3 text-sm text-red-700">
+          Import confirmation could not be verified for this operation. Reload
+          its history; no success is confirmed.
+        </p>
+      ) : null}
       {response?.error === null &&
       (response.kind === "import-partial" ||
-        response.kind === "import-complete") ? (
+        response.kind === "import-complete") &&
+      response.result.persistenceVerified === true &&
+      response.result.operationId === proposal.operationId &&
+      response.proposal.operationId === proposal.operationId ? (
         <>
           <p
             role="status"
@@ -1129,15 +1134,13 @@ function StaffImportProposalView({
             }`}
           >
             Applied{" "}
-            {response.result.succeededRows ??
-              response.result.createdIds.length +
-                response.result.updatedIds.length +
-                response.result.reusedIds.length}{" "}
+            {response.result.appliedRowCount ??
+              response.result.succeededRows ??
+              0}{" "}
             approved{" "}
-            {(response.result.succeededRows ??
-              response.result.createdIds.length +
-                response.result.updatedIds.length +
-                response.result.reusedIds.length) === 1
+            {(response.result.appliedRowCount ??
+              response.result.succeededRows ??
+              0) === 1
               ? "item"
               : "items"}
             .

@@ -1754,6 +1754,10 @@ describe("staff inventory import safety", () => {
     });
     database.asset.findMany.mockImplementation(({ where }) => {
       const availableAssets = [...existingAssets, ...assetRows];
+      if (where.id?.in)
+        return availableAssets.filter((asset) =>
+          where.id.in.includes(asset.id)
+        );
       if (typeof where.title === "string")
         return availableAssets
           .filter((asset) => asset.title === where.title)
@@ -2208,6 +2212,7 @@ describe("staff inventory import safety", () => {
       createdAt: new Date().toISOString(),
       categoryOptions: [
         { id: "category-electronics", name: "Electronics", archived: false },
+        { id: "category-kits", name: "Kits", archived: false },
       ],
       locationOptions: [
         {
@@ -2255,9 +2260,9 @@ describe("staff inventory import safety", () => {
         rowNumber: 2,
         decision: "APPROVE" as const,
         title: "Arduino Nano",
-        categoryId: "category-electronics",
+        categoryId: "category-kits",
         locationId: "location-shelf-b3",
-        quantity: 4,
+        quantity: 9,
         type: "INDIVIDUAL" as const,
         trackingModeConfirmed: false,
         trackingModeSelectedByStaff: true,
@@ -2295,6 +2300,8 @@ describe("staff inventory import safety", () => {
     ]);
     expect(mockCreateAsset).not.toHaveBeenCalled();
     expect(mockCreateAssetModel).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+    expect(mockReplaceAssetPlacements).not.toHaveBeenCalled();
   });
 
   it("persists final reviewed values in the successful ledger and reopens them independently of later drafts", async () => {
@@ -3352,7 +3359,7 @@ describe("staff inventory import safety", () => {
       reviewDecisionRows: [
         {
           rowNumber: 2,
-          decision: null,
+          decision: "APPROVE",
           title: row.title,
           assetId: null,
           categoryId: row.categoryId,
@@ -3529,26 +3536,27 @@ describe("staff inventory import safety", () => {
     }
   );
 
-  it("accepts a direct row import without a second approval flag", async () => {
-    const { result, assetRows } = await applyNewImport({
-      quantity: 5,
-      applyOnlyRowNumber: 2,
-      reviewDecisionRows: [
-        {
-          rowNumber: 2,
-          decision: null,
-          title: "Arduino Nano",
-          assetId: null,
-          categoryId: "category-electronics",
-          locationId: null,
-          quantity: 5,
-          type: "QUANTITY_TRACKED",
-          productChoice: "NEW",
-        },
-      ],
-    });
-    expect(result).toMatchObject({ succeededRows: 1 });
-    expect(assetRows).toHaveLength(1);
+  it("rejects single-row Apply without explicit row approval", async () => {
+    await expect(
+      applyNewImport({
+        quantity: 5,
+        applyOnlyRowNumber: 2,
+        reviewDecisionRows: [
+          {
+            rowNumber: 2,
+            decision: null,
+            title: "Arduino Nano",
+            assetId: null,
+            categoryId: "category-electronics",
+            locationId: null,
+            quantity: 5,
+            type: "QUANTITY_TRACKED",
+            productChoice: "NEW",
+          },
+        ],
+      })
+    ).rejects.toThrow("Approve or ignore at least one row before Apply");
+    expect(mockCreateAsset).not.toHaveBeenCalled();
   });
 
   it("returns an explicit ignored issue for an ignored row in a scoped import", async () => {
@@ -6658,105 +6666,208 @@ describe("staff inventory import safety", () => {
     }
   );
 
-  it("returns a stored SUCCEEDED result without creating PENDING ledger rows", async () => {
-    const result = {
-      operationId: "operation-succeeded",
-      createdIds: ["asset-1"],
+  it.each(["SUCCEEDED", "PARTIAL"])(
+    "prepares a new review instead of replaying a cached %s result",
+    async (status) => {
+      preparePdfImportMocks("new-review");
+      mockRequestImportHelperProposal.mockResolvedValue({
+        status: "manual",
+        reason: "helper_not_configured",
+      });
+      database.ioioWriteOperation.findUnique.mockResolvedValue({
+        status,
+        description: JSON.stringify({
+          result: { createdIds: ["previous-asset"] },
+        }),
+        createdAt: new Date(),
+      });
+      const prepared = await prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File(
+          [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
+          "inventory.pdf",
+          { type: "application/pdf" }
+        ),
+      });
+      expect(prepared.status).toBe("PREPARED");
+      expect(prepared.proposal.rows).toHaveLength(1);
+      expect(prepared).not.toHaveProperty("result");
+      expect(database.ioioWriteOperation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: "PREPARED" }),
+        })
+      );
+      expect(database.ioioImportItem.createMany).toHaveBeenCalled();
+      expect(mockCreateAsset).not.toHaveBeenCalled();
+      expect(mockUpdateAsset).not.toHaveBeenCalled();
+      expect(mockCreateAssetModel).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([1, 2, 20])(
+    "keeps %s helper-enriched PDF items pending with no canonical writes",
+    async (count) => {
+      preparePdfImportMocks(`review-${count}`);
+      const items = Array.from({ length: count }, (_, index) => ({
+        productName: `Arduino component ${index + 1}`,
+        quantity: index + 1,
+        evidenceText: `Arduino component ${index + 1}`,
+      }));
+      const text = [
+        "Name | Quantity",
+        ...items.map((item) => `${item.productName} | ${item.quantity}`),
+      ].join("\n");
+      mockRequestImportHelperProposal.mockResolvedValue(
+        makeGenericHelperReadyResult({ pageText: text, items })
+      );
+      const prepared = await prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File([makePdfFromPages([{ text }])], "inventory.pdf", {
+          type: "application/pdf",
+        }),
+      });
+      expect(prepared.status).toBe("PREPARED");
+      expect(prepared.proposal.rows).toHaveLength(count);
+      expect(prepared.proposal.appliedRowNumbers ?? []).toEqual([]);
+      expect(prepared.proposal.savedReviewDecisions ?? []).toEqual([]);
+      expect(mockRequestImportHelperProposal).toHaveBeenCalled();
+      expect(mockCreateAsset).not.toHaveBeenCalled();
+      expect(mockUpdateAsset).not.toHaveBeenCalled();
+      expect(mockCreateAssetModel).not.toHaveBeenCalled();
+      expect(mockUpdateAssetModelDescriptionIfUnchanged).not.toHaveBeenCalled();
+      expect(mockReplaceAssetPlacements).not.toHaveBeenCalled();
+      expect(database.ioioImportItem.updateMany).not.toHaveBeenCalled();
+      const rows = prepared.proposal.rows.map((row) => ({
+        ...row,
+        categoryId: "category-electronics",
+        category: "Electronics",
+      }));
+      const { result, assetRows, ledgerRows } = await applyNewImport({
+        quantity: 1,
+        proposalRows: rows,
+        reviewDecisionRows: rows.map((row, index) => ({
+          rowNumber: row.rowNumber,
+          decision: index === 0 ? "APPROVE" : null,
+          title: row.title,
+          quantity: row.quantity,
+          categoryId: row.categoryId,
+          locationId: null,
+          type: "QUANTITY_TRACKED",
+          productChoice: "NEW",
+        })),
+      });
+      expect(result).toMatchObject({
+        succeededRows: 1,
+        remainingRows: count - 1,
+      });
+      expect(assetRows).toHaveLength(1);
+      expect(ledgerRows.filter((item) => item.status === "DONE")).toHaveLength(
+        1
+      );
+      expect(
+        ledgerRows.filter((item) => item.status === "PENDING")
+      ).toHaveLength(count - 1);
+    }
+  );
+
+  it.each(["session", "ledger"])(
+    "returns an error when %s draft persistence fails",
+    async (boundary) => {
+      preparePdfImportMocks("persistence-failed");
+      mockRequestImportHelperProposal.mockResolvedValue({
+        status: "manual",
+        reason: "helper_not_configured",
+      });
+      const write =
+        boundary === "session"
+          ? database.ioioWriteOperation.create
+          : database.ioioImportItem.createMany;
+      write.mockRejectedValueOnce(new Error("Draft persistence failed"));
+      await expect(
+        prepareStaffInventoryImport({
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+          request: new Request("http://localhost/staff/import"),
+          file: new File(
+            [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
+            "inventory.pdf",
+            { type: "application/pdf" }
+          ),
+        })
+      ).rejects.toThrow("Draft persistence failed");
+      expect(mockCreateAsset).not.toHaveBeenCalled();
+      expect(mockUpdateAsset).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reports zero committed creates when the canonical transaction rejects", async () => {
+    // why: capture structured diagnostics without emitting fixture inventory logs.
+    const logs = vi.spyOn(Logger, "info").mockImplementation(() => {});
+    const { result, assetRows } = await applyNewImport({
+      quantity: 1,
+      creationFailure: "transaction rolled back",
+    });
+    expect(assetRows).toEqual([]);
+    expect(result).toMatchObject({
+      createdIds: [],
       updatedIds: [],
-      reusedIds: [],
-      failedRows: [],
-      conflictRows: [],
-      ignoredRows: 0,
-      reviewedRows: 1,
-      totalRows: 1,
-      succeededRows: 1,
-      failedRowsCount: 0,
-      conflictedRowsCount: 0,
-      skippedRows: 0,
-    };
-    const proposal = {
-      version: 1 as const,
-      operationId: result.operationId,
-      organizationId: "org-1",
-      source: {
-        filename: "inventory.pdf",
-        size: 16,
-        sha256: "file-sha",
-      },
-      rows: [],
-      counts: {},
-      createdAt: "2026-10-26T00:00:00.000Z",
-    };
-    mockStaffAccess.mockResolvedValue({
-      organizationId: "org-1",
-      userId: "staff-1",
+      succeededRows: 0,
+      persistenceVerified: true,
     });
-    database.asset.findMany.mockResolvedValue([]);
-    database.location.findMany.mockResolvedValue([]);
-    mockGetCategories.mockResolvedValue([]);
-    database.ioioWriteOperation.findUnique.mockResolvedValue({
-      status: "SUCCEEDED",
-      description: JSON.stringify({ proposal, result }),
-      createdAt: new Date("2026-10-26T00:00:00.000Z"),
-    });
-
-    const response = await prepareStaffInventoryImport({
-      context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      request: new Request("http://localhost/staff/import"),
-      file: new File(
-        [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
-        "inventory.pdf",
-        { type: "application/pdf" }
-      ),
-    });
-
-    expect(response).toEqual({ status: "SUCCEEDED", result });
-    expect(database.ioioImportItem.createMany).not.toHaveBeenCalled();
-    expect(database.ioioWriteOperation.create).not.toHaveBeenCalled();
+    expect(logs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "ioio_staff_import_applied",
+        canonicalWritesAttempted: 1,
+        canonicalWritesCommitted: 0,
+      })
+    );
   });
 
-  it("returns the stored PARTIAL result when the same file is prepared again", async () => {
-    vi.clearAllMocks();
-    const result = {
-      operationId: "operation-partial",
-      createdIds: ["asset-1"],
-      updatedIds: [],
-      reusedIds: [],
-      failedRows: [{ rowNumber: 3, reason: "Needs correction." }],
-      conflictRows: [],
-      ignoredRows: 0,
-      reviewedRows: 1,
-      totalRows: 2,
-      succeededRows: 1,
-      failedRowsCount: 1,
-      conflictedRowsCount: 0,
-      skippedRows: 0,
-    };
-    mockStaffAccess.mockResolvedValue({
-      organizationId: "org-1",
-      userId: "staff-1",
-    });
-    database.asset.findMany.mockResolvedValue([]);
-    database.location.findMany.mockResolvedValue([]);
-    mockGetCategories.mockResolvedValue([]);
-    database.ioioWriteOperation.findUnique.mockResolvedValue({
-      status: "PARTIAL",
-      description: JSON.stringify({ result }),
-      createdAt: new Date(),
-    });
-
-    const prepared = await prepareStaffInventoryImport({
+  it("reloads implemented history even after review expiry without allowing stale Apply", async () => {
+    const { operation, operationId } = await applyNewImport({ quantity: 1 });
+    operation.createdAt = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    database.ioioWriteOperation.findMany.mockResolvedValue([operation]);
+    const args = {
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
       request: new Request("http://localhost/staff/import"),
-      file: new File(
-        [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
-        "inventory.pdf",
-        { type: "application/pdf" }
-      ),
-    });
+      operationId,
+    };
+    const history = await getStaffInventoryImportProposal(args);
+    expect(history.implementations).toHaveLength(1);
+    expect(history.reviewExpired).toBe(true);
+    const drafts = await getStaffInventoryImportDrafts(args);
+    expect(drafts).toContainEqual(expect.objectContaining({ operationId }));
+    expect(database.ioioWriteOperation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            { importItems: { some: { status: "DONE" } } },
+          ]),
+        }),
+      })
+    );
+  });
 
-    expect(prepared).toEqual({ status: "PARTIAL", result });
-    expect(database.ioioImportItem.createMany).not.toHaveBeenCalled();
+  it("does not write inventory when document analysis fails", async () => {
+    preparePdfImportMocks("analysis-failed");
+    mockRequestImportHelperProposal.mockRejectedValue(
+      new Error("analysis failed")
+    );
+    await expect(
+      prepareStaffInventoryImport({
+        context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        request: new Request("http://localhost/staff/import"),
+        file: new File(
+          [makePdfFromPages([{ text: "Name | Quantity\nNano | 1" }])],
+          "inventory.pdf",
+          { type: "application/pdf" }
+        ),
+      })
+    ).rejects.toThrow("analysis failed");
+    expect(mockCreateAsset).not.toHaveBeenCalled();
+    expect(mockUpdateAsset).not.toHaveBeenCalled();
+    expect(mockCreateAssetModel).not.toHaveBeenCalled();
     expect(database.ioioWriteOperation.create).not.toHaveBeenCalled();
   });
 
@@ -6839,6 +6950,7 @@ describe("staff inventory import safety", () => {
       where.status === "IN_FLIGHT" ? [] : [ledgerItem]
     );
 
+    database.asset.findMany.mockResolvedValue([{ id: "asset-1" }]);
     const result = await applyStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
       request: new Request("http://localhost/staff/import"),
@@ -6934,7 +7046,7 @@ describe("staff inventory import safety", () => {
     });
   });
 
-  it("returns PARTIAL results without retrying terminal ledger rows", async () => {
+  it("refuses legacy PARTIAL success counts without verifiable history", async () => {
     vi.clearAllMocks();
     const operationId = "operation-partial";
     const result = {
@@ -6972,7 +7084,7 @@ describe("staff inventory import safety", () => {
         operationId,
         proposalHash: "unused-terminal-status-hash",
       })
-    ).resolves.toEqual(result);
+    ).rejects.toThrow("no verifiable proposal/history");
     expect(database.ioioImportItem.createMany).not.toHaveBeenCalled();
     expect(database.ioioImportItem.updateMany).not.toHaveBeenCalled();
     expect(mockCreateAsset).not.toHaveBeenCalled();

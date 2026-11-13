@@ -162,12 +162,10 @@ export async function action({ context, request }: ActionFunctionArgs) {
         request,
         file,
       });
-      return prepared.status !== "PREPARED"
-        ? payload({ kind: "import-result" as const, result: prepared.result })
-        : payload({
-            kind: "import-proposal" as const,
-            proposal: prepared.proposal,
-          });
+      return payload({
+        kind: "import-proposal" as const,
+        proposal: prepared.proposal,
+      });
     }
 
     const operationId = z

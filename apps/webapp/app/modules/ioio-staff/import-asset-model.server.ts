@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { db } from "~/database/db.server";
 import { createAssetModel } from "~/modules/asset-model/service.server";
 import { Logger } from "~/utils/logger";
+import {
+  assertImportApplyPhase,
+  recordImportWriteAttempt,
+  recordImportWriteCommit,
+} from "./import-phase.server";
 
 type ImportAssetModelIdentityInput = {
   name: string;
@@ -98,6 +103,7 @@ export async function resolveImportAssetModel({
   importSessionId?: string;
   importCandidateId?: string;
 }): Promise<ImportAssetModelResolution> {
+  assertImportApplyPhase();
   const identity = getImportAssetModelIdentity({
     name,
     manufacturer,
@@ -170,6 +176,7 @@ export async function resolveImportAssetModel({
       }
 
       try {
+        recordImportWriteAttempt();
         const attached = await db.assetModel.updateMany({
           where: {
             id: existingByName.id,
@@ -179,6 +186,7 @@ export async function resolveImportAssetModel({
           data: { importIdentityKey: identity.key },
         });
         if (attached.count === 1) {
+          recordImportWriteCommit();
           return {
             status: "RESOLVED",
             assetModelId: existingByName.id,
@@ -218,6 +226,7 @@ export async function resolveImportAssetModel({
   }
 
   try {
+    recordImportWriteAttempt();
     const model = await createAssetModel({
       id: preferredModelId,
       importIdentityKey: identity.key,
@@ -228,6 +237,7 @@ export async function resolveImportAssetModel({
       userId,
       organizationId,
     });
+    recordImportWriteCommit();
     Logger.info({
       event: "ioio_import_canonical_write",
       importSessionId: importSessionId ?? null,

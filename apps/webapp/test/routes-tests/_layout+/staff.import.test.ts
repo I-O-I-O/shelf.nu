@@ -131,40 +131,49 @@ describe("staff inventory import route", () => {
     }
   );
 
-  it("routes a PDF upload into proposal preparation", async () => {
-    const proposal = { operationId: "operation-1", rows: [] };
-    mocks.prepareStaffInventoryImport.mockResolvedValue({
-      status: "PREPARED",
-      proposal,
-    });
-    const form = new FormData();
-    form.set("intent", "analyze-file");
-    const file = new File(["%PDF-1.4"], "supplier-invoice.pdf", {
-      type: "application/pdf",
-    });
-    form.set("file", file);
+  it.each([1, 2, 20])(
+    "routes a %s-item PDF only into Pending review preparation",
+    async (count) => {
+      const proposal = {
+        operationId: "operation-1",
+        rows: Array.from({ length: count }, (_, index) => ({
+          rowNumber: index + 1,
+        })),
+      };
+      mocks.prepareStaffInventoryImport.mockResolvedValue({
+        status: "PREPARED",
+        proposal,
+      });
+      const form = new FormData();
+      form.set("intent", "analyze-file");
+      const file = new File(["%PDF-1.4"], "supplier-invoice.pdf", {
+        type: "application/pdf",
+      });
+      form.set("file", file);
 
-    const result = await action(
-      createActionArgs({
-        request: new Request("http://localhost/staff/import", {
-          method: "POST",
-          body: form,
-        }),
-        context: { getSession: () => ({ userId: "staff-1" }) } as never,
-      })
-    );
+      const result = await action(
+        createActionArgs({
+          request: new Request("http://localhost/staff/import", {
+            method: "POST",
+            body: form,
+          }),
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+        })
+      );
 
-    expect(mocks.prepareStaffInventoryImport).toHaveBeenCalledWith({
-      context: expect.anything(),
-      request: expect.any(Request),
-      file: expect.any(File),
-    });
-    expect(result).toMatchObject({
-      error: null,
-      kind: "import-proposal",
-      proposal,
-    });
-  });
+      expect(mocks.prepareStaffInventoryImport).toHaveBeenCalledWith({
+        context: expect.anything(),
+        request: expect.any(Request),
+        file: expect.any(File),
+      });
+      expect(mocks.applyStaffInventoryImport).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        error: null,
+        kind: "import-proposal",
+        proposal,
+      });
+    }
+  );
 
   it("passes the canonical category-creation permission to the review UI", async () => {
     const result = (await loader(

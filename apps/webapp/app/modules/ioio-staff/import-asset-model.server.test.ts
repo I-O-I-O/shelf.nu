@@ -21,8 +21,13 @@ vi.mock("~/modules/asset-model/service.server", () => ({
 
 import {
   getImportAssetModelIdentity,
-  resolveImportAssetModel,
+  resolveImportAssetModel as unscopedResolveImportAssetModel,
 } from "./import-asset-model.server";
+
+import { withImportPhase } from "./import-phase.server";
+const resolveImportAssetModel = (
+  input: Parameters<typeof unscopedResolveImportAssetModel>[0]
+) => withImportPhase("APPLY", () => unscopedResolveImportAssetModel(input));
 
 type Model = {
   id: string;
@@ -33,6 +38,22 @@ type Model = {
 
 describe("import AssetModel identity resolution", () => {
   let models: Model[];
+
+  it.each(["PREPARE", "REVIEW"] as const)(
+    "blocks model resolution during %s",
+    async (phase) => {
+      await expect(
+        withImportPhase(phase, () =>
+          unscopedResolveImportAssetModel({
+            organizationId: "org",
+            userId: "staff",
+            name: "No write",
+          })
+        )
+      ).rejects.toThrow("explicit Apply");
+      expect(mockCreateAssetModel).not.toHaveBeenCalled();
+    }
+  );
 
   beforeEach(() => {
     vi.clearAllMocks();

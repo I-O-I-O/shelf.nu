@@ -14,7 +14,8 @@ function renderPanel(
   rowOverrides: Record<string, unknown>,
   canCreateCategory = true,
   proposalOverrides: Partial<StaffImportProposal> = {},
-  action?: (args: { request: Request }) => Promise<unknown>
+  action?: (args: { request: Request }) => Promise<unknown>,
+  startEmpty = false
 ) {
   const proposal = {
     version: 1,
@@ -68,7 +69,7 @@ function renderPanel(
         element: (
           <StaffImportPanel
             actionPath="/staff/import"
-            initialProposal={proposal}
+            initialProposal={startEmpty ? null : proposal}
             canCreateCategory={canCreateCategory}
           />
         ),
@@ -76,10 +77,175 @@ function renderPanel(
     ],
     { initialEntries: ["/staff/import"] }
   );
-  return { ...render(<RouterProvider router={router} />), router };
+  return { ...render(<RouterProvider router={router} />), router, proposal };
 }
 
 describe("StaffImportPanel review gate", () => {
+  it.each(["persistence error", "legacy success"])(
+    "does not report inventory success for upload %s",
+    async (kind) => {
+      // why: control failed/legacy HTTP responses without calling a real import.
+      const action = vi.fn(() =>
+        Promise.resolve(
+          kind === "persistence error"
+            ? { error: { message: "Draft persistence failed" } }
+            : {
+                error: null,
+                kind: "import-result",
+                result: {
+                  operationId: "previous-operation",
+                  createdIds: ["old-asset"],
+                  updatedIds: [],
+                  reusedIds: [],
+                  failedRows: [],
+                },
+              }
+        )
+      );
+      renderPanel({}, true, {}, action, true);
+      fireEvent.change(screen.getByLabelText("Choose PDF file"), {
+        target: {
+          files: [
+            new File(["%PDF-1.4"], "inventory.pdf", {
+              type: "application/pdf",
+            }),
+          ],
+        },
+      });
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        kind === "persistence error"
+          ? "Draft persistence failed"
+          : "no saved review"
+      );
+      expect(
+        screen.queryByText(/Created 1|Import finished|Applied 1/)
+      ).toBeNull();
+      expect(
+        screen.queryByRole("heading", { name: /Pending review/ })
+      ).toBeNull();
+    }
+  );
+
+  it.each([1, 2, 20])(
+    "puts a %s-item upload in Pending review until explicit approved Apply",
+    async (count) => {
+      const rows = Array.from({ length: count }, (_, index) => ({
+        rowNumber: index + 1,
+        title: `Arduino component ${index + 1}`,
+        action: "CREATE",
+        assetId: null,
+        categoryId: "category-1",
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        quantity: 5,
+        receivedQuantity: 5,
+        type: "QUANTITY_TRACKED",
+        reason: "New item",
+      })) as StaffImportProposal["rows"];
+      // why: this UI test controls HTTP action responses; canonical writes are
+      // separately exercised by the import service and phase-boundary tests.
+      const apply = vi.fn();
+      const action = vi.fn(async ({ request }: { request: Request }) => {
+        const data = await request.formData();
+        const intent = data.get("intent");
+        if (intent === "analyze-file")
+          return {
+            error: null,
+            kind: "import-proposal",
+            proposal: view.proposal,
+          };
+        if (intent === "save-draft")
+          return {
+            error: null,
+            kind: "import-draft-saved",
+            operationId: "operation-1",
+          };
+        expect(intent).toBe("apply-import");
+        const decisions = JSON.parse(String(data.get("reviewDecisions")));
+        expect(decisions[0]).toMatchObject({
+          decision: "APPROVE",
+          quantity: 9,
+        });
+        apply();
+        return {
+          error: null,
+          kind: count === 1 ? "import-complete" : "import-partial",
+          proposal: {
+            ...view.proposal,
+            appliedRowNumbers: [1],
+            savedReviewDecisions: decisions,
+            implementations: [
+              {
+                rowNumber: 1,
+                title: rows[0].title,
+                quantity: 9,
+                categoryLabel: "Electronics",
+                locationLabel: "Unassigned",
+                sourceRoom: null,
+                sourceOrganization: null,
+                implementedAt: new Date().toISOString(),
+                assetIds: ["asset-1"],
+                assetModelId: null,
+              },
+            ],
+          },
+          result: {
+            operationId: "operation-1",
+            persistenceVerified: true,
+            appliedRowCount: 1,
+            createdIds: ["asset-1"],
+            updatedIds: [],
+            reusedIds: [],
+            failedRows: [],
+            conflictRows: [],
+            remainingRows: count - 1,
+          },
+        };
+      });
+      const view = renderPanel({}, true, { rows }, action, true);
+      const file = screen.getByLabelText("Choose PDF file") as HTMLInputElement;
+      fireEvent.change(file, {
+        target: {
+          files: [
+            new File(["%PDF-1.4"], "inventory.pdf", {
+              type: "application/pdf",
+            }),
+          ],
+        },
+      });
+      expect(
+        await screen.findByRole("heading", {
+          name: `Pending review (${count})`,
+        })
+      ).toBeInTheDocument();
+      expect(apply).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Import finished/)).toBeNull();
+      const button = screen.getByRole("button", {
+        name: "Apply approved changes",
+      });
+      expect(button).toBeDisabled();
+      fireEvent.change(screen.getByLabelText(`Quantity for ${rows[0].title}`), {
+        target: { value: "9" },
+      });
+      expect(apply).not.toHaveBeenCalled();
+      fireEvent.click(
+        screen.getByLabelText(`Approve ${rows[0].title} for import`)
+      );
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(apply).not.toHaveBeenCalled();
+      fireEvent.click(button);
+      await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+      expect(
+        await screen.findByRole("heading", { name: "Implemented (1)" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: `Pending review (${count - 1})` })
+      ).toBeInTheDocument();
+    }
+  );
+
   it.each([false, true])(
     "shows persisted successful rows after apply (partial: %s), keeping failures pending",
     async (partial) => {
@@ -166,6 +332,9 @@ describe("StaffImportPanel review gate", () => {
             ],
           },
           result: {
+            operationId: "operation-1",
+            persistenceVerified: true,
+            appliedRowCount: 1,
             createdIds: ["asset-1"],
             updatedIds: [],
             reusedIds: [],
@@ -305,7 +474,7 @@ describe("StaffImportPanel review gate", () => {
       )
     ).toBeTruthy();
     expect(
-      screen.queryByText(/approved ·|need review ·|products found ·/)
+      screen.queryByText(/approved ·|need review ·|products ready for review ·/)
     ).toBeNull();
     expect(screen.queryByText("Draft saved automatically.")).toBeNull();
     expect(
@@ -804,10 +973,10 @@ describe("StaffImportPanel review gate", () => {
     );
 
     expect(screen.getByRole("heading", { name: "mouser.pdf" })).toBeTruthy();
-    expect(screen.getByText("1 product found")).toBeTruthy();
+    expect(screen.getByText("1 product ready for review")).toBeTruthy();
     expect(
       screen.queryByText(
-        /products found ·|need review ·|unassigned category|unassigned location/
+        /products ready for review ·|need review ·|unassigned category|unassigned location/
       )
     ).toBeNull();
     expect(
@@ -960,6 +1129,9 @@ describe("StaffImportPanel review gate", () => {
       error: null,
       kind: "import-result",
       result: {
+        operationId: "operation-1",
+        persistenceVerified: true,
+        appliedRowCount: 1,
         createdIds: ["asset-1"],
         updatedIds: [],
         reusedIds: [],
@@ -1150,7 +1322,7 @@ describe("StaffImportPanel review gate", () => {
     );
 
     expect(screen.getAllByRole("row")).toHaveLength(2);
-    expect(screen.getByText("1 product found")).toBeTruthy();
+    expect(screen.getByText("1 product ready for review")).toBeTruthy();
     expect(screen.getByText("713-101010001")).not.toBeVisible();
     expect(screen.getByText("101010001")).not.toBeVisible();
     expect(screen.queryByRole("columnheader", { name: "Tracking" })).toBeNull();
@@ -1460,7 +1632,7 @@ describe("StaffImportPanel review gate", () => {
     renderPanel({}, true, { rows } as Partial<StaffImportProposal>);
 
     expect(screen.getAllByRole("row")).toHaveLength(13);
-    expect(screen.getByText("12 products found")).toBeTruthy();
+    expect(screen.getByText("12 products ready for review")).toBeTruthy();
     expect(screen.getAllByText("Relay Module")).toHaveLength(2);
     productNames
       .filter((title) => title !== "Relay Module")
@@ -1613,7 +1785,7 @@ describe("StaffImportPanel review gate", () => {
     });
     renderPanel({}, true, { rows } as Partial<StaffImportProposal>, action);
 
-    expect(screen.getByText("20 products found")).toBeTruthy();
+    expect(screen.getByText("20 products ready for review")).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Apply approved changes" })
     ).toBeDisabled();
@@ -1668,7 +1840,7 @@ describe("StaffImportPanel review gate", () => {
       );
     }
 
-    expect(screen.queryByText(/products found ·/)).toBeNull();
+    expect(screen.queryByText(/products ready for review ·/)).toBeNull();
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Apply approved changes" })
@@ -1841,6 +2013,9 @@ describe("StaffImportPanel review gate", () => {
             appliedRowNumbers: rows.map((row) => row.rowNumber),
           },
           result: {
+            operationId: "operation-1",
+            persistenceVerified: true,
+            appliedRowCount: 1,
             createdIds: ["push-buttons"],
             updatedIds: [],
             reusedIds: [],
@@ -1946,6 +2121,9 @@ describe("StaffImportPanel review gate", () => {
             reviewClosed: false,
           },
           result: {
+            operationId: "operation-1",
+            persistenceVerified: true,
+            appliedRowCount: 1,
             createdIds: [],
             updatedIds: [],
             reusedIds: [],

@@ -73,6 +73,12 @@ import {
   recordImportLedgerExpectedPrior,
   STAFF_IMPORT_LEDGER_STALE_AFTER_MS,
 } from "./import-ledger.server";
+import { verifyImportResult } from "./import-persistence.server";
+import {
+  withImportPhase,
+  getImportPersistenceDiagnostics,
+  setImportPersistenceDiagnostics,
+} from "./import-phase.server";
 import {
   chunkImportUnitWork,
   planIndividualUnitWork,
@@ -401,6 +407,7 @@ export type StaffImportProposal = {
   revertibleRowNumbers?: number[];
   /** Completed proposals stay viewable for their review retention period. */
   reviewClosed?: boolean;
+  reviewExpired?: boolean;
 };
 
 export type StaffImportReviewDecision = {
@@ -427,6 +434,8 @@ export type StaffImportReviewDecision = {
 };
 
 export type StaffImportResult = {
+  persistenceVerified?: boolean;
+  appliedRowCount?: number;
   operationId: string;
   createdIds: string[];
   updatedIds: string[];
@@ -447,9 +456,10 @@ export type StaffImportResult = {
   remainingRows?: number;
 };
 
-export type StaffInventoryImportPreparation =
-  | { status: "PREPARED"; proposal: StaffImportProposal }
-  | { status: "SUCCEEDED" | "PARTIAL"; result: StaffImportResult };
+export type StaffInventoryImportPreparation = {
+  status: "PREPARED";
+  proposal: StaffImportProposal;
+};
 
 export type StaffImportDuplicateResult = {
   status: "DUPLICATE";
@@ -4994,7 +5004,24 @@ async function enrichMouserLineItems({
   };
 }
 
-export async function prepareStaffInventoryImport({
+export function prepareStaffInventoryImport(
+  ...args: Parameters<typeof prepareStaffInventoryImportWithinPhase>
+) {
+  return withImportPhase("PREPARE", async () => {
+    try {
+      return await prepareStaffInventoryImportWithinPhase(...args);
+    } catch (cause) {
+      Logger.info({
+        event: "ioio_import_persistence_failed",
+        ...getImportPersistenceDiagnostics(),
+        errorName: cause instanceof Error ? cause.name : "Unknown",
+      });
+      throw cause;
+    }
+  });
+}
+
+async function prepareStaffInventoryImportWithinPhase({
   context,
   request,
   file,
@@ -5818,6 +5845,10 @@ export async function prepareStaffInventoryImport({
     ...proposalContent,
     proposalHash: getStaffImportProposalHash(proposalContent),
   };
+  setImportPersistenceDiagnostics({
+    operationId,
+    analysisCandidateCount: proposal.rows.length,
+  });
   const idempotencyKey = `staff-import:${proposal.source.sha256}:${organizationId}:${userId}`;
   const existingOperation = await db.ioioWriteOperation.findUnique({
     where: { idempotencyKey },
@@ -5827,6 +5858,16 @@ export async function prepareStaffInventoryImport({
     if (!isStaffImportExpired(existingOperation.createdAt)) {
       const storedProposal = readStoredProposal(existingOperation.description);
       await ensureProposalLedger(storedProposal);
+      Logger.info({
+        event: "ioio_import_persistence",
+        operationId: storedProposal.operationId,
+        analysisCandidateCount: storedProposal.rows.length,
+        draftRowsPersisted: storedProposal.rows.length,
+        canonicalWritesAttempted: 0,
+        canonicalWritesCommitted: 0,
+        finalOperationState: "PREPARED",
+        resumedDraft: true,
+      });
       return { status: "PREPARED", proposal: storedProposal };
     }
     await db.ioioWriteOperation.updateMany({
@@ -5834,18 +5875,8 @@ export async function prepareStaffInventoryImport({
       data: { status: "EXPIRED", completedAt: new Date() },
     });
   }
-  if (existingOperation?.status === "SUCCEEDED") {
-    return {
-      status: "SUCCEEDED",
-      result: readStoredImportResult(existingOperation.description),
-    };
-  }
-  if (existingOperation?.status === "PARTIAL") {
-    return {
-      status: "PARTIAL",
-      result: readStoredImportResult(existingOperation.description),
-    };
-  }
+  // A new upload is always a review draft, never a replay of an old result.
+  // Completed history and duplicate-Apply protection remain on the old session.
   if (existingOperation?.status === "APPLYING") {
     throw importError("This import proposal is already being processed.");
   }
@@ -5870,6 +5901,10 @@ export async function prepareStaffInventoryImport({
         }),
       },
     });
+    setImportPersistenceDiagnostics({
+      draftRowsPersisted: proposal.rows.length,
+      finalOperationState: "PREPARED",
+    });
   } catch (cause) {
     Logger.info({
       event: "ioio_staff_import_image_attempt",
@@ -5882,7 +5917,12 @@ export async function prepareStaffInventoryImport({
     });
     throw cause;
   }
-  await ensureProposalLedger(proposal);
+  const persistedLedger = await ensureProposalLedger(proposal);
+  Logger.info({
+    event: "ioio_import_persistence",
+    ...getImportPersistenceDiagnostics(),
+    ledgerRowsPersisted: persistedLedger.length,
+  });
   for (const row of proposal.rows)
     Logger.info({
       event: "ioio_staff_import_image_attempt",
@@ -5907,7 +5947,7 @@ export async function prepareStaffInventoryImport({
 }
 
 async function ensureProposalLedger(proposal: StaffImportProposal) {
-  await ensureImportLedgerItems({
+  return ensureImportLedgerItems({
     operationId: proposal.operationId,
     organizationId: proposal.organizationId,
     items: planStaffInventoryImport(proposal),
@@ -6019,32 +6059,27 @@ export async function getStaffInventoryImportProposal({
   ) {
     throw staffImportUnavailableError();
   }
-  if (isStaffImportExpired(operation.createdAt)) {
-    await db.ioioWriteOperation.updateMany({
-      where: {
-        id: operationId,
-        organizationId,
-        userId,
-        operationType: STAFF_IMPORT_OPERATION,
-        status: "PREPARED",
-      },
-      data: { status: "EXPIRED", completedAt: new Date() },
-    });
-    throw staffImportUnavailableError();
-  }
   const proposal = readStoredProposal(operation.description);
   const ledgerItems = await getImportLedgerItems({
     operationId,
     organizationId,
   });
-  await reopenIncompleteImportOperation({
-    operationId,
-    organizationId,
-    userId,
-    status: operation.status,
-    proposal,
-    ledgerItems,
-  });
+  const hasImplementedHistory =
+    getResolvedImportRowNumbers({ proposal, ledgerItems, status: "DONE" })
+      .length > 0;
+  const reviewExpired = isStaffImportExpired(operation.createdAt);
+  if (reviewExpired && !hasImplementedHistory) {
+    throw staffImportUnavailableError();
+  }
+  if (!reviewExpired)
+    await reopenIncompleteImportOperation({
+      operationId,
+      organizationId,
+      userId,
+      status: operation.status,
+      proposal,
+      ledgerItems,
+    });
   const appliedRowNumbers = getResolvedImportRowNumbers({
     proposal,
     ledgerItems,
@@ -6065,6 +6100,7 @@ export async function getStaffInventoryImportProposal({
   });
   return {
     ...proposal,
+    reviewExpired,
     rows: displayRows,
     savedReviewDecisions: readStoredReviewDraft(operation.description).map(
       (decision) => {
@@ -6221,9 +6257,14 @@ export async function getStaffInventoryImportDrafts({
       userId,
       operationType: STAFF_IMPORT_OPERATION,
       status: { in: ["PREPARED", "SUCCEEDED", "PARTIAL"] },
-      createdAt: {
-        gte: new Date(Date.now() - STAFF_IMPORT_REVIEW_RETENTION_MS),
-      },
+      OR: [
+        {
+          createdAt: {
+            gte: new Date(Date.now() - STAFF_IMPORT_REVIEW_RETENTION_MS),
+          },
+        },
+        { importItems: { some: { status: "DONE" } } },
+      ],
     },
     select: { id: true, description: true, createdAt: true, status: true },
     orderBy: { updatedAt: "desc" },
@@ -6247,7 +6288,25 @@ export async function getStaffInventoryImportDrafts({
   });
 }
 
-export async function saveStaffInventoryImportDraft({
+export function saveStaffInventoryImportDraft(
+  ...args: Parameters<typeof saveStaffInventoryImportDraftWithinPhase>
+) {
+  return withImportPhase("REVIEW", async () => {
+    setImportPersistenceDiagnostics({ operationId: args[0].operationId });
+    try {
+      return await saveStaffInventoryImportDraftWithinPhase(...args);
+    } catch (cause) {
+      Logger.info({
+        event: "ioio_import_persistence_failed",
+        ...getImportPersistenceDiagnostics(),
+        errorName: cause instanceof Error ? cause.name : "Unknown",
+      });
+      throw cause;
+    }
+  });
+}
+
+async function saveStaffInventoryImportDraftWithinPhase({
   context,
   request,
   operationId,
@@ -7926,7 +7985,25 @@ async function requeueReviewedImportRejection({
   return getImportLedgerItem({ operationId, organizationId, itemId: item.id });
 }
 
-export async function applyStaffInventoryImport({
+export function applyStaffInventoryImport(
+  ...args: Parameters<typeof applyStaffInventoryImportWithinPhase>
+) {
+  return withImportPhase("APPLY", async () => {
+    setImportPersistenceDiagnostics({ operationId: args[0].operationId });
+    try {
+      return await applyStaffInventoryImportWithinPhase(...args);
+    } catch (cause) {
+      Logger.info({
+        event: "ioio_import_persistence_failed",
+        ...getImportPersistenceDiagnostics(),
+        errorName: cause instanceof Error ? cause.name : "Unknown",
+      });
+      throw cause;
+    }
+  });
+}
+
+async function applyStaffInventoryImportWithinPhase({
   context,
   request,
   operationId,
@@ -7966,7 +8043,9 @@ export async function applyStaffInventoryImport({
   if (operation.status === "SUCCEEDED" || operation.status === "PARTIAL") {
     // Historical result-only records contain no resumable proposal/ledger plan.
     if (!(JSON.parse(operation.description) as { proposal?: unknown }).proposal)
-      return readStoredImportResult(operation.description);
+      throw importError(
+        "This legacy import has no verifiable proposal/history. No success summary is available."
+      );
     const reopened = await reopenIncompleteImportOperation({
       operationId,
       organizationId,
@@ -7975,7 +8054,12 @@ export async function applyStaffInventoryImport({
       proposal: readStoredProposal(operation.description),
       ledgerItems: await getImportLedgerItems({ operationId, organizationId }),
     });
-    if (!reopened) return readStoredImportResult(operation.description);
+    if (!reopened)
+      return verifyImportResult({
+        result: readStoredImportResult(operation.description),
+        ledger: await getImportLedgerItems({ operationId, organizationId }),
+        organizationId,
+      });
     operation.status = "PREPARED";
   }
   if (
@@ -8000,6 +8084,11 @@ export async function applyStaffInventoryImport({
 
   const isResume = operation.status === "APPLYING";
   const proposal = readStoredProposal(operation.description);
+  setImportPersistenceDiagnostics({
+    analysisCandidateCount: proposal.rows.length,
+    draftRowsPersisted: proposal.rows.length,
+    finalOperationState: operation.status,
+  });
   if (proposalHash !== proposal.proposalHash) {
     throw importError(
       "The import proposal changed after review. Reload it and review the current proposal before applying."
@@ -8019,16 +8108,6 @@ export async function applyStaffInventoryImport({
     : reviewDecisions
     ? readReviewDecisions(reviewDecisions, { allowUnresolved: true })
     : readLegacyPdfDecisions(pdfDecisions);
-  if (!isResume && (applyOnlyRowNumber !== undefined || applyOnlyRowNumbers)) {
-    for (const decision of decisions) {
-      if (
-        decision.decision !== "IGNORE" &&
-        (decision.rowNumber === applyOnlyRowNumber ||
-          applyOnlyRowNumbers?.includes(decision.rowNumber))
-      )
-        decision.decision = "APPROVE";
-    }
-  }
   for (const decision of decisions) {
     const row = proposal.rows.find(
       (row) => row.rowNumber === decision.rowNumber
@@ -10721,11 +10800,29 @@ export async function applyStaffInventoryImport({
   if (aggregateStatus === "APPLYING")
     return { status: "IN_PROGRESS", operationId };
 
+  // Derive the report from re-read DONE rows, never attempted-write counters.
+  const persistedSummary = {
+    createdIds: [] as string[],
+    updatedIds: [] as string[],
+    reusedIds: [] as string[],
+  };
+  const appliedKeys = new Set(rowsToApply.map((row) => `row-${row.rowNumber}`));
+  for (const item of finalLedgerItems)
+    if (item.status === "DONE" && appliedKeys.has(item.rowKey))
+      summarizeDoneItem(item, persistedSummary);
+  for (const key of ["createdIds", "updatedIds", "reusedIds"] as const)
+    persistedSummary[key] = [...new Set(persistedSummary[key])];
   const result: StaffImportResult = {
     operationId,
-    createdIds,
-    updatedIds,
-    reusedIds,
+    appliedRowCount: getResolvedImportRowNumbers({
+      proposal,
+      ledgerItems: finalLedgerItems,
+      status: "DONE",
+    }).filter((number) => rowsToApply.some((row) => row.rowNumber === number))
+      .length,
+    createdIds: persistedSummary.createdIds,
+    updatedIds: persistedSummary.updatedIds,
+    reusedIds: persistedSummary.reusedIds,
     failedRows,
     conflictRows,
     ignoredRows: rowSummary.skippedRows,
@@ -10734,11 +10831,17 @@ export async function applyStaffInventoryImport({
       decisions.filter(({ decision }) => decision !== null).length,
     ...rowSummary,
   };
+  const verifiedResult = await verifyImportResult({
+    result,
+    ledger: finalLedgerItems,
+    organizationId,
+  });
   const remainingRows = getPendingImportRowNumbers(
     proposal,
     finalLedgerItems
   ).length;
   result.remainingRows = remainingRows;
+  verifiedResult.remainingRows = remainingRows;
   const keepReviewing = remainingRows > 0;
   const completed = await db.ioioWriteOperation.updateMany({
     where: { id: operationId, organizationId, userId, status: "APPLYING" },
@@ -10748,7 +10851,7 @@ export async function applyStaffInventoryImport({
         kind: "STAFF_INVENTORY_IMPORT",
         proposal,
         reviewDraft: decisions,
-        result,
+        result: verifiedResult,
       }),
       failureCode:
         conflictRows.length > 0
@@ -10760,19 +10863,32 @@ export async function applyStaffInventoryImport({
     },
   });
   if (completed.count !== 1) return { status: "IN_PROGRESS", operationId };
+  setImportPersistenceDiagnostics({
+    historyRowsPersisted: finalLedgerItems.filter(
+      (item) => item.status === "DONE"
+    ).length,
+    finalOperationState: keepReviewing ? "PREPARED" : aggregateStatus,
+  });
   Logger.info({
     event: "ioio_staff_import_applied",
+    analysisCandidateCount: proposal.rows.length,
+    draftRowsPersisted: proposal.rows.length,
+    ...getImportPersistenceDiagnostics(),
+    historyRowsPersisted: finalLedgerItems.filter(
+      (item) => item.status === "DONE"
+    ).length,
+    finalOperationState: keepReviewing ? "PREPARED" : aggregateStatus,
     operationId,
     organizationId,
     userId,
-    created: createdIds.length,
-    updated: updatedIds.length,
-    reused: reusedIds.length,
+    created: verifiedResult.createdIds.length,
+    updated: verifiedResult.updatedIds.length,
+    reused: verifiedResult.reusedIds.length,
     failed: failedRows.length,
     conflicts: conflictRows.length,
     ignored: result.skippedRows,
     reviewed: result.reviewedRows,
     aggregateStatus,
   });
-  return result;
+  return verifiedResult;
 }

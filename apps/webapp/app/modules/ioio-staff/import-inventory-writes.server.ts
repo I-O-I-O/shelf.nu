@@ -2,6 +2,11 @@ import { createAsset, updateAsset } from "~/modules/asset/service.server";
 import { ShelfError } from "~/utils/error";
 import { id } from "~/utils/id/id.server";
 import { Logger } from "~/utils/logger";
+import {
+  assertImportApplyPhase,
+  recordImportWriteAttempt,
+  recordImportWriteCommit,
+} from "./import-phase.server";
 
 export const IMPORT_NON_DESTRUCTIVE_MESSAGE =
   "Inventory import cannot delete, archive, or undo Shelf inventory. Use the separate Shelf inventory workflow.";
@@ -28,6 +33,7 @@ export function assertImportInventoryOperation(operation: string) {
     ].includes(operation)
   )
     forbidden();
+  assertImportApplyPhase();
 }
 
 type ImportWriteScope = { importSessionId: string; importCandidateId: string };
@@ -78,7 +84,9 @@ export async function createImportAsset(
     assetId,
     assetModelId: args.assetModelId ?? null,
   });
+  recordImportWriteAttempt();
   const asset = await createAsset({ ...args, id: assetId });
+  recordImportWriteCommit();
   audit(
     { importSessionId, importCandidateId },
     "CREATE_ASSET",
@@ -128,7 +136,9 @@ export async function updateImportAsset(
     operationType,
     assetId: args.id,
   });
+  recordImportWriteAttempt();
   const asset = await updateAsset(args);
+  recordImportWriteCommit();
   audit({ importSessionId, importCandidateId }, operationType, args.id, null);
   return asset;
 }
