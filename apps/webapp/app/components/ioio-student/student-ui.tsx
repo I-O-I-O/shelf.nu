@@ -515,7 +515,7 @@ export function AssetCard({
       ? "1 ready to borrow"
       : `${asset.availableQuantity} ready to borrow`
     : !asset.availableToBook
-    ? "Not available for borrowing"
+    ? "Not available to borrow"
     : asset.status === "IN_CUSTODY" || asset.status === "CHECKED_OUT"
     ? "Currently on loan"
     : "None ready to borrow";
@@ -530,15 +530,11 @@ export function AssetCard({
     : "Location not recorded";
 
   return (
-    <article
-      className={`flex min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm ${
-        variant === "assistant" ? "h-full" : "self-start"
-      }`}
-    >
+    <article className="flex h-full min-w-0 flex-col self-stretch overflow-hidden rounded-2xl border border-gray-200 bg-white transition hover:border-red-200 hover:shadow-sm">
       <Link
         to={`/ioio/browse/${asset.id}`}
         aria-label={`View ${formatStudentTitle(asset.title, asset.type)}`}
-        className="block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-700"
+        className="block shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-700"
       >
         <StudentAssetPlaceholder
           asset={asset}
@@ -546,11 +542,11 @@ export function AssetCard({
         />
       </Link>
       <div
-        className={`flex min-w-0 flex-col ${
+        className={`flex min-w-0 flex-1 flex-col ${
           variant === "assistant" ? `flex-1 ${compact ? "p-3" : "p-4"}` : "p-3"
         }`}
       >
-        <div className={variant === "assistant" ? "min-h-10" : ""}>
+        <div className="min-h-10">
           <Link
             to={`/ioio/browse/${asset.id}`}
             className="line-clamp-2 font-bold leading-5 text-gray-950 underline-offset-4 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700"
@@ -562,7 +558,9 @@ export function AssetCard({
           <>
             <p className="mt-2 text-sm font-semibold text-gray-800">
               {totalQuantity} {totalQuantity === 1 ? "unit" : "units"} ·{" "}
-              {asset.availableQuantity ?? 0} available
+              {asset.availableToBook
+                ? `${asset.availableQuantity ?? 0} available`
+                : "Lab use only"}
             </p>
             {asset.category?.name ? (
               <p className="mt-1 text-xs text-gray-500">
@@ -581,17 +579,19 @@ export function AssetCard({
           </>
         ) : (
           <>
-            <p className="mt-1 line-clamp-2 text-xs leading-4 text-gray-500">
+            <p className="mt-1 line-clamp-2 min-h-8 text-xs leading-4 text-gray-500">
               {locationSummary}
             </p>
-            <div className="mt-2 flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-2">
-              <p
-                className={`text-sm font-bold ${
-                  availableNow ? "text-green-800" : "text-gray-600"
-                }`}
-              >
-                {availability}
-              </p>
+            <div className="mt-auto flex min-h-20 w-full flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-2">
+              {asset.availableToBook ? (
+                <p
+                  className={`text-sm font-bold ${
+                    availableNow ? "text-green-800" : "text-gray-600"
+                  }`}
+                >
+                  {availability}
+                </p>
+              ) : null}
               <StudentCheckoutButton asset={asset} compact={compact} primary />
             </div>
           </>
@@ -639,8 +639,9 @@ export function StudentCheckoutButton({
     return (
       <div className="flex flex-wrap items-center gap-2">
         <span className="rounded-full bg-gray-100 px-2.5 py-1.5 text-xs font-bold text-gray-500">
-          Not available for borrowing
+          Not available to borrow
         </span>
+        <span className="text-xs text-gray-500">Lab use only</span>
         {inCheckout ? (
           <button
             type="button"

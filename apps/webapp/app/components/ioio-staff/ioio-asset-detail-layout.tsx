@@ -18,6 +18,7 @@ export type IoioAssetDetailLayoutProps = {
   actions?: ReactNode;
   categoryName?: string | null;
   locations: AssetDetailLocation[];
+  availableToBook?: boolean;
   availableQuantity: number;
   totalQuantity: number;
   availabilityDetail?: string;
@@ -38,6 +39,7 @@ export function IoioAssetDetailLayout({
   actions,
   categoryName,
   locations,
+  availableToBook = true,
   availableQuantity,
   totalQuantity,
   availabilityDetail,
@@ -88,9 +90,15 @@ export function IoioAssetDetailLayout({
         <AssetDetailInformation
           categoryName={categoryName}
           locations={locations}
-          availability={availableLabel}
-          availabilityTone={available > 0 ? "available" : "unavailable"}
-          availabilityDetail={availabilityDetail}
+          availability={
+            availableToBook ? availableLabel : "Not available to borrow"
+          }
+          availabilityTone={
+            availableToBook && available > 0 ? "available" : "unavailable"
+          }
+          availabilityDetail={
+            availableToBook ? availabilityDetail : "Lab use only"
+          }
           tracking={tracking}
           status={status}
           maxBorrowDays={maxBorrowDays}

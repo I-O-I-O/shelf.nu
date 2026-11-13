@@ -144,6 +144,7 @@ export default function IoioAssetDetail() {
             : "/ioio",
         };
       })}
+      availableToBook={asset.availableToBook}
       availableQuantity={availableQuantity}
       totalQuantity={totalQuantity}
       unitLabel={unitLabel}

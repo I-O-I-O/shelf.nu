@@ -1165,6 +1165,7 @@ export default function AssetOverview() {
             withPreview
           />
         }
+        availableToBook={asset.availableToBook}
         availableQuantity={inventoryAvailableQuantity}
         totalQuantity={
           individualProductSummary

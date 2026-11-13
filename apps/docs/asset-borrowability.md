@@ -113,3 +113,19 @@ fields/borrowability component. No server or database implementation was changed
 
 The layout follow-up passed 99 tests across six focused suites, plus ESLint,
 Prettier and `git diff --check`.
+
+## Detail availability presentation
+
+Staff and student detail routes pass canonical `availableToBook` into the shared
+`IoioAssetDetailLayout`. When false, Availability reads **Not available to borrow**
+with secondary text **Lab use only**, replacing numeric availability summaries.
+When true, existing counts return. Student catalog/assistant and checkout labels
+use the same terminology; assistant cards suppress the available count for
+restricted stock. Quantity, visibility and server guards are unchanged.
+No migration or environment changes are required.
+
+Student browse cards now stretch to the grid row height with a flex-column body,
+two-line title/location space and a shared minimum-height footer pushed to the
+bottom. Lab-use cards show non-interactive restriction text in that footer, with
+no disabled Borrow button. Loan/unavailable/approval states use the same footer.
+Image sizing, title clamping and responsive grid breakpoints are preserved.

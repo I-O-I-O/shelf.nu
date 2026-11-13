@@ -541,7 +541,7 @@ describe("student checkout action", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Borrow" })).toBeNull();
-    expect(screen.getByText("Not available for borrowing")).toBeTruthy();
+    expect(screen.getByText("Not available to borrow")).toBeTruthy();
   });
 });
 
@@ -596,7 +596,7 @@ describe("student inventory cards", () => {
         name: "Add to borrow list",
       });
       expect(availability.parentElement).toBe(borrowAction.parentElement);
-      expect(availability.parentElement?.className).not.toContain("mt-auto");
+      expect(availability.parentElement?.className).toContain("mt-auto");
       expect(availability.parentElement?.className).toContain("w-full");
       expect(availability.parentElement?.className).toContain(
         "justify-between"
@@ -605,4 +605,70 @@ describe("student inventory cards", () => {
       expect(borrowAction.className).not.toContain("bg-red-50");
     }
   );
+});
+
+describe("student card alignment", () => {
+  it("shares stretched rows and reserved footers across borrowability and title lengths", () => {
+    const assets = [
+      checkoutAsset({
+        id: "borrowable",
+        title: "Camera",
+        availableQuantity: 3,
+      }),
+      checkoutAsset({
+        id: "lab",
+        title:
+          "A very long caliper product title with technical specifications and accessories",
+        availableToBook: false,
+        availableQuantity: 3,
+      }),
+      checkoutAsset({
+        id: "loan",
+        title: "Meter",
+        availableQuantity: 0,
+        status: "CHECKED_OUT",
+      }),
+    ];
+    const router = createMemoryRouter([
+      {
+        path: "/",
+        element: createElement(
+          StudentCheckoutProvider,
+          null,
+          createElement(
+            "div",
+            { className: "grid grid-cols-1 sm:grid-cols-3" },
+            ...assets.map((asset) =>
+              createElement(AssetCard, { key: asset.id, asset })
+            )
+          )
+        ),
+      },
+    ]);
+    const { container } = render(createElement(RouterProvider, { router }));
+    const cards = Array.from(container.querySelectorAll("article"));
+    expect(cards).toHaveLength(3);
+    expect(new Set(cards.map((card) => card.className)).size).toBe(1);
+    for (const card of cards) {
+      expect(card).toHaveClass("h-full", "flex-col", "self-stretch");
+      expect(card.querySelector(".mt-auto")).toHaveClass(
+        "min-h-20",
+        "w-full",
+        "pt-2"
+      );
+      expect(card.querySelector(".line-clamp-2")).toBeTruthy();
+      expect(card.querySelector(".h-36")).toHaveClass("sm:h-32");
+    }
+    const restricted = cards[1];
+    expect(restricted.textContent).toContain("Not available to borrow");
+    expect(restricted.querySelector(".mt-auto")?.textContent).toContain(
+      "Lab use only"
+    );
+    expect(restricted.querySelector("button")).toBeNull();
+    expect(restricted.textContent).not.toContain("3 ready to borrow");
+    expect(cards[0].querySelector("button")).toBeTruthy();
+    expect(cards[2].querySelector(".mt-auto")?.textContent).toContain(
+      "On loan"
+    );
+  });
 });

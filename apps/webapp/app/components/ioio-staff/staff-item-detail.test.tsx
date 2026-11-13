@@ -6,6 +6,35 @@ import { StaffItemDetail } from "./staff-item-detail";
 describe("StaffItemDetail", () => {
   afterEach(() => cleanup());
 
+  it.each([true, false])(
+    "shows borrowability %s for three physical items",
+    (availableToBook) => {
+      const router = createMemoryRouter([
+        {
+          path: "/",
+          element: (
+            <StaffItemDetail
+              title="Calipers"
+              image={<div>Image</div>}
+              locationPath={[]}
+              availableToBook={availableToBook}
+              availableQuantity={3}
+              totalQuantity={3}
+            />
+          ),
+        },
+      ]);
+      render(<RouterProvider router={router} />);
+      if (availableToBook)
+        expect(screen.getByText("3 / 3 items available")).toBeTruthy();
+      else {
+        expect(screen.getByText("Not available to borrow")).toBeTruthy();
+        expect(screen.getByText("Lab use only")).toBeTruthy();
+        expect(screen.queryByText("3 / 3 items available")).toBeNull();
+      }
+    }
+  );
+
   it("places Borrow and Edit in the detail action row without Ask IOIO", () => {
     const router = createMemoryRouter(
       [

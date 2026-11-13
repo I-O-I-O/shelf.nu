@@ -9,6 +9,7 @@ import {
 export type StaffItemDetailProps = {
   title: string;
   image: ReactNode;
+  availableToBook?: boolean;
   availableQuantity: number;
   totalQuantity?: number;
   availabilityDetail?: string;
@@ -32,6 +33,7 @@ export type StaffItemDetailProps = {
 export function StaffItemDetail({
   title,
   image,
+  availableToBook = true,
   availableQuantity,
   totalQuantity,
   availabilityDetail,
@@ -80,6 +82,7 @@ export function StaffItemDetail({
           {actions}
         </>
       }
+      availableToBook={availableToBook}
       availableQuantity={availableQuantity}
       totalQuantity={total}
       availabilityDetail={detail}

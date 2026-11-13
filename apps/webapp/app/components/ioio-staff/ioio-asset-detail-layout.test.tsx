@@ -16,6 +16,7 @@ const trackingHelp =
   "Each physical unit has its own QR code so IOIO can track which exact unit is borrowed and returned.";
 
 function renderDetail({
+  availableToBook = true,
   availableQuantity = 4,
   availabilityDetail,
   status,
@@ -23,6 +24,7 @@ function renderDetail({
   title = "Makey Kit",
   description = "A classroom electronics kit.",
 }: {
+  availableToBook?: boolean;
   availableQuantity?: number;
   availabilityDetail?: string;
   status?: string;
@@ -65,6 +67,7 @@ function renderDetail({
                 href: "/ioio/browse?location=section-a-id",
               },
             ]}
+            availableToBook={availableToBook}
             availableQuantity={availableQuantity}
             totalQuantity={5}
             unitLabel="kits"
@@ -339,4 +342,27 @@ describe("IoioAssetDetailLayout", () => {
     });
     expect(screen.getByRole("tooltip").textContent).toContain(trackingHelp);
   });
+});
+
+describe("shared staff/student borrowing restriction", () => {
+  afterEach(cleanup);
+  it.each([true, false, true])(
+    "respects borrowability %s without changing stock",
+    (availableToBook) => {
+      const asset = Object.freeze({ availableToBook, quantity: 3 });
+      renderDetail({
+        availableToBook: asset.availableToBook,
+        availableQuantity: asset.quantity,
+        availabilityDetail: "3 available",
+      });
+      if (availableToBook) {
+        expect(screen.getByText("3 / 5 kits available")).toBeTruthy();
+      } else {
+        expect(screen.getByText("Not available to borrow")).toBeTruthy();
+        expect(screen.getByText("Lab use only")).toBeTruthy();
+        expect(screen.queryByText(/3.*available/)).toBeNull();
+      }
+      expect(asset.quantity).toBe(3);
+    }
+  );
 });
