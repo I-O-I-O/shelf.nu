@@ -177,6 +177,13 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
     }
   );
 
+  it("preserves Unit of measure when the staff edit UI omits it", async () => {
+    await action(buildArgs({ clearMainImage: "false" }));
+    expect(
+      vi.mocked(updateAsset).mock.calls[0][0].unitOfMeasure
+    ).toBeUndefined();
+  });
+
   it("preserves borrowability when an older form does not submit it", async () => {
     await action(buildArgs({ clearMainImage: "false" }));
     expect(

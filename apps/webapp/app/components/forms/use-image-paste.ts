@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, RefObject } from "react";
+import { getClipboardImage } from "~/utils/clipboard-image";
 
 /** Clipboard uploads share Shelf's canonical multipart endpoint and validation. */
 export function useImagePaste({
@@ -28,17 +29,49 @@ export function useImagePaste({
     const input = inputRef.current;
     const form = input?.closest("form");
     if (!pasteImages || !input || !form || disabled) return;
+    input.dataset.imagePaste = "enabled";
+    const visible = (element: Element) => {
+      for (
+        let parent: Element | null = element;
+        parent;
+        parent = parent.parentElement
+      ) {
+        if (
+          parent.hasAttribute("hidden") ||
+          parent.hasAttribute("inert") ||
+          getComputedStyle(parent).display === "none" ||
+          getComputedStyle(parent).visibility === "hidden"
+        )
+          return false;
+      }
+      return true;
+    };
     const paste = async (event: ClipboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        (event.target instanceof Element &&
-          event.target.closest("form") !== form)
-      )
-        return;
-      const item = Array.from(event.clipboardData?.items ?? []).find(
-        (entry) => entry.kind === "file" && entry.type.startsWith("image/")
-      );
-      const file = item?.getAsFile();
+      if (event.defaultPrevented || !visible(form)) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const targetForm = target?.closest("form");
+      if (targetForm && targetForm !== form) return;
+      // Page-focused paste belongs to the sole visible image form, never a
+      // background queued draft or a form beneath an open dialog.
+      if (!targetForm) {
+        if (
+          document.querySelector(
+            '[role="dialog"][data-state="open"], dialog[open]'
+          )
+        )
+          return;
+        const owners = new Set(
+          Array.from(
+            document.querySelectorAll<HTMLInputElement>(
+              'input[data-image-paste="enabled"]'
+            )
+          )
+            .filter(visible)
+            .map((field) => field.closest("form"))
+        );
+        if (owners.size !== 1 || !owners.has(form)) return;
+      }
+      const file = getClipboardImage(event.clipboardData);
       if (!file) return;
       event.preventDefault();
       if (pasteBusy.current) return;
@@ -68,10 +101,10 @@ export function useImagePaste({
         const body = new FormData();
         body.append(name, accepted);
         const response = await fetch(pasteUploadUrl, { method: "POST", body });
-        const result = await response.json();
-        if (!response.ok || result.success !== true)
+        const result = await response.json().catch(() => null);
+        if (!response.ok || result?.success !== true)
           throw new Error(
-            typeof result.error === "string"
+            typeof result?.error === "string"
               ? result.error
               : "Image upload failed. Try again."
           );
@@ -95,10 +128,11 @@ export function useImagePaste({
         event.stopPropagation();
       }
     };
-    form.addEventListener("paste", paste);
+    document.addEventListener("paste", paste);
     form.addEventListener("submit", submit, true);
     return () => {
-      form.removeEventListener("paste", paste);
+      delete input.dataset.imagePaste;
+      document.removeEventListener("paste", paste);
       form.removeEventListener("submit", submit, true);
     };
   }, [

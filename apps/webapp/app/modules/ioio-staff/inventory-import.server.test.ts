@@ -3474,6 +3474,61 @@ describe("staff inventory import safety", () => {
     expect(mockCreateCategory).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      description:
+        "TinkerKit joystick module for directional input in Arduino and electronics projects.",
+      expected:
+        "TinkerKit joystick module for directional input in Arduino and electronics projects.",
+    },
+    { description: null, expected: "" },
+  ])(
+    "creates a joystick with clean product text or blank through Apply: $expected",
+    async ({ description, expected }) => {
+      const row: StaffImportProposalRow = {
+        rowNumber: 2,
+        title: "TinkerKit joystick module",
+        quantity: 1,
+        receivedQuantity: 1,
+        type: "QUANTITY_TRACKED",
+        action: "CREATE",
+        category: "Electronics",
+        categoryId: "category-electronics",
+        location: null,
+        locationId: null,
+        assetId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "New product",
+        sourceOrganization: "IOIO Lab",
+        sourceDescription: "TinkerKit joystick module.",
+        manufacturer: "TinkerKi",
+        assetModelDescription: description,
+      };
+      const { result, assetRows } = await applyNewImport({
+        quantity: 1,
+        proposalRows: [row],
+        reviewDecisionRows: [
+          {
+            rowNumber: 2,
+            decision: "APPROVE",
+            title: row.title,
+            quantity: 1,
+            categoryId: row.categoryId,
+            locationId: null,
+            type: "QUANTITY_TRACKED",
+            productChoice: "NEW",
+            assetModelDescription: description,
+          },
+        ],
+      });
+      expect(result).toMatchObject({ succeededRows: 1, failedRowsCount: 0 });
+      expect(assetRows).toHaveLength(1);
+      expect(assetRows[0].description).toBe(expected);
+    }
+  );
+
   it("accepts a direct row import without a second approval flag", async () => {
     const { result, assetRows } = await applyNewImport({
       quantity: 5,
@@ -5324,10 +5379,15 @@ describe("staff inventory import safety", () => {
         locationId: `bin-${bin}`,
         organizationId: "org-1",
       });
-      expect(assetRows[0].description).toContain("Source lab: IOIO Lab");
-      expect(assetRows[0].description).toContain("Source room: B477");
-      expect(assetRows[0].description).toContain(
-        `Source storage location: ${bin}`
+      expect(assetRows[0].description).not.toMatch(
+        /Imported from|Source (lab|room|storage location|description):/
+      );
+      expect(prepared.proposal.rows).toContainEqual(
+        expect.objectContaining({
+          sourceOrganization: "IOIO Lab",
+          sourceRoom: "B477",
+          sourceStorageLocation: bin,
+        })
       );
     }
   });

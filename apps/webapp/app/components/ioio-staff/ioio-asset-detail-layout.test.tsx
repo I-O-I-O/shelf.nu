@@ -9,6 +9,7 @@ import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, describe, expect, it } from "vitest";
 import { AssetDetailImage } from "~/components/assets/asset-image";
 import { ASSET_IMAGE_PLACEHOLDER } from "~/modules/asset/image-resolution";
+import { importedDescription } from "~/modules/ioio-staff/import-description";
 import { IoioAssetDetailLayout } from "./ioio-asset-detail-layout";
 
 const trackingHelp =
@@ -17,12 +18,14 @@ const trackingHelp =
 function renderDetail({
   availableQuantity = 4,
   availabilityDetail,
+  status,
   imageUrl = "/makey-kit.jpg",
   title = "Makey Kit",
   description = "A classroom electronics kit.",
 }: {
   availableQuantity?: number;
   availabilityDetail?: string;
+  status?: string;
   imageUrl?: string | null;
   title?: string;
   description?: string | null;
@@ -36,8 +39,8 @@ function renderDetail({
             backTo="/ioio"
             backLabel="Back to Inventory"
             title={title}
+            status={status}
             description={description}
-            descriptionPlacement="below-details"
             image={
               <AssetDetailImage
                 asset={{
@@ -81,8 +84,25 @@ function renderDetail({
 describe("IoioAssetDetailLayout", () => {
   afterEach(() => cleanup());
 
+  it("shows clean imported product text on the student detail surface", () => {
+    const description = importedDescription({
+      title: "TinkerKit joystick module",
+      assetModelDescription:
+        "TinkerKit joystick module for directional input in Arduino and electronics projects.",
+      sourceDescription: "Source lab: IOIO Lab. Source room: B477.",
+    });
+    const { container } = renderDetail({
+      title: "TinkerKit joystick module",
+      description,
+    });
+    expect(screen.getByText(description)).toBeVisible();
+    expect(container.textContent).not.toMatch(
+      /Imported from|Source lab:|Source room:|Source storage location:/
+    );
+  });
+
   it.each(["Grove Kit", "Camera"])(
-    "puts the %s image and details before its full description",
+    "stacks the %s image and details before its full-width description",
     (title) => {
       const description =
         "This kit includes an Arduino Nano 33 BLE Rev2.\n\nThe kit consists of the following components:\n1x Arduino Nano 33 BLE Sense Rev2\n1x USB-A to Micro-USB cable";
@@ -110,7 +130,7 @@ describe("IoioAssetDetailLayout", () => {
         action.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING
       ).toBeTruthy();
       expect(
-        image.compareDocumentPosition(details) &
+        image.compareDocumentPosition(descriptionHeading) &
           Node.DOCUMENT_POSITION_FOLLOWING
       ).toBeTruthy();
       expect(
@@ -121,6 +141,18 @@ describe("IoioAssetDetailLayout", () => {
         descriptionHeading.compareDocumentPosition(descriptionText) &
           Node.DOCUMENT_POSITION_FOLLOWING
       ).toBeTruthy();
+      expect(
+        screen.getAllByRole("region", { name: `${title} image` })
+      ).toHaveLength(1);
+      expect(
+        screen.getAllByRole("heading", { name: "Description" })
+      ).toHaveLength(1);
+      expect(
+        screen.getAllByText(
+          (_, element) =>
+            element?.tagName === "P" && element.textContent === description
+        )
+      ).toHaveLength(1);
       expect(descriptionText.textContent).toBe(description);
       expect(descriptionText.className).toContain("whitespace-pre-wrap");
       expect(descriptionText.className).toContain("break-words");
@@ -132,6 +164,70 @@ describe("IoioAssetDetailLayout", () => {
       expect(screen.getByText("Inventory")).toBeTruthy();
     }
   );
+
+  it("stretches the top cards equally and spans Description across both grid columns", () => {
+    renderDetail({ status: "Available" });
+    const title = screen.getByRole("heading", { name: "Makey Kit" });
+    const header = title.closest("header")!;
+    expect(header.textContent).not.toMatch(/Availability:|available/i);
+    expect(screen.queryByLabelText("Availability")).not.toBeInTheDocument();
+    expect(screen.getAllByText("4 / 5 kits available")).toHaveLength(1);
+    const image = screen.getByRole("region", { name: "Makey Kit image" });
+    const description = screen
+      .getByRole("heading", { name: "Description" })
+      .closest("section")!;
+    const grid = image.parentElement!;
+    expect(description.parentElement).toBe(grid);
+    expect(description).toHaveClass("lg:col-span-2");
+    expect(image.className).not.toMatch(/self-start|h-\[/);
+    expect(grid).toHaveClass(
+      "grid",
+      "items-stretch",
+      "gap-4",
+      "lg:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.9fr)]"
+    );
+    for (const card of [image, description]) {
+      expect(card).toHaveClass(
+        "w-full",
+        "min-w-0",
+        "rounded-2xl",
+        "border",
+        "border-gray-200",
+        "bg-white",
+        "p-3",
+        "sm:p-4",
+        "shadow-sm"
+      );
+      expect(card.className).not.toMatch(/max-w-|mt-/);
+    }
+    const body = screen.getByText("A classroom electronics kit.");
+    expect(body).toHaveClass(
+      "w-full",
+      "min-w-0",
+      "max-w-[110ch]",
+      "break-words",
+      "[overflow-wrap:anywhere]"
+    );
+    const sidebar = screen
+      .getByRole("heading", { name: "Details" })
+      .closest("section")!;
+    expect(sidebar.parentElement).toBe(grid);
+    expect(Array.from(grid.children)).toEqual([image, sidebar, description]);
+    expect(sidebar.className).not.toMatch(/self-start|h-\[/);
+  });
+
+  it("keeps the placeholder before a long description when no product image exists", () => {
+    const description = "Long product information. ".repeat(200);
+    renderDetail({ imageUrl: null, description });
+    const placeholder = screen.getByAltText("Makey Kit");
+    const heading = screen.getByRole("heading", { name: "Description" });
+    expect(placeholder).toHaveAttribute("src", ASSET_IMAGE_PLACEHOLDER);
+    expect(
+      placeholder.compareDocumentPosition(heading) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(screen.getAllByRole("img")).toHaveLength(1);
+  });
 
   it("does not render a description section for an empty description", () => {
     renderDetail({ description: " \n " });
@@ -181,7 +277,7 @@ describe("IoioAssetDetailLayout", () => {
     expect(imagePanel.parentElement?.className).toContain(
       "lg:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.9fr)]"
     );
-    expect(imagePanel.parentElement?.className).toContain("items-start");
+    expect(imagePanel.parentElement?.className).toContain("items-stretch");
     const availability = screen.getByText("4 / 5 kits available").parentElement;
     expect(availability?.className).toContain("bg-green-50");
   });

@@ -92,6 +92,106 @@ describe("IOIO asset creation form", () => {
     navigate.mockClear();
   });
 
+  it("puts Can't borrow in Advanced options and removes Unit of measure only from edit", () => {
+    const { rerender } = render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Calipers"
+        type="QUANTITY_TRACKED"
+        unitOfMeasure="pcs"
+        showAssetModel={false}
+      />
+    );
+    const toggle = screen.getByLabelText("Can't borrow");
+    const advanced = screen.getByText("Advanced options").closest("details");
+    expect(advanced).toContainElement(toggle);
+    expect(toggle).not.toBeVisible();
+    expect(screen.queryByLabelText("Unit of measure")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Label for the unit (e.g. pcs, boxes, liters).")
+    ).not.toBeInTheDocument();
+    const form = (screen.getByLabelText("Name") as HTMLInputElement).form!;
+    expect(new FormData(form).has("unitOfMeasure")).toBe(false);
+    fireEvent.click(screen.getByText("Advanced options"));
+    expect(toggle).toBeVisible();
+    expect(screen.getByLabelText("Description")).toBeVisible();
+    rerender(<IoioAssetCreateForm showAssetModel={false} />);
+    expect(screen.getByLabelText("Unit of measure")).toBeInTheDocument();
+  });
+
+  it("hides borrowing controls for lab use and restores their values when borrowing is enabled", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Calipers"
+        type="QUANTITY_TRACKED"
+        availableToBook
+        requiresBorrowApproval
+        requiresStaffPreparation
+        requiresReturnPhoto
+        maxBorrowDays={21}
+        extensionBorrowDays={7}
+        returnHandling="RETURN_TO_RETURN_ZONE"
+        showAssetModel={false}
+      />
+    );
+    fireEvent.click(screen.getByText("Advanced options"));
+    const toggle = screen.getByLabelText("Can't borrow");
+    const period = screen.getByLabelText("Maximum borrowing period");
+    const extension = screen.getByLabelText("Extension period");
+    const preparation = screen.getByLabelText("Requires preparation");
+    const returns = screen.getByLabelText("Return section for staff check");
+    const form = (screen.getByLabelText("Name") as HTMLInputElement).form!;
+    fireEvent.change(period, { target: { value: "28" } });
+    const submittedSettings = () =>
+      Array.from(new FormData(form).entries()).filter(
+        ([key, value]) => key !== "availableToBook" && typeof value === "string"
+      );
+    const before = submittedSettings();
+    fireEvent.click(toggle);
+    expect(new FormData(form).get("availableToBook")).toBe("false");
+    expect(
+      screen.getByText("Lab use only — this item cannot be borrowed.")
+    ).toBeVisible();
+    for (const control of [period, extension, preparation, returns])
+      expect(control).not.toBeVisible();
+    expect(screen.getByLabelText("Min quantity")).toBeVisible();
+    expect(screen.getByLabelText("Description")).toBeVisible();
+    expect(submittedSettings()).toEqual(before);
+    fireEvent.click(toggle);
+    expect(new FormData(form).get("availableToBook")).toBe("true");
+    for (const control of [period, extension, preparation, returns])
+      expect(control).toBeVisible();
+    expect(period).toHaveValue(28);
+    expect(extension).toHaveValue(7);
+    expect(preparation).toBeChecked();
+    expect(returns).toBeChecked();
+    expect(submittedSettings()).toEqual(before);
+  });
+
+  it("loads saved lab-use mode without submitting an unintended borrowability edit", () => {
+    render(
+      <IoioAssetCreateForm
+        id="asset-1"
+        title="Multimeter"
+        type="QUANTITY_TRACKED"
+        availableToBook={false}
+        requiresStaffPreparation
+        showAssetModel={false}
+      />
+    );
+    fireEvent.click(screen.getByText("Advanced options"));
+    expect(screen.getByLabelText("Can't borrow")).toBeChecked();
+    expect(screen.getByLabelText("Maximum borrowing period")).not.toBeVisible();
+    expect(screen.getByLabelText("Requires preparation")).not.toBeVisible();
+    expect(screen.getByLabelText("Requires preparation")).toBeChecked();
+    const form = (screen.getByLabelText("Name") as HTMLInputElement).form!;
+    expect(new FormData(form).has("availableToBook")).toBe(false);
+    fireEvent.click(screen.getByLabelText("Can't borrow"));
+    expect(screen.getByLabelText("Requires preparation")).toBeVisible();
+    expect(screen.getByLabelText("Requires preparation")).toBeChecked();
+  });
+
   it("starts new assets with the existing quantity and preparation defaults", () => {
     render(<IoioAssetCreateForm showAssetModel={false} />);
 

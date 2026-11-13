@@ -146,3 +146,60 @@ booking/kit services and shared select constants.
 - `apps/webapp/test/routes-tests/api+/bookings.$bookingId.assets-sidebar.test.ts`
 - `apps/webapp/test/routes-tests/api+/kits.test.tsx`
 - `apps/docs/asset-image-resolution.md` (this report)
+
+## Detail page content order
+
+Staff `/assets/:assetId/overview` renders `StaffItemDetail`, which uses
+`IoioAssetDetailLayout`. Student `/ioio/browse/:assetId` uses that same layout.
+Previously its default placed staff descriptions in the header, while the student
+route selected a separate below-details placement. The shared component now has
+one order: title/actions, image and Details in the top row, full-width Description below.
+The student route no longer needs a placement override.
+
+On desktop, Image and Details are equal-height top-row cards, with Description
+spanning both columns below. Smaller screens stack Image → Details → Description.
+The image renderer, responsive image dimensions, preview/lightbox, placeholder,
+contents and physical-unit panels are retained. Empty descriptions are omitted;
+long descriptions appear exactly once below the image, with whitespace preserved.
+Availability and status remain in the Details sidebar; the redundant title-area
+summary (`Available · Availability: 3 / 3 items available`) is removed.
+
+Follow-up files:
+
+- `apps/webapp/app/components/ioio-staff/ioio-asset-detail-layout.tsx`
+- `apps/webapp/app/components/ioio-staff/ioio-asset-detail-layout.test.tsx`
+- `apps/webapp/app/components/ioio-staff/staff-item-detail.test.tsx`
+- `apps/webapp/app/components/ioio-staff/staff-asset-detail-shell.test.tsx`
+- `apps/webapp/app/routes/_layout+/ioio.browse.$assetId.tsx`
+- `apps/docs/asset-image-resolution.md`
+
+Focused UI regressions check ordering for staff and student layouts, very long
+text, absent images, empty descriptions, one image region/description, responsive
+column classes, retained panels and the existing preview component behavior.
+No database change or migration is required. The shared detail layout and student
+route are the likely upstream merge-conflict points for this follow-up.
+
+## Detail card alignment polish
+
+The shared staff/student layout is one responsive grid with three direct children:
+Image, Details and Description. Desktop uses two columns. `items-stretch` makes
+both top-row cards fill the same grid row height, determined by the taller card;
+there is no fixed image height or image stretching. The existing renderer retains
+`object-contain`, intrinsic sizing limits, and the preview/lightbox behavior.
+
+Description uses `lg:col-span-2` to span the image column, gap and Details column
+in the next row, sharing the grid's outer left/right edges. `gap-4` preserves the
+card spacing. Below the desktop breakpoint, the grid has one column and natural
+row heights, in Image → Details → Description order.
+
+Existing card borders, radius, background, shadow and responsive padding are
+unchanged. The Description body retains its `110ch` reading-width limit, natural
+wrapping and original text. Page margins and the `max-w-7xl` limit are retained.
+
+This layout follow-up changes `ioio-asset-detail-layout.tsx`, its UI regression
+test, `staff-item-detail.test.tsx`, and this document. Image previews, description text, asset data and borrowing
+logic are unchanged. No migration is required. The shared detail layout is the
+likely merge-conflict point.
+
+Polish validation: 41 focused UI tests passed across four suites; ESLint,
+Prettier and `git diff --check` passed.

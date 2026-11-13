@@ -79,7 +79,7 @@ describe("StaffAssetDetailShell", () => {
     expect(screen.getByText("Extension period")).toBeTruthy();
     expect(screen.getByText("Borrowing approval")).toBeTruthy();
     expect(screen.getByText("Kit image")).toBeTruthy();
-    expect(screen.getByText("IOIO Lab")).toBeTruthy();
+    expect(screen.getByText("IOIO Lab · Container A1-1")).toBeTruthy();
     expect(screen.getByText(/Container A1-1/u)).toBeTruthy();
     expect(screen.getByText("Kits")).toBeTruthy();
     expect(screen.getByText("45 days")).toBeTruthy();

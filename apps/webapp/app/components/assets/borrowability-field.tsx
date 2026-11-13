@@ -4,9 +4,11 @@ import { useState } from "react";
 export function BorrowabilityField({
   availableToBook,
   disabled,
+  onBorrowableChange,
 }: {
   availableToBook: boolean;
   disabled?: boolean;
+  onBorrowableChange?: (borrowable: boolean) => void;
 }) {
   const [borrowable, setBorrowable] = useState(availableToBook);
   const [changed, setChanged] = useState(false);
@@ -26,14 +28,16 @@ export function BorrowabilityField({
           disabled={disabled}
           onChange={(event) => {
             setBorrowable(!event.target.checked);
+            onBorrowableChange?.(!event.target.checked);
             setChanged(true);
           }}
         />
         Can't borrow
       </label>
       <p className="mt-1 text-xs text-gray-600">
-        Keep this item visible in inventory, but prevent borrowing and
-        reservations.
+        {borrowable
+          ? "Keep this item visible in inventory, but prevent borrowing and reservations."
+          : "Lab use only — this item cannot be borrowed."}
       </p>
     </div>
   );

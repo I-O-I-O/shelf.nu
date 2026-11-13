@@ -6,12 +6,14 @@ import {
 } from "~/components/assets/asset-detail-information";
 import { PageBackLink } from "~/components/shared/page-back-link";
 
+const contentCardClasses =
+  "w-full min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-4";
+
 export type IoioAssetDetailLayoutProps = {
   backTo: string;
   backLabel: string;
   title: string;
   description?: string | null;
-  descriptionPlacement?: "header" | "below-details";
   image: ReactNode;
   actions?: ReactNode;
   categoryName?: string | null;
@@ -32,7 +34,6 @@ export function IoioAssetDetailLayout({
   backLabel,
   title,
   description,
-  descriptionPlacement = "header",
   image,
   actions,
   categoryName,
@@ -68,11 +69,6 @@ export function IoioAssetDetailLayout({
           <h1 className="break-words text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
             {title}
           </h1>
-          {descriptionPlacement === "header" && description?.trim() ? (
-            <p className="mt-2 max-w-3xl whitespace-pre-wrap text-sm leading-6 text-gray-600">
-              {description.trim()}
-            </p>
-          ) : null}
         </div>
         {actions ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
@@ -81,13 +77,14 @@ export function IoioAssetDetailLayout({
         ) : null}
       </header>
 
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.9fr)]">
+      <div className="grid items-stretch gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.9fr)]">
         <section
           aria-label={`${title} image`}
-          className="flex w-full min-w-0 items-center justify-center rounded-2xl border border-gray-200 bg-gray-50 shadow-sm"
+          className={`${contentCardClasses} flex items-center justify-center [&>div]:p-0`}
         >
           {image}
         </section>
+
         <AssetDetailInformation
           categoryName={categoryName}
           locations={locations}
@@ -99,24 +96,23 @@ export function IoioAssetDetailLayout({
           maxBorrowDays={maxBorrowDays}
           additionalFields={additionalFields}
         />
-      </div>
-
-      {descriptionPlacement === "below-details" && description?.trim() ? (
-        <section
-          aria-labelledby="asset-description-heading"
-          className="mt-6 w-full min-w-0 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
-        >
-          <h2
-            id="asset-description-heading"
-            className="text-sm font-bold uppercase tracking-wide text-gray-500"
+        {description?.trim() ? (
+          <section
+            aria-labelledby="asset-description-heading"
+            className={`${contentCardClasses} lg:col-span-2`}
           >
-            Description
-          </h2>
-          <p className="mt-3 max-w-4xl whitespace-pre-wrap break-words text-sm leading-6 text-gray-700">
-            {description.trim()}
-          </p>
-        </section>
-      ) : null}
+            <h2
+              id="asset-description-heading"
+              className="text-sm font-bold uppercase tracking-wide text-gray-500"
+            >
+              Description
+            </h2>
+            <p className="mt-3 w-full min-w-0 max-w-[110ch] whitespace-pre-wrap break-words text-sm leading-6 text-gray-700 [overflow-wrap:anywhere]">
+              {description.trim()}
+            </p>
+          </section>
+        ) : null}
+      </div>
 
       {children}
     </div>

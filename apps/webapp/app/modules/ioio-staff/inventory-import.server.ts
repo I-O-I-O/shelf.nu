@@ -38,6 +38,7 @@ import {
   ImportAssetModelConflictError,
   resolveImportAssetModel,
 } from "./import-asset-model.server";
+import { importedDescription } from "./import-description";
 import {
   requestImportHelperProposal,
   type ImportHelperManualReason,
@@ -6902,36 +6903,6 @@ function readLegacyPdfDecisions(value: string | null | undefined) {
   return parsed;
 }
 
-function buildImportedDescription(
-  filename: string,
-  row: StaffImportProposalRow
-) {
-  const parts = [
-    `Imported from ${filename}`,
-    row.sourceOrganization ? `Source lab: ${row.sourceOrganization}` : null,
-    row.sourceRoom ? `Source room: ${row.sourceRoom}` : null,
-    row.sourceStorageLocation
-      ? `Source storage location: ${row.sourceStorageLocation}`
-      : null,
-    row.quantityIsEstimated
-      ? `Source estimated quantity: ${row.sourceQuantity ?? row.quantity}`
-      : null,
-    row.sourceDescription
-      ? `Source description: ${row.sourceDescription}`
-      : null,
-    row.manufacturer ? `Manufacturer: ${row.manufacturer}` : null,
-    row.manufacturerPartNumber
-      ? `Manufacturer part number: ${row.manufacturerPartNumber}`
-      : null,
-    row.supplierPartNumber
-      ? `Supplier part number: ${row.supplierPartNumber}`
-      : null,
-    row.unitDescription ? `Unit: ${row.unitDescription}` : null,
-    row.sourceNotes ? `Source notes: ${row.sourceNotes}` : null,
-  ].filter(Boolean);
-  return parts.join(". ").slice(0, 2000);
-}
-
 async function makeSuggestedImageRequest(
   row: StaffImportProposalRow,
   organizationId: string,
@@ -7016,7 +6987,7 @@ async function applyImportAssetModelEnrichment({
     operationType: "ENRICH_MODEL",
     assetModelId,
   });
-  const description = row.assetModelDescription?.trim();
+  const description = importedDescription(row);
   if (
     description &&
     description !== row.existingAssetModelDescription?.trim()
@@ -7740,7 +7711,7 @@ async function buildIndividualUnitImportPlan({
     name: row.title,
     manufacturer: row.manufacturer,
     manufacturerPartNumber: row.manufacturerPartNumber,
-    description: row.assetModelDescription ?? null,
+    description: importedDescription(row) || null,
     defaultCategoryId: row.categoryId,
     defaultValuation: null,
     preferredModelId: id(),
@@ -7802,7 +7773,7 @@ async function ensureIndividualAssetModel({
     name: row.title,
     manufacturer: row.manufacturer,
     manufacturerPartNumber: row.manufacturerPartNumber,
-    description: row.assetModelDescription ?? null,
+    description: importedDescription(row) || null,
     defaultCategoryId: row.categoryId,
     defaultValuation: null,
     preferredModelId: plan.assetModelId,
@@ -10059,10 +10030,7 @@ export async function applyStaffInventoryImport({
                   importSessionId: operationId,
                   importCandidateId: `row-${row.rowNumber}`,
                   title: unitPlan.units[unitIndex].title,
-                  description: buildImportedDescription(
-                    proposal.source.filename,
-                    row
-                  ),
+                  description: importedDescription(row),
                   userId,
                   organizationId,
                   valuation: null,
@@ -10236,19 +10204,7 @@ export async function applyStaffInventoryImport({
           importSessionId: operationId,
           importCandidateId: `row-${row.rowNumber}`,
           title: row.title,
-          description:
-            type === "QUANTITY_TRACKED" && row.assetModelDescription?.trim()
-              ? [
-                  row.assetModelDescription.trim(),
-                  row.sourceRoom ||
-                  row.sourceOrganization ||
-                  row.sourceStorageLocation
-                    ? buildImportedDescription(proposal.source.filename, row)
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join("\n\n")
-              : buildImportedDescription(proposal.source.filename, row),
+          description: importedDescription(row),
           userId,
           organizationId,
           valuation: null,

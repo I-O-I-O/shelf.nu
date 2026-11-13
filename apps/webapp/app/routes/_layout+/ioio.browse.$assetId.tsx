@@ -122,7 +122,6 @@ export default function IoioAssetDetail() {
       backLabel="Back to inventory"
       title={formatStudentTitle(asset.title, asset.type)}
       description={asset.description}
-      descriptionPlacement="below-details"
       image={
         <AssetDetailImage
           asset={asset}

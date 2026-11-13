@@ -73,12 +73,16 @@ export function AssetAdvancedFields({
   values,
   disabled,
   fieldPrefix = "",
+  showUnitOfMeasure = true,
+  borrowingDisabled = false,
   onRequiresStaffPreparationChange,
   onReturnHandlingChange,
 }: {
   values: AssetAdvancedSettings;
   disabled: boolean;
   fieldPrefix?: string;
+  showUnitOfMeasure?: boolean;
+  borrowingDisabled?: boolean;
   onRequiresStaffPreparationChange: (checked: boolean) => void;
   onReturnHandlingChange: (returnHandling: Asset["returnHandling"]) => void;
 }) {
@@ -86,21 +90,23 @@ export function AssetAdvancedFields({
     <>
       {isQuantityTracked(values.type) ? (
         <>
-          <FormRow
-            rowLabel="Unit of measure"
-            subHeading="Label for the unit (e.g. pcs, boxes, liters)."
-            className="border-b-0 py-4"
-          >
-            <Input
-              label="Unit of measure"
-              hideLabel
-              name={`${fieldPrefix}unitOfMeasure`}
-              disabled={disabled}
-              className="w-full"
-              placeholder="e.g., pcs, boxes, liters"
-              defaultValue={values.unitOfMeasure ?? ""}
-            />
-          </FormRow>
+          {showUnitOfMeasure ? (
+            <FormRow
+              rowLabel="Unit of measure"
+              subHeading="Label for the unit (e.g. pcs, boxes, liters)."
+              className="border-b-0 py-4"
+            >
+              <Input
+                label="Unit of measure"
+                hideLabel
+                name={`${fieldPrefix}unitOfMeasure`}
+                disabled={disabled}
+                className="w-full"
+                placeholder="e.g., pcs, boxes, liters"
+                defaultValue={values.unitOfMeasure ?? ""}
+              />
+            </FormRow>
+          ) : null}
           <FormRow
             rowLabel="Min quantity"
             subHeading="Low-stock alert threshold. Defaults to 1."
@@ -120,78 +126,83 @@ export function AssetAdvancedFields({
           </FormRow>
         </>
       ) : null}
-      <FormRow
-        rowLabel={
-          <SettingHelpLabel
-            label="Staff preparation"
-            help="When enabled, Staff must prepare or check the item before the borrower can pick it up."
-          />
-        }
-        className="border-b-0 py-4"
-      >
-        <label className="flex items-start gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            name={`${fieldPrefix}requiresStaffPreparation`}
-            value="true"
-            checked={values.requiresStaffPreparation}
-            onChange={(event) =>
-              onRequiresStaffPreparationChange(event.currentTarget.checked)
-            }
-            disabled={disabled}
-            className="mt-0.5 size-4 rounded border-gray-300 text-primary-500 focus:ring-primary-500"
-          />
-          <span>Requires preparation</span>
-        </label>
-      </FormRow>
-      <FormRow
-        rowLabel={
-          <SettingHelpLabel
-            label="Return section"
-            help="Students return this equipment here for staff checking. Items with a reported problem follow the configured problem-return workflow."
-          />
-        }
-        className="border-b-0 py-4"
-      >
-        <div className="space-y-2 text-sm text-gray-700">
-          <label className="flex items-start gap-2">
+      {/* Keep values mounted and submitted while borrowing is disabled. */}
+      <div hidden={borrowingDisabled}>
+        <FormRow
+          rowLabel={
+            <SettingHelpLabel
+              label="Staff preparation"
+              help="When enabled, Staff must prepare or check the item before the borrower can pick it up."
+            />
+          }
+          className="border-b-0 py-4"
+        >
+          <label className="flex items-start gap-2 text-sm text-gray-700">
             <input
-              type="radio"
-              name={`${fieldPrefix}returnHandling`}
-              value={ASSET_RETURN_HANDLING.RETURN_TO_STORAGE}
-              checked={
-                values.returnHandling ===
-                ASSET_RETURN_HANDLING.RETURN_TO_STORAGE
-              }
-              onChange={() =>
-                onReturnHandlingChange(ASSET_RETURN_HANDLING.RETURN_TO_STORAGE)
+              type="checkbox"
+              name={`${fieldPrefix}requiresStaffPreparation`}
+              value="true"
+              checked={values.requiresStaffPreparation}
+              onChange={(event) =>
+                onRequiresStaffPreparationChange(event.currentTarget.checked)
               }
               disabled={disabled}
-              className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
+              className="mt-0.5 size-4 rounded border-gray-300 text-primary-500 focus:ring-primary-500"
             />
-            <span>Assigned storage location</span>
+            <span>Requires preparation</span>
           </label>
-          <label className="flex items-start gap-2">
-            <input
-              type="radio"
-              name={`${fieldPrefix}returnHandling`}
-              value={ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE}
-              checked={
-                values.returnHandling ===
-                ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE
-              }
-              onChange={() =>
-                onReturnHandlingChange(
+        </FormRow>
+        <FormRow
+          rowLabel={
+            <SettingHelpLabel
+              label="Return section"
+              help="Students return this equipment here for staff checking. Items with a reported problem follow the configured problem-return workflow."
+            />
+          }
+          className="border-b-0 py-4"
+        >
+          <div className="space-y-2 text-sm text-gray-700">
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                name={`${fieldPrefix}returnHandling`}
+                value={ASSET_RETURN_HANDLING.RETURN_TO_STORAGE}
+                checked={
+                  values.returnHandling ===
+                  ASSET_RETURN_HANDLING.RETURN_TO_STORAGE
+                }
+                onChange={() =>
+                  onReturnHandlingChange(
+                    ASSET_RETURN_HANDLING.RETURN_TO_STORAGE
+                  )
+                }
+                disabled={disabled}
+                className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
+              />
+              <span>Assigned storage location</span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="radio"
+                name={`${fieldPrefix}returnHandling`}
+                value={ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE}
+                checked={
+                  values.returnHandling ===
                   ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE
-                )
-              }
-              disabled={disabled}
-              className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
-            />
-            <span>Return section for staff check</span>
-          </label>
-        </div>
-      </FormRow>
+                }
+                onChange={() =>
+                  onReturnHandlingChange(
+                    ASSET_RETURN_HANDLING.RETURN_TO_RETURN_ZONE
+                  )
+                }
+                disabled={disabled}
+                className="mt-0.5 size-4 border-gray-300 text-primary-500 focus:ring-primary-500"
+              />
+              <span>Return section for staff check</span>
+            </label>
+          </div>
+        </FormRow>
+      </div>
     </>
   );
 }

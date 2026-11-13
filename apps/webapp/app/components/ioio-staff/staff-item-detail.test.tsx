@@ -14,6 +14,7 @@ describe("StaffItemDetail", () => {
           element: (
             <StaffItemDetail
               title="Motor Small"
+              description={"Staff product information. ".repeat(100)}
               image={<div>Motor image</div>}
               availableQuantity={2}
               locationPath={[]}
@@ -32,6 +33,24 @@ describe("StaffItemDetail", () => {
     expect(
       borrow.compareDocumentPosition(edit) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+    const image = screen.getByRole("region", { name: "Motor Small image" });
+    const description = screen.getByRole("heading", { name: "Description" });
+    const details = screen.getByRole("heading", { name: "Details" });
+    expect(
+      borrow.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      image.compareDocumentPosition(description) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      details.compareDocumentPosition(description) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(screen.getAllByText("Motor image")).toHaveLength(1);
+    expect(
+      screen.getAllByRole("heading", { name: "Description" })
+    ).toHaveLength(1);
     expect(screen.queryByText(/Ask IOIO about this item/u)).toBeNull();
   });
 

@@ -171,3 +171,103 @@ it("leaves text paste untouched and still accepts a picked file", async () => {
     (screen.getByLabelText("Main image") as HTMLInputElement).files
   ).toHaveLength(1);
 });
+
+it("uploads a files-only clipboard image when the edit page has focus", async () => {
+  // why: replace external upload HTTP with a successful storage response.
+  const upload = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response(JSON.stringify({ success: true })));
+  render(
+    <Provider>
+      <EditImage />
+    </Provider>
+  );
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { items: [], files: [image()] },
+  });
+  fireEvent(document.body, event);
+  expect(event.defaultPrevented).toBe(true);
+  await screen.findByAltText("Selected upload preview");
+  expect(upload).toHaveBeenCalledTimes(1);
+});
+
+it("does not claim page paste while a different form or dialog owns it", () => {
+  // why: unrelated form/dialog paste must never send external upload HTTP.
+  const upload = vi.spyOn(globalThis, "fetch");
+  render(
+    <Provider>
+      <EditImage />
+      <form>
+        <input aria-label="Other notes" />
+      </form>
+      <dialog open>Other dialog</dialog>
+    </Provider>
+  );
+  for (const target of [screen.getByLabelText("Other notes"), document.body]) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { items: [], files: [image()] },
+    });
+    fireEvent(target, event);
+    expect(event.defaultPrevented).toBe(false);
+  }
+  expect(upload).not.toHaveBeenCalled();
+});
+
+it("reports a useful error for a non-JSON server failure and keeps the saved image", async () => {
+  // why: a proxy or expired-session HTML response is an external upload failure.
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response("<html>unavailable</html>", { status: 503 })
+  );
+  render(
+    <Provider>
+      <EditImage />
+    </Provider>
+  );
+  paste(image());
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Image upload failed. Try again."
+  );
+  expect(screen.getByAltText("Saved cover")).toBeVisible();
+});
+
+it("pastes into the visible draft without uploading to a hidden queued form", async () => {
+  // why: external upload HTTP is controlled to verify the destination count.
+  const upload = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response(JSON.stringify({ success: true })));
+  render(
+    <Provider>
+      <div hidden>
+        <EditImage />
+      </div>
+      <EditImage />
+    </Provider>
+  );
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { items: [], files: [image()] },
+  });
+  fireEvent(document.body, event);
+  await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+  expect(await screen.findByAltText("Selected upload preview")).toBeVisible();
+});
+
+it("leaves ambiguous page paste alone when multiple image forms are visible", () => {
+  // why: no external upload may be sent to an ambiguous image target.
+  const upload = vi.spyOn(globalThis, "fetch");
+  render(
+    <Provider>
+      <EditImage />
+      <EditImage />
+    </Provider>
+  );
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    value: { items: [], files: [image()] },
+  });
+  fireEvent(document.body, event);
+  expect(event.defaultPrevented).toBe(false);
+  expect(upload).not.toHaveBeenCalled();
+});

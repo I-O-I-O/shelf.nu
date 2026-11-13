@@ -446,6 +446,8 @@ export const IoioAssetCreateForm = ({
   /** Whether we are in edit mode (asset already exists). */
   const isEditMode = Boolean(id);
   const isProductGroupEdit = Boolean(productGroup);
+  const [borrowable, setBorrowable] = useState(availableToBook);
+  useEffect(() => setBorrowable(availableToBook), [id, availableToBook]);
   /** Track the selected asset type for conditional field rendering. */
   const [selectedAssetType, setSelectedAssetType] = useState<AssetType>(
     bulkMode ? AssetType.INDIVIDUAL : assetType ?? AssetType.QUANTITY_TRACKED
@@ -1759,77 +1761,80 @@ export const IoioAssetCreateForm = ({
             />
           </FormRow>
 
-          {id ? (
-            <FormRow
-              rowLabel="Borrowing"
-              subHeading={
-                isProductGroupEdit
-                  ? "Changing this setting applies to all active physical units of this product."
-                  : undefined
-              }
-              className="border-b-0 py-3"
-            >
-              <BorrowabilityField
-                key={`${id}:${availableToBook}`}
-                availableToBook={availableToBook}
-                disabled={disabled}
-              />
-            </FormRow>
-          ) : null}
           <AdvancedOptions>
             <div className="border-b border-gray-200 pb-2 pt-3">
               <h3 className="text-sm font-semibold text-gray-900">Borrowing</h3>
             </div>
-            <FormRow
-              rowLabel={
-                <SettingHelpLabel
-                  label="Maximum borrowing period"
-                  help="How long this item can be borrowed before an extension is required."
-                />
-              }
-              className="border-b-0 py-3"
-            >
-              <div className="flex items-center gap-2">
-                <Input
-                  label="Maximum borrowing period"
-                  hideLabel
-                  name="maxBorrowDays"
-                  type="number"
-                  min={1}
-                  max={365}
-                  defaultValue={maxBorrowDays ?? 45}
+            {id ? (
+              <FormRow
+                rowLabel="Borrowing"
+                subHeading={
+                  isProductGroupEdit
+                    ? "Changing this setting applies to all active physical units of this product."
+                    : undefined
+                }
+                className="border-b-0 py-3"
+              >
+                <BorrowabilityField
+                  key={`${id}:${availableToBook}`}
+                  availableToBook={availableToBook}
                   disabled={disabled}
-                  className="w-24"
-                  required
+                  onBorrowableChange={setBorrowable}
                 />
-                <span className="text-sm text-gray-600">days</span>
-              </div>
-            </FormRow>
-            <FormRow
-              rowLabel={
-                <SettingHelpLabel
-                  label="Extension period"
-                  help="Additional borrowing time available after Staff approves an extension request."
-                />
-              }
-              className="border-b-0 py-3"
-            >
-              <div className="flex items-center gap-2">
-                <Input
-                  label="Extension period"
-                  hideLabel
-                  name="extensionBorrowDays"
-                  type="number"
-                  min={1}
-                  max={365}
-                  defaultValue={extensionBorrowDays ?? maxBorrowDays ?? 45}
-                  disabled={disabled}
-                  className="w-24"
-                  required
-                />
-                <span className="text-sm text-gray-600">days</span>
-              </div>
-            </FormRow>
+              </FormRow>
+            ) : null}
+            <div hidden={!borrowable}>
+              <FormRow
+                rowLabel={
+                  <SettingHelpLabel
+                    label="Maximum borrowing period"
+                    help="How long this item can be borrowed before an extension is required."
+                  />
+                }
+                className="border-b-0 py-3"
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    label="Maximum borrowing period"
+                    hideLabel
+                    name="maxBorrowDays"
+                    type="number"
+                    min={1}
+                    max={365}
+                    defaultValue={maxBorrowDays ?? 45}
+                    disabled={disabled}
+                    className="w-24"
+                    required
+                  />
+                  <span className="text-sm text-gray-600">days</span>
+                </div>
+              </FormRow>
+              <FormRow
+                rowLabel={
+                  <SettingHelpLabel
+                    label="Extension period"
+                    help="Additional borrowing time available after Staff approves an extension request."
+                  />
+                }
+                className="border-b-0 py-3"
+              >
+                <div className="flex items-center gap-2">
+                  <Input
+                    label="Extension period"
+                    hideLabel
+                    name="extensionBorrowDays"
+                    type="number"
+                    min={1}
+                    max={365}
+                    defaultValue={extensionBorrowDays ?? maxBorrowDays ?? 45}
+                    disabled={disabled}
+                    className="w-24"
+                    required
+                  />
+                  <span className="text-sm text-gray-600">days</span>
+                </div>
+              </FormRow>
+            </div>
             <DescriptionField description={description} disabled={disabled} />
             {isProductGroupEdit ? (
               <p className="pb-2 text-xs text-gray-600">
@@ -1839,6 +1844,8 @@ export const IoioAssetCreateForm = ({
               </p>
             ) : null}
             <AssetAdvancedFields
+              showUnitOfMeasure={!isEditMode}
+              borrowingDisabled={!borrowable}
               values={{
                 type: selectedAssetType,
                 unitOfMeasure: unitOfMeasure ?? null,

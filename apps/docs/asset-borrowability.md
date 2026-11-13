@@ -5,8 +5,8 @@ The staff edit form's **Can't borrow** control writes its inverse. No schema,
 migration or environment change is required. The control does not write quantity,
 location, visibility, archive markers, custody or checkout status.
 
-The control appears beside the borrowing settings in the normal IOIO asset edit
-form. Untouched forms omit the field so older clients and mixed grouped products
+The control is the first setting under **Advanced options → Borrowing** in
+the IOIO asset edit form. Untouched forms omit the field so older clients and mixed grouped products
 retain their saved values. An explicit edit on a grouped product applies to every
 active physical unit. Reloading initializes the control from saved canonical data.
 An unresolved issue report still prevents re-enabling borrowing; the control does
@@ -77,3 +77,39 @@ and borrow-day limits), plus other existing repository diagnostics. Comparison
 with the preceding image-task check confirmed those errors predate this change;
 no new borrowing-control diagnostics were reported. This feature has not been
 deployed or tested by changing live inventory.
+
+## Staff edit layout
+
+The normal edit area has no Can't borrow toggle or Unit of measure field.
+Expand Advanced options, then use Can't borrow directly beneath the Borrowing
+heading, before Maximum borrowing period. Enabled mode says “Lab use only —
+this item cannot be borrowed.” Maximum borrowing period, Extension period,
+Staff preparation and Return section controls are hidden until borrowing is
+re-enabled. Their inputs stay mounted and retain their values; Description and
+Min quantity remain accessible. There is no separate approval control rendered
+by this form, and existing approval flags and server guards are unchanged.
+
+`Asset.unitOfMeasure` remains in the database and other consumers. Editing omits
+this field rather than clearing it. Creation still uses the existing field.
+Borrowability still writes only `Asset.availableToBook`; visibility, archive,
+physical status and staff/student access semantics are unchanged. No migration
+is required.
+
+Layout follow-up files:
+
+- `apps/webapp/app/components/assets/advanced-options.tsx`
+- `apps/webapp/app/components/assets/borrowability-field.tsx`
+- `apps/webapp/app/components/assets/ioio-asset-create-form.tsx`
+- `apps/webapp/app/components/assets/ioio-asset-create-form.test.tsx`
+- `apps/webapp/test/routes-tests/_layout+/assets.$assetId_.edit.clear-image.test.ts`
+- `apps/docs/asset-borrowability.md`
+
+Focused regressions cover Advanced placement, absent Unit of measure controls,
+unchanged creation UI, persisted lab-use state, hidden/restored borrowing settings
+and unchanged form values. Existing route persistence, student visibility and
+direct server borrow refusal suites verify the canonical behavior still applies.
+Likely upstream conflicts are confined to the IOIO edit form and shared advanced
+fields/borrowability component. No server or database implementation was changed.
+
+The layout follow-up passed 99 tests across six focused suites, plus ESLint,
+Prettier and `git diff --check`.

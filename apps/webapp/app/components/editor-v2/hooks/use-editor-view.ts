@@ -10,6 +10,7 @@ import {
   parseMarkdoc,
   serializeMarkdoc,
 } from "~/modules/editor-v2/markdoc-utils";
+import { getClipboardImage } from "~/utils/clipboard-image";
 import { Logger } from "~/utils/logger";
 import { tw } from "~/utils/tw";
 
@@ -196,16 +197,7 @@ export function useEditorView(
         },
       },
       handlePaste: (view, event) => {
-        const clipboard = event.clipboardData;
-        const imageFile = clipboard
-          ? Array.from(clipboard.items)
-              .filter((item) => item.type.startsWith("image/"))
-              .map((item) => item.getAsFile())
-              .find((file): file is File => Boolean(file)) ??
-            Array.from(clipboard.files).find((file) =>
-              file.type.startsWith("image/")
-            )
-          : undefined;
+        const imageFile = getClipboardImage(event.clipboardData);
         if (imageFile && onPasteImageRef.current) {
           event.preventDefault();
           onPasteImageRef.current(imageFile, view);
