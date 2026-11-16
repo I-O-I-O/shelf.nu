@@ -415,6 +415,23 @@ describe("staff dashboard Lab status hierarchy", () => {
         }),
         children: [
           {
+            // Resource boundary: the real endpoint's authorization and filesystem
+            // behavior are covered in api+/backups.test.ts.
+            path: "api/backups",
+            loader: () => ({
+              backup: {
+                available: true,
+                automatic: "unconfirmed",
+                retention: 7,
+                running: false,
+                status: "never",
+                last: null,
+                recent: [],
+                metadataWarning: false,
+              },
+            }),
+          },
+          {
             path: "home",
             Component: HomePage,
             loader: () => ({
@@ -443,6 +460,10 @@ describe("staff dashboard Lab status hierarchy", () => {
     renderDashboard(true, 3);
     const lab = await screen.findByRole("region", { name: "Lab status" });
     const status = screen.getByRole("region", { name: "System status" });
+    expect(screen.getByRole("region", { name: "Backup" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Back up now" })
+    ).toBeInTheDocument();
     expect(status).toHaveTextContent(/Server\s*Online/u);
     expect(status).toHaveTextContent(/Storage\s*63% used/u);
     expect(status).toHaveTextContent(/Claude\s*Unavailable/u);
@@ -488,6 +509,7 @@ describe("staff dashboard Lab status hierarchy", () => {
 
   it("does not show the staff status area or review count to students", async () => {
     renderDashboard(false, 3);
+    expect(screen.queryByRole("region", { name: "Backup" })).toBeNull();
     await screen.findByRole("heading", { name: "Staff Dashboard" });
     expect(screen.queryByRole("region", { name: "Lab status" })).toBeNull();
     expect(screen.queryByRole("region", { name: "System status" })).toBeNull();

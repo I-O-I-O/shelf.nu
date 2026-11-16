@@ -42,6 +42,7 @@ FROM base AS release
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+      postgresql-client \
       tesseract-ocr \
       tesseract-ocr-eng \
       tesseract-ocr-swe && \
@@ -55,6 +56,9 @@ COPY --from=build /src/apps/webapp/package.json /src/apps/webapp/package.json
 COPY --from=build /src/package.json /src/package.json
 COPY --from=build /src/apps/webapp/prisma.config.ts /src/apps/webapp/prisma.config.ts
 COPY --from=build /src/apps/webapp/start.sh /src/apps/webapp/start.sh
+
+COPY --from=build /src/apps/webapp/scripts/database-backup.mjs /src/apps/webapp/scripts/database-backup.mjs
+COPY --from=build /src/apps/webapp/app/modules/backup/service.server.ts /src/apps/webapp/app/modules/backup/service.server.ts
 
 WORKDIR /src/apps/webapp
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily IOIO Shelf database backup at 03:00 server local time
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+AccuracySec=1min
+Unit=ioio-shelf-backup.service
+
+[Install]
+WantedBy=timers.target
