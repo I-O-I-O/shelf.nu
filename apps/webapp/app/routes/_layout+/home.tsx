@@ -14,7 +14,7 @@ import type {
 import { data, Link, useLoaderData, useRouteLoaderData } from "react-router";
 import { z } from "zod";
 import { ErrorContent } from "~/components/errors";
-import { BackupCard } from "~/components/ioio-staff/backup-card";
+import { BackupStatusItem } from "~/components/ioio-staff/backup-status";
 import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customizer";
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
 import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
@@ -581,10 +581,7 @@ export default function HomePage() {
         </header>
 
         {isStaff && systemStatus ? (
-          <>
-            <SystemStatusStrip status={systemStatus} />
-            <BackupCard />
-          </>
+          <SystemStatusStrip status={systemStatus} />
         ) : null}
 
         {isStaff ? (
@@ -646,6 +643,7 @@ function SystemStatusStrip({ status }: { status: StaffSystemStatus }) {
             <span>Claude</span>
             <span className="font-semibold text-gray-950">{claudeLabel}</span>
           </p>
+          <BackupStatusItem />
         </div>
       </div>
     </section>

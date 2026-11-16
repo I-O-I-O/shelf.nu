@@ -460,15 +460,16 @@ describe("staff dashboard Lab status hierarchy", () => {
     renderDashboard(true, 3);
     const lab = await screen.findByRole("region", { name: "Lab status" });
     const status = screen.getByRole("region", { name: "System status" });
-    expect(screen.getByRole("region", { name: "Backup" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Back up now" })
+      within(status).getByRole("button", { name: /Backup/ })
     ).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Backup" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back up now" })).toBeNull();
     expect(status).toHaveTextContent(/Server\s*Online/u);
     expect(status).toHaveTextContent(/Storage\s*63% used/u);
     expect(status).toHaveTextContent(/Claude\s*Unavailable/u);
     expect(within(status).queryByText("Handbook reviews")).toBeNull();
-    expect(status.querySelectorAll("a, button")).toHaveLength(0);
+    expect(status.querySelectorAll("a, button")).toHaveLength(1);
     expect(
       status.compareDocumentPosition(lab) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
@@ -513,6 +514,7 @@ describe("staff dashboard Lab status hierarchy", () => {
     await screen.findByRole("heading", { name: "Staff Dashboard" });
     expect(screen.queryByRole("region", { name: "Lab status" })).toBeNull();
     expect(screen.queryByRole("region", { name: "System status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Backup/ })).toBeNull();
     expect(screen.queryByRole("link", { name: /Handbook reviews/ })).toBeNull();
   });
 });
