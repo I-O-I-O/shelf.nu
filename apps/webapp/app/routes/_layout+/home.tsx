@@ -14,6 +14,7 @@ import type {
 import { data, Link, useLoaderData, useRouteLoaderData } from "react-router";
 import { z } from "zod";
 import { ErrorContent } from "~/components/errors";
+import { BackupCard } from "~/components/ioio-staff/backup-card";
 import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customizer";
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
 import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
@@ -580,7 +581,10 @@ export default function HomePage() {
         </header>
 
         {isStaff && systemStatus ? (
-          <SystemStatusStrip status={systemStatus} />
+          <>
+            <SystemStatusStrip status={systemStatus} />
+            <BackupCard />
+          </>
         ) : null}
 
         {isStaff ? (

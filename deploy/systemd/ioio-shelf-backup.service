@@ -1,0 +1,21 @@
+[Unit]
+Description=IOIO Shelf verified PostgreSQL backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# EDIT these paths and identity to match the existing IOIO web service.
+User=ioio-shelf
+Group=ioio-shelf
+WorkingDirectory=/opt/ioio-shelf/apps/webapp
+EnvironmentFile=/etc/ioio-shelf/backup.env
+ExecStart=/usr/bin/node --experimental-strip-types scripts/database-backup.mjs
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ioio-shelf/backups
+# Runner allows up to one hour per PostgreSQL command.
+TimeoutStartSec=125min
