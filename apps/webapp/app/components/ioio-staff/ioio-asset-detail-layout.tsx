@@ -90,6 +90,7 @@ export function IoioAssetDetailLayout({
         <AssetDetailInformation
           categoryName={categoryName}
           locations={locations}
+          availableToBook={availableToBook}
           availability={
             availableToBook ? availableLabel : "Not available to borrow"
           }

@@ -17,6 +17,7 @@ export type AssetDetailField = {
 type AssetDetailInformationProps = {
   categoryName?: string | null;
   locations: AssetDetailLocation[];
+  availableToBook: boolean;
   availability: string;
   availabilityTone: "available" | "unavailable";
   availabilityDetail?: string;
@@ -44,6 +45,7 @@ function LocationValue({ location }: { location: AssetDetailLocation }) {
 export function AssetDetailInformation({
   categoryName,
   locations,
+  availableToBook,
   availability,
   availabilityTone,
   availabilityDetail,
@@ -75,7 +77,7 @@ export function AssetDetailInformation({
       label: "Category",
       value: categoryName || "Uncategorized",
     },
-    ...(maxBorrowDays != null
+    ...(availableToBook && maxBorrowDays != null
       ? [{ label: "Maximum borrowing period", value: `${maxBorrowDays} days` }]
       : []),
     ...(tracking
