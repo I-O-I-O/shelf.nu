@@ -258,6 +258,7 @@ describe("IoioAssetDetailLayout", () => {
     expect(screen.queryByText(/Section A|Shelf A1/u)).toBeNull();
     expect(screen.getByText("Inventory")).toBeTruthy();
     expect(screen.getByText("45 days")).toBeTruthy();
+    expect(screen.getByText("Maximum borrowing period")).toBeTruthy();
 
     const definitionLists = container.querySelectorAll("section dl");
     expect(
@@ -283,6 +284,14 @@ describe("IoioAssetDetailLayout", () => {
     expect(imagePanel.parentElement?.className).toContain("items-stretch");
     const availability = screen.getByText("4 / 5 kits available").parentElement;
     expect(availability?.className).toContain("bg-green-50");
+  });
+
+  it("hides the borrowing period for an asset that cannot be borrowed", () => {
+    renderDetail({ availableToBook: false });
+
+    expect(screen.getByText("Not available to borrow")).toBeVisible();
+    expect(screen.queryByText("Maximum borrowing period")).toBeNull();
+    expect(screen.queryByText("45 days")).toBeNull();
   });
 
   it.each([
