@@ -58,10 +58,12 @@ import {
   getActiveCustomFieldsForAsset,
   moveAssetLocationUnits,
   getAssets,
+  getAssetsOrderBy,
   parseAssetValuation,
   placeUnplacedUnits,
   refreshExpiredAssetImages,
   resolveAssetImagesForPresentation,
+  shouldUseDefaultAssetBrowseOrder,
   releaseQuantity,
   replaceAssetPlacements,
   relinkAssetQrCode,
@@ -5967,6 +5969,57 @@ describe("getAssets search via UNION", () => {
     orderBy: "createdAt" as const,
     orderDirection: "desc" as const,
   };
+
+  it("uses the useful default priority order on an unfiltered first load", async () => {
+    const defaultBrowseOrder = shouldUseDefaultAssetBrowseOrder({
+      search: null,
+      hasActiveFilters: false,
+      hasExplicitSort: false,
+    });
+
+    expect(defaultBrowseOrder).toBe(true);
+    await getAssets({ ...base, defaultBrowseOrder });
+
+    expect(findManyMock.mock.calls[0][0]!.orderBy).toEqual([
+      { consumptionType: { sort: "desc", nulls: "first" } },
+      { bookingAssets: { _count: "desc" } },
+      { valuation: "desc" },
+      { createdAt: "desc" },
+      { id: "asc" },
+    ]);
+  });
+
+  it("keeps the existing ordering when search, filters, or a sort are active", () => {
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: "camera",
+        hasActiveFilters: false,
+        hasExplicitSort: false,
+      })
+    ).toBe(false);
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: null,
+        hasActiveFilters: true,
+        hasExplicitSort: false,
+      })
+    ).toBe(false);
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: null,
+        hasActiveFilters: false,
+        hasExplicitSort: true,
+      })
+    ).toBe(false);
+
+    expect(
+      getAssetsOrderBy({
+        defaultBrowseOrder: false,
+        orderBy: "title",
+        orderDirection: "asc",
+      })
+    ).toEqual([{ title: "asc" }, { id: "asc" }]);
+  });
 
   it("runs the UNION and filters assets to the matching id set", async () => {
     await getAssets({ ...base, search: "chair" });
