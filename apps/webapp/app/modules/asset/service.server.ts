@@ -130,6 +130,7 @@ import {
   rethrowIfClientError,
   throwIfAssetQuantityOverAllocation,
 } from "~/utils/error";
+import { computeHasActiveFilters } from "~/utils/filter-params";
 import { getRedirectUrlFromRequest } from "~/utils/http";
 import { getCurrentSearchParams } from "~/utils/http.server";
 import { id, id as createId } from "~/utils/id/id.server";
@@ -768,6 +769,50 @@ const unavailableBookingStatuses = [
 ];
 
 /**
+ * A first-load browse order for the IOIO inventory. Reusable stock comes
+ * before one-way consumables, followed by items with more booking associations
+ * and higher unit value. Stable date/id keys keep page boundaries
+ * deterministic. Explicit filters and sorts retain their existing order.
+ */
+export function getAssetsOrderBy({
+  defaultBrowseOrder,
+  orderBy,
+  orderDirection,
+}: {
+  defaultBrowseOrder: boolean;
+  orderBy: SortingOptions;
+  orderDirection: SortingDirection;
+}): Prisma.AssetOrderByWithRelationInput[] {
+  if (defaultBrowseOrder) {
+    return [
+      { consumptionType: { sort: "desc", nulls: "first" } },
+      { bookingAssets: { _count: "desc" } },
+      { valuation: "desc" },
+      { createdAt: "desc" },
+      { id: "asc" },
+    ];
+  }
+
+  return [
+    { [orderBy]: orderDirection },
+    ...(orderBy !== "id" ? [{ id: "asc" as const }] : []),
+  ];
+}
+
+/** Whether an asset list request can use the IOIO first-load browse order. */
+export function shouldUseDefaultAssetBrowseOrder({
+  search,
+  hasActiveFilters,
+  hasExplicitSort,
+}: {
+  search?: string | null;
+  hasActiveFilters: boolean;
+  hasExplicitSort: boolean;
+}) {
+  return !hasActiveFilters && !search?.trim() && !hasExplicitSort;
+}
+
+/**
  * Fetches assets directly from the asset table with enhanced search capabilities
  * @param params Search and filtering parameters for asset queries
  * @returns Assets and total count matching the criteria
@@ -804,6 +849,8 @@ export async function getAssets(params: {
   ioioHiddenOnly?: boolean;
   /** Calculate the full filtered inventory quantity, independent of pagination. */
   includeTotalInventoryQuantity?: boolean;
+  /** IOIO default browse ranking, only when the viewer has not filtered/sorted. */
+  defaultBrowseOrder?: boolean;
 }) {
   let {
     organizationId,
@@ -827,6 +874,7 @@ export async function getAssets(params: {
     excludeAssetIds,
     ioioHiddenOnly,
     includeTotalInventoryQuantity = false,
+    defaultBrowseOrder = false,
   } = params;
 
   try {
@@ -1182,15 +1230,11 @@ export async function getAssets(params: {
             }),
             ...extraInclude,
           },
-          // Stable `id` tiebreaker for deterministic skip/take paging when
-          // rows tie on the sort key (bulk-imported assets share createdAt
-          // down to the millisecond). Mirrors the tiebreaker the advanced
-          // index uses (parseSortingOptions in query.server.ts). Skipped when
-          // the caller already sorts by id.
-          orderBy: [
-            { [orderBy]: orderDirection },
-            ...(orderBy !== "id" ? [{ id: "asc" as const }] : []),
-          ],
+          orderBy: getAssetsOrderBy({
+            defaultBrowseOrder,
+            orderBy,
+            orderDirection,
+          }),
         }),
         db.asset.count({ where: assetWhere }),
       ]);
@@ -6112,9 +6156,8 @@ export async function getPaginatedAndFilterableAssets({
   includeTotalInventoryQuantity?: boolean;
 }) {
   const currentFilterParams = new URLSearchParams(filters || "");
-  const searchParams = filters
-    ? currentFilterParams
-    : getCurrentSearchParams(request);
+  const requestSearchParams = getCurrentSearchParams(request);
+  const searchParams = filters ? currentFilterParams : requestSearchParams;
 
   const paramsValues = getParamsValues(searchParams);
   const status =
@@ -6138,6 +6181,17 @@ export async function getPaginatedAndFilterableAssets({
     teamMemberIds,
     assetKitFilter,
   } = paramsValues;
+
+  const hasExplicitSort = [searchParams, requestSearchParams].some((params) =>
+    ["sortBy", "orderBy", "orderDirection"].some((key) => params.has(key))
+  );
+  const defaultBrowseOrder = shouldUseDefaultAssetBrowseOrder({
+    search: search || requestSearchParams.get("s"),
+    hasActiveFilters:
+      computeHasActiveFilters(searchParams) ||
+      computeHasActiveFilters(requestSearchParams),
+    hasExplicitSort,
+  });
 
   const cookie = await updateCookieWithPerPage(request, perPageParam);
   const { perPage } = cookie;
@@ -6227,6 +6281,7 @@ export async function getPaginatedAndFilterableAssets({
         excludeAssetIds,
         ioioHiddenOnly,
         includeTotalInventoryQuantity,
+        defaultBrowseOrder,
       }),
     ]);
 
