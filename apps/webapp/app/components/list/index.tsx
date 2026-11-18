@@ -84,8 +84,6 @@ export type ListProps = {
   hideListTitle?: boolean;
   /** Optional fixed table layout for a purpose-built row design. */
   tableClassName?: string;
-  /** Hide the edge fade when a fixed table has no intended horizontal scroll. */
-  disableTableOverflowGradient?: boolean;
   /** Any extra content to the right in Header */
   headerExtraContent?: ReactNode;
   /** Any extra props directly passed to ItemComponent */
@@ -139,7 +137,6 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     customPagination,
     hideListTitle = false,
     tableClassName,
-    disableTableOverflowGradient = false,
     headerExtraContent,
     extraItemComponentProps,
     disableSelectAllItems,
@@ -234,7 +231,6 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
           ) : null}
           <div className={tw(MobileItemComponent && "hidden md:block")}>
             <Table
-              disableOverflowGradient={disableTableOverflowGradient}
               className={tw(
                 "list",
                 bulkActions && "list-with-bulk-actions",

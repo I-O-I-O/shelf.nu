@@ -1,9 +1,11 @@
 import { Currency, OrganizationType } from "@prisma/client";
-import type { Organization, Prisma, User } from "@prisma/client";
-import type { ITXClientDenyList } from "@prisma/client/runtime/library";
+import type { Organization, User } from "@prisma/client";
 
-import { db, type ExtendedPrismaClient } from "~/database/db.server";
-import { createOrganization } from "~/modules/organization/service.server";
+import { db } from "~/database/db.server";
+import {
+  createOrganization,
+  type OrganizationTransactionClient,
+} from "~/modules/organization/service.server";
 import { INSTANCE_NAME } from "~/utils/env";
 
 /**
@@ -13,7 +15,7 @@ import { INSTANCE_NAME } from "~/utils/env";
  */
 const IOIO_INITIAL_TEAM_LOCK_ID = 0x494f494f;
 
-type InitializationTransaction = Omit<ExtendedPrismaClient, ITXClientDenyList>;
+type InitializationTransaction = OrganizationTransactionClient;
 
 async function ensureInitialIoioTeamInTransaction({
   tx,
@@ -46,7 +48,7 @@ async function ensureInitialIoioTeamInTransaction({
     userId,
     image: null,
     currency: Currency.USD,
-    tx: tx as Prisma.TransactionClient,
+    tx,
   });
 
   await tx.user.update({

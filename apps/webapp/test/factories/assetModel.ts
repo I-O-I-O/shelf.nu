@@ -21,6 +21,8 @@ export function createAssetModel(
     userId: "user-123",
     createdAt: new Date("2023-01-01"),
     updatedAt: new Date("2023-01-01"),
+    importIdentityKey: null,
     ...overrides,
+    ioioHidden: overrides.ioioHidden ?? false,
   };
 }

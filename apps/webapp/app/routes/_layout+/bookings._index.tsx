@@ -495,15 +495,16 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
           .filter((id): id is string => Boolean(id))
       )
     );
-    const readyLocations = new Map(
-      await Promise.all(
-        readyLocationIds.map(async (locationId) => [
+    const readyLocationEntries = await Promise.all(
+      readyLocationIds.map(
+        async (locationId): Promise<[string, string]> => [
           locationId,
           (await getPickupLocationDisplay({ organizationId, locationId }))
             .label,
-        ])
+        ]
       )
     );
+    const readyLocations = new Map(readyLocationEntries);
     const readyPickupByBookingId = new Map<
       string,
       Array<{ unit: string; location: string | null }>
@@ -791,7 +792,6 @@ export default function BookingsIndexPage({
           hideListTitle={isIoioStaffLoans}
           hideFirstHeaderColumn={isIoioStaffLoans}
           tableClassName={isIoioStaffLoans ? "table-fixed" : undefined}
-          disableTableOverflowGradient={isIoioStaffLoans}
           headerChildren={
             isIoioStaffLoans ? (
               <>

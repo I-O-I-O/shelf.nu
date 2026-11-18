@@ -106,22 +106,34 @@ describe("active Staff Inventory Trash action", () => {
   });
 
   it("trashes the submitted Shelf Asset ID and stays on active Inventory", async () => {
-    const result = (await action(
+    const result = await action(
       createActionArgs({
         request: makeInventoryTrashRequest(),
         context,
       })
-    )) as { success: boolean; undo: { operation: string } };
+    );
 
     expect(mocks.trashIoioItems).toHaveBeenCalledWith({
       organizationId: "org-1",
       items: [{ itemType: "ASSET", itemId: "asset-1" }],
       trashedById: "staff-1",
     });
-    expect(result).toMatchObject({
-      success: true,
-      undo: { operation: "trash" },
-    });
+    if (!result || !("success" in result) || result.success !== true) {
+      throw new Error(
+        "Expected the Trash action to return its success payload"
+      );
+    }
+    const undo = "undo" in result ? result.undo : undefined;
+    if (
+      typeof undo !== "object" ||
+      undo === null ||
+      !("operation" in undo) ||
+      undo.operation !== "trash"
+    ) {
+      throw new Error("Expected the Trash action to include an undo operation");
+    }
+    expect(result.success).toBe(true);
+    expect(undo.operation).toBe("trash");
   });
 
   it("returns a controlled conflict for a legitimate Trash blocker", async () => {

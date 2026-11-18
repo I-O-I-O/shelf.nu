@@ -95,6 +95,10 @@ export function getImportLedgerItems({
   });
 }
 
+export type ImportLedgerItem = Awaited<
+  ReturnType<typeof getImportLedgerItems>
+>[number];
+
 /**
  * Conditional update is the claim: only the request that changes PENDING can
  * proceed. The attempt count and first heartbeat are written in the same SQL

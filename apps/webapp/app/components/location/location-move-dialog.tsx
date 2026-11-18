@@ -93,7 +93,11 @@ export function LocationMoveDialog({
         if (candidate.id === location?.id || descendants.has(candidate.id))
           return false;
         const depth = getIoioLocationDepth(candidate.id, locations);
-        return depth === expectedParentDepth && depth + 1 + subtreeDepth <= 3;
+        return (
+          depth !== null &&
+          depth === expectedParentDepth &&
+          depth + 1 + subtreeDepth <= 3
+        );
       })
       .sort((left, right) =>
         getLocationPathLabel(left, locationsById).localeCompare(

@@ -8,23 +8,47 @@ vi.mock("~/database/db.server", () => ({
   db: { asset: { findMany: assets } },
 }));
 function args() {
+  const result: StaffImportResult = {
+    operationId: "operation",
+    createdIds: ["asset"],
+    updatedIds: [],
+    reusedIds: [],
+    failedRows: [],
+    conflictRows: [],
+    ignoredRows: 0,
+    reviewedRows: 1,
+    totalRows: 1,
+    succeededRows: 1,
+    failedRowsCount: 0,
+    conflictedRowsCount: 0,
+    skippedRows: 0,
+  };
+  const ledgerItem: ImportLedgerItem = {
+    id: "item",
+    operationId: "operation",
+    organizationId: "org",
+    rowKey: "row-1",
+    unitIndex: null,
+    identityKey: "row-1",
+    kind: "CREATE",
+    status: "DONE",
+    idempotencyKey: "operation:row-1",
+    expectedPrior: null,
+    writtenState: { outcome: "created", assetId: "asset" },
+    targetAssetId: "asset",
+    targetKitId: null,
+    qrId: null,
+    attempt: 1,
+    heartbeatAt: new Date("2026-01-01T00:00:00.000Z"),
+    errorCode: null,
+    errorMessage: null,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+  };
   return {
     organizationId: "org",
-    result: {
-      operationId: "operation",
-      createdIds: ["asset"],
-      updatedIds: [],
-      reusedIds: [],
-      failedRows: [],
-      totalRows: 1,
-      succeededRows: 1,
-    } as unknown as StaffImportResult,
-    ledger: [
-      {
-        status: "DONE",
-        writtenState: { outcome: "created", assetId: "asset" },
-      },
-    ] as ImportLedgerItem[],
+    result,
+    ledger: [ledgerItem],
   };
 }
 beforeEach(() => {

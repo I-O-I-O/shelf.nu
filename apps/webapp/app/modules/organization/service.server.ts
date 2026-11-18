@@ -5,9 +5,10 @@ import {
   Roles,
 } from "@prisma/client";
 import type { Organization, Prisma, TierId, User } from "@prisma/client";
+import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import type Stripe from "stripe";
 
-import { db } from "~/database/db.server";
+import { db, type ExtendedPrismaClient } from "~/database/db.server";
 import { sendEmail } from "~/emails/mail.server";
 import { DEFAULT_MAX_IMAGE_UPLOAD_SIZE } from "~/utils/constants";
 import { ADMIN_EMAIL } from "~/utils/env";
@@ -38,6 +39,12 @@ import { USER_NAME_SELECT } from "../user/fields";
 import { getDefaultWeeklySchedule } from "../working-hours/service.server";
 
 const label: ErrorLabel = "Organization";
+
+/** Transaction client type used by this app's extended Prisma client. */
+export type OrganizationTransactionClient = Omit<
+  ExtendedPrismaClient,
+  ITXClientDenyList
+>;
 
 export async function getOrganizationById<T extends Prisma.OrganizationInclude>(
   id: Organization["id"],
@@ -190,10 +197,10 @@ export async function createOrganization({
   userId: User["id"];
   image: File | null;
   /** Existing Shelf organization creation can participate in a caller transaction. */
-  tx?: Prisma.TransactionClient;
+  tx?: OrganizationTransactionClient;
 }) {
   try {
-    const client = tx ?? db;
+    const client: OrganizationTransactionClient = tx ?? db;
     const owner = await client.user.findFirstOrThrow({
       where: { id: userId },
       select: {

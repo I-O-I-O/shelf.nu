@@ -184,6 +184,20 @@ type Task = {
   accessApprovalId?: string;
 };
 
+function hasAvailabilitySummary(task: Task): task is Task & {
+  preparationRequest: true;
+  availableForRequestedPeriod: number;
+  availableNow: number;
+  totalPhysicalUnits: number;
+} {
+  return (
+    task.preparationRequest === true &&
+    task.availableForRequestedPeriod !== undefined &&
+    task.availableNow !== undefined &&
+    task.totalPhysicalUnits !== undefined
+  );
+}
+
 type AllBulkFamily = Exclude<OperationsView, "all">;
 type AllSelectionEntry = {
   key: string;
@@ -472,7 +486,6 @@ function isAnnualAccessAction(value: unknown): value is {
     reapproved?: boolean;
     failed?: number | Array<{ id: string; name: string; reason: string }>;
     succeeded?: number;
-    failedCount?: number;
   };
 } {
   return (
@@ -1791,7 +1804,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
         select: {
           id: true,
           userId: true,
-          asset: { select: { title: true, sequentialId: true } },
+          assetId: true,
         },
       });
       if (!operation) {
@@ -1801,6 +1814,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
           error: "This pickup is no longer ready for collection.",
         });
       }
+      const asset = operation.assetId
+        ? await db.asset.findFirst({
+            where: { id: operation.assetId, organizationId },
+            select: { title: true, sequentialId: true },
+          })
+        : null;
       const result = await confirmStudentPreparationPickup({
         organizationId,
         operationId: operation.id,
@@ -1808,9 +1827,9 @@ export async function action({ context, request }: ActionFunctionArgs) {
         staffUserId: userId,
         hints: getClientHint(request),
         verificationValue:
-          getPhysicalUnitNumberFromTitle(operation.asset?.title ?? "") ??
-          operation.asset?.sequentialId ??
-          operation.asset?.title,
+          getPhysicalUnitNumberFromTitle(asset?.title ?? "") ??
+          asset?.sequentialId ??
+          asset?.title,
       });
       return data({ ok: true as const, intent, result });
     }
@@ -2487,11 +2506,6 @@ function PreparationTaskActions({
   }>();
   const borrowerName = task.borrowerName ?? "Borrower";
   const itemName = task.title;
-  const hasAvailabilitySummary =
-    task.preparationRequest &&
-    task.availableForRequestedPeriod !== undefined &&
-    task.availableNow !== undefined &&
-    task.totalPhysicalUnits !== undefined;
   const readyError =
     readyFetcher.data && !readyFetcher.data.ok
       ? typeof readyFetcher.data.error === "string"
@@ -2514,7 +2528,7 @@ function PreparationTaskActions({
     <div
       className={`flex w-full min-w-0 flex-wrap items-center justify-end gap-2 ${className}`}
     >
-      {hasAvailabilitySummary ? (
+      {hasAvailabilitySummary(task) ? (
         <div className="min-w-0 max-w-44 text-xs leading-snug">
           {task.softReservationOverlap ? (
             <p className="font-semibold text-amber-800">
@@ -2554,7 +2568,7 @@ function PreparationTaskActions({
       ) : (
         <span
           title={
-            hasAvailabilitySummary
+            hasAvailabilitySummary(task)
               ? "No units are reservable for the requested period."
               : task.preparationBlockedReason
           }
@@ -3520,9 +3534,10 @@ export default function OperationsPage() {
             !result.ok
         )
       : [];
-  const approvalResult = isAnnualAccessAction(actionResult)
-    ? actionResult.result
+  const annualAccessAction = isAnnualAccessAction(actionResult)
+    ? actionResult
     : null;
+  const approvalResult = annualAccessAction?.result ?? null;
   const visibleApprovals =
     approvalView === "pending"
       ? annualAccessApprovals.pending.map((approval) => ({
@@ -3780,7 +3795,7 @@ export default function OperationsPage() {
                   role="status"
                   className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-900"
                 >
-                  {actionResult?.intent === "decline-access-bulk"
+                  {annualAccessAction?.intent === "decline-access-bulk"
                     ? `${approvalResult.succeeded ?? 0} access request${
                         approvalResult.succeeded === 1 ? "" : "s"
                       } rejected.${

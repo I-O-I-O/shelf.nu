@@ -1843,10 +1843,70 @@ export default function IoioLoans() {
   );
 }
 
+type PickupValidation = Awaited<
+  ReturnType<typeof validateStudentPreparationPickup>
+>;
+
 type StudentPickupValidationState = {
   operationId: string;
-  validation: Awaited<ReturnType<typeof validateStudentPreparationPickup>>;
+  validation: PickupValidation;
 } | null;
+
+type PickupValidatedActionData = {
+  ok: true;
+  intent: "pickup-validated";
+  inputValue: string;
+  validation: PickupValidation;
+};
+
+function hasSuccessfulActionIntent<Intent extends string>(
+  value: unknown,
+  intent: Intent
+): value is { ok: true; intent: Intent } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "ok" in value &&
+    value.ok === true &&
+    "intent" in value &&
+    value.intent === intent
+  );
+}
+
+function isPickupValidation(value: unknown): value is PickupValidation {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "valid" in value &&
+    typeof value.valid === "boolean" &&
+    "status" in value &&
+    (value.status === "valid" ||
+      value.status === "wrong-unit" ||
+      value.status === "wrong-item" ||
+      value.status === "unresolved" ||
+      value.status === "unavailable") &&
+    "assignedUnitLabel" in value &&
+    typeof value.assignedUnitLabel === "string" &&
+    (!("scannedUnitLabel" in value) ||
+      typeof value.scannedUnitLabel === "string" ||
+      value.scannedUnitLabel === undefined) &&
+    (!("error" in value) ||
+      typeof value.error === "string" ||
+      value.error === undefined)
+  );
+}
+
+function isPickupValidatedActionData(
+  value: unknown
+): value is PickupValidatedActionData {
+  return (
+    hasSuccessfulActionIntent(value, "pickup-validated") &&
+    "inputValue" in value &&
+    typeof value.inputValue === "string" &&
+    "validation" in value &&
+    isPickupValidation(value.validation)
+  );
+}
 
 export function StudentPickupForm({
   operationId,
@@ -1943,22 +2003,23 @@ export function StudentPickupForm({
     }
     if (!response) return;
 
-    if (
-      response.ok &&
-      response.intent === "pickup-validated" &&
-      response.inputValue === verificationValue
-    ) {
-      setValidationState({ operationId, validation: response.validation });
+    const pickupValidationResponse = isPickupValidatedActionData(response)
+      ? response
+      : null;
+    if (pickupValidationResponse?.inputValue === verificationValue) {
+      setValidationState({
+        operationId,
+        validation: pickupValidationResponse.validation,
+      });
     } else if (!response.ok) {
       setValidationState((current) =>
         current?.operationId === operationId ? null : current
       );
     }
 
-    const responseToken =
-      response.ok && response.intent === "pickup-validated"
-        ? normalizeQrScanValue(response.inputValue)
-        : lastValidatedTokenRef.current;
+    const responseToken = pickupValidationResponse
+      ? normalizeQrScanValue(pickupValidationResponse.inputValue)
+      : lastValidatedTokenRef.current;
     if (
       responseToken &&
       inFlightTokenRef.current === responseToken &&
@@ -1968,11 +2029,7 @@ export function StudentPickupForm({
     }
 
     if (!scanOpen) return;
-    if (
-      response.ok &&
-      response.intent === "pickup-validated" &&
-      response.validation.valid
-    ) {
+    if (pickupValidationResponse?.validation.valid) {
       queuedTokenRef.current = null;
       setScanPaused(true);
       setScanOpen(false);
@@ -1995,7 +2052,7 @@ export function StudentPickupForm({
   ]);
 
   useEffect(() => {
-    if (fetcher.data?.ok && fetcher.data.intent === "pickup-confirmed") {
+    if (hasSuccessfulActionIntent(fetcher.data, "pickup-confirmed")) {
       pickupSubmittedRef.current = true;
       if (!pickupRefreshTriggeredRef.current) {
         pickupRefreshTriggeredRef.current = true;

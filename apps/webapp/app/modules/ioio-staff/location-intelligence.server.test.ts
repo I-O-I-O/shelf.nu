@@ -633,7 +633,9 @@ it("preserves helper references, unresolved names, and contextual hints without 
     organizationId: "org-1",
     instruction,
   });
-  if (!("grounding" in result)) throw new Error("Expected grounding");
+  if (!("grounding" in result) || !result.grounding || !result.taskPlan) {
+    throw new Error("Expected a task plan and grounding");
+  }
   expect(result.grounding).toMatchObject({
     explicitInventoryRefCount: 2,
     resolvedInventoryRefCount: 1,

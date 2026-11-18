@@ -185,22 +185,16 @@ describe("simple contribution review actions", () => {
     );
     render(createElement(RouterProvider, { router }));
     await user.click(await screen.findByText("Review", { exact: true }));
-    expect(
-      screen.getByRole("button", { name: "Approve", exact: true })
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Return|Dismiss/ })).toBeNull();
-    await user.click(
-      screen.getByRole("button", { name: "Reject", exact: true })
-    );
+    await user.click(screen.getByRole("button", { name: "Reject" }));
     const dialog = screen.getByRole("alertdialog");
     const reason = within(dialog).getByRole("textbox", {
       name: "Reason (optional)",
     });
     expect(reason).not.toBeRequired();
     await user.type(reason, "The safety section needs clearer instructions.");
-    await user.click(
-      within(dialog).getByRole("button", { name: "Reject", exact: true })
-    );
+    await user.click(within(dialog).getByRole("button", { name: "Reject" }));
     await waitFor(() =>
       expect(mocks.resolveSubmission).toHaveBeenCalledWith({
         organizationId: "team-1",

@@ -195,7 +195,6 @@ export default function AccessApprovalSettingsPage() {
               <label htmlFor="required">Require Student approval</label>
               <InfoTooltip
                 icon={<CircleHelp className="size-4" />}
-                ariaLabel="About Student approval requirement"
                 content="Students need current approval before they can start a new borrowing. Staff and TAs are exempt."
               />
             </span>
@@ -212,7 +211,6 @@ export default function AccessApprovalSettingsPage() {
               Approval renewal
               <InfoTooltip
                 icon={<CircleHelp className="size-4" />}
-                ariaLabel="About approval renewal"
                 content="Controls how long a Student approval remains valid. Existing approvals keep their saved expiry date."
               />
             </span>
@@ -245,7 +243,6 @@ export default function AccessApprovalSettingsPage() {
                 Renewal month
                 <InfoTooltip
                   icon={<CircleHelp className="size-4" />}
-                  ariaLabel="About renewal month"
                   content="Starts a new academic approval cycle in this month each year."
                 />
               </span>

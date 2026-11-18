@@ -62,8 +62,19 @@ describe("IOIO location forms", () => {
     expect(screen.getAllByRole("radio").length).toBeGreaterThan(0);
   });
 
-  it.each(["Section", "Shelf", "Box / Container"] as const)(
-    "does not offer manual color selection when creating a %s",
+  it("offers manual color selection when creating a Section", async () => {
+    const user = userEvent.setup();
+    renderInDataRouter(<IoioLocationCreationForm locations={locations} />);
+
+    await user.click(screen.getByRole("button", { name: "Select a room" }));
+    await user.click(screen.getByRole("button", { name: /Section/ }));
+
+    expect(screen.getByRole("group", { name: "Color" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio").length).toBeGreaterThan(0);
+  });
+
+  it.each(["Shelf", "Box / Container"] as const)(
+    "inherits color without manual selection when creating a %s",
     async (typeLabel) => {
       const user = userEvent.setup();
       renderInDataRouter(<IoioLocationCreationForm locations={locations} />);
@@ -73,31 +84,43 @@ describe("IOIO location forms", () => {
         screen.getByRole("button", { name: new RegExp(typeLabel) })
       );
 
-      expect(screen.queryByText(/location color/i)).not.toBeInTheDocument();
       expect(screen.queryByRole("radio")).not.toBeInTheDocument();
     }
   );
 
-  it.each(["section", "shelf", "container"] as const)(
-    "does not offer a color selector when editing a %s",
+  it("offers manual color selection when editing a Section", () => {
+    renderInDataRouter(
+      <LocationForm
+        ioioMode
+        locationType="section"
+        locations={locations}
+        name="Section A"
+        address=""
+        description=""
+        parentId="room"
+      />
+    );
+
+    expect(screen.getByRole("group", { name: "Color" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio").length).toBeGreaterThan(0);
+  });
+
+  it.each(["shelf", "container"] as const)(
+    "inherits color without manual selection when editing a %s",
     (locationType) => {
       renderInDataRouter(
         <LocationForm
           ioioMode
           locationType={locationType}
           locations={locations}
-          name={locationType === "room" ? "IOIO Lab" : "Section A"}
+          name="Section A"
           address=""
           description=""
-          parentId={locationType === "room" ? null : "room"}
+          parentId="room"
         />
       );
 
-      expect(screen.queryByText(/location color/i)).not.toBeInTheDocument();
       expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("group", { name: "Color" })
-      ).not.toBeInTheDocument();
     }
   );
 

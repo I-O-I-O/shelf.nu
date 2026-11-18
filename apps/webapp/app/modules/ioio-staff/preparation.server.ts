@@ -1180,7 +1180,8 @@ async function loadStudentPreparationPickup({
       to: true,
     },
   });
-  if (!operation?.bookingId) {
+  const bookingId = operation?.bookingId;
+  if (!operation || !bookingId) {
     throw new Error("That pickup is no longer ready for collection.");
   }
   if (!operation.reviewedAt) {
@@ -1201,7 +1202,7 @@ async function loadStudentPreparationPickup({
 
   const booking = await db.booking.findFirst({
     where: {
-      id: operation.bookingId,
+      id: bookingId,
       organizationId,
       custodianUserId: borrowerUserId,
       status: {
@@ -1264,7 +1265,7 @@ async function loadStudentPreparationPickup({
   ) {
     throw new Error("The pickup item could not be verified.");
   }
-  return { operation, booking, assignedSlice, pickupAsset };
+  return { operation, booking, bookingId, assignedSlice, pickupAsset };
 }
 
 type PickupVerification = {
@@ -1488,7 +1489,7 @@ export async function confirmStudentPreparationPickup({
   hints: Parameters<typeof checkoutBooking>[0]["hints"];
   verificationValue?: string;
 }) {
-  const { operation, booking, assignedSlice, pickupAsset } =
+  const { operation, booking, bookingId, assignedSlice, pickupAsset } =
     await loadStudentPreparationPickup({
       organizationId,
       operationId,
@@ -1524,7 +1525,7 @@ export async function confirmStudentPreparationPickup({
   if (!assignedSlice.checkedOutAt) {
     if (booking.status === BookingStatus.RESERVED) {
       await checkoutBooking({
-        id: operation.bookingId,
+        id: bookingId,
         organizationId,
         userId: staffUserId ?? borrowerUserId,
         hints,
@@ -1534,7 +1535,7 @@ export async function confirmStudentPreparationPickup({
       // A sibling unit may already have started this booking. Check out only
       // this verified physical unit; never replay the whole booking checkout.
       await partialCheckoutBooking({
-        id: operation.bookingId,
+        id: bookingId,
         organizationId,
         assetIds: [pickupAsset.id],
         userId: staffUserId ?? borrowerUserId,

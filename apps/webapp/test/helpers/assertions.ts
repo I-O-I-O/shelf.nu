@@ -11,11 +11,11 @@
  * assertIsDataWithResponseInit(response);
  * expect(response.init?.status).toBe(500);
  */
-export function assertIsDataWithResponseInit(
+export function assertIsDataWithResponseInit<TData = unknown>(
   response: unknown
 ): asserts response is {
   init: ResponseInit | null;
-  data: unknown;
+  data: TData;
   type: string;
 } {
   if (

@@ -324,11 +324,14 @@ export function IoioAssetCreationQueue({
 
   const addAnother = useCallback(
     (sourceDraftId?: string) => {
-      const summary = sourceDraftId
-        ? handles.current.get(sourceDraftId)?.readSummary()
-        : undefined;
-      if (summary) {
-        setSummaries((current) => ({ ...current, [sourceDraftId]: summary }));
+      if (sourceDraftId) {
+        const summary = handles.current.get(sourceDraftId)?.readSummary();
+        if (summary) {
+          setSummaries((current) => ({
+            ...current,
+            [sourceDraftId]: summary,
+          }));
+        }
       }
       const nextId = `asset-draft-${nextDraftNumber.current++}`;
       setDraftIds((current) => [...current, nextId]);

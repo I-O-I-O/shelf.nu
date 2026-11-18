@@ -169,7 +169,7 @@ export type StudentCategory = {
 
 type AssetRow = Prisma.AssetGetPayload<{ select: typeof ASSET_SELECT }>;
 
-function buildLocationPath(
+function buildLocationPathSegments(
   locationId: string,
   locationsById: Map<string, { name: string; parentId: string | null }>
 ) {
@@ -185,7 +185,7 @@ function buildLocationPath(
     currentId = current.parentId;
   }
 
-  return path.join(" → ");
+  return path;
 }
 
 async function shapeAssets(
@@ -1221,7 +1221,14 @@ export function formatStudentLocationPath(
   locationId: string,
   locations: Array<{ id: string; name: string; parentId: string | null }>
 ) {
-  return buildLocationPath(
+  return getStudentLocationPathSegments(locationId, locations).join(" → ");
+}
+
+export function getStudentLocationPathSegments(
+  locationId: string,
+  locations: Array<{ id: string; name: string; parentId: string | null }>
+) {
+  return buildLocationPathSegments(
     locationId,
     new Map(locations.map((location) => [location.id, location]))
   );

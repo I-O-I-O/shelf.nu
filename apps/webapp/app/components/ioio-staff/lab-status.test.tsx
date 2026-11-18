@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createLabStatus } from "@factories";
 import type {
   LabIssue,
   LabStatus,
@@ -17,23 +18,10 @@ function createStatus(count: number): LabStatus {
     href: "/operations?view=general",
   }));
 
-  return {
-    totalIssues: issues.length,
-    severity: issues.length ? "attention" : "healthy",
-    overdueLoans: 0,
-    unresolvedReports: 0,
+  return createLabStatus({
     generalReports: issues.length,
-    incompleteKits: 0,
-    importWarnings: 0,
-    pendingReservationRequests: 0,
-    returnChecks: 0,
-    returnedWithIssues: 0,
-    preparationTasks: 0,
-    cancelledPickups: 0,
-    readyForPickup: 0,
-    annualAccessApprovals: 0,
     issues,
-  };
+  });
 }
 
 const readStateKey = "test:lab-status-seen";

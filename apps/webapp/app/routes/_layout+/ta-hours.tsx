@@ -800,14 +800,12 @@ function Overview({ page }: { page: PageData }) {
   const [logSubmissionKey, setLogSubmissionKey] = useState("");
   const logFetcher = useFetcher<typeof action>();
   const showNotification = useSetAtom(showNotificationAtom);
-  const notifiedLogResult = useRef<typeof logFetcher.data>(undefined);
-  const logResult = logFetcher.data as
-    | {
-        quickEntry?: { kind: "logged" | "alreadyLogged"; actualHours: string };
-        budgetWarning?: string | null;
-        error?: string;
-      }
-    | undefined;
+  const actionResult = logFetcher.data;
+  const logResult =
+    actionResult && "quickEntry" in actionResult ? actionResult : undefined;
+  const logError =
+    actionResult && "error" in actionResult ? actionResult.error : undefined;
+  const notifiedLogResult = useRef<typeof logResult>(undefined);
   const selectedAllocation = page.allocations.find(
     (allocation) => allocation.userId === selectedAllocateUser
   );
@@ -815,7 +813,7 @@ function Overview({ page }: { page: PageData }) {
     selectedAllocation?.allocatedHours ?? 0
   );
   const proposedAllocation = Number(allocatedInput);
-  const logSucceeded = Boolean(logResult?.quickEntry?.kind === "logged");
+  const logSucceeded = logResult?.quickEntry.kind === "logged";
 
   useEffect(() => {
     if (logSucceeded) setLogOpen(false);
@@ -1115,15 +1113,15 @@ function Overview({ page }: { page: PageData }) {
                 Hours can only be logged in the current academic year.
               </p>
             ) : null}
-            {logResult?.quickEntry?.kind === "alreadyLogged" ? (
+            {logResult?.quickEntry.kind === "alreadyLogged" ? (
               <p role="status" className="text-sm text-gray-600">
                 {hours(logResult.quickEntry.actualHours)} are already recorded
                 for this date.
               </p>
             ) : null}
-            {logResult?.error ? (
+            {logError ? (
               <p role="alert" className="text-sm text-red-700">
-                {logResult.error}
+                {logError}
               </p>
             ) : null}
             <div className="flex justify-end gap-2">

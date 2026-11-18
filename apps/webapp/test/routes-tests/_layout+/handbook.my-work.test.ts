@@ -146,9 +146,10 @@ describe("Handbook My Work route", () => {
     expect(
       screen.getByText("Clarify the safety section.", { exact: false })
     ).toBeTruthy();
-    expect(
-      screen.getByRole("link", { name: "Edit", exact: true })
-    ).toHaveAttribute("href", "/handbook/change-filament/edit?improve=1");
+    expect(screen.getByRole("link", { name: "Edit" })).toHaveAttribute(
+      "href",
+      "/handbook/change-filament/edit?improve=1"
+    );
     expect(screen.getAllByText(/Submitted/)).toHaveLength(4);
     expect(
       screen.queryByRole("link", { name: "Review contributions" })

@@ -307,6 +307,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
             id: operation.id,
             title: item.kitName ?? item.asset.title,
             displayName,
+            unitLabel: item.unitLabel,
             asset: {
               id: item.asset.id,
               title: item.asset.title,
@@ -457,6 +458,7 @@ type ReadyPickupItem = {
   id: string;
   title: string;
   displayName: string;
+  unitLabel: string | null;
   pickupLocation: string | null;
   pickupRoomName: string | null;
   pickupZoneName: string | null;

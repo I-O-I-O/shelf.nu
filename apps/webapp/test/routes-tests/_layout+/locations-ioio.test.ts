@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createActionArgs, createLoaderArgs } from "@mocks/remix";
+import { assertIsDataWithResponseInit } from "@helpers/assertions";
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
@@ -97,11 +99,12 @@ const countUnassignedAssetsMock = vi.mocked(db.asset.count);
 const getArchivedAssetIdsMock = vi.mocked(getIoioArchivedItemIds);
 
 function loaderArgs(url: string): LoaderFunctionArgs {
-  return {
+  const request = new Request(url);
+  return createLoaderArgs({
     context: { getSession: () => ({ userId: "staff-1" }) },
     params: { locationId: "section-1" },
-    request: new Request(url),
-  } as LoaderFunctionArgs;
+    request,
+  });
 }
 
 function actionArgs(
@@ -109,11 +112,12 @@ function actionArgs(
   formData: FormData,
   locationId = "section-1"
 ): ActionFunctionArgs {
-  return {
+  const request = new Request(url, { method: "POST", body: formData });
+  return createActionArgs({
     context: { getSession: () => ({ userId: "staff-1" }) },
     params: { locationId },
-    request: new Request(url, { method: "POST", body: formData }),
-  } as ActionFunctionArgs;
+    request,
+  });
 }
 
 function getActionErrorMessage(result: unknown): string {
@@ -355,6 +359,7 @@ describe("IOIO Locations routes", () => {
       actionArgs("https://example.com/locations/section-1", new FormData())
     );
 
+    assertIsDataWithResponseInit(result);
     expect(result).toMatchObject({ init: { status: 409 } });
     expect(result.data).toMatchObject({
       error: {
@@ -827,6 +832,31 @@ describe("IOIO Locations routes", () => {
     );
     expect(createLocationMock).not.toHaveBeenCalled();
     expect(getActionErrorMessage(result)).toMatch(/already used/u);
+  });
+
+  it("reports the duplicate sibling name in the full New location action", async () => {
+    findFirstLocationMock.mockResolvedValue({
+      id: "room-1",
+      name: "IOIO Lab",
+      parentId: null,
+      parent: null,
+    } as never);
+    findManyLocationsMock.mockResolvedValue([
+      { id: "section-1", name: "Section A", parentId: "room-1" },
+    ] as never);
+    const formData = new FormData();
+    formData.set("locationType", "section");
+    formData.set("name", "Section A");
+    formData.set("parentId", "room-1");
+
+    const result = await newLocationAction(
+      actionArgs("https://example.com/locations/new", formData)
+    );
+
+    expect(getActionErrorMessage(result)).toBe(
+      "A location named Section A already exists in IOIO Lab."
+    );
+    expect(createLocationMock).not.toHaveBeenCalled();
   });
 
   it("rejects the effective color of a legacy Section without a stored color", async () => {

@@ -91,6 +91,31 @@ function customFieldType(
   }
 }
 
+type NewAssetPageLoaderData = {
+  nextSequentialId: string;
+  referer: string | null;
+  prefillTitle: string;
+  prefillQuantity: number | null;
+};
+
+function isNewAssetPageLoaderData(
+  value: unknown
+): value is NewAssetPageLoaderData {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "nextSequentialId" in value &&
+    typeof value.nextSequentialId === "string" &&
+    "referer" in value &&
+    (typeof value.referer === "string" || value.referer === null) &&
+    "prefillTitle" in value &&
+    typeof value.prefillTitle === "string" &&
+    "prefillQuantity" in value &&
+    (typeof value.prefillQuantity === "number" ||
+      value.prefillQuantity === null)
+  );
+}
+
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
@@ -647,13 +672,15 @@ export async function action({ context, request }: LoaderFunctionArgs) {
 
 export default function NewAssetPage() {
   const title = useAtomValue(dynamicTitleAtom);
-  const {
-    nextSequentialId,
-    referer,
-    prefillTitle,
-    prefillQuantity,
-    customFields,
-  } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const fullPageData = isNewAssetPageLoaderData(loaderData)
+    ? loaderData
+    : undefined;
+  const nextSequentialId = fullPageData?.nextSequentialId;
+  const referer = fullPageData?.referer;
+  const prefillTitle = fullPageData?.prefillTitle;
+  const prefillQuantity = fullPageData?.prefillQuantity;
+  const { customFields } = loaderData;
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );

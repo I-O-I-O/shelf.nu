@@ -23,7 +23,7 @@ vi.mock("~/components/location/location-quick-actions", () => ({
 // why: the app wrapper adds organization cookie behavior; this explorer test only
 // needs React Router's URL state and data-router navigation.
 vi.mock("~/hooks/search-params", async (importOriginal) => {
-  const router = await importOriginal();
+  const router = await importOriginal<typeof import("react-router")>();
   return { useSearchParams: router.useSearchParams };
 });
 
@@ -272,7 +272,7 @@ describe("IOIO Location Explorer", () => {
     await user.click(within(chooser).getByRole("button", { name: "Shelf A2" }));
     const input = screen.getByRole("textbox", { name: "Container name" });
     await user.type(input, "Container A2-02");
-    await user.click(screen.getByRole("button", { name: "Add", exact: true }));
+    await user.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() => expect(createCalls).toHaveLength(1));
     expect(createCalls[0]).toMatchObject({
       name: "Container A2-02",

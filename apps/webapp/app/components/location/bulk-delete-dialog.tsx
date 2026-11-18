@@ -13,14 +13,14 @@ export const BulkDeleteLocationSchema = z.object({
 });
 
 export default function BulkDeleteDialog() {
-  const { totalItems } = useLoaderData<typeof loader>();
+  const { totalLocations } = useLoaderData<typeof loader>();
 
   const zo = useZorm("BulkDeleteLocations", BulkDeleteLocationSchema);
 
   const selectedLocations = useAtomValue(selectedBulkItemsAtom);
 
   const totalSelected = isSelectingAllItems(selectedLocations)
-    ? totalItems
+    ? totalLocations
     : selectedLocations.length;
 
   return (
