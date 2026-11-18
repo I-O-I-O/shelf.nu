@@ -911,7 +911,7 @@ function CustomFieldEnumField({
   disabled,
 }: Omit<EnumFieldProps, "options"> & { fieldName: string }) {
   const data = useLoaderData<AssetIndexLoaderData>();
-  const customFields = useMemo(
+  const customFields = useMemo<CustomFieldSummary[]>(
     () => data?.customFields || [],
     [data?.customFields]
   );

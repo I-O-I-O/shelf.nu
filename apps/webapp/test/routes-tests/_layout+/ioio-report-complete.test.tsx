@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   },
   requireStudentRead: vi.fn(),
   getStudentAssets: vi.fn(),
-  formatStudentLocationPath: vi.fn(),
+  getStudentLocationPathSegments: vi.fn(),
 }));
 
 // why: this route test verifies completion copy, organization-scoped report lookup, and optional asset presentation.
@@ -22,7 +22,7 @@ vi.mock("~/modules/ioio-student/route.server", () => ({
   requireStudentRead: mocks.requireStudentRead,
 }));
 vi.mock("~/modules/ioio-student/service.server", () => ({
-  formatStudentLocationPath: mocks.formatStudentLocationPath,
+  getStudentLocationPathSegments: mocks.getStudentLocationPathSegments,
   getStudentAssets: mocks.getStudentAssets,
 }));
 
@@ -106,7 +106,7 @@ describe("IOIO Student report completion", () => {
       reportType: "ITEM_DAMAGED",
     });
     mocks.db.location.findMany.mockResolvedValue([]);
-    mocks.formatStudentLocationPath.mockImplementation(
+    mocks.getStudentLocationPathSegments.mockImplementation(
       (
         locationId: string,
         locations: Array<{ id: string; name: string; parentId: string | null }>
@@ -262,7 +262,7 @@ describe("IOIO Student report completion", () => {
       makeStudentAsset({
         id: "makey-product",
         title: "Makey Kit",
-        type: "CONSUMABLE",
+        type: "QUANTITY_TRACKED",
         mainImage: "https://images.example.test/makey.jpg",
         sequentialId: null,
       }),

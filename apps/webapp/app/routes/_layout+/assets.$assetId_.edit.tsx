@@ -7,8 +7,10 @@ import type {
 } from "react-router";
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
-import { NewAssetFormSchema } from "~/components/assets/form";
-import { IoioAssetCreateForm } from "~/components/assets/ioio-asset-create-form";
+import {
+  IoioAssetCreateForm,
+  NewAssetFormSchema,
+} from "~/components/assets/ioio-asset-create-form";
 
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";

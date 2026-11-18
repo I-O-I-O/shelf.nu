@@ -16,7 +16,7 @@ import { IOIO_REPORT_OPERATION } from "~/modules/ioio-student/rate-limit.server"
 import { getIoioReportAcknowledgement } from "~/modules/ioio-student/report-problem.shared";
 import { requireStudentRead } from "~/modules/ioio-student/route.server";
 import {
-  formatStudentLocationPath,
+  getStudentLocationPathSegments,
   getStudentAssets,
 } from "~/modules/ioio-student/service.server";
 import { getCompactLocationSummary } from "~/modules/location/compact-location";
@@ -125,7 +125,7 @@ async function loadReportedLocation(
   );
   if (!selectedLocation) return null;
 
-  const hierarchy = formatStudentLocationPath(locationId, locations);
+  const hierarchy = getStudentLocationPathSegments(locationId, locations);
   const summary = getCompactLocationSummary(hierarchy, {
     showIntermediateLocations: false,
   });

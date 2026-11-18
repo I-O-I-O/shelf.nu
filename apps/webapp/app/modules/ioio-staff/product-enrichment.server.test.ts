@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as SsrfModule from "~/utils/ssrf.server";
 
 const { mockSafeFetch } = vi.hoisted(() => ({ mockSafeFetch: vi.fn() }));
 
 // why: outbound search providers, product pages, and image hosts are untrusted
 // network dependencies; mocked responses keep tests deterministic and offline.
 vi.mock("~/utils/ssrf.server", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof SsrfModule>();
   return { ...actual, safeFetch: mockSafeFetch };
 });
 

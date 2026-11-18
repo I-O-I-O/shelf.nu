@@ -1,5 +1,6 @@
-import { AssetType, type Prisma } from "@prisma/client";
-import { db } from "~/database/db.server";
+import { AssetType } from "@prisma/client";
+import type { ITXClientDenyList } from "@prisma/client/runtime/library";
+import { db, type ExtendedPrismaClient } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import {
@@ -9,6 +10,8 @@ import {
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import { createNote } from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
+
+type LabStatusTransactionClient = Omit<ExtendedPrismaClient, ITXClientDenyList>;
 
 export type LabIssueSeverity = "critical" | "attention";
 export type LabIssueKind =
@@ -212,7 +215,7 @@ export async function returnBrokenAssetToService({
       throw new ShelfError({
         cause: null,
         message: "This broken item is no longer waiting for repair.",
-        label: "Operations",
+        label: "Report",
         status: 409,
         shouldBeCaptured: false,
       });
@@ -240,7 +243,7 @@ export async function returnBrokenAssetToService({
       throw new ShelfError({
         cause: null,
         message: "This broken item is no longer waiting for repair.",
-        label: "Operations",
+        label: "Report",
         status: 409,
         shouldBeCaptured: false,
       });
@@ -305,7 +308,7 @@ export async function returnResolvedAssetToService({
       throw new ShelfError({
         cause: null,
         message: "This physical unit is already available for borrowing.",
-        label: "Inventory",
+        label: "Assets",
         status: 409,
         shouldBeCaptured: false,
       });
@@ -323,7 +326,7 @@ async function ensureIoioAssetCanReturnToService({
   ignoreReportOperationId,
   requireIndividual = false,
 }: {
-  tx: Prisma.TransactionClient;
+  tx: LabStatusTransactionClient;
   organizationId: string;
   assetId: string;
   ignoreReportOperationId?: string;
@@ -341,7 +344,7 @@ async function ensureIoioAssetCanReturnToService({
     throw new ShelfError({
       cause: null,
       message: "The physical unit could not be found in this workspace.",
-      label: "Inventory",
+      label: "Assets",
       status: 404,
       shouldBeCaptured: false,
     });
@@ -351,7 +354,7 @@ async function ensureIoioAssetCanReturnToService({
       cause: null,
       message:
         "This unit is still checked out or in custody and cannot return to service yet.",
-      label: "Inventory",
+      label: "Assets",
       status: 409,
       shouldBeCaptured: false,
     });
@@ -462,7 +465,7 @@ async function ensureIoioAssetCanReturnToService({
       cause: null,
       message:
         "Resolve the remaining loan, preparation, report, or archive hold before returning this unit to service.",
-      label: "Inventory",
+      label: "Assets",
       status: 409,
       shouldBeCaptured: false,
     });
@@ -476,7 +479,7 @@ async function markIoioAssetAvailable({
   organizationId,
   staffUserId,
 }: {
-  tx: Prisma.TransactionClient;
+  tx: LabStatusTransactionClient;
   asset: { id: string; title: string; availableToBook: boolean };
   organizationId: string;
   staffUserId: string;
@@ -544,7 +547,7 @@ export async function resolveBrokenAssetOutOfService({
       throw new ShelfError({
         cause: null,
         message: "This broken item is no longer waiting for review.",
-        label: "Operations",
+        label: "Report",
         status: 409,
         shouldBeCaptured: false,
       });
@@ -562,7 +565,7 @@ export async function resolveBrokenAssetOutOfService({
       throw new ShelfError({
         cause: null,
         message: "The reported physical unit could not be found.",
-        label: "Operations",
+        label: "Assets",
         status: 404,
         shouldBeCaptured: false,
       });
@@ -582,7 +585,7 @@ export async function resolveBrokenAssetOutOfService({
       throw new ShelfError({
         cause: null,
         message: "This broken item is no longer waiting for review.",
-        label: "Operations",
+        label: "Report",
         status: 409,
         shouldBeCaptured: false,
       });

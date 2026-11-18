@@ -5,12 +5,18 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import type { ActionFunction, ActionFunctionArgs } from "react-router";
 import { createRoutesStub, redirect } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 import { loader as loadLegacyFoundRoute } from "~/routes/_layout+/ioio.found";
 import IoioReport, {
-  action as submitIoioReport,
+  action as submitIoioReportRoute,
 } from "~/routes/_layout+/ioio.report";
+
+function submitIoioReport(args: Partial<ActionFunctionArgs>) {
+  return submitIoioReportRoute(createActionArgs(args));
+}
 
 const actionMocks = vi.hoisted(() => ({
   db: {
@@ -104,7 +110,10 @@ const loaderData = {
   selectedProblemType: null as "FOUND_SOMETHING" | null,
 };
 
-function renderReport(action = vi.fn(() => ({ ok: true })), data = loaderData) {
+function renderReport(
+  action: ActionFunction = vi.fn(() => ({ ok: true })),
+  data = loaderData
+) {
   const Stub = createRoutesStub([
     {
       path: "/ioio/report",
@@ -373,9 +382,9 @@ describe("IOIO Student report form", () => {
   });
 
   it("does not submit hidden item or unit values after changing to Location full", async () => {
-    let submittedForm: FormData | null = null;
-    const action = vi.fn(async ({ request }: { request: Request }) => {
-      submittedForm = await request.formData();
+    const submittedForms: FormData[] = [];
+    const action = vi.fn(async ({ request }: ActionFunctionArgs) => {
+      submittedForms.push(await request.formData());
       return redirect("/ioio");
     });
     renderReport(action);
@@ -400,9 +409,9 @@ describe("IOIO Student report form", () => {
       await waitFor(() => expect(action).toHaveBeenCalledTimes(1));
     });
 
-    expect(submittedForm?.get("productId")).toBeNull();
-    expect(submittedForm?.get("unitId")).toBeNull();
-    expect(submittedForm?.get("locationId")).toBe("shelf-b");
+    expect(submittedForms[0].get("productId")).toBeNull();
+    expect(submittedForms[0].get("unitId")).toBeNull();
+    expect(submittedForms[0].get("locationId")).toBe("shelf-b");
   });
 
   it("submits the selected physical unit through the existing report service", async () => {
@@ -436,7 +445,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "The casing is cracked.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
@@ -491,7 +500,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "The casing is cracked.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
@@ -542,13 +551,13 @@ describe("IOIO Student report form", () => {
       form.set("content", "The item needs staff attention.");
 
       const response = await submitIoioReport({
-        context: {} as never,
+        context: {},
         request: new Request("http://localhost/ioio/report", {
           method: "POST",
           body: form,
         }),
         params: {},
-      } as never);
+      });
 
       expect(actionMocks.createBorrowedItemProblemReport).toHaveBeenCalledWith(
         {
@@ -585,13 +594,13 @@ describe("IOIO Student report form", () => {
     form.set("content", "I found an unclaimed USB adapter.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report?mode=found", {
         method: "POST",
         body: form,
       }),
       params: {},
-    } as never);
+    });
 
     expect(actionMocks.prepareReportProblem).toHaveBeenCalledWith(
       {
@@ -635,13 +644,13 @@ describe("IOIO Student report form", () => {
     form.set("content", "One sensor is missing.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
       }),
       params: {},
-    } as never);
+    });
 
     expect(actionMocks.prepareReportProblem).toHaveBeenCalledWith(
       {
@@ -671,13 +680,13 @@ describe("IOIO Student report form", () => {
     form.set("content", "One sensor is missing.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
       }),
       params: {},
-    } as never);
+    });
 
     expect(response).toHaveProperty(
       "data.error.message",
@@ -699,13 +708,13 @@ describe("IOIO Student report form", () => {
     form.set("content", "I found an unclaimed USB adapter.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report?mode=found", {
         method: "POST",
         body: form,
       }),
       params: {},
-    } as never);
+    });
 
     expect(response).toHaveProperty("data.error.message");
     expect(actionMocks.prepareReportProblem).not.toHaveBeenCalled();
@@ -736,11 +745,13 @@ describe("IOIO Student report form", () => {
       role: "SELF_SERVICE",
     });
 
-    const response = await loadLegacyFoundRoute({
-      context: {} as never,
-      request: new Request("http://localhost/ioio/found"),
-      params: {},
-    } as never);
+    const response = await loadLegacyFoundRoute(
+      createLoaderArgs({
+        context: {},
+        request: new Request("http://localhost/ioio/found"),
+        params: {},
+      })
+    );
 
     expect((response as Response).headers.get("Location")).toBe(
       "/ioio/report?mode=found"
@@ -779,7 +790,7 @@ describe("IOIO Student report form", () => {
       form.set("content", "The item is not in its storage location.");
 
       const response = await submitIoioReport({
-        context: {} as never,
+        context: {},
         request: new Request("http://localhost/ioio/report", {
           method: "POST",
           body: form,
@@ -826,7 +837,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "The item is damaged.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
@@ -873,7 +884,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "The camera is in the wrong cabinet.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
@@ -954,7 +965,7 @@ describe("IOIO Student report form", () => {
       form.set("content", "This report has enough detail.");
 
       const response = await submitIoioReport({
-        context: {} as never,
+        context: {},
         request: new Request("http://localhost/ioio/report", {
           method: "POST",
           body: form,
@@ -987,7 +998,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "There is no room for the returned kits.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,
@@ -1014,7 +1025,7 @@ describe("IOIO Student report form", () => {
 
   it("creates one report for a double click and follows the server redirect", async () => {
     const submissions: FormData[] = [];
-    const action = vi.fn(async ({ request }: { request: Request }) => {
+    const action = vi.fn(async ({ request }: ActionFunctionArgs) => {
       submissions.push(await request.formData());
       return redirect("/ioio");
     });
@@ -1115,8 +1126,8 @@ describe("IOIO Student report form", () => {
   it("disables the submit button while the server action is pending", async () => {
     let resolveAction: (value: unknown) => void = () => undefined;
     const action = vi.fn(
-      () =>
-        new Promise((resolve) => {
+      (_args: ActionFunctionArgs) =>
+        new Promise<unknown>((resolve) => {
           resolveAction = resolve;
         })
     );
@@ -1145,7 +1156,7 @@ describe("IOIO Student report form", () => {
   });
 
   it("shows only the failure result when the action rejects the report", async () => {
-    const action = vi.fn(() => ({
+    const action = vi.fn((_args: ActionFunctionArgs) => ({
       error: { message: "The report could not be submitted." },
     }));
     renderReport(action);
@@ -1193,7 +1204,7 @@ describe("IOIO Student report form", () => {
     form.set("content", "A sign is damaged.");
 
     const response = await submitIoioReport({
-      context: {} as never,
+      context: {},
       request: new Request("http://localhost/ioio/report", {
         method: "POST",
         body: form,

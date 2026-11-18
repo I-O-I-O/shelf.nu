@@ -136,12 +136,14 @@ function LevelHeader({
   onAdd: () => void;
   addDisabled?: boolean;
 }) {
-  const singularLabel: Record<LevelGroup, string> = {
-    rooms: "room",
-    sections: "section",
-    shelves: "shelf",
-    containers: "container",
-  }[label];
+  const singularLabel = (
+    {
+      rooms: "room",
+      sections: "section",
+      shelves: "shelf",
+      containers: "container",
+    } satisfies Record<LevelGroup, string>
+  )[label];
   return (
     <div className="flex items-center gap-1 border-b border-gray-100 py-1">
       <button
@@ -518,8 +520,14 @@ export function IoioLocationHierarchy({
       (locationType !== "container" && creating.parentId !== parentId)
     )
       return null;
+    const storedParentId =
+      creating.parentId && locationsById.has(creating.parentId)
+        ? creating.parentId
+        : null;
     const formParentId =
-      locationType === "container" ? parentId : creating.parentId;
+      locationType === "container"
+        ? parentId ?? storedParentId
+        : creating.parentId;
     return (
       <div className="my-2 rounded-md bg-gray-50 px-3 py-2">
         <InlineLocationForm

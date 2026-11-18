@@ -31,3 +31,5 @@ export * from "./scan";
 /** `createBookingSettings` — the full `getBookingSettingsForOrganization`
  * shape, every switch off, for typed mocks of that service. */
 export * from "./bookingSettings";
+/** `createLabStatus` — the complete status payload shared by the lab UI tests. */
+export * from "./labStatus";

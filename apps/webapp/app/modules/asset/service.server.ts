@@ -82,7 +82,7 @@ import {
 } from "~/modules/custom-field/service.server";
 import type { CustomFieldDraftPayload } from "~/modules/custom-field/types";
 import { bulkAssignKitCustody } from "~/modules/kit/service.server";
-import { LOCATION_PICKER_INCLUDE } from "~/modules/location/picker-select.server";
+import { MAX_LOCATION_HIERARCHY_DEPTH } from "~/modules/location/picker-select.server";
 import {
   createLocationChangeNote,
   createLocationsIfNotExists,
@@ -10619,6 +10619,41 @@ export async function getCategoriesForCreateAndEdit({
   }
 }
 
+type ExtendedLocationFindManyArgs = Prisma.Args<typeof db.location, "findMany">;
+type ExtendedLocationInclude = NonNullable<
+  ExtendedLocationFindManyArgs["include"]
+>;
+
+function extendedLocationParentSelect(
+  depth: number
+): ExtendedLocationInclude["parent"] {
+  if (depth <= 0) return undefined;
+
+  return {
+    select: {
+      id: true,
+      name: true,
+      parentId: true,
+      ...(depth > 1 ? { parent: extendedLocationParentSelect(depth - 1) } : {}),
+    },
+  };
+}
+
+const extendedLocationPickerInclude = {
+  parent: extendedLocationParentSelect(MAX_LOCATION_HIERARCHY_DEPTH - 1),
+} satisfies ExtendedLocationInclude;
+
+type LocationPickerQuery = Pick<
+  ExtendedLocationFindManyArgs,
+  "where" | "take"
+> & {
+  include: typeof extendedLocationPickerInclude;
+};
+
+function findLocationPickerRows(query: LocationPickerQuery) {
+  return db.location.findMany(query);
+}
+
 export async function getLocationsForCreateAndEdit({
   organizationId,
   request,
@@ -10635,19 +10670,20 @@ export async function getLocationsForCreateAndEdit({
     const locationSelected =
       searchParams.get("location") ?? defaultLocation ?? "";
     const getAllEntries = searchParams.getAll("getAll") as AllowedModelNames[];
+    const locationExcludedSelectedQuery = {
+      where: { organizationId, id: { not: locationSelected } },
+      take: includeAll || getAllEntries.includes("location") ? undefined : 12,
+      include: extendedLocationPickerInclude,
+    } satisfies LocationPickerQuery;
+    const selectedLocationQuery = {
+      where: { organizationId, id: locationSelected },
+      include: extendedLocationPickerInclude,
+    } satisfies LocationPickerQuery;
 
     const [locationExcludedSelected, selectedLocation, totalLocations] =
       await Promise.all([
-        db.location.findMany({
-          where: { organizationId, id: { not: locationSelected } },
-          take:
-            includeAll || getAllEntries.includes("location") ? undefined : 12,
-          include: LOCATION_PICKER_INCLUDE,
-        }),
-        db.location.findMany({
-          where: { organizationId, id: locationSelected },
-          include: LOCATION_PICKER_INCLUDE,
-        }),
+        findLocationPickerRows(locationExcludedSelectedQuery),
+        findLocationPickerRows(selectedLocationQuery),
         db.location.count({ where: { organizationId } }),
       ]);
 

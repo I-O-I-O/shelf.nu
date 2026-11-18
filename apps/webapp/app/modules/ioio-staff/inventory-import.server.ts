@@ -65,6 +65,7 @@ import {
   getImportLedgerItem,
   getImportLedgerItems,
   heartbeatImportLedgerItem,
+  type ImportLedgerItem,
   markImportLedgerItemConflict,
   markImportLedgerItemDone,
   markImportLedgerItemFailed,
@@ -7193,10 +7194,6 @@ type ImportAssetRecoverySnapshot = {
     manualLocations?: Array<{ locationId: string; quantity: number }>;
   };
 };
-
-type ImportLedgerItem = Awaited<
-  ReturnType<typeof getImportLedgerItems>
->[number];
 
 export type StaffImportApplyResponse =
   | StaffImportResult

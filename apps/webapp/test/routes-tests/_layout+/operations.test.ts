@@ -7,15 +7,22 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Prisma } from "@prisma/client";
 import { createActionArgs, createLoaderArgs } from "@mocks/remix";
+import { assertIsDataWithResponseInit } from "@helpers/assertions";
+import { createLabStatus } from "@factories";
 import { LabStatusCard } from "~/components/ioio-staff/lab-status";
-import type { LabStatus } from "~/modules/ioio-staff/lab-status.server";
 import OperationsPage, {
   action,
   getBrokenItemDestination,
   loader,
 } from "~/routes/_layout+/operations";
 import { ShelfError } from "~/utils/error";
+
+type OperationsLoaderData = Extract<
+  Awaited<ReturnType<typeof loader>>,
+  { data: unknown }
+>["data"];
 
 const mocks = vi.hoisted(() => {
   const methods = {
@@ -227,18 +234,7 @@ describe("Operations loader", () => {
       weeklySchedule: {},
       overrides: [],
     });
-    mocks.getLabStatus.mockResolvedValue({
-      overdueLoans: 0,
-      returnChecks: 0,
-      returnedWithIssues: 0,
-      unresolvedReports: 0,
-      preparationTasks: 0,
-      cancelledPickups: 0,
-      readyForPickup: 0,
-      annualAccessApprovals: 0,
-      issues: [],
-      totalIssues: 0,
-    });
+    mocks.getLabStatus.mockResolvedValue(createLabStatus());
     mocks.getApprovals.mockResolvedValue([]);
     mocks.getIoioAvailability.mockResolvedValue({
       totalActive: 1,
@@ -272,26 +268,22 @@ describe("Operations loader", () => {
         context: { getSession: () => ({ userId: "user-1" }) } as never,
         request: new Request("http://localhost/operations"),
       })
-    ).catch((cause) => cause as { data?: { error?: { message?: string } } });
-    expect(refusal.data?.error?.message).toBe("Forbidden");
+    ).catch((cause: unknown) => cause);
+    assertIsDataWithResponseInit(refusal);
+    expect(refusal.data).toHaveProperty("error.message", "Forbidden");
     expect(mocks.requirePermission).toHaveBeenCalledWith(
       expect.objectContaining({ userId: "user-1" })
     );
   });
 
   it.each(views)("returns an empty payload for the %s view", async (view) => {
-    const result = (await loader(
+    const result = await loader(
       createLoaderArgs({
         context: { getSession: () => ({ userId: "user-1" }) } as never,
         request: new Request(`http://localhost/operations?view=${view}`),
       })
-    )) as unknown as {
-      data: {
-        view: string;
-        tasks: unknown[];
-        annualAccessApprovals: unknown[];
-      };
-    };
+    );
+    assertIsDataWithResponseInit<OperationsLoaderData>(result);
 
     expect(result.data.view).toBe(view);
     expect(result.data.tasks).toEqual([]);
@@ -299,12 +291,13 @@ describe("Operations loader", () => {
   });
 
   it("does not expose a generic requests view", async () => {
-    const result = (await loader(
+    const result = await loader(
       createLoaderArgs({
         context: { getSession: () => ({ userId: "user-1" }) } as never,
         request: new Request("http://localhost/operations?view=requests"),
       })
-    )) as unknown as { data: { view: string } };
+    );
+    assertIsDataWithResponseInit<OperationsLoaderData>(result);
 
     expect(result.data.view).toBe("all");
   });
@@ -380,31 +373,13 @@ describe("Operations loader", () => {
       (assets: unknown[]) => assets as never
     );
 
-    const result = (await loader(
+    const result = await loader(
       createLoaderArgs({
         context: { getSession: () => ({ userId: "staff-1" }) } as never,
         request: new Request("http://localhost/operations?view=to-prepare"),
       })
-    )) as unknown as {
-      data: {
-        summary: { "to-prepare": number };
-        tasks: Array<{
-          id: string;
-          kind: string;
-          title: string;
-          operationId?: string;
-          borrowerName?: string;
-          quantity?: number;
-          preparationRequest?: boolean;
-          bulkReadyEligible?: boolean;
-          requestedPeriod?: string;
-          availableForRequestedPeriod?: number;
-          availableNow?: number;
-          totalPhysicalUnits?: number;
-          physicalUnitAssignment?: string;
-        }>;
-      };
-    };
+    );
+    assertIsDataWithResponseInit<OperationsLoaderData>(result);
 
     const task = result.data.tasks.find(
       (entry) => entry.operationId === request.id
@@ -456,22 +431,27 @@ describe("Operations loader", () => {
       ],
     });
     mocks.methods.findMany.mockImplementation(
-      (args: {
-        where?: {
-          organizationId?: { in?: string[] } | string;
-          operationType?: string;
-          source?: string | { in?: string[] };
-          status?: string;
-        };
-      }) =>
-        args.where?.operationType === "IOIO_PREPARATION" &&
-        args.where?.source !== undefined &&
-        typeof args.where.source === "object" &&
-        args.where.source.in?.includes("IOIO_PREPARATION_REQUEST") &&
-        args.where.organizationId !== "personal-1" &&
-        args.where.organizationId?.in?.includes("team-1")
+      (args: Prisma.IoioWriteOperationFindManyArgs) => {
+        const source = args.where?.source;
+        const organizationId = args.where?.organizationId;
+        const requestsPreparationSource =
+          typeof source === "object" &&
+          source !== null &&
+          Array.isArray(source.in) &&
+          source.in.includes("IOIO_PREPARATION_REQUEST");
+        const includesTeamOrganization =
+          typeof organizationId === "object" &&
+          organizationId !== null &&
+          Array.isArray(organizationId.in) &&
+          organizationId.in.includes("team-1");
+
+        return args.where?.operationType === "IOIO_PREPARATION" &&
+          requestsPreparationSource &&
+          organizationId !== "personal-1" &&
+          includesTeamOrganization
           ? [{ organizationId: "team-1" }]
-          : []
+          : [];
+      }
     );
 
     const result = await loader(
@@ -481,6 +461,9 @@ describe("Operations loader", () => {
       })
     );
 
+    if (!(result instanceof Response)) {
+      throw new Error("Expected an operations redirect response");
+    }
     expect(result).toMatchObject({ status: 302 });
     expect(result.headers.get("Location")).toBe(
       "http://localhost/operations?view=to-prepare"
@@ -535,14 +518,13 @@ describe("Operations loader", () => {
           : []
     );
 
-    const result = (await loader(
+    const result = await loader(
       createLoaderArgs({
         context: { getSession: () => ({ userId: "staff-2" }) } as never,
         request: new Request("http://localhost/operations?view=to-prepare"),
       })
-    )) as unknown as {
-      data: { summary: { "to-prepare": number }; tasks: unknown[] };
-    };
+    );
+    assertIsDataWithResponseInit<OperationsLoaderData>(result);
 
     expect(result.data.summary["to-prepare"]).toBe(0);
     expect(result.data.tasks).toEqual([]);
@@ -2051,7 +2033,7 @@ describe("Operations loader", () => {
   });
 
   it("keeps ready pickups in Current activity, outside Needs attention", () => {
-    const status = {
+    const status = createLabStatus({
       severity: "attention",
       totalIssues: 1,
       issues: [
@@ -2064,20 +2046,8 @@ describe("Operations loader", () => {
           href: "/operations?view=broken",
         },
       ],
-      overdueLoans: 0,
-      returnChecks: 0,
-      returnedWithIssues: 0,
-      unresolvedReports: 0,
-      preparationTasks: 0,
-      cancelledPickups: 0,
       readyForPickup: 2,
-      annualAccessApprovals: 0,
-      pendingReservationRequests: 0,
-      incompleteKits: 0,
-      outOfStock: 0,
-      lowStock: 0,
-      importWarnings: 0,
-    } satisfies LabStatus;
+    });
 
     render(createElement(LabStatusCard, { status }));
 
@@ -2095,7 +2065,7 @@ describe("Operations loader", () => {
   });
 
   it("keeps Dashboard Lab status compact and links General to Operations", () => {
-    const status = {
+    const status = createLabStatus({
       severity: "attention",
       totalIssues: 5,
       issues: Array.from({ length: 5 }, (_, index) => ({
@@ -2106,21 +2076,8 @@ describe("Operations loader", () => {
         detail: "Needs review",
         href: "/operations?view=general",
       })),
-      overdueLoans: 0,
-      returnChecks: 0,
-      returnedWithIssues: 0,
-      unresolvedReports: 0,
       generalReports: 5,
-      preparationTasks: 0,
-      cancelledPickups: 0,
-      readyForPickup: 0,
-      annualAccessApprovals: 0,
-      pendingReservationRequests: 0,
-      incompleteKits: 0,
-      outOfStock: 0,
-      lowStock: 0,
-      importWarnings: 0,
-    } satisfies LabStatus;
+    });
 
     render(createElement(LabStatusCard, { status }));
 
@@ -2141,7 +2098,7 @@ describe("Operations loader", () => {
   });
 
   it("routes Dashboard attention rows to Lab status queues without actions", () => {
-    const status = {
+    const status = createLabStatus({
       severity: "attention",
       totalIssues: 4,
       issues: [
@@ -2178,21 +2135,11 @@ describe("Operations loader", () => {
           href: "/operations?view=access-approvals",
         },
       ],
-      overdueLoans: 0,
-      lowStock: 0,
-      outOfStock: 0,
       unresolvedReports: 1,
       generalReports: 1,
-      incompleteKits: 0,
-      importWarnings: 0,
-      pendingReservationRequests: 0,
       returnChecks: 1,
-      returnedWithIssues: 0,
-      preparationTasks: 0,
-      cancelledPickups: 0,
-      readyForPickup: 0,
       annualAccessApprovals: 1,
-    } satisfies LabStatus;
+    });
 
     const { rerender } = render(createElement(LabStatusCard, { status }));
 

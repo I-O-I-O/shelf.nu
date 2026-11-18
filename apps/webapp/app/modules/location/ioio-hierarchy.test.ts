@@ -23,10 +23,10 @@ describe("IOIO location hierarchy validation", () => {
   });
 
   it.each([
-    ["section", { parentId: null, grandparentId: null }, null],
-    ["shelf", { parentId: "room", grandparentId: null }, null],
-    ["shelf", { parentId: null, grandparentId: null }, null],
-    ["container", { parentId: "section", grandparentId: "room" }, null],
+    ["section", { parentId: null, grandparentId: null }],
+    ["shelf", { parentId: "room", grandparentId: null }],
+    ["shelf", { parentId: null, grandparentId: null }],
+    ["container", { parentId: "section", grandparentId: "room" }],
   ] as const)(
     "accepts %s at a valid hierarchy depth",
     (locationType, parent) => {

@@ -166,7 +166,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
     if (duplicate) {
       throwLocationValidationError(
-        `A location named ${duplicate.name} already exists in ${
+        `A location named ${duplicate} already exists in ${
           parent?.name ?? "the top level"
         }.`
       );

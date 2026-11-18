@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { createAsset } from "~/modules/asset/service.server";
 import { Logger } from "~/utils/logger";
 import {
   PermissionAction,
@@ -184,6 +185,7 @@ import {
   type StaffImportProposalRow,
   type StaffImportReviewDecision,
   type StaffImportResult,
+  type StaffImportRow,
 } from "./inventory-import.server";
 import { PdfOcrError } from "./pdf-ocr.server";
 import type {
@@ -208,6 +210,41 @@ import {
   MOUSER_SIX_LINE_EXPECTED,
   MOUSER_SIX_LINE_PAGES,
 } from "../../../test/fixtures/mouser-invoice-fragments";
+
+type ClassifiedExistingAsset = Parameters<
+  typeof classifyStaffImportRows
+>[0]["assets"][number];
+type MockCreatedAsset = Pick<
+  ClassifiedExistingAsset,
+  "id" | "title" | "type" | "quantity" | "categoryId"
+> &
+  Partial<Pick<ClassifiedExistingAsset, "assetLocations" | "assetModelId">> &
+  Pick<
+    Parameters<typeof createAsset>[0],
+    "description" | "locationId" | "newQrId"
+  >;
+type ApplyNewImportSourceRow = Pick<StaffImportRow, "title" | "quantity"> &
+  Partial<
+    Pick<
+      StaffImportRow,
+      | "receivedQuantity"
+      | "orderedQuantity"
+      | "quantityStatus"
+      | "sourceQuantity"
+      | "sourceRoom"
+      | "sourceOrganization"
+    >
+  >;
+
+function makeStaffImportProposalRow(
+  row: Omit<StaffImportProposalRow, "category" | "location">,
+  source: Pick<StaffImportRow, "category" | "location"> = {
+    category: null,
+    location: null,
+  }
+): StaffImportProposalRow {
+  return { ...row, ...source };
+}
 
 function makeMouserPdf() {
   const content = MOUSER_FRAGMENTED_PAGE_TEXT.split("\n")
@@ -813,28 +850,30 @@ describe("staff inventory import safety", () => {
         ],
       })
     );
-    mockEnrichImportProductRows.mockImplementationOnce((rows) => ({
-      rows: rows.map((row) => ({
-        ...row,
-        productImageProposal: {
-          status: "IMAGE_FOUND",
-          mimeType: "image/webp",
-          dataBase64: Buffer.from("RIFF\u0004\u0000\u0000\u0000WEBP").toString(
-            "base64"
-          ),
-          autoAccepted: true,
+    mockEnrichImportProductRows.mockImplementationOnce(
+      (rows: ImportProductEnrichmentRow[]) => ({
+        rows: rows.map((row) => ({
+          ...row,
+          productImageProposal: {
+            status: "IMAGE_FOUND",
+            mimeType: "image/webp",
+            dataBase64: Buffer.from(
+              "RIFF\u0004\u0000\u0000\u0000WEBP"
+            ).toString("base64"),
+            autoAccepted: true,
+          },
+        })),
+        diagnostics: {
+          imageLookupAttempted: 1,
+          descriptionSource: {
+            SOURCE: 0,
+            SHELF_EXISTING: 0,
+            GENERATED: 0,
+            NONE: 1,
+          },
         },
-      })),
-      diagnostics: {
-        imageLookupAttempted: 1,
-        descriptionSource: {
-          SOURCE: 0,
-          SHELF_EXISTING: 0,
-          GENERATED: 0,
-          NONE: 1,
-        },
-      },
-    }));
+      })
+    );
     database.image.upsert.mockRejectedValueOnce(
       new Error("Preview store unavailable")
     );
@@ -1460,16 +1499,7 @@ describe("staff inventory import safety", () => {
     acceptSuggestedImage?: boolean;
     applyOnlyRowNumber?: number;
     applyOnlyRowNumbers?: number[];
-    sourceRow?: {
-      title: string;
-      quantity: number | null;
-      receivedQuantity?: number | null;
-      orderedQuantity?: number | null;
-      quantityStatus?: "RECEIVED" | "SHIPPED" | "ORDERED" | "UNKNOWN";
-      sourceQuantity?: number;
-      sourceRoom?: string;
-      sourceOrganization?: string;
-    };
+    sourceRow?: ApplyNewImportSourceRow;
     sourceLocations?: ReturnType<typeof inventorySourceLocations>;
     creationFailure?: string;
     creationFailureAtIndex?: number;
@@ -1590,7 +1620,7 @@ describe("staff inventory import safety", () => {
       description: JSON.stringify({ proposal }),
     };
     const ledgerRows: Array<Record<string, any>> = [];
-    const assetRows: Array<Record<string, any>> = [];
+    const assetRows: MockCreatedAsset[] = [];
     let modelId: string | null = null;
     let modelIdentityKey: string | null = null;
     let claimAttempted = false;
@@ -1811,21 +1841,27 @@ describe("staff inventory import safety", () => {
     database.qr.findFirst.mockResolvedValue(null);
     if (!selectedLocationId)
       database.location.findMany.mockResolvedValue(sourceLocations ?? []);
-    mockCreateAsset.mockImplementation((asset) => {
-      assetCreateAttempt += 1;
-      if (
-        creationFailure &&
-        (!creationFailureAtIndex ||
-          creationFailureAtIndex === assetCreateAttempt)
-      )
-        throw new Error(creationFailure);
-      const created = {
-        ...asset,
-        id: asset.id ?? `asset-${assetRows.length + 1}`,
-      };
-      assetRows.push(created);
-      return { id: created.id };
-    });
+    mockCreateAsset.mockImplementation(
+      (asset: Parameters<typeof createAsset>[0]) => {
+        assetCreateAttempt += 1;
+        if (
+          creationFailure &&
+          (!creationFailureAtIndex ||
+            creationFailureAtIndex === assetCreateAttempt)
+        )
+          throw new Error(creationFailure);
+        if (!asset.type)
+          throw new Error("Inventory import must provide an asset type.");
+        const created: MockCreatedAsset = {
+          ...asset,
+          id: asset.id ?? `asset-${assetRows.length + 1}`,
+          type: asset.type,
+          quantity: asset.quantity ?? null,
+        };
+        assetRows.push(created);
+        return { id: created.id };
+      }
+    );
 
     const result = await applyStaffInventoryImport({
       context: { getSession: () => ({ userId: "staff-1" }) } as never,
@@ -3316,33 +3352,36 @@ describe("staff inventory import safety", () => {
       locationIds: [],
       assetModelId: null,
     };
-    const row: StaffImportProposalRow = {
-      rowNumber: 2,
-      title: "Arduino Nano",
-      action: "POSSIBLE_DUPLICATE",
-      assetId: null,
-      type: "QUANTITY_TRACKED",
-      trackingSource: "DETERMINISTIC_DEFAULT",
-      quantity: 1,
-      receivedQuantity: 1,
-      categoryId: "category-electronics",
-      locationId: null,
-      currentQuantity: null,
-      currentCategoryId: null,
-      currentLocationId: null,
-      reason: "Review possible duplicate",
-      matchCandidates: [
-        {
-          id: "existing-board",
-          title: "Arduino Nano",
-          type: "INDIVIDUAL",
-          quantity: null,
-          category: "Electronics",
-          location: null,
-          expectedAssetState,
-        },
-      ],
-    };
+    const row = makeStaffImportProposalRow(
+      {
+        rowNumber: 2,
+        title: "Arduino Nano",
+        action: "POSSIBLE_DUPLICATE",
+        assetId: null,
+        type: "QUANTITY_TRACKED",
+        trackingSource: "DETERMINISTIC_DEFAULT",
+        quantity: 1,
+        receivedQuantity: 1,
+        categoryId: "category-electronics",
+        locationId: null,
+        currentQuantity: null,
+        currentCategoryId: null,
+        currentLocationId: null,
+        reason: "Review possible duplicate",
+        matchCandidates: [
+          {
+            id: "existing-board",
+            title: "Arduino Nano",
+            type: "INDIVIDUAL",
+            quantity: null,
+            category: "Electronics",
+            location: null,
+            expectedAssetState,
+          },
+        ],
+      },
+      { category: "Electronics", location: null }
+    );
     const { result, assetRows } = await applyNewImport({
       quantity: 1,
       proposalRows: [row],
@@ -3382,22 +3421,25 @@ describe("staff inventory import safety", () => {
   it.each([false, true])(
     "validates required fields instead of stored CONFLICT (missing category: %s)",
     async (missingCategory) => {
-      const row: StaffImportProposalRow = {
-        rowNumber: 2,
-        title: "Arduino Nano",
-        action: "CREATE",
-        reviewState: "CONFLICT",
-        assetId: null,
-        type: "QUANTITY_TRACKED",
-        quantity: 5,
-        receivedQuantity: 5,
-        categoryId: missingCategory ? null : "category-electronics",
-        locationId: null,
-        currentQuantity: null,
-        currentCategoryId: null,
-        currentLocationId: null,
-        reason: "Historical review state",
-      };
+      const row = makeStaffImportProposalRow(
+        {
+          rowNumber: 2,
+          title: "Arduino Nano",
+          action: "CREATE",
+          reviewState: "CONFLICT",
+          assetId: null,
+          type: "QUANTITY_TRACKED",
+          quantity: 5,
+          receivedQuantity: 5,
+          categoryId: missingCategory ? null : "category-electronics",
+          locationId: null,
+          currentQuantity: null,
+          currentCategoryId: null,
+          currentLocationId: null,
+          reason: "Historical review state",
+        },
+        { category: missingCategory ? null : "Electronics", location: null }
+      );
       const { result, assetRows } = await applyNewImport({
         quantity: 5,
         proposalRows: [row],
@@ -3435,22 +3477,26 @@ describe("staff inventory import safety", () => {
   it("returns all blocked selected rows before writing a mixed batch", async () => {
     const rows: StaffImportProposalRow[] = Array.from(
       { length: 6 },
-      (_, index) => ({
-        rowNumber: index + 2,
-        title: `Product ${index + 1}`,
-        action: "CREATE",
-        reviewState: "CONFLICT",
-        assetId: null,
-        type: "QUANTITY_TRACKED",
-        quantity: 1,
-        receivedQuantity: 1,
-        categoryId: index < 3 ? "category-electronics" : null,
-        locationId: null,
-        currentQuantity: null,
-        currentCategoryId: null,
-        currentLocationId: null,
-        reason: "New item",
-      })
+      (_, index) =>
+        makeStaffImportProposalRow(
+          {
+            rowNumber: index + 2,
+            title: `Product ${index + 1}`,
+            action: "CREATE",
+            reviewState: "CONFLICT",
+            assetId: null,
+            type: "QUANTITY_TRACKED",
+            quantity: 1,
+            receivedQuantity: 1,
+            categoryId: index < 3 ? "category-electronics" : null,
+            locationId: null,
+            currentQuantity: null,
+            currentCategoryId: null,
+            currentLocationId: null,
+            reason: "New item",
+          },
+          { category: index < 3 ? "Electronics" : null, location: null }
+        )
     );
     const { result, assetRows } = await applyNewImport({
       quantity: 1,
@@ -5296,6 +5342,9 @@ describe("staff inventory import safety", () => {
       acceptSuggestedImage: true,
     });
 
+    if (!("succeededRows" in result)) {
+      throw new Error("Expected the import to complete successfully.");
+    }
     expect(result.succeededRows).toBe(1);
     expect(mockUpdateAssetMainImage).toHaveBeenCalledTimes(1);
     expect(mockCreateAssetModel).not.toHaveBeenCalled();

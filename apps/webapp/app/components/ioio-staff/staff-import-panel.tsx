@@ -27,21 +27,9 @@ import {
 import type {
   StaffImportProposal,
   StaffImportProposalRow,
+  StaffImportResult,
 } from "~/modules/ioio-staff/inventory-import.server";
 import type { ImportProductImageProposal } from "~/modules/ioio-staff/product-enrichment.server";
-
-type StaffImportResult = {
-  operationId: string;
-  createdIds: string[];
-  updatedIds: string[];
-  reusedIds: string[];
-  failedRows: Array<{ rowNumber: number; reason: string }>;
-  conflictRows?: Array<{ rowNumber: number; reason: string }>;
-  ignoredRows?: number;
-  reviewedRows?: number;
-  succeededRows?: number;
-  remainingRows?: number;
-};
 
 type StaffImportActionResponse =
   | {
@@ -1128,19 +1116,16 @@ function StaffImportProposalView({
             role="status"
             className={`mt-3 text-sm ${
               response.result.failedRows.length ||
-              response.result.conflictRows?.length
+              response.result.conflictRows.length
                 ? "text-amber-800"
                 : "text-green-700"
             }`}
           >
             Applied{" "}
-            {response.result.appliedRowCount ??
-              response.result.succeededRows ??
-              0}{" "}
+            {response.result.appliedRowCount ?? response.result.succeededRows}{" "}
             approved{" "}
             {(response.result.appliedRowCount ??
-              response.result.succeededRows ??
-              0) === 1
+              response.result.succeededRows) === 1
               ? "item"
               : "items"}
             .
@@ -1151,13 +1136,13 @@ function StaffImportProposalView({
               : null}
           </p>
           {response.result.failedRows.length ||
-          response.result.conflictRows?.length ? (
+          response.result.conflictRows.length ? (
             <div role="alert" className="mt-3 text-sm text-amber-800">
               <p>These approved rows could not be applied:</p>
               <ul>
                 {[
                   ...response.result.failedRows,
-                  ...(response.result.conflictRows ?? []),
+                  ...response.result.conflictRows,
                 ].map((failure, index) => (
                   <li key={`${failure.rowNumber}-${index}`}>
                     {proposal.rows.find(
