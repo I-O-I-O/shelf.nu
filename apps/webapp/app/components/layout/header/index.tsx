@@ -46,7 +46,7 @@ export default function Header({
   const shouldHideQuickFind = hideQuickFind || isIoioStaff;
 
   return header ? (
-    <header className={tw("-mx-4 bg-white", classNames)}>
+    <header className={tw("-mx-4 min-w-0 max-w-full bg-white", classNames)}>
       {!hideBreadcrumbs && !isIoioStaff && (
         <>
           <div className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 md:min-h-[67px] md:py-3">
@@ -74,14 +74,14 @@ export default function Header({
       {!hidePageDescription && (
         <div
           className={tw(
-            "relative flex items-center border-b border-gray-200 px-4 py-3",
+            "relative flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 px-4 py-3",
             isIoioStaff && "border-b-0 py-1"
           )}
         >
           {slots?.["left-of-title"] ? (
             <div className="relative">{slots["left-of-title"]}</div>
           ) : null}
-          <div>
+          <div className="min-w-0 flex-1">
             {preHeading ? (
               <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
                 {preHeading}
@@ -94,7 +94,10 @@ export default function Header({
               )
             )}
             <div className="flex items-center gap-2">
-              <Heading as="h2" className="break-all text-[20px] font-semibold">
+              <Heading
+                as="h2"
+                className="break-words text-[20px] font-semibold"
+              >
                 {title || header?.title}
               </Heading>
               {slots?.["append-to-title"] || null}

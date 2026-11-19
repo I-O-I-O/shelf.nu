@@ -104,3 +104,163 @@
   background-color: var(--ioio-red-300);
   border-color: var(--ioio-red-300);
 }
+
+@media (max-width: 767px) {
+  .ioio-staff-surface .import-review-table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    table-layout: auto;
+  }
+
+  .ioio-staff-surface .import-review-table-pending thead,
+  .ioio-staff-surface .import-review-table-pending tbody,
+  .ioio-staff-surface .import-review-table-implemented tbody {
+    display: block;
+  }
+
+  .ioio-staff-surface .import-review-table-pending thead tr {
+    display: block;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.75rem;
+  }
+
+  .ioio-staff-surface .import-review-table-pending thead th:first-child {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0;
+  }
+
+  .ioio-staff-surface .import-review-table-pending thead th:first-child::after {
+    content: "Approve all ready rows on this page";
+    color: #374151;
+    font-size: 0.875rem;
+    font-weight: 600;
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  .ioio-staff-surface .import-review-table-pending thead th:not(:first-child),
+  .ioio-staff-surface .import-review-table-implemented thead {
+    display: none;
+  }
+
+  .ioio-staff-surface .import-review-table tbody tr {
+    display: block;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[data-label] {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(5.5rem, 6.5rem) minmax(0, 1fr);
+    align-items: start;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[data-label]::before {
+    content: attr(data-label);
+    color: #6b7280;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[data-label="Approve"] {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+    padding-bottom: 0.25rem;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[data-label="Actions"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .ioio-staff-surface
+    .import-review-table
+    tbody
+    td[data-label="Actions"]::before {
+    flex-basis: 100%;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[colspan] {
+    display: block;
+    width: 100%;
+    padding: 0.75rem;
+  }
+
+  .ioio-staff-surface .import-review-table tbody td[aria-hidden="true"] {
+    display: none;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    table-layout: auto;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table thead {
+    display: none;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table tbody,
+  .ioio-staff-surface .ioio-responsive-card-table tbody tr {
+    display: block;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table tbody tr {
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.25rem 0;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table tbody td[data-label] {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(6rem, 7.5rem) minmax(0, 1fr);
+    align-items: start;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table tbody td[data-label]::before {
+    content: attr(data-label);
+    color: #6b7280;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table select {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .ioio-staff-surface .ioio-responsive-card-table td[data-label="Review"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .ioio-staff-surface
+    .ioio-responsive-card-table
+    td[data-label="Review"]::before {
+    flex-basis: 100%;
+  }
+
+  .ioio-staff-surface
+    .ioio-responsive-card-table
+    td[data-label="Review"]
+    button {
+    min-height: 2.75rem;
+    margin: 0;
+  }
+}

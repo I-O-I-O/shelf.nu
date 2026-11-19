@@ -11,7 +11,7 @@ export function ListContentWrapper({
   return (
     <div
       className={tw(
-        "relative flex flex-1 flex-col md:mx-0 md:mt-4 md:gap-2",
+        "relative flex min-w-0 max-w-full flex-1 flex-col md:mx-0 md:mt-4 md:gap-2",
         className
       )}
     >

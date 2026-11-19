@@ -6,15 +6,19 @@ import type {
 } from "react-router";
 import { data, Link, Outlet } from "react-router";
 import { z } from "zod";
-import CategoryQuickActions from "~/components/category/category-quick-actions";
+import CategoryQuickActions, {
+  CategoryMobileQuickActions,
+} from "~/components/category/category-quick-actions";
 import { CategorySelectionToolbar } from "~/components/category/category-selection-toolbar";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import LineBreakText from "~/components/layout/line-break-text";
 import { List } from "~/components/list";
+import { BulkListCardCheckbox } from "~/components/list/bulk-actions/bulk-list-card-checkbox";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
 import { Filters } from "~/components/list/filters";
+import type { ListItemData } from "~/components/list/list-item";
 import { Badge } from "~/components/shared/badge";
 import { Button } from "~/components/shared/button";
 import { Th, Td } from "~/components/table";
@@ -185,6 +189,7 @@ export default function CategoriesPage() {
             newButtonContent: "Create your first category",
           }}
           ItemComponent={CategoryItem}
+          MobileItemComponent={MobileCategoryItem}
           headerChildren={
             <>
               <Th>Description</Th>
@@ -228,3 +233,47 @@ const CategoryItem = ({
     <CategoryQuickActions category={item} />
   </>
 );
+
+function MobileCategoryItem({
+  item: listItem,
+  hasBulkActions = false,
+}: {
+  item: ListItemData;
+  hasBulkActions?: boolean;
+}) {
+  const item = listItem as Pick<
+    Category,
+    "id" | "description" | "name" | "color"
+  > & { _count: { assets: number } };
+  return (
+    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="flex min-w-0 items-start gap-3">
+        {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
+        <div className="min-w-0 flex-1">
+          <Badge
+            color={item.color}
+            withDot={false}
+            className="max-w-full whitespace-normal break-words [overflow-wrap:anywhere]"
+          >
+            {item.name}
+          </Badge>
+          <p className="mt-2 text-sm text-gray-600">
+            {item._count.assets} {item._count.assets === 1 ? "asset" : "assets"}
+          </p>
+          {item.description ? (
+            <div className="mt-2 break-words text-sm text-gray-700">
+              <LineBreakText
+                text={item.description}
+                numberOfLines={3}
+                charactersPerLine={60}
+              />
+            </div>
+          ) : null}
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <CategoryMobileQuickActions category={item} />
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}

@@ -26,8 +26,18 @@ import { describe, expect, it, vi } from "vitest";
 // router context this render test doesn't set up. A plain anchor is enough
 // to assert the booking name renders.
 vi.mock("../shared/button", () => ({
-  Button: ({ children, to }: { children: ReactNode; to?: string }) => (
-    <a href={to}>{children}</a>
+  Button: ({
+    children,
+    to,
+    className,
+  }: {
+    children: ReactNode;
+    to?: string;
+    className?: string;
+  }) => (
+    <a href={to} className={className}>
+      {children}
+    </a>
   ),
 }));
 
@@ -65,7 +75,9 @@ vi.mock("~/hooks/user-user-role-helper", () => ({
   }),
 }));
 
-import ListBookingsContent from "./list-bookings-content";
+import ListBookingsContent, {
+  MobileListBookingsContent,
+} from "./list-bookings-content";
 
 type BookingItem = ComponentProps<typeof ListBookingsContent>["item"];
 
@@ -96,6 +108,28 @@ function buildItem(overrides: Partial<BookingItem> = {}): BookingItem {
     ...overrides,
   } as unknown as BookingItem;
 }
+
+describe("MobileListBookingsContent", () => {
+  it("keeps booking name and key details together in a wrapping card", () => {
+    const item = buildItem({
+      name: "A very long booking name for the portable lighting kit",
+      description: "Pickup from the equipment desk.",
+    });
+
+    render(<MobileListBookingsContent item={item} hasBulkActions />);
+
+    expect(screen.getByRole("link", { name: item.name })).toHaveClass(
+      "break-words"
+    );
+    expect(
+      screen.getByRole("button", { name: "Select " + item.name })
+    ).toBeInTheDocument();
+    expect(screen.getByText("From")).toBeInTheDocument();
+    expect(screen.getByText("To")).toBeInTheDocument();
+    expect(screen.getByText("Custodian")).toBeInTheDocument();
+    expect(screen.getByText("Description")).toBeInTheDocument();
+  });
+});
 
 describe("ListBookingsContent — Stock conflict pill", () => {
   it('renders the amber "Stock conflict" pill when item.hasStockConflict is true', () => {

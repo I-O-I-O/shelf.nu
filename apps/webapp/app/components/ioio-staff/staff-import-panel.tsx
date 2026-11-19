@@ -110,7 +110,7 @@ const IMPORT_REVIEW_SECTION_CLASS =
 const IMPORT_REVIEW_SECTION_HEADER_CLASS =
   "flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3";
 const IMPORT_REVIEW_TABLE_CLASS =
-  "w-full min-w-[920px] table-fixed text-left text-sm";
+  "import-review-table w-full min-w-[920px] table-fixed text-left text-sm";
 const IMPORT_REVIEW_TABLE_HEAD_CLASS =
   "border-b border-gray-200 bg-gray-50 text-xs uppercase tracking-wide text-gray-500";
 const IMPORT_REVIEW_TABLE_BODY_CLASS = "divide-y divide-gray-100";
@@ -1225,7 +1225,9 @@ function StaffImportProposalView({
           hidden={pendingReviewRows.length === 0}
           className="overflow-x-auto"
         >
-          <table className={IMPORT_REVIEW_TABLE_CLASS}>
+          <table
+            className={`${IMPORT_REVIEW_TABLE_CLASS} import-review-table-pending`}
+          >
             <thead className={IMPORT_REVIEW_TABLE_HEAD_CLASS}>
               <tr>
                 <th className="w-10 p-2">
@@ -1406,7 +1408,7 @@ function StaffImportProposalView({
                         isIgnored ? "" : "bg-amber-50/40"
                       }`}
                     >
-                      <td className="w-10 p-2 align-top">
+                      <td data-label="Approve" className="w-10 p-2 align-top">
                         <ImportReviewCheckbox
                           ariaLabel={`Approve ${
                             row.title || `row ${row.rowNumber}`
@@ -1424,7 +1426,10 @@ function StaffImportProposalView({
                           }
                         />
                       </td>
-                      <td className="break-words p-2 align-top">
+                      <td
+                        data-label="Product"
+                        className="break-words p-2 align-top"
+                      >
                         <div className="break-words font-semibold leading-5 text-gray-950">
                           {row.title || "Unresolved item name"}
                         </div>
@@ -1764,7 +1769,10 @@ function StaffImportProposalView({
                           </div>
                         </details>
                       </td>
-                      <td className="w-[120px] p-2 pr-4 align-top tabular-nums">
+                      <td
+                        data-label="Quantity"
+                        className="w-[120px] p-2 pr-4 align-top tabular-nums"
+                      >
                         <Input
                           label={`Quantity for ${row.title}`}
                           hideLabel
@@ -1811,7 +1819,10 @@ function StaffImportProposalView({
                               : "Quantity ready")}
                         </p>
                       </td>
-                      <td className="min-w-36 p-2 align-top">
+                      <td
+                        data-label="Category"
+                        className="min-w-36 p-2 align-top"
+                      >
                         {isResolved ? (
                           <span>
                             {selectedCategoryBadge?.name ??
@@ -1873,7 +1884,10 @@ function StaffImportProposalView({
                           <CategoryBadge category={selectedCategoryBadge} />
                         )}
                       </td>
-                      <td className="break-words p-2 align-top text-gray-700">
+                      <td
+                        data-label="Location"
+                        className="break-words p-2 align-top text-gray-700"
+                      >
                         {isResolved ? (
                           selectedLocation?.pathLabel ??
                           row.locationLabel ??
@@ -1890,7 +1904,7 @@ function StaffImportProposalView({
                           />
                         )}
                       </td>
-                      <td className="p-2 align-top">
+                      <td data-label="Image" className="p-2 align-top">
                         {proposedImage?.status === "IMAGE_FOUND" &&
                         importProductImagePreview(proposedImage) ? (
                           <img
@@ -1915,7 +1929,7 @@ function StaffImportProposalView({
                           </span>
                         )}
                       </td>
-                      <td className="p-2 align-top">
+                      <td data-label="Status" className="p-2 align-top">
                         <span
                           className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${statusClassName}`}
                           role="status"
@@ -1938,7 +1952,7 @@ function StaffImportProposalView({
                             </p>
                           ))}
                       </td>
-                      <td className="p-2 align-top">
+                      <td data-label="Actions" className="p-2 align-top">
                         {isResolved ? null : (
                           <button
                             type="button"
@@ -2521,7 +2535,9 @@ function StaffImportProposalView({
             delete or revert assets.
           </p>
           <div className="overflow-x-auto">
-            <table className={IMPORT_REVIEW_TABLE_CLASS}>
+            <table
+              className={`${IMPORT_REVIEW_TABLE_CLASS} import-review-table-implemented`}
+            >
               <thead className={IMPORT_REVIEW_TABLE_HEAD_CLASS}>
                 <tr>
                   <th className="w-10 p-2" aria-hidden="true" />
@@ -2560,7 +2576,10 @@ function StaffImportProposalView({
                   return (
                     <tr key={row.rowNumber}>
                       <td className="w-10 p-2 align-top" aria-hidden="true" />
-                      <td className="break-words p-2 align-top font-semibold text-gray-950">
+                      <td
+                        data-label="Product"
+                        className="break-words p-2 align-top font-semibold text-gray-950"
+                      >
                         {implementation?.title ??
                           decision?.title ??
                           row.title ??
@@ -2594,14 +2613,20 @@ function StaffImportProposalView({
                           </time>
                         ) : null}
                       </td>
-                      <td className="whitespace-nowrap p-2 align-top font-semibold tabular-nums text-gray-700">
+                      <td
+                        data-label="Quantity"
+                        className="whitespace-nowrap p-2 align-top font-semibold tabular-nums text-gray-700"
+                      >
                         {implementation?.quantity ??
                           decision?.quantity ??
                           row.receivedQuantity ??
                           row.quantity ??
                           "—"}
                       </td>
-                      <td className="break-words p-2 align-top text-gray-700">
+                      <td
+                        data-label="Category"
+                        className="break-words p-2 align-top text-gray-700"
+                      >
                         {implementation
                           ? implementation.categoryLabel ?? "—"
                           : category ||
@@ -2609,7 +2634,10 @@ function StaffImportProposalView({
                             row.suggestedCategory ||
                             "—"}
                       </td>
-                      <td className="break-words p-2 align-top text-gray-700">
+                      <td
+                        data-label="Location"
+                        className="break-words p-2 align-top text-gray-700"
+                      >
                         {implementation?.locationLabel ??
                           location?.pathLabel ??
                           row.locationLabel ??
@@ -2623,7 +2651,7 @@ function StaffImportProposalView({
                           </p>
                         ) : null}
                       </td>
-                      <td className="p-2 align-top">
+                      <td data-label="Image" className="p-2 align-top">
                         {imageSource ? (
                           <img
                             src={imageSource}
@@ -2634,7 +2662,10 @@ function StaffImportProposalView({
                           <span className="text-xs text-gray-500">—</span>
                         )}
                       </td>
-                      <td className="p-2 align-top text-xs font-semibold text-gray-600">
+                      <td
+                        data-label="Status"
+                        className="p-2 align-top text-xs font-semibold text-gray-600"
+                      >
                         Implemented
                       </td>
                       <td aria-hidden="true" className="p-2 align-top" />

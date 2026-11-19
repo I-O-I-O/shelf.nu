@@ -66,3 +66,51 @@ export default function CategoryQuickActions({
     </>
   );
 }
+
+export function CategoryMobileQuickActions({
+  category,
+}: CategoryQuickActionsProps) {
+  const { roles } = useUserRoleHelper();
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      <When
+        truthy={userHasPermission({
+          roles,
+          entity: PermissionEntity.category,
+          action: PermissionAction.update,
+        })}
+      >
+        <Button
+          size="sm"
+          variant="secondary"
+          to={`${category.id}/edit`}
+          aria-label={`Edit ${category.name}`}
+        >
+          Edit
+        </Button>
+      </When>
+      <When
+        truthy={userHasPermission({
+          roles,
+          entity: PermissionEntity.category,
+          action: PermissionAction.delete,
+        })}
+      >
+        <DeleteCategory
+          category={category}
+          trigger={
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              aria-label={`Delete ${category.name}`}
+            >
+              Delete
+            </Button>
+          }
+        />
+      </When>
+    </div>
+  );
+}

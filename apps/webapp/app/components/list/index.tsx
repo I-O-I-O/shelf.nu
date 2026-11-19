@@ -57,7 +57,11 @@ export type ListProps = {
   title?: string;
   ItemComponent: any;
   /** Optional compact card renderer for narrow screens. */
-  MobileItemComponent?: any;
+  MobileItemComponent?: React.ComponentType<{
+    item: ListItemData;
+    extraProps?: Record<string, unknown>;
+    hasBulkActions?: boolean;
+  }>;
   headerChildren?: ReactNode;
   hideFirstHeaderColumn?: boolean;
   /** Function to be passed if the rows of the table should navigate */
@@ -165,8 +169,8 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     <div
       ref={ref}
       className={tw(
-        "-mx-4 border border-gray-200 bg-white md:mx-0 md:rounded",
-        modeIsAdvanced ? "flex h-full flex-col" : "overflow-auto",
+        "-mx-4 min-w-0 max-w-full border border-gray-200 bg-white md:mx-0 md:rounded",
+        modeIsAdvanced ? "flex h-full flex-col" : "overflow-x-clip",
         className
       )}
     >
@@ -224,6 +228,7 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
                 <MobileItemComponent
                   item={item}
                   extraProps={extraItemComponentProps}
+                  hasBulkActions={Boolean(bulkActions)}
                   key={item.id}
                 />
               ))}

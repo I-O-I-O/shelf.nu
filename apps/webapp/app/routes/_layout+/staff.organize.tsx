@@ -902,7 +902,7 @@ export default function StaffOrganizePage() {
             </p>
             {proposal.proposalItems.length ? (
               <div className="mt-4 overflow-x-auto rounded-lg border">
-                <table className="w-full min-w-[900px] text-left text-sm">
+                <table className="ioio-responsive-card-table w-full min-w-[900px] text-left text-sm">
                   <thead className="bg-gray-50">
                     <tr>
                       {[
@@ -926,18 +926,18 @@ export default function StaffOrganizePage() {
                   <tbody>
                     {proposal.proposalItems.map((item) => (
                       <tr key={item.modelId} className="border-t">
-                        <td className="p-3 font-medium">
+                        <td data-label="Product" className="p-3 font-medium">
                           {item.productName}
                           <p className="mt-1 text-xs text-gray-500">
                             {item.reason}
                           </p>
                         </td>
-                        <td className="p-3">
+                        <td data-label="Current location" className="p-3">
                           {locations.find(
                             (entry) => entry.id === item.currentLocationId
                           )?.path ?? "Unassigned"}
                         </td>
-                        <td className="p-3">
+                        <td data-label="Proposed location" className="p-3">
                           {(item.alternatives ?? []).length > 0 ? (
                             <select
                               aria-label={`Destination for ${item.productName}`}
@@ -975,7 +975,7 @@ export default function StaffOrganizePage() {
                             "—"
                           )}
                         </td>
-                        <td className="p-3">
+                        <td data-label="Strength" className="p-3">
                           {selectedDestinations[item.modelId]
                             ? "Staff selected"
                             : item.strength === "RECOMMENDED"
@@ -992,12 +992,12 @@ export default function StaffOrganizePage() {
                           (entry) => entry.categoryId
                         ) && (
                           <>
-                            <td className="p-3">
+                            <td data-label="Current category" className="p-3">
                               {categories.find(
                                 (entry) => entry.id === item.currentCategoryId
                               )?.name ?? "Unassigned"}
                             </td>
-                            <td className="p-3">
+                            <td data-label="Suggested category" className="p-3">
                               {item.categoryId
                                 ? categories.find(
                                     (entry) => entry.id === item.categoryId
@@ -1006,7 +1006,7 @@ export default function StaffOrganizePage() {
                             </td>
                           </>
                         )}
-                        <td className="p-3">
+                        <td data-label="Review" className="p-3">
                           <button
                             type="button"
                             onClick={() =>

@@ -31,7 +31,7 @@ export const Filters = ({
     <div
       className={tw(
         modeIsAdvanced ? "md:p-3" : "md:px-4 md:py-5",
-        "flex items-center justify-between bg-white py-2 md:rounded md:border md:border-gray-200 ",
+        "flex min-w-0 max-w-full flex-col items-stretch justify-between gap-2 bg-white py-2 md:flex-row md:items-center md:gap-0 md:rounded md:border md:border-gray-200 ",
         className
       )}
     >
@@ -47,7 +47,9 @@ export const Filters = ({
           {slots?.["right-of-search"] || null}
         </div>
         {children ? (
-          <div className="flex flex-1 justify-end gap-3">{children}</div>
+          <div className="flex flex-col gap-2 md:flex-1 md:flex-row md:justify-end md:gap-3">
+            {children}
+          </div>
         ) : null}
       </div>
     </div>

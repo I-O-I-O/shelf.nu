@@ -341,7 +341,7 @@ const SidebarTrigger = forwardRef<
       ref={ref}
       data-sidebar="trigger"
       variant="secondary"
-      className={tw("size-[21px] border-none p-0", className)}
+      className={tw("size-11 border-none p-0 md:size-[21px]", className)}
       onClick={(event: any) => {
         onClick?.(event);
         toggleSidebar();
@@ -397,7 +397,7 @@ const SidebarInset = forwardRef<HTMLDivElement, ComponentProps<"main">>(
       <main
         ref={ref}
         className={tw(
-          "h-dvh w-full overflow-auto bg-gray-25 px-4",
+          "h-dvh w-full min-w-0 max-w-full overflow-y-auto overflow-x-clip bg-gray-25 px-4",
           isAvailabilityView ? (isKitIndex ? "pb-0" : "pb-[46px]") : "pb-10",
           className
         )}
@@ -569,7 +569,7 @@ const SidebarMenuItem = forwardRef<HTMLLIElement, ComponentProps<"li">>(
 SidebarMenuItem.displayName = "SidebarMenuItem";
 
 const sidebarMenuButtonVariants = cva(
-  "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-none ring-primary-500 transition-[width,height,padding] focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent data-[active=true]:font-semibold data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
+  "peer/menu-button flex min-h-11 w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-none ring-primary-500 transition-[width,height,padding] focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent data-[active=true]:font-semibold data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 md:min-h-0",
   {
     variants: {
       variant: {
@@ -776,7 +776,7 @@ const SidebarMenuSubButton = forwardRef<
       data-size={size}
       data-active={isActive}
       className={tw(
-        "flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground outline-none ring-primary-500 aria-disabled:pointer-events-none aria-disabled:opacity-50  focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground",
+        "flex min-h-11 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground outline-none ring-primary-500 aria-disabled:pointer-events-none aria-disabled:opacity-50 focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 md:h-7 md:min-h-0 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground",
         "data-[active=true]:bg-sidebar-accent data-[active=true]:text-sidebar-accent-foreground",
         size === "sm" && "text-xs",
         size === "md" && "text-sm",

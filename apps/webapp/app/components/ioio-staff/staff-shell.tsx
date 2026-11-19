@@ -134,7 +134,7 @@ export function StaffNavigation({
                     setDraggedPath(null);
                   }}
                   onDragEnd={() => setDraggedPath(null)}
-                  className={`flex min-h-9 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 ${
+                  className={`flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 md:min-h-9 ${
                     active
                       ? "bg-red-50 text-red-800"
                       : "text-gray-700 hover:bg-red-50 hover:text-red-800"
@@ -168,7 +168,7 @@ export function StaffNavigation({
                     to={getMyLoansPath("staff")}
                     aria-current={isStaffMyLoansActive ? "page" : undefined}
                     onClick={onNavigate}
-                    className={`block rounded-lg px-3 py-1.5 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 ${
+                    className={`block min-h-11 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 md:min-h-9 md:py-1.5 ${
                       isStaffMyLoansActive
                         ? "bg-red-50 text-red-800"
                         : "text-gray-600 hover:bg-red-50 hover:text-red-800"
@@ -207,7 +207,7 @@ export function StaffNavigation({
               setDraggedPath(null);
             }}
             onDragEnd={() => setDraggedPath(null)}
-            className={`flex min-h-9 min-w-0 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 ${
+            className={`flex min-h-11 min-w-0 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 md:min-h-9 ${
               active
                 ? "bg-red-50 text-red-800"
                 : "text-gray-700 hover:bg-red-50 hover:text-red-800"

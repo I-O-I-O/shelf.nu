@@ -25,7 +25,9 @@ import {
   STAFF_LOAN_COLUMNS,
   type ListBookingsContentProps as IoioLoanContentProps,
 } from "~/components/booking/ioio-staff-loan-content";
-import ListBookingsContent from "~/components/booking/list-bookings-content";
+import ListBookingsContent, {
+  MobileListBookingsContent,
+} from "~/components/booking/list-bookings-content";
 import { ErrorContent } from "~/components/errors";
 
 import ContextualModal from "~/components/layout/contextual-modal";
@@ -33,6 +35,7 @@ import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import { List } from "~/components/list";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
+import type { ListItemData } from "~/components/list/list-item";
 import { Button } from "~/components/shared/button";
 import { Th } from "~/components/table";
 import { db } from "~/database/db.server";
@@ -105,12 +108,13 @@ function BookingListItem({
 }
 
 function MobileBookingListItem({
-  item,
+  item: listItem,
   extraProps,
 }: {
-  item: IoioLoanContentProps["item"];
+  item: ListItemData;
   extraProps?: BookingRowExtraProps;
 }) {
+  const item = listItem as IoioLoanContentProps["item"];
   return (
     <IoioMobileLoanContent
       item={item}
@@ -786,7 +790,7 @@ export default function BookingsIndexPage({
             isIoioStaffLoans ? BookingListItem : ListBookingsContent
           }
           MobileItemComponent={
-            isIoioStaffLoans ? MobileBookingListItem : undefined
+            isIoioStaffLoans ? MobileBookingListItem : MobileListBookingsContent
           }
           extraItemComponentProps={loanRowExtraProps}
           hideListTitle={isIoioStaffLoans}

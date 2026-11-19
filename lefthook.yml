@@ -73,7 +73,7 @@ pre-commit:
 commit-msg:
   commands:
     commitlint:
-      run: npx --no -- commitlint --edit {1}
+      run: npx --no -- commitlint --edit "{1}"
       fail_text: |
         Commit message doesn't follow Conventional Commits format
 

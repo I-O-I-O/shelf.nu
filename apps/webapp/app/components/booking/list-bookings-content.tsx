@@ -26,7 +26,9 @@ import { BookingAssetsSidebar } from "./booking-assets-sidebar";
 import { BookingStatusBadge } from "./booking-status-badge";
 import { UnassignedModelUnitsPill } from "./unassigned-model-units-pill";
 import LineBreakText from "../layout/line-break-text";
+import { BulkListCardCheckbox } from "../list/bulk-actions/bulk-list-card-checkbox";
 import ItemsWithViewMore from "../list/items-with-view-more";
+import type { ListItemData } from "../list/list-item";
 import { Badge } from "../shared/badge";
 import { Button } from "../shared/button";
 import { DateS } from "../shared/date";
@@ -275,5 +277,89 @@ export default function ListBookingsContent({
         <UserBadge user={item?.creator} />
       </Td>
     </>
+  );
+}
+
+/** Narrow-screen card for the shared bookings list and its related surfaces. */
+export function MobileListBookingsContent({
+  item: listItem,
+  hasBulkActions = false,
+}: {
+  item: ListItemData;
+  hasBulkActions?: boolean;
+}) {
+  const item = listItem as ListBookingsContentProps["item"];
+  const custodianName = item.custodianTeamMember
+    ? item.custodianTeamMember.name
+    : resolveUserDisplayName(item.custodianUser);
+
+  return (
+    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="flex min-w-0 items-start gap-3">
+        {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
+        <div className="min-w-0 flex-1">
+          <Button
+            to={`/bookings/${item.id}`}
+            variant="link"
+            className="block max-w-full break-words text-left font-semibold text-gray-900 hover:text-gray-700"
+          >
+            {item.name}
+          </Button>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <BookingStatusBadge
+              status={item.status}
+              custodianUserId={item.custodianUserId || undefined}
+            />
+            <BookingAssetsSidebar booking={item} />
+            <UnassignedModelUnitsPill
+              count={countUnassignedModelUnits(item.modelRequests)}
+              canAssign={canAssignModelUnits(item.status)}
+            />
+          </div>
+        </div>
+      </div>
+
+      {item.hasStockConflict || item.hasUnavailableAssets ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {item.hasStockConflict ? <StockConflictPill /> : null}
+          {item.hasUnavailableAssets ? (
+            <AvailabilityBadge
+              badgeText="Includes unavailable assets"
+              tooltipTitle="Booking includes unavailable assets"
+              tooltipContent="One or more assets in this booking are unavailable for reservation."
+            />
+          ) : null}
+        </div>
+      ) : null}
+
+      <dl className="mt-4 grid min-w-0 grid-cols-2 gap-3 border-t border-gray-100 pt-3 text-sm">
+        <div className="min-w-0">
+          <dt className="text-xs font-semibold text-gray-500">From</dt>
+          <dd className="mt-1 break-words text-gray-900">
+            {item.from ? <DateS date={item.from} /> : "Not set"}
+          </dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-xs font-semibold text-gray-500">To</dt>
+          <dd className="mt-1 break-words text-gray-900">
+            {item.to ? <DateS date={item.to} /> : "Not set"}
+          </dd>
+        </div>
+        <div className="col-span-2 min-w-0">
+          <dt className="text-xs font-semibold text-gray-500">Custodian</dt>
+          <dd className="mt-1 break-words text-gray-900">
+            {custodianName || "Unassigned"}
+          </dd>
+        </div>
+        {item.description ? (
+          <div className="col-span-2 min-w-0">
+            <dt className="text-xs font-semibold text-gray-500">Description</dt>
+            <dd className="mt-1 break-words text-gray-700">
+              <LineBreakText text={item.description} />
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </article>
   );
 }

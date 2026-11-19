@@ -226,7 +226,7 @@ export const Button = React.forwardRef<HTMLElement, ButtonProps>(
         ? "inline-flex items-center"
         : textualVariants.has(variant as ButtonVariant)
         ? "inline-flex items-start justify-start gap-2 text-left max-w-xl"
-        : "inline-flex items-center justify-center rounded font-semibold text-center gap-2 max-w-xl border text-sm box-shadow-xs";
+        : "inline-flex min-h-11 items-center justify-center rounded font-semibold text-center gap-2 max-w-xl border text-sm box-shadow-xs md:min-h-0";
 
     const isDisabled =
       typeof disabled === "boolean" ? disabled : disabled !== undefined;
