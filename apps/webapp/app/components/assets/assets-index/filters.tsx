@@ -19,6 +19,7 @@ import type { OrganizationPermissionSettings } from "~/utils/permissions/custody
 import { resolveTeamMemberName } from "~/utils/user";
 import { AdvancedFilteringAndSorting } from "./advanced-asset-index-filters-and-sorting";
 import { ConfigureColumnsDropdown } from "./configure-columns-dropdown";
+import { MobileAssetFilters } from "./mobile-asset-filters";
 import { SavedFilterPresetsControls } from "./saved-filter-presets";
 import { AvailabilityViewToggle } from "./view-toggle";
 
@@ -68,7 +69,7 @@ export function AssetIndexFilters({
           ),
         }}
       >
-        <div className="flex w-full items-center justify-around gap-6 md:w-auto md:justify-end">
+        <div className="flex w-full items-center justify-end gap-2 md:w-auto md:gap-6">
           {hasFiltersToClear ? (
             <div className="hidden gap-6 md:flex">
               <Button
@@ -83,91 +84,18 @@ export function AssetIndexFilters({
               <div className="text-gray-600"> | </div>
             </div>
           ) : null}
-          <div className="flex w-full items-center justify-around gap-2 p-3 md:w-auto md:justify-end md:p-0 lg:gap-4">
-            <DynamicDropdown
-              trigger={
-                <div className="flex cursor-pointer items-center gap-2">
-                  Categories{" "}
-                  <ChevronRight className="hidden rotate-90 md:inline" />
-                </div>
-              }
-              model={{ name: "category", queryKey: "name" }}
-              label="Filter by category"
-              placeholder="Search categories"
-              initialDataKey="categories"
-              countKey="totalCategories"
-              withoutValueItem={{
-                id: "uncategorized",
-                name: "Uncategorized",
-              }}
+          <MobileAssetFilters>
+            <AssetSimpleFilterOptions
+              compact
+              canSeeAllCustody={canSeeAllCustody}
+              disableTeamMemberFilter={disableTeamMemberFilter}
             />
-            <DynamicDropdown
-              trigger={
-                <div className="flex cursor-pointer items-center gap-2">
-                  Tags <ChevronRight className="hidden rotate-90 md:inline" />
-                </div>
-              }
-              model={{ name: "tag", queryKey: "name" }}
-              label="Filter by tag"
-              initialDataKey="tags"
-              countKey="totalTags"
-              withoutValueItem={{
-                id: "untagged",
-                name: "Without tag",
-              }}
+          </MobileAssetFilters>
+          <div className="hidden w-full items-center justify-around gap-2 md:flex md:w-auto md:justify-end lg:gap-4">
+            <AssetSimpleFilterOptions
+              canSeeAllCustody={canSeeAllCustody}
+              disableTeamMemberFilter={disableTeamMemberFilter}
             />
-            <DynamicDropdown
-              trigger={
-                <div className="flex cursor-pointer items-center gap-2">
-                  Locations{" "}
-                  <ChevronRight className="hidden rotate-90 md:inline" />
-                </div>
-              }
-              model={{ name: "location", queryKey: "name" }}
-              label="Filter by location"
-              initialDataKey="locations"
-              countKey="totalLocations"
-              withoutValueItem={{
-                id: "without-location",
-                name: "Without location",
-              }}
-              renderItem={({ metadata }) => (
-                <div className="flex items-center gap-2">
-                  <ImageWithPreview
-                    thumbnailUrl={metadata.thumbnailUrl}
-                    alt={metadata.name}
-                    className="size-6 rounded-[2px]"
-                  />
-                  <div>{metadata.name}</div>
-                </div>
-              )}
-            />
-            <When truthy={canSeeAllCustody && !disableTeamMemberFilter}>
-              <DynamicDropdown
-                trigger={
-                  <div className="flex cursor-pointer items-center gap-2">
-                    Custodian{" "}
-                    <ChevronRight className="hidden rotate-90 md:inline" />
-                  </div>
-                }
-                model={{
-                  name: "teamMember",
-                  queryKey: "name",
-                  deletedAt: null,
-                  // A read FILTER — the workspace custody override governs.
-                  custodyPurpose: "custody-filter",
-                }}
-                renderItem={(item) => resolveTeamMemberName(item, true)}
-                label="Filter by custodian"
-                placeholder="Search team members"
-                initialDataKey="teamMembers"
-                countKey="totalTeamMembers"
-                withoutValueItem={{
-                  id: "without-custody",
-                  name: "Without custody",
-                }}
-              />
-            </When>
           </div>
         </div>
       </Filters>
@@ -177,6 +105,108 @@ export function AssetIndexFilters({
   if (modeIsAdvanced) {
     return <AdvancedAssetIndexFilters />;
   }
+}
+
+function AssetSimpleFilterOptions({
+  compact = false,
+  canSeeAllCustody,
+  disableTeamMemberFilter,
+}: {
+  compact?: boolean;
+  canSeeAllCustody: boolean;
+  disableTeamMemberFilter?: boolean;
+}) {
+  const filterButton = (label: string) => (
+    <div
+      className={
+        compact
+          ? "flex min-h-11 w-full min-w-0 items-center justify-between gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-left text-sm font-semibold text-gray-800"
+          : "flex cursor-pointer items-center gap-2"
+      }
+    >
+      <span className={compact ? "min-w-0 break-words" : undefined}>
+        {label}
+      </span>
+      <ChevronRight
+        aria-hidden="true"
+        className={
+          compact ? "size-4 shrink-0 rotate-90" : "hidden rotate-90 md:inline"
+        }
+      />
+    </div>
+  );
+  const triggerWrapperClassName = compact ? "w-full min-w-0" : undefined;
+
+  return (
+    <div
+      className={
+        compact
+          ? "flex w-full min-w-0 flex-col gap-2"
+          : "flex w-full items-center justify-around gap-2 md:w-auto md:justify-end"
+      }
+    >
+      <DynamicDropdown
+        trigger={filterButton("Categories")}
+        triggerWrapperClassName={triggerWrapperClassName}
+        model={{ name: "category", queryKey: "name" }}
+        label="Filter by category"
+        placeholder="Search categories"
+        initialDataKey="categories"
+        countKey="totalCategories"
+        withoutValueItem={{ id: "uncategorized", name: "Uncategorized" }}
+      />
+      <DynamicDropdown
+        trigger={filterButton("Tags")}
+        triggerWrapperClassName={triggerWrapperClassName}
+        model={{ name: "tag", queryKey: "name" }}
+        label="Filter by tag"
+        initialDataKey="tags"
+        countKey="totalTags"
+        withoutValueItem={{ id: "untagged", name: "Without tag" }}
+      />
+      <DynamicDropdown
+        trigger={filterButton("Locations")}
+        triggerWrapperClassName={triggerWrapperClassName}
+        model={{ name: "location", queryKey: "name" }}
+        label="Filter by location"
+        initialDataKey="locations"
+        countKey="totalLocations"
+        withoutValueItem={{
+          id: "without-location",
+          name: "Without location",
+        }}
+        renderItem={({ metadata }) => (
+          <div className="flex min-w-0 items-center gap-2">
+            <ImageWithPreview
+              thumbnailUrl={metadata.thumbnailUrl}
+              alt={metadata.name}
+              className="size-6 shrink-0 rounded-[2px]"
+            />
+            <span className="min-w-0 break-words">{metadata.name}</span>
+          </div>
+        )}
+      />
+      <When truthy={canSeeAllCustody && !disableTeamMemberFilter}>
+        <DynamicDropdown
+          trigger={filterButton("Custodian")}
+          triggerWrapperClassName={triggerWrapperClassName}
+          model={{
+            name: "teamMember",
+            queryKey: "name",
+            deletedAt: null,
+            // A read FILTER — the workspace custody override governs.
+            custodyPurpose: "custody-filter",
+          }}
+          renderItem={(item) => resolveTeamMemberName(item, true)}
+          label="Filter by custodian"
+          placeholder="Search team members"
+          initialDataKey="teamMembers"
+          countKey="totalTeamMembers"
+          withoutValueItem={{ id: "without-custody", name: "Without custody" }}
+        />
+      </When>
+    </div>
+  );
 }
 
 function AdvancedAssetIndexFilters() {

@@ -6,10 +6,12 @@ import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/avail
 import {
   classifyIoioReport,
   IOIO_REPORT_LABELS,
+  isIoioPhysicalUnitBlockingReport,
 } from "~/modules/ioio-student/report-problem.shared";
 import { getStudentReturnIssueComment } from "~/modules/ioio-student/return-item.shared";
 import { createNote } from "~/modules/note/service.server";
 import { ShelfError } from "~/utils/error";
+import type { LabInventoryTarget } from "./lab-inventory";
 
 type LabStatusTransactionClient = Omit<ExtendedPrismaClient, ITXClientDenyList>;
 
@@ -36,6 +38,7 @@ export type LabIssue = {
   detail: string;
   href: string;
   targetUnavailable?: boolean;
+  inventoryTarget?: LabInventoryTarget;
 };
 
 const LAB_ISSUE_OPERATIONS_VIEWS: Partial<Record<LabIssueKind, string>> = {
@@ -319,18 +322,20 @@ export async function returnResolvedAssetToService({
   });
 }
 
-async function ensureIoioAssetCanReturnToService({
+export async function ensureIoioAssetCanReturnToService({
   tx,
   organizationId,
   assetId,
   ignoreReportOperationId,
   requireIndividual = false,
+  includeStaffReservations = false,
 }: {
   tx: LabStatusTransactionClient;
   organizationId: string;
   assetId: string;
   ignoreReportOperationId?: string;
   requireIndividual?: boolean;
+  includeStaffReservations?: boolean;
 }) {
   const asset = await tx.asset.findFirst({
     where: {
@@ -382,10 +387,16 @@ async function ensureIoioAssetCanReturnToService({
           booking: {
             organizationId,
             status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
-            OR: [
-              { description: { not: IOIO_STAFF_RESERVATION_DESCRIPTION } },
-              { description: null },
-            ],
+            ...(includeStaffReservations
+              ? {}
+              : {
+                  OR: [
+                    {
+                      description: { not: IOIO_STAFF_RESERVATION_DESCRIPTION },
+                    },
+                    { description: null },
+                  ],
+                }),
           },
         },
         select: { id: true },
@@ -473,7 +484,7 @@ async function ensureIoioAssetCanReturnToService({
   return asset;
 }
 
-async function markIoioAssetAvailable({
+export async function markIoioAssetAvailable({
   tx,
   asset,
   organizationId,
@@ -859,7 +870,13 @@ export async function getLabStatus({
   const [reportAssets, reportKits, reportLocations] = await Promise.all([
     db.asset.findMany({
       where: { organizationId, id: { in: reportAssetIds } },
-      select: { id: true, title: true },
+      select: {
+        id: true,
+        title: true,
+        type: true,
+        quantity: true,
+        availableToBook: true,
+      },
     }),
     db.kit.findMany({
       where: { organizationId, id: { in: reportKitIds } },
@@ -870,6 +887,9 @@ export async function getLabStatus({
       select: { id: true, name: true },
     }),
   ]);
+  const reportAssetById = new Map(
+    reportAssets.map((asset) => [asset.id, asset])
+  );
   const references: ReportReferences = {
     assetsById: new Map(
       reportAssets.map((asset) => [
@@ -929,6 +949,9 @@ export async function getLabStatus({
           ? "incomplete-kit"
           : "report"
         : "general-report";
+    const asset = operation.assetId
+      ? reportAssetById.get(operation.assetId)
+      : undefined;
     reportIssues.push({
       id: `report:${operation.id}`,
       kind,
@@ -943,6 +966,23 @@ export async function getLabStatus({
         reference?.href ??
         "/reports/operational",
       targetUnavailable,
+      ...(kind === "report" &&
+      isIoioPhysicalUnitBlockingReport(operation.reportType) &&
+      asset &&
+      !operation.kitId &&
+      !targetUnavailable &&
+      (asset.type === AssetType.INDIVIDUAL || (asset.quantity ?? 0) > 0)
+        ? {
+            inventoryTarget: {
+              assetId: asset.id,
+              title: asset.title,
+              pooled:
+                asset.type === AssetType.QUANTITY_TRACKED &&
+                (asset.quantity ?? 0) > 1,
+              disabled: !asset.availableToBook,
+            },
+          }
+        : {}),
     });
   }
 

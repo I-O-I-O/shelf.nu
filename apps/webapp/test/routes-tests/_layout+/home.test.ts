@@ -7,6 +7,8 @@ import { createActionArgs, createLoaderArgs } from "@mocks/remix";
 const mocks = vi.hoisted(() => ({
   findUnique: vi.fn(),
   requirePermission: vi.fn(),
+  requirePermissionInOrganization: vi.fn(),
+  manageLabInventory: vi.fn(),
   getDashboardLabTasks: vi.fn(),
   getTAHours: vi.fn(),
   getPurchasing: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("~/components/ioio-staff/dashboard-customizer", () => ({
 }));
 vi.mock("~/utils/roles.server", () => ({
   requirePermission: mocks.requirePermission,
+  requirePermissionInOrganization: mocks.requirePermissionInOrganization,
 }));
 vi.mock("~/modules/ioio-staff/lab-tasks.server", () => ({
   getDashboardLabTasks: mocks.getDashboardLabTasks,
@@ -65,7 +68,13 @@ vi.mock("~/modules/ioio-handbook/service.server", () => ({
   countPendingHandbookReviews: mocks.countPendingHandbookReviews,
 }));
 
+// why: exercise the dashboard write gate without executing inventory database writes.
+vi.mock("~/modules/ioio-staff/lab-inventory.server", () => ({
+  manageLabInventory: mocks.manageLabInventory,
+}));
+
 import HomePage, { action, loader } from "~/routes/_layout+/home";
+import { ShelfError } from "~/utils/error";
 
 describe("IOIO staff dashboard loader", () => {
   beforeEach(() => {
@@ -103,6 +112,90 @@ describe("IOIO staff dashboard loader", () => {
     });
     mocks.findUnique.mockResolvedValue({ staffDashboardPreferences: null });
     mocks.countPendingHandbookReviews.mockResolvedValue(0);
+  });
+
+  describe("reported inventory actions", () => {
+    function submit({ confirm = true, role = "OWNER" } = {}) {
+      mocks.requirePermission.mockResolvedValue({
+        organizationId: "org-1",
+        role,
+        currentOrganization: { type: "TEAM" },
+        userOrganizations: [
+          {
+            organizationId: "org-1",
+            roles: [role],
+            organization: { type: "TEAM" },
+          },
+        ],
+      });
+      const form = new FormData();
+      form.set("intent", "manage-lab-inventory");
+      form.set("inventoryAction", "delete");
+      if (confirm) form.set("confirmed", "yes");
+      form.append("target", "sreport-1");
+      form.append("target", "preport-2");
+      return action(
+        createActionArgs({
+          context: { getSession: () => ({ userId: "staff-1" }) } as never,
+          request: new Request("http://localhost/home", {
+            method: "POST",
+            body: form,
+          }),
+        })
+      );
+    }
+
+    it("requires explicit confirmation for permanent deletion", async () => {
+      await expect(submit({ confirm: false })).resolves.toMatchObject({
+        init: { status: 400 },
+      });
+      expect(mocks.manageLabInventory).not.toHaveBeenCalled();
+    });
+
+    it("rejects non-staff requests before reaching inventory", async () => {
+      await expect(submit({ role: "SELF_SERVICE" })).resolves.toMatchObject({
+        init: { status: 403 },
+      });
+      expect(mocks.manageLabInventory).not.toHaveBeenCalled();
+    });
+
+    it("stops staff without the asset permission before any mutation", async () => {
+      mocks.requirePermissionInOrganization.mockRejectedValueOnce(
+        new ShelfError({
+          cause: null,
+          message: "Asset access denied",
+          label: "Permission",
+          status: 403,
+          shouldBeCaptured: false,
+        })
+      );
+      await expect(submit()).resolves.toMatchObject({ init: { status: 403 } });
+      expect(mocks.manageLabInventory).not.toHaveBeenCalled();
+    });
+
+    it("checks asset deletion permission and passes only the confirmed report targets", async () => {
+      mocks.manageLabInventory.mockResolvedValue({ count: 2 });
+      await expect(submit()).resolves.toMatchObject({
+        kind: "lab-inventory-updated",
+        count: 2,
+      });
+      expect(mocks.requirePermissionInOrganization).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: "org-1",
+          entity: "asset",
+          action: "delete",
+        })
+      );
+      expect(mocks.manageLabInventory).toHaveBeenCalledWith({
+        organizationId: "org-1",
+        staffUserId: "staff-1",
+        action: "delete",
+        targets: [
+          { reportId: "report-1", pooled: false },
+          { reportId: "report-2", pooled: true },
+        ],
+      });
+    });
   });
 
   it.each([1, 2, 20])(

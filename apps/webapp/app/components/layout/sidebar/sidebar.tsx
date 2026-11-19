@@ -397,7 +397,7 @@ const SidebarInset = forwardRef<HTMLDivElement, ComponentProps<"main">>(
       <main
         ref={ref}
         className={tw(
-          "h-dvh w-full min-w-0 max-w-full overflow-y-auto overflow-x-clip bg-gray-25 px-4",
+          "h-dvh w-full min-w-0 max-w-full overflow-y-auto overflow-x-clip bg-gray-25 px-0 md:px-4",
           isAvailabilityView ? (isKitIndex ? "pb-0" : "pb-[46px]") : "pb-10",
           className
         )}

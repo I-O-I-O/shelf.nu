@@ -294,7 +294,7 @@ export function MobileListBookingsContent({
     : resolveUserDisplayName(item.custodianUser);
 
   return (
-    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+    <article className="w-full min-w-0 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       <div className="flex min-w-0 items-start gap-3">
         {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
         <div className="min-w-0 flex-1">

@@ -1,6 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { afterEach, describe, expect, it } from "vitest";
+import { AssetDetailImage } from "~/components/assets/asset-image";
+import { ASSET_IMAGE_PLACEHOLDER } from "~/modules/asset/image-resolution";
 import { StaffItemDetail } from "./staff-item-detail";
 
 describe("StaffItemDetail", () => {
@@ -34,6 +36,61 @@ describe("StaffItemDetail", () => {
       }
     }
   );
+
+  it("keeps long metadata and zero availability visible with a bounded phone placeholder", () => {
+    const title = "Motor".repeat(20);
+    const category = "Electronics".repeat(12);
+    const location = "Cabinet".repeat(15);
+    const router = createMemoryRouter([
+      {
+        path: "/",
+        element: (
+          <StaffItemDetail
+            title={title}
+            image={
+              <AssetDetailImage
+                asset={{
+                  id: "motor",
+                  mainImage: null,
+                  thumbnailImage: null,
+                  assetModel: null,
+                }}
+                alt="Motor image"
+                compactOnMobile
+              />
+            }
+            availableQuantity={0}
+            totalQuantity={10}
+            locationPath={[location]}
+            categoryName={category}
+            status="Unavailable"
+          />
+        ),
+      },
+    ]);
+    render(<RouterProvider router={router} />);
+    expect(screen.getByRole("heading", { name: title })).toHaveClass(
+      "text-2xl",
+      "[overflow-wrap:anywhere]"
+    );
+    expect(screen.getByText("0 / 10 items available")).toBeInTheDocument();
+    expect(screen.getByText(category)).toHaveClass("[overflow-wrap:anywhere]");
+    expect(screen.getByText(location).closest("dd")).toHaveClass(
+      "[overflow-wrap:anywhere]"
+    );
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    const image = screen.getByAltText("Motor image");
+    expect(image).toHaveAttribute("src", ASSET_IMAGE_PLACEHOLDER);
+    expect(image).toHaveClass("object-contain");
+    expect(image.parentElement).toHaveClass(
+      "max-md:aspect-[4/3]",
+      "max-md:max-h-56"
+    );
+    expect(
+      screen.getByRole("heading", { name: title }).closest("header")
+        ?.parentElement
+    ).toHaveClass("max-md:px-0");
+  });
 
   it("places Borrow and Edit in the detail action row without Ask IOIO", () => {
     const router = createMemoryRouter(

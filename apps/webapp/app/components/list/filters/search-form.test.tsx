@@ -56,6 +56,11 @@ vi.mock("~/hooks/use-asset-index-view-state", () => ({
   useAssetIndexViewState: () => ({ modeIsAdvanced: false }),
 }));
 
+// why: verify the shared search affordance is responsive without rendering its tooltip portal.
+vi.mock("./search-field-tooltip", () => ({
+  SearchFieldTooltip: () => <span data-testid="search-field-help" />,
+}));
+
 /** Resolve the `?s=` value a recorded setSearchParams call would produce. */
 function resolveSearchTerm(callIndex: number) {
   const setter = mockSetSearchParams.mock.calls[callIndex][0] as (
@@ -86,6 +91,15 @@ describe("SearchForm debounce", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("keeps the search help affordance available on desktop and hidden on phones", () => {
+    render(<SearchForm />);
+
+    expect(screen.getByTestId("search-field-help").parentElement).toHaveClass(
+      "hidden",
+      "md:block"
+    );
   });
 
   it("issues ONE navigation for a burst of typing, not one per character", () => {

@@ -766,7 +766,7 @@ export function MobileListBookingsContent({
     : `/bookings/${item.id}`;
 
   return (
-    <article className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+    <article className="w-full min-w-0 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           {compactStaffLoans ? (

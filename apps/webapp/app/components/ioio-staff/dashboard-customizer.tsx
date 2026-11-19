@@ -101,7 +101,7 @@ export function DashboardCustomizer({
       <Button
         type="button"
         variant="secondary"
-        className="h-9 px-3 text-sm"
+        className="h-8 w-auto px-2 text-xs sm:h-9 sm:px-3 sm:text-sm"
         onClick={() => setOpen(true)}
       >
         Customize dashboard

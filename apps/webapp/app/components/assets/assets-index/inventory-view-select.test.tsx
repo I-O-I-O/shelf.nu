@@ -30,4 +30,21 @@ describe("InventoryViewSelect", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Kits" })).toBeInTheDocument();
   });
+
+  it("allows View to fill the mobile filter sheet without changing desktop sizing", () => {
+    render(
+      <InventoryViewSelect
+        value="all"
+        className="h-11 min-h-11 w-full"
+        onChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("combobox", { name: "View" })).toHaveClass(
+      "h-11",
+      "min-h-11",
+      "w-full"
+    );
+    expect(INVENTORY_FILTER_TRIGGER_CLASS_NAME).toContain("w-[170px]");
+  });
 });

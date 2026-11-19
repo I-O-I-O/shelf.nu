@@ -169,7 +169,7 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     <div
       ref={ref}
       className={tw(
-        "-mx-4 min-w-0 max-w-full border border-gray-200 bg-white md:mx-0 md:rounded",
+        "w-full min-w-0 max-w-full border-0 bg-white md:mx-0 md:rounded md:border",
         modeIsAdvanced ? "flex h-full flex-col" : "overflow-x-clip",
         className
       )}
@@ -186,10 +186,10 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
             <div
               className={tw(
                 showSelectionToolbar
-                  ? "flex items-center justify-between gap-3 p-3 md:px-4"
+                  ? "flex items-center justify-between gap-3 py-2 md:px-4 md:py-3"
                   : modeIsAdvanced
-                  ? "p-3 pb-[5px]"
-                  : "flex-col p-4 pb-2 md:flex-row",
+                  ? "py-3 md:p-3 md:pb-[5px]"
+                  : "flex-col px-0 py-3 md:flex-row md:p-4 md:pb-2",
                 "flex justify-between border-b md:items-center"
               )}
             >
@@ -223,7 +223,7 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
             </div>
           ) : null}
           {MobileItemComponent ? (
-            <div className="space-y-3 p-3 md:hidden">
+            <div className="w-full min-w-0 space-y-3 py-3 md:hidden">
               {items.map((item) => (
                 <MobileItemComponent
                   item={item}

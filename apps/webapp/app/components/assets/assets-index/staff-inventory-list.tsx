@@ -52,6 +52,8 @@ import {
   INVENTORY_FILTER_TRIGGER_CLASS_NAME,
 } from "~/components/assets/assets-index/inventory-view-select";
 import { partitionInventoryVisibilitySelection } from "~/components/assets/assets-index/inventory-visibility-selection";
+import { MobileAssetFilters } from "~/components/assets/assets-index/mobile-asset-filters";
+import { StaffInventoryMobileCard } from "~/components/assets/assets-index/staff-inventory-mobile-card";
 import {
   STAFF_INVENTORY_UPDATED_AT_HEADING,
   StaffInventoryUpdatedAt,
@@ -457,7 +459,6 @@ export function StaffInventoryList({
                 <StaffInventoryMobileRow
                   key={item.id}
                   item={item}
-                  prefs={prefs}
                   selected={isInventoryRowSelected(item)}
                   onToggle={() => toggleInventoryRow(item)}
                 />
@@ -541,149 +542,181 @@ function StaffInventoryFilters() {
     ? "checked-out"
     : "all";
 
+  const renderViewFilter = (compact: boolean) => (
+    <InventoryViewSelect
+      value={viewFilter}
+      className={compact ? "h-11 min-h-11 w-full" : undefined}
+      onChange={(value) =>
+        setSearchParams((current) => applyInventoryQuickFilter(current, value))
+      }
+    />
+  );
+
+  const renderCategoryFilter = (compact: boolean) => (
+    <DynamicDropdown
+      trigger={
+        <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
+          {categoryFilterColor ? (
+            <span
+              aria-hidden="true"
+              className="size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: categoryFilterColor }}
+            />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">{categoryFilterLabel}</span>
+          <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+        </span>
+      }
+      triggerWrapperClassName={tw(
+        INVENTORY_FILTER_TRIGGER_CLASS_NAME,
+        compact && "h-11 min-h-11 w-full",
+        selectedCategoryIds.length > 0 && activeFilterTriggerClassName
+      )}
+      model={{ name: "category", queryKey: "name" }}
+      label="Filter by category"
+      placeholder="Search categories"
+      initialDataKey="categories"
+      countKey="totalCategories"
+      onSelectionChange={() =>
+        setSearchParams((current) => {
+          current.delete("category", IOIO_KIT_CATEGORY_FILTER);
+          return current;
+        })
+      }
+      withoutValueItem={{ id: "uncategorized", name: "Uncategorized" }}
+      hideCounter
+    />
+  );
+
+  const renderLocationFilter = (compact: boolean) => (
+    <DynamicDropdown
+      trigger={
+        <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
+          {selectedLocation && selectedLocationColor ? (
+            <span
+              aria-hidden="true"
+              className="size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: selectedLocationColor.color }}
+            />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">
+            {selectedLocation
+              ? formatInventoryLocationName(selectedLocation.name)
+              : "Location"}
+          </span>
+          {selectedLocationCount > 1 ? (
+            <span className="shrink-0 text-xs text-gray-500">
+              +{selectedLocationCount - 1}
+            </span>
+          ) : null}
+          {selectedLocation ? (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Clear location filter"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                clearLocation();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearLocation();
+                }
+              }}
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-sm leading-none text-gray-600 hover:bg-gray-200 hover:text-gray-950 focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-1"
+            >
+              <span aria-hidden="true">×</span>
+            </span>
+          ) : null}
+          <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+        </span>
+      }
+      triggerWrapperClassName={tw(
+        INVENTORY_FILTER_TRIGGER_CLASS_NAME,
+        compact && "h-11 min-h-11 w-full",
+        selectedLocation && activeFilterTriggerClassName
+      )}
+      model={{ name: "location", queryKey: "name" }}
+      label="Filter by location"
+      placeholder="Search locations"
+      initialDataKey="locations"
+      countKey="totalLocations"
+      allValueItem={{ name: "All locations" }}
+      getItemGroup={(item) =>
+        getInventoryLocationGroup(
+          item as InventoryLocationOption,
+          locations as InventoryLocationOption[]
+        )
+      }
+      sortItems={(items) =>
+        sortInventoryLocationItems(
+          items as InventoryLocationOption[],
+          locations as InventoryLocationOption[]
+        ) as typeof items
+      }
+      renderItem={(item) =>
+        renderInventoryLocationOption(
+          item as InventoryLocationOption,
+          locations as InventoryLocationOption[]
+        )
+      }
+      withoutValueItem={{ id: "without-location", name: "Without location" }}
+      hideCounter
+    />
+  );
+
+  const renderClearFilters = () =>
+    hasFiltersToClear && hasAdditionalFilters ? (
+      <Button
+        type="button"
+        variant="link"
+        className="h-9 shrink-0 rounded-lg px-2 font-normal text-gray-500 hover:bg-red-50 hover:text-red-800"
+        onClick={clearFilters}
+      >
+        Clear filters
+      </Button>
+    ) : null;
+
   return (
     <div className="ioio-inventory-filters flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50/50 px-4 py-3 text-sm text-gray-500">
       <SearchForm
-        className="min-w-[240px] flex-[1_1_320px]"
+        className="w-full min-w-0 md:min-w-[240px] md:flex-[1_1_320px]"
         label="Search inventory"
         placeholder="Search inventory..."
       />
-      <InventoryViewSelect
-        value={viewFilter}
-        onChange={(value) =>
-          setSearchParams((current) =>
-            applyInventoryQuickFilter(current, value)
-          )
-        }
-      />
-      <div className="w-[170px] shrink-0">
-        <DynamicDropdown
-          trigger={
-            <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
-              {categoryFilterColor ? (
-                <span
-                  aria-hidden="true"
-                  className="size-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: categoryFilterColor }}
-                />
-              ) : null}
-              <span className="min-w-0 flex-1 truncate">
-                {categoryFilterLabel}
-              </span>
-              <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+      <MobileAssetFilters>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              View
             </span>
-          }
-          triggerWrapperClassName={tw(
-            INVENTORY_FILTER_TRIGGER_CLASS_NAME,
-            selectedCategoryIds.length > 0 && activeFilterTriggerClassName
-          )}
-          model={{ name: "category", queryKey: "name" }}
-          label="Filter by category"
-          placeholder="Search categories"
-          initialDataKey="categories"
-          countKey="totalCategories"
-          onSelectionChange={() =>
-            setSearchParams((current) => {
-              current.delete("category", IOIO_KIT_CATEGORY_FILTER);
-              return current;
-            })
-          }
-          withoutValueItem={{ id: "uncategorized", name: "Uncategorized" }}
-          hideCounter
-        />
-      </div>
-      <div className="w-[170px] shrink-0">
-        <DynamicDropdown
-          trigger={
-            <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
-              {selectedLocation && selectedLocationColor ? (
-                <span
-                  aria-hidden="true"
-                  className="size-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: selectedLocationColor.color }}
-                />
-              ) : null}
-              <span className="min-w-0 flex-1 truncate">
-                {selectedLocation
-                  ? formatInventoryLocationName(selectedLocation.name)
-                  : "Location"}
-              </span>
-              {selectedLocationCount > 1 ? (
-                <span className="shrink-0 text-xs text-gray-500">
-                  +{selectedLocationCount - 1}
-                </span>
-              ) : null}
-              {selectedLocation ? (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  aria-label="Clear location filter"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    clearLocation();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      clearLocation();
-                    }
-                  }}
-                  className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-sm leading-none text-gray-600 hover:bg-gray-200 hover:text-gray-950 focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-1"
-                >
-                  <span aria-hidden="true">×</span>
-                </span>
-              ) : null}
-              <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+            {renderViewFilter(true)}
+          </div>
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Category
             </span>
-          }
-          triggerWrapperClassName={tw(
-            INVENTORY_FILTER_TRIGGER_CLASS_NAME,
-            selectedLocation && activeFilterTriggerClassName
-          )}
-          model={{ name: "location", queryKey: "name" }}
-          label="Filter by location"
-          placeholder="Search locations"
-          initialDataKey="locations"
-          countKey="totalLocations"
-          allValueItem={{ name: "All locations" }}
-          getItemGroup={(item) =>
-            getInventoryLocationGroup(
-              item as InventoryLocationOption,
-              locations as InventoryLocationOption[]
-            )
-          }
-          sortItems={(items) =>
-            sortInventoryLocationItems(
-              items as InventoryLocationOption[],
-              locations as InventoryLocationOption[]
-            ) as typeof items
-          }
-          renderItem={(item) =>
-            renderInventoryLocationOption(
-              item as InventoryLocationOption,
-              locations as InventoryLocationOption[]
-            )
-          }
-          withoutValueItem={{
-            id: "without-location",
-            name: "Without location",
-          }}
-          hideCounter
-        />
+            {renderCategoryFilter(true)}
+          </div>
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Location
+            </span>
+            {renderLocationFilter(true)}
+          </div>
+          {renderClearFilters()}
+        </div>
+      </MobileAssetFilters>
+      <div className="hidden shrink-0 flex-wrap items-center gap-3 md:flex">
+        {renderViewFilter(false)}
+        {renderCategoryFilter(false)}
+        {renderLocationFilter(false)}
+        {renderClearFilters()}
       </div>
-      {hasFiltersToClear && hasAdditionalFilters ? (
-        <Button
-          type="button"
-          variant="link"
-          className="h-9 shrink-0 rounded-lg px-2 font-normal text-gray-500 hover:bg-red-50 hover:text-red-800"
-          onClick={clearFilters}
-        >
-          Clear filters
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -1592,12 +1625,10 @@ function getUnitLabel(title: string): string {
 
 function StaffInventoryMobileRow({
   item,
-  prefs,
   selected,
   onToggle,
 }: {
   item: StaffInventoryItem;
-  prefs: ResolvedFormatPrefs;
   selected: boolean;
   onToggle: () => void;
 }) {
@@ -1620,15 +1651,17 @@ function StaffInventoryMobileRow({
   }, [item.members]);
 
   return (
-    <article className="space-y-4 p-4">
-      <div className="flex min-w-0 items-center gap-3">
+    <StaffInventoryMobileCard
+      selectionControl={
         <input
           type="checkbox"
           checked={selected}
           onChange={onToggle}
           aria-label={`Select ${item.logicalTitle}`}
-          className="size-4 shrink-0 rounded border-gray-300 text-red-600 focus:ring-red-600"
+          className="size-5 shrink-0 rounded border-gray-300 text-red-600 focus:ring-red-600"
         />
+      }
+      image={
         <AssetImage
           asset={{
             id: imageItem.id,
@@ -1640,8 +1673,10 @@ function StaffInventoryMobileRow({
           }}
           alt={`Image of ${item.logicalTitle}`}
           useThumbnail={false}
-          className="size-9 shrink-0 rounded border object-cover"
+          className="size-full rounded-lg border object-cover"
         />
+      }
+      title={
         <Button
           to={`/assets/${item.id}`}
           state={{
@@ -1650,20 +1685,29 @@ function StaffInventoryMobileRow({
             }`,
           }}
           variant="link"
-          className="min-w-0 truncate p-0 text-left font-medium text-gray-900 hover:text-gray-700"
+          className="block max-w-full whitespace-normal break-words p-0 text-left text-base font-semibold leading-snug text-gray-950 hover:text-gray-700"
           title={item.logicalTitle}
         >
           {item.logicalTitle}
         </Button>
-        {isHidden ? (
-          <Badge color="#E5E7EB" textColor="#374151" withDot={false}>
+      }
+      status={
+        isHidden ? (
+          <Badge
+            color="#E5E7EB"
+            textColor="#374151"
+            withDot={false}
+            className="text-[11px]"
+          >
             Hidden
           </Badge>
-        ) : null}
-        {item.isExpandable ? (
+        ) : undefined
+      }
+      expandControl={
+        item.isExpandable ? (
           <button
             type="button"
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-red-50 text-red-700 focus:outline-none focus:ring-2 focus:ring-red-600"
+            className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-700 focus:outline-none focus:ring-2 focus:ring-red-600"
             aria-label={
               (expanded ? "Collapse " : "Expand ") + item.logicalTitle
             }
@@ -1676,67 +1720,13 @@ function StaffInventoryMobileRow({
               }
             />
           </button>
-        ) : null}
-      </div>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-        <div className="min-w-0">
-          <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">
-            Category
-          </dt>
-          <dd className="mt-1 min-w-0">
-            <CategoryBadge
-              className="max-w-full whitespace-normal break-words text-left"
-              category={
-                item.category
-                  ? {
-                      ...item.category,
-                    }
-                  : null
-              }
-            />
-          </dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">
-            Location
-          </dt>
-          <dd className="mt-1 min-w-0">
-            {location ? (
-              <LocationBadge
-                location={{
-                  id: location.id,
-                  name: formatStaffLocationName(location.name),
-                  parentId: location.parentId ?? undefined,
-                  childCount: location._count?.children ?? 0,
-                }}
-                className="ml-0 max-w-full whitespace-normal break-words text-left"
-              />
-            ) : (
-              <EmptyTableValue />
-            )}
-          </dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-xs font-medium uppercase tracking-wide text-gray-400">
-            Quantity
-          </dt>
-          <dd
-            aria-label={`${availableQuantity} of ${totalQuantity} available`}
-            className="mt-1 flex min-w-0 flex-col items-center"
-          >
-            <QuantityPill available={availableQuantity} total={totalQuantity} />
-          </dd>
-        </div>
-        <div>
-          <dd className="text-sm text-gray-600">
-            <StaffInventoryUpdatedAt value={item.updatedAt} prefs={prefs} />
-          </dd>
-        </div>
-      </dl>
-      <div className="border-t border-gray-100 pt-3">
+        ) : null
+      }
+      actions={
         <StaffInventoryActions
           item={item}
           roles={roles}
+          compact
           physicalUnitIds={selectedPhysicalUnitIds}
           onPhysicalUnitAction={(action) =>
             setPhysicalUnitAction({
@@ -1745,9 +1735,45 @@ function StaffInventoryMobileRow({
             })
           }
         />
-      </div>
-      {item.isExpandable && expanded ? (
-        <div className="rounded-lg bg-gray-50 p-3">
+      }
+      category={
+        <CategoryBadge
+          className="max-w-full whitespace-normal break-words text-left"
+          category={
+            item.category
+              ? {
+                  ...item.category,
+                }
+              : null
+          }
+        />
+      }
+      location={
+        location ? (
+          <LocationBadge
+            location={{
+              id: location.id,
+              name: formatStaffLocationName(location.name),
+              parentId: location.parentId ?? undefined,
+              childCount: location._count?.children ?? 0,
+            }}
+            className="ml-0 max-w-full whitespace-normal break-words text-left"
+          />
+        ) : (
+          <EmptyTableValue />
+        )
+      }
+      availability={
+        <span aria-label={`${availableQuantity} of ${totalQuantity} available`}>
+          <QuantityPill
+            available={availableQuantity}
+            total={totalQuantity}
+            includeAvailableLabel
+          />
+        </span>
+      }
+      expandedContent={
+        item.isExpandable && expanded ? (
           <StaffInventoryExpandedUnitsContent
             item={item}
             roles={roles}
@@ -1756,9 +1782,9 @@ function StaffInventoryMobileRow({
             actionRequest={physicalUnitAction}
             onActionRequestChange={setPhysicalUnitAction}
           />
-        </div>
-      ) : null}
-    </article>
+        ) : null
+      }
+    />
   );
 }
 
@@ -1774,9 +1800,11 @@ function formatStaffLocationName(name: string): string {
 function QuantityPill({
   available,
   total,
+  includeAvailableLabel = false,
 }: {
   available: number;
   total: number;
+  includeAvailableLabel?: boolean;
 }) {
   const hasAvailability = available > 0;
   return (
@@ -1784,9 +1812,14 @@ function QuantityPill({
       color={hasAvailability ? "#dcfce7" : "#fee2e2"}
       textColor={hasAvailability ? "#166534" : "#b91c1c"}
       withDot={false}
-      className="inline-flex min-w-14 shrink-0 justify-center whitespace-nowrap px-2 py-1 text-sm font-semibold tabular-nums"
+      className={tw(
+        "inline-flex min-w-14 shrink-0 justify-center whitespace-nowrap px-2 py-1 text-sm font-semibold tabular-nums",
+        includeAvailableLabel &&
+          "min-w-0 max-w-full shrink whitespace-normal break-words text-xs"
+      )}
     >
       {available}/{total}
+      {includeAvailableLabel ? " available" : ""}
     </Badge>
   );
 }
@@ -1794,11 +1827,13 @@ function QuantityPill({
 function StaffInventoryActions({
   item,
   roles,
+  compact = false,
   physicalUnitIds = [],
   onPhysicalUnitAction,
 }: {
   item: StaffInventoryItem;
   roles: OrganizationRoles[] | undefined;
+  compact?: boolean;
   physicalUnitIds?: string[];
   onPhysicalUnitAction?: (action: ExpandedUnitAction) => void;
 }) {
@@ -1939,7 +1974,7 @@ function StaffInventoryActions({
   return (
     <>
       <div className="flex items-center gap-1.5 whitespace-nowrap">
-        {canEditGeneralItem ? (
+        {canEditGeneralItem && !compact ? (
           <Button
             to={getStaffInventoryEditTarget({
               assetId: item.id,
@@ -1954,14 +1989,17 @@ function StaffInventoryActions({
             <PencilIcon className="size-4" />
           </Button>
         ) : null}
-        {canUpdate || canReadQr || canDelete ? (
+        {canEditGeneralItem || canUpdate || canReadQr || canDelete ? (
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <Button
                 type="button"
                 size="sm"
                 variant="secondary"
-                className="size-8 shrink-0 rounded-lg p-1.5"
+                className={tw(
+                  "size-8 shrink-0 rounded-lg p-1.5",
+                  compact && "size-11"
+                )}
                 aria-label="More actions"
                 tooltip="More actions"
               >
@@ -1969,6 +2007,24 @@ function StaffInventoryActions({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-52 max-w-60">
+              {canEditGeneralItem ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={() =>
+                    void navigate(
+                      getStaffInventoryEditTarget({
+                        assetId: item.id,
+                        assetModelId,
+                      })
+                    )
+                  }
+                >
+                  <PencilIcon className="size-5 shrink-0" />
+                  <span>
+                    {assetModelId ? "Edit general item" : "Edit item"}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
               {canEditGeneralItem ? (
                 <DropdownMenuItem
                   className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"

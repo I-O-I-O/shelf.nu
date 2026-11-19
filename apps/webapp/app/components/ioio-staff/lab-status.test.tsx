@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLabStatus } from "@factories";
@@ -26,10 +33,14 @@ function createStatus(count: number): LabStatus {
 
 const readStateKey = "test:lab-status-seen";
 
-function renderBell(status: LabStatus | null) {
+function renderBell(status: LabStatus | null, mobile = false) {
   return render(
     <MemoryRouter>
-      <StaffLabStatusBell status={status} readStateKey={readStateKey} />
+      <StaffLabStatusBell
+        status={status}
+        mobile={mobile}
+        readStateKey={readStateKey}
+      />
     </MemoryRouter>
   );
 }
@@ -71,6 +82,62 @@ describe("LabStatusCard", () => {
 describe("StaffLabStatusBell", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(() => cleanup());
+
+  it("opens a mobile sheet, clears the unread count and restores focus on close", async () => {
+    const user = userEvent.setup();
+    renderBell(createStatus(3), true);
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+    expect(within(bell).getByText("3")).toBeInTheDocument();
+
+    await user.click(bell);
+    const sheet = screen.getByRole("dialog", { name: "Lab status" });
+    expect(sheet).toHaveClass(
+      "inset-x-0",
+      "w-full",
+      "pb-[env(safe-area-inset-bottom)]"
+    );
+    const list = within(sheet).getByRole("list", {
+      name: "Lab status notifications",
+    });
+    expect(list.parentElement).toHaveClass(
+      "overflow-y-auto",
+      "overscroll-contain"
+    );
+    expect(bell).toHaveAttribute("aria-expanded", "true");
+    expect(within(bell).queryByText("3")).toBeNull();
+    expect(
+      within(sheet).getByRole("link", { name: "Open operations" })
+    ).toHaveAttribute("href", "/operations");
+
+    await user.click(within(sheet).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(bell).toHaveFocus();
+
+    await user.click(bell);
+    await user.click(
+      screen.getByRole("link", { name: "Wrong location 1: Shelf B" })
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the desktop notification preview anchored to the bell", async () => {
+    const user = userEvent.setup();
+    renderBell(createStatus(1));
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+    await user.click(bell);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.getByRole("list", { name: "Lab status notifications" })
+        .parentElement
+    ).toHaveClass("absolute", "right-0");
+    await user.keyboard("{Escape}");
+    expect(bell).toHaveAttribute("aria-expanded", "false");
+    expect(bell).toHaveFocus();
+  });
 
   it("counts newly actionable preparation units in the notification badge", () => {
     const status = createStatus(0);

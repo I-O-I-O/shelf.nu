@@ -11,6 +11,14 @@ const locations = [
   { id: "room-2", name: "Room B478", parentId: null, color: null },
 ];
 
+function getFormByTestId(testId: string): HTMLFormElement {
+  const element = screen.getByTestId(testId);
+  if (!(element instanceof HTMLFormElement)) {
+    throw new Error(`Expected ${testId} to reference a form`);
+  }
+  return element;
+}
+
 function EditablePicker({
   parentId,
   initialColor,
@@ -46,7 +54,7 @@ describe("Section color picker", () => {
     );
     expect(screen.getByRole("radio", { name: /Blue/u })).toBeDisabled();
     expect(screen.getByRole("radio", { name: /Red/u })).toBeDisabled();
-    expect(new FormData(screen.getByTestId("room-form")).get("color")).toBe(
+    expect(new FormData(getFormByTestId("room-form")).get("color")).toBe(
       "#2E7D32"
     );
     rerender(
@@ -67,12 +75,12 @@ describe("Section color picker", () => {
     render(<EditablePicker parentId="room-1" initialColor="#1565C0" />);
     expect(screen.getByRole("radio", { name: /Blue/u })).toBeEnabled();
     expect(screen.getByRole("radio", { name: /Red/u })).toBeDisabled();
-    expect(new FormData(screen.getByTestId("location-form")).get("color")).toBe(
+    expect(new FormData(getFormByTestId("location-form")).get("color")).toBe(
       "#1565C0"
     );
 
     await user.click(screen.getByRole("radio", { name: /Green/u }));
-    expect(new FormData(screen.getByTestId("location-form")).get("color")).toBe(
+    expect(new FormData(getFormByTestId("location-form")).get("color")).toBe(
       "#2E7D32"
     );
   });

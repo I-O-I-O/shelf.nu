@@ -253,10 +253,9 @@ describe("Handbook staff management visibility", () => {
 
     const staff = renderHome(true);
     await screen.findByRole("heading", { name: "Handbook" });
-    const staffNavigation = screen
-      .getByRole("heading", { name: "Handbook" })
-      .closest("header")!;
-    const staffActions = within(staffNavigation).getAllByRole("link");
+    const staffActions = within(
+      screen.getByTestId("handbook-desktop-actions")
+    ).getAllByRole("link");
     expect(
       staffActions
         .filter((link) =>
@@ -289,9 +288,7 @@ describe("Handbook staff management visibility", () => {
     renderHome(false);
     await screen.findByRole("heading", { name: "Handbook" });
     expect(
-      within(
-        screen.getByRole("heading", { name: "Handbook" }).closest("header")!
-      )
+      within(screen.getByTestId("handbook-desktop-actions"))
         .getAllByRole("link")
         .filter((link) =>
           ["Contribute", "My Work"].includes(link.textContent?.trim() ?? "")

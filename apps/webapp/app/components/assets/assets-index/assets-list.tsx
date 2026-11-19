@@ -56,13 +56,14 @@ import { AssetModelSortHeader } from "./asset-model-sort-header";
 import AssetQuickActions from "./asset-quick-actions";
 import { AssetIndexFilters } from "./filters";
 import { ListItemTagsColumn } from "./list-item-tags-column";
+import { MobileAssetCard } from "./mobile-asset-card";
 import BookSelectedModelsDropdown from "./model-booking/book-selected-models-dropdown";
 import { getUnselectableModelRows } from "./model-booking/unselectable-model-rows";
+import { useAssetAvailabilityData } from "./use-asset-availability-data";
 import AvailabilityCalendar from "../../availability-calendar/availability-calendar";
 import { ResourceTitleLink } from "../../availability-calendar/resource-title-link";
 import ImageWithPreview from "../../image-with-preview/image-with-preview";
 import { CategoryBadge } from "../category-badge";
-import { useAssetAvailabilityData } from "./use-asset-availability-data";
 
 /**
  * The model view's bulk-action toolbar, built once.
@@ -501,109 +502,6 @@ export const AssetsList = ({
     </div>
   );
 };
-
-function MobileAssetCard({
-  item: listItem,
-  hasBulkActions = false,
-}: {
-  item: ListItemData;
-  hasBulkActions?: boolean;
-}) {
-  // The loader supplies the asset view shape to both the desktop row and card.
-  const item = listItem as AssetsFromViewItem;
-  const isUserPage = useIsUserAssetsPage();
-  const organization = useCurrentOrganization();
-  const location = getPrimaryLocation(item);
-  const displayCode = organization
-    ? resolveDisplayCode({
-        entity: item,
-        organization,
-        entityKind: "asset",
-      })
-    : null;
-
-  return (
-    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
-      <div className="flex min-w-0 items-start gap-3">
-        {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
-        <AssetImage
-          asset={{
-            id: item.id,
-            mainImage: item.mainImage,
-            thumbnailImage: item.thumbnailImage,
-            mainImageExpiration: item.mainImageExpiration,
-            assetModel: item.assetModel ?? null,
-          }}
-          alt={`Image of ${item.title}`}
-          className="size-14 shrink-0 rounded border object-cover"
-          withPreview
-        />
-        <div className="min-w-0 flex-1">
-          <Button
-            to={`/assets/${item.id}`}
-            variant="link"
-            className="block max-w-full break-words text-left font-semibold text-gray-900 hover:text-gray-700"
-          >
-            {item.title}
-          </Button>
-          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
-            <AssetStatusBadge
-              id={item.id}
-              status={item.status}
-              availableToBook={item.availableToBook}
-              asset={item}
-            />
-            {displayCode ? <AssetCodeBadge {...displayCode} /> : null}
-          </div>
-        </div>
-      </div>
-
-      <dl className="mt-3 grid min-w-0 grid-cols-2 gap-3 border-t border-gray-100 pt-3 text-sm">
-        <div className="min-w-0">
-          <dt className="text-xs font-medium text-gray-500">Category</dt>
-          <dd className="mt-1 min-w-0 break-words">
-            <CategoryBadge category={item.category} />
-          </dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-xs font-medium text-gray-500">Location</dt>
-          <dd className="mt-1 min-w-0 break-words">
-            {location ? (
-              <LocationBadge
-                location={{
-                  id: location.id,
-                  name: location.name,
-                  parentId: location.parentId ?? undefined,
-                  childCount: location._count?.children ?? 0,
-                }}
-              />
-            ) : (
-              <span className="text-gray-500">Not set</span>
-            )}
-          </dd>
-        </div>
-        {isQuantityTracked(item) && item.quantity != null ? (
-          <div className="min-w-0">
-            <dt className="text-xs font-medium text-gray-500">Quantity</dt>
-            <dd className="mt-1 break-words text-gray-900">
-              {item.quantity}
-              {item.unitOfMeasure ? ` ${item.unitOfMeasure}` : ""}
-            </dd>
-          </div>
-        ) : null}
-        {!isUserPage ? (
-          <div className="min-w-0">
-            <dt className="text-xs font-medium text-gray-500">Custody</dt>
-            <dd className="mt-1 break-words text-gray-900">
-              {formatCustodyList(item.custody ?? []).primary?.custodian?.name ??
-                "Unassigned"}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
-    </article>
-  );
-}
 
 function MobileAssetModelCard({
   item: listItem,

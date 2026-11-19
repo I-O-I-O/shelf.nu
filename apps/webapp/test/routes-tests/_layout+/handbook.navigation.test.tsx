@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   createMemoryRouter,
@@ -76,11 +76,63 @@ function renderHandbook({
 }
 
 describe("Handbook navigation", () => {
+  it("keeps phone actions compact and permission-gates secondary destinations", async () => {
+    const user = userEvent.setup();
+    renderHandbook({ isStudent: false, canEdit: true });
+
+    const mobileActions = await screen.findByTestId("handbook-mobile-actions");
+    expect(mobileActions).toHaveClass("w-full", "min-w-0", "sm:hidden");
+    expect(mobileActions).toHaveTextContent("New article");
+    expect(mobileActions).toHaveTextContent("More actions");
+
+    await user.click(
+      within(mobileActions).getByRole("button", { name: "More actions" })
+    );
+    const sheet = screen.getByRole("dialog", {
+      name: "More Handbook actions",
+    });
+    expect(sheet).toHaveClass("inset-x-0", "w-full", "rounded-t-2xl");
+    for (const label of [
+      "My Work",
+      "Review contributions",
+      "Manage Handbook",
+    ]) {
+      expect(
+        within(sheet).getByRole("link", { name: new RegExp(label) })
+      ).toBeInTheDocument();
+    }
+  });
+
+  it("shows only student Handbook actions available to the current role", async () => {
+    const user = userEvent.setup();
+    renderHandbook();
+
+    const mobileActions = await screen.findByTestId("handbook-mobile-actions");
+    await user.click(
+      within(mobileActions).getByRole("button", { name: "More actions" })
+    );
+    const sheet = screen.getByRole("dialog", {
+      name: "More Handbook actions",
+    });
+    expect(
+      within(sheet).getByRole("link", { name: /My Work/ })
+    ).toBeInTheDocument();
+    expect(
+      within(sheet).queryByRole("link", { name: /Review contributions/ })
+    ).toBeNull();
+    expect(
+      within(sheet).queryByRole("link", { name: /Manage Handbook/ })
+    ).toBeNull();
+  });
+
   it("opens the normal article create route from Contribute", async () => {
     const user = userEvent.setup();
     const { router } = renderHandbook();
 
-    await user.click(await screen.findByRole("link", { name: "Contribute" }));
+    const mobileActions = await screen.findByTestId("handbook-mobile-actions");
+    await user.click(
+      within(mobileActions).getByRole("link", { name: "Contribute" })
+    );
 
     expect(router.state.location.pathname).toBe("/handbook/new");
     expect(await screen.findByText("Article create route")).toBeTruthy();
@@ -142,10 +194,13 @@ describe("Handbook navigation", () => {
       screen.queryByRole("link", { name: "Review contributions" })
     ).toBeNull();
     expect(screen.queryByRole("link", { name: "Manage Handbook" })).toBeNull();
+    const mobileActions = await screen.findByTestId("handbook-mobile-actions");
     expect(
-      await screen.findByRole("link", { name: "Contribute" })
+      within(mobileActions).getByRole("link", { name: "Contribute" })
     ).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "New article" })).toBeNull();
+    expect(
+      within(mobileActions).queryByRole("link", { name: "New article" })
+    ).toBeNull();
     expect(await screen.findByRole("link", { name: "My Work" })).toBeTruthy();
   });
 

@@ -1,5 +1,7 @@
 import type { ComponentProps, ReactElement } from "react";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 // why: the quick-action permission branch needs an authorized Staff role.
@@ -73,5 +75,39 @@ describe("Staff asset quick actions", () => {
     expect(
       screen.queryByRole("button", { name: "Move asset to trash" })
     ).toBeNull();
+  });
+
+  it("offers a single compact overflow trigger with secondary actions in its menu", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <AssetQuickActions
+          compact
+          asset={{
+            id: "asset-1",
+            title: "IOIO image upload",
+            mainImage: null,
+            qrId: "qr-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    const trigger = screen.getByRole("button", { name: "Asset actions" });
+    expect(trigger).toHaveClass("size-11");
+    expect(
+      screen.queryByRole("button", { name: "Edit asset information" })
+    ).toBeNull();
+
+    await user.click(trigger);
+    expect(
+      screen.getByRole("menuitem", { name: "Edit asset" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Duplicate asset" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "Delete asset" })
+    ).toBeInTheDocument();
   });
 });

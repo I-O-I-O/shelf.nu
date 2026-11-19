@@ -1,7 +1,26 @@
+import { useState } from "react";
+import type { LucideIcon } from "lucide-react";
+import {
+  ChevronRight,
+  ClipboardList,
+  MoreHorizontal,
+  Settings2,
+  ShieldCheck,
+} from "lucide-react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
 import { data, Form, Link, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import { HandbookArticleActions } from "~/components/handbook/handbook-article-actions";
+import { IoioPageContainer } from "~/components/ioio-shared/page-container";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "~/components/shared/sheet";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
 import {
   listHandbookCategories,
@@ -80,6 +99,87 @@ function groupArticlesByCategory<
   );
 }
 
+type HandbookAction = {
+  to: string;
+  label: string;
+  Icon: LucideIcon;
+};
+
+function HandbookMoreActions({ canEdit }: { canEdit: boolean }) {
+  const [open, setOpen] = useState(false);
+  const actions: HandbookAction[] = [
+    {
+      to: "/handbook/my-work",
+      label: "My Work",
+      Icon: ClipboardList,
+    },
+    ...(canEdit
+      ? [
+          {
+            to: "/handbook/review",
+            label: "Review contributions",
+            Icon: ShieldCheck,
+          },
+          {
+            to: "/handbook/manage",
+            label: "Manage Handbook",
+            Icon: Settings2,
+          },
+        ]
+      : []),
+  ];
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <button
+          type="button"
+          aria-label="More actions"
+          aria-controls="handbook-more-actions"
+          aria-expanded={open}
+          className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-3 text-sm font-semibold text-gray-800 shadow-sm hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700"
+        >
+          <span>More actions</span>
+          <MoreHorizontal aria-hidden="true" className="size-4" />
+        </button>
+      </SheetTrigger>
+      <SheetContent
+        id="handbook-more-actions"
+        side="bottom"
+        overlayClassName="bg-black/55"
+        closeButtonClassName="right-3 top-3 flex size-11 items-center justify-center rounded-lg text-gray-600 opacity-100 transition-colors hover:bg-gray-100 focus:ring-red-700 dark:text-gray-200 dark:hover:bg-gray-800"
+        className="max-h-[70dvh] w-full touch-pan-y overflow-y-auto overscroll-contain rounded-t-2xl border-gray-200 bg-white px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-5 text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-50"
+      >
+        <SheetHeader className="mb-3 pr-10 text-left">
+          <SheetTitle className="text-base text-gray-950 dark:text-gray-50">
+            More Handbook actions
+          </SheetTitle>
+          <SheetDescription className="text-xs">
+            Other tools for your Handbook work.
+          </SheetDescription>
+        </SheetHeader>
+        <nav aria-label="More Handbook actions" className="space-y-1">
+          {actions.map(({ to, label, Icon }) => (
+            <SheetClose asChild key={to}>
+              <Link
+                to={to}
+                className="flex min-h-11 min-w-0 items-center gap-3 rounded-lg px-3 py-1.5 text-sm font-semibold text-gray-700 hover:bg-red-50 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 dark:text-gray-200 dark:hover:bg-gray-800 dark:hover:text-white"
+              >
+                <Icon aria-hidden="true" className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{label}</span>
+                <ChevronRight
+                  aria-hidden="true"
+                  className="size-3.5 shrink-0 text-gray-400"
+                />
+              </Link>
+            </SheetClose>
+          ))}
+        </nav>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 export const meta: MetaFunction = () => [
   { title: appendToMetaTitle("Handbook") },
 ];
@@ -101,22 +201,46 @@ export default function HandbookIndexPage() {
     : categories;
   const articleGroups = groupArticlesByCategory(articles, seedCategories);
   return (
-    <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
-        <div>
+    <IoioPageContainer className="max-w-6xl px-0 py-3 md:px-4 md:py-6">
+      <header className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-2 sm:mb-6 sm:gap-4">
+        <div className="min-w-0">
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-red-700">
-            IOIO Lab
+            IOIO LAB
           </p>
-          <h1 className="mt-1 text-3xl font-semibold text-gray-950">
+          <h1 className="mt-1 text-2xl font-semibold text-gray-950 sm:text-3xl">
             Handbook
           </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-600">
+          <p className="mt-1 max-w-2xl text-sm leading-5 text-gray-600 sm:mt-2 sm:leading-6">
             Practical, living knowledge from IOIO Lab. Shelf remains the source
             for current availability, locations, loans and other live inventory
             facts.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div
+          data-testid="handbook-mobile-actions"
+          className="flex w-full min-w-0 items-center gap-2 sm:hidden"
+        >
+          {canEdit ? (
+            <Link
+              to="/handbook/new"
+              className="inline-flex h-11 min-w-0 flex-1 items-center justify-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800"
+            >
+              New article
+            </Link>
+          ) : isStudent ? (
+            <Link
+              to="/handbook/new"
+              className="inline-flex h-11 min-w-0 flex-1 items-center justify-center rounded-lg bg-red-700 px-3 text-sm font-semibold text-white hover:bg-red-800"
+            >
+              Contribute
+            </Link>
+          ) : null}
+          <HandbookMoreActions canEdit={canEdit} />
+        </div>
+        <div
+          data-testid="handbook-desktop-actions"
+          className="hidden flex-wrap gap-2 sm:flex"
+        >
           {isStudent ? (
             <Link
               to="/handbook/new"
@@ -160,7 +284,7 @@ export default function HandbookIndexPage() {
 
       <Form
         method="get"
-        className="mb-6 grid gap-3 rounded-xl border border-gray-200 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_220px_auto]"
+        className="mb-4 grid w-full min-w-0 grid-cols-1 gap-2 rounded-xl border border-gray-200 bg-white p-2.5 sm:mb-6 sm:grid-cols-[minmax(0,1fr)_220px_auto] sm:gap-3 sm:p-3"
       >
         <label className="sr-only" htmlFor="handbook-search">
           Search Handbook
@@ -171,7 +295,7 @@ export default function HandbookIndexPage() {
           type="search"
           defaultValue={query}
           placeholder="Search procedures, equipment, troubleshooting…"
-          className="h-10 rounded-lg border border-gray-300 px-3 text-sm focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
+          className="h-11 w-full min-w-0 rounded-lg border border-gray-300 px-3 text-sm focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
         />
         <label className="sr-only" htmlFor="handbook-category">
           Category
@@ -180,7 +304,7 @@ export default function HandbookIndexPage() {
           id="handbook-category"
           name="handbookCategoryId"
           defaultValue={handbookCategoryId}
-          className="h-10 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-800 focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
+          className="h-11 w-full min-w-0 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-800 focus:border-red-700 focus:outline-none focus:ring-2 focus:ring-red-200"
         >
           <option value="">All categories</option>
           {categories.map((category) => (
@@ -191,7 +315,7 @@ export default function HandbookIndexPage() {
         </select>
         <button
           type="submit"
-          className="h-10 rounded-lg border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800"
+          className="h-11 w-full rounded-lg border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 sm:w-auto"
         >
           Search
         </button>
@@ -202,11 +326,11 @@ export default function HandbookIndexPage() {
           {articleGroups.map(({ category, articles: groupArticles }) => (
             <section
               key={category?.id ?? "uncategorized"}
-              className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
+              className="w-full min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5"
             >
               <header className="mb-3 flex flex-wrap items-end justify-between gap-3 border-b border-gray-100 pb-3">
                 <div>
-                  <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-gray-900">
+                  <h2 className="min-w-0 break-words text-sm font-bold uppercase tracking-[0.14em] text-gray-900">
                     {category?.name ?? "Other knowledge"}
                   </h2>
                   <p className="mt-1 text-xs text-gray-500">
@@ -233,7 +357,7 @@ export default function HandbookIndexPage() {
                 {groupArticles.map((article, index) => (
                   <li
                     key={article.id}
-                    className="flex min-w-0 items-center gap-3 py-2 first:pt-1 last:pb-1"
+                    className="flex w-full min-w-0 items-center gap-3 py-2 first:pt-1 last:pb-1"
                   >
                     <span className="w-7 shrink-0 text-right text-sm font-medium tabular-nums text-gray-500">
                       {index + 1}.
@@ -273,7 +397,7 @@ export default function HandbookIndexPage() {
           ))}
         </div>
       ) : (
-        <section className="rounded-xl border border-dashed border-gray-300 bg-white px-5 py-10 text-center">
+        <section className="w-full min-w-0 rounded-xl border border-dashed border-gray-300 bg-white px-4 py-8 text-center sm:px-5 sm:py-10">
           <h2 className="text-lg font-semibold text-gray-900">
             No published articles yet
           </h2>
@@ -291,7 +415,7 @@ export default function HandbookIndexPage() {
           ) : null}
         </section>
       )}
-    </main>
+    </IoioPageContainer>
   );
 }
 

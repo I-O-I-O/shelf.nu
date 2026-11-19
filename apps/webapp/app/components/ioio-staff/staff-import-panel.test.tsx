@@ -15,7 +15,14 @@ function renderPanel(
   canCreateCategory = true,
   proposalOverrides: Partial<StaffImportProposal> = {},
   action?: (args: { request: Request }) => Promise<unknown>,
-  startEmpty = false
+  startEmpty = false,
+  savedDrafts: Array<{
+    operationId: string;
+    filename: string;
+    rowCount: number;
+    createdAt: string;
+    status?: string;
+  }> = []
 ) {
   const proposal = {
     version: 1,
@@ -71,6 +78,7 @@ function renderPanel(
             actionPath="/staff/import"
             initialProposal={startEmpty ? null : proposal}
             canCreateCategory={canCreateCategory}
+            savedDrafts={savedDrafts}
           />
         ),
       },
@@ -81,6 +89,34 @@ function renderPanel(
 }
 
 describe("StaffImportPanel review gate", () => {
+  it("keeps saved import filenames compact and exposes full filename and metadata", () => {
+    const filename =
+      "inventory-import-for-the-long-autumn-semester-electronics-workshop.pdf";
+    renderPanel({}, true, {}, undefined, true, [
+      {
+        operationId: "saved-import-1",
+        filename,
+        rowCount: 20,
+        createdAt: new Date().toISOString(),
+        status: "DRAFT",
+      },
+    ]);
+
+    const savedImport = screen.getByRole("link", {
+      name: `Open saved import ${filename}, 20 rows, draft`,
+    });
+    const displayedFilename = within(savedImport).getByText(filename);
+    expect(displayedFilename).toHaveClass("truncate");
+    expect(displayedFilename).toHaveAttribute("title", filename);
+    expect(
+      within(savedImport).getByText("20 rows · Draft")
+    ).toBeInTheDocument();
+    expect(savedImport).toHaveAttribute(
+      "href",
+      "/staff/import?importOperation=saved-import-1#staff-inventory-import"
+    );
+  });
+
   it.each(["persistence error", "legacy success"])(
     "does not report inventory success for upload %s",
     async (kind) => {

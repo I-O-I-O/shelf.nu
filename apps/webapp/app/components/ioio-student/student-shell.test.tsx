@@ -2,7 +2,6 @@ import type { FormEventHandler, ReactNode } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-
 // why: the shell only needs router primitives in this component test; a real
 // data router would add unrelated route loading and navigation behavior.
 vi.mock("react-router", () => ({
@@ -70,8 +69,11 @@ vi.mock("react-router", () => ({
 
 import type { StudentAsset } from "~/modules/ioio-student/service.server";
 import { StudentCheckoutProvider } from "./checkout-context";
-import StudentShell from "./student-shell";
-import { StudentBorrowListIndicator } from "./student-shell";
+import StudentShell, {
+  getStudentMobileMoreItems,
+  STUDENT_NAVIGATION,
+  StudentBorrowListIndicator,
+} from "./student-shell";
 import { StudentCheckoutButton } from "./student-ui";
 
 function checkoutAsset(): StudentAsset {
@@ -103,7 +105,7 @@ describe("StudentShell account controls", () => {
     render(<StudentShell />);
 
     expect(screen.getByText("Student desk")).toBeInTheDocument();
-    const mobileHeader = screen.getByRole("banner");
+    const mobileHeader = screen.getByTestId("ioio-mobile-header");
     expect(mobileHeader).not.toHaveClass("border-b");
     expect(
       within(mobileHeader).getByRole("button", { name: "Open notifications" })
@@ -111,7 +113,13 @@ describe("StudentShell account controls", () => {
     expect(
       within(mobileHeader).getByRole("link", { name: /Open borrowing list/ })
     ).toBeInTheDocument();
-    expect(screen.getByRole("main")).toHaveClass("pt-6", "w-full");
+    expect(screen.getByRole("main")).toHaveClass(
+      "pt-4",
+      "md:pt-6",
+      "w-full",
+      "min-w-0",
+      "px-4"
+    );
     expect(screen.getByRole("main")).not.toHaveClass("max-w-6xl");
     expect(
       screen.getAllByRole("button", { name: "Open notifications" })
@@ -157,7 +165,7 @@ describe("StudentShell account controls", () => {
     ).toBeNull();
   });
 
-  it("keeps logout available in the desktop sidebar and mobile drawer", async () => {
+  it("keeps logout available in the desktop sidebar and More sheet", async () => {
     const user = userEvent.setup();
 
     render(<StudentShell />);
@@ -177,20 +185,46 @@ describe("StudentShell account controls", () => {
       screen.getByRole("button", { name: /log out/i }).closest("form")
     ).toHaveAttribute("method", "post");
 
-    await user.click(screen.getByRole("button", { name: "Menu" }));
+    await user.click(screen.getByRole("button", { name: "More destinations" }));
 
+    const moreSheet = screen.getByRole("dialog", { name: "More" });
+    expect(
+      within(moreSheet).getByRole("region", { name: "Student account" })
+    ).toBeInTheDocument();
     expect(
       screen.getAllByRole("region", { name: "Student account" })
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(screen.queryByText("Workspace")).toBeNull();
     expect(
       screen.queryByRole("button", { name: /current workspace/i })
     ).toBeNull();
-    expect(screen.getAllByRole("button", { name: /log out/i })).toHaveLength(2);
+    expect(
+      within(moreSheet).getAllByRole("button", { name: /log out/i })
+    ).toHaveLength(1);
   });
 });
 
 describe("Student borrowing list feedback", () => {
+  it("builds More from student desktop navigation destinations only", () => {
+    const primaryDestinations = new Set([
+      "/ioio",
+      "/ioio/loans",
+      "/ioio/report",
+    ]);
+    const desktopDestinations = STUDENT_NAVIGATION.filter(
+      (item) => !primaryDestinations.has(item.to)
+    );
+    const moreItems = getStudentMobileMoreItems();
+
+    expect(moreItems.map((item) => item.to)).toEqual(
+      desktopDestinations.map((item) => item.to)
+    );
+    expect(moreItems.map((item) => item.to)).not.toContain("/ioio/checkout");
+    expect(moreItems.map((item) => item.to)).not.toContain("/ioio/report");
+    expect(moreItems[0]?.label).toBe(desktopDestinations[0]?.label);
+    expect(moreItems[0]?.Icon).toBe(desktopDestinations[0]?.Icon);
+  });
+
   it("updates its existing count and confirms the item beside the basket", async () => {
     window.sessionStorage.clear();
     const user = userEvent.setup();

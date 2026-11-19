@@ -1,6 +1,13 @@
-import type { Dispatch, SetStateAction } from "react";
-import { useEffect, useRef, useState } from "react";
-import { Bell } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Bell,
+  ClipboardList,
+  Home,
+  MessageSquareWarning,
+  ShoppingBasket,
+  BookOpen,
+  Settings,
+} from "lucide-react";
 import {
   Link,
   NavLink,
@@ -11,6 +18,13 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { Form } from "~/components/custom-form";
+import {
+  MobileBottomNavigation,
+  MobileIoioHeader,
+  type MobileNavigationItem,
+} from "~/components/ioio-shared/mobile-navigation";
+import { NotificationPanel } from "~/components/ioio-shared/notification-panel";
+import { IoioPageContainer } from "~/components/ioio-shared/page-container";
 import { getAnnualAccessNoticeEventKey } from "~/modules/ioio-student/annual-access";
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
@@ -19,14 +33,69 @@ import {
   useStudentCheckout,
 } from "./checkout-context";
 
-const navigation = [
-  { to: "/ioio", label: "Home", end: true },
-  { to: getMyLoansPath("student"), label: "My Loans", end: false },
-  { to: "/ioio/lab", label: "About the IOIO Lab", end: false },
-  { to: "/handbook", label: "Handbook", end: false },
-  { to: "/ioio/report", label: "Report", end: false },
-  { to: "/ioio/settings", label: "Settings", end: false },
+export const STUDENT_NAVIGATION = [
+  { to: "/ioio", label: "Home", Icon: Home, end: true, group: "Home" },
+  {
+    to: getMyLoansPath("student"),
+    label: "My Loans",
+    Icon: ClipboardList,
+    end: false,
+    group: "Loans",
+  },
+  {
+    to: "/ioio/lab",
+    label: "About the IOIO Lab",
+    Icon: Home,
+    end: false,
+    group: "Explore",
+  },
+  {
+    to: "/handbook",
+    label: "Handbook",
+    Icon: BookOpen,
+    end: false,
+    group: "Explore",
+  },
+  {
+    to: "/ioio/report",
+    label: "Report",
+    Icon: MessageSquareWarning,
+    end: false,
+    group: "Support",
+  },
+  {
+    to: "/ioio/settings",
+    label: "Settings",
+    Icon: Settings,
+    end: false,
+    group: "Account",
+  },
+] as const;
+
+const mobilePrimaryItems: MobileNavigationItem[] = [
+  { to: "/ioio", label: "Home", Icon: Home, end: true },
+  { to: getMyLoansPath("student"), label: "My Loans", Icon: ClipboardList },
+  { to: "/ioio/checkout", label: "Checkout", Icon: ShoppingBasket },
+  { to: "/ioio/report", label: "Report", Icon: MessageSquareWarning },
 ];
+
+export function getStudentMobileMoreItems(): MobileNavigationItem[] {
+  const primaryDestinations = new Set([
+    "/ioio",
+    getMyLoansPath("student"),
+    "/ioio/report",
+  ]);
+
+  return STUDENT_NAVIGATION.filter(
+    (item) => !primaryDestinations.has(item.to)
+  ).map((item) => ({
+    to: item.to,
+    label: item.label,
+    Icon: item.Icon,
+    end: item.end,
+    group: item.group,
+  }));
+}
 
 function Ioiologo({ compact = false }: { compact?: boolean }) {
   return (
@@ -41,7 +110,7 @@ function Ioiologo({ compact = false }: { compact?: boolean }) {
 function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="space-y-1">
-      {navigation.map((item) => (
+      {STUDENT_NAVIGATION.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
@@ -74,7 +143,7 @@ export function StudentBorrowListIndicator({
   const justAdded = recentlyAdded !== null;
 
   return (
-    <div className="relative">
+    <div className="relative flex">
       <Link
         to="/ioio/checkout"
         aria-label={`${
@@ -89,8 +158,8 @@ export function StudentBorrowListIndicator({
             ? `Borrow list (${items.length})`
             : "Open borrowing list"
         }
-        className={`relative inline-flex h-10 items-center justify-center gap-2 rounded-xl border bg-white text-sm font-bold text-gray-700 transition-[transform,background-color,border-color,box-shadow,color] duration-300 hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
-          showLabel ? "px-3" : "w-10"
+        className={`relative inline-flex h-11 items-center justify-center gap-2 rounded-xl border bg-white text-sm font-bold text-gray-700 transition-[transform,background-color,border-color,box-shadow,color] duration-300 hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 md:h-10 ${
+          showLabel ? "px-3" : "w-11 md:w-10"
         } ${
           justAdded
             ? "ioio-borrow-list-pop border-red-300 bg-red-50 text-red-800 shadow-sm"
@@ -130,7 +199,9 @@ export function StudentBorrowListIndicator({
   );
 }
 
-export function StudentNotificationBell() {
+export function StudentNotificationBell({
+  mobile = false,
+}: { mobile?: boolean } = {}) {
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
     "routes/_layout+/_layout"
   );
@@ -145,7 +216,6 @@ export function StudentNotificationBell() {
     storageKey: string;
     ids: string[];
   } | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!storageKey) {
       setReadState(null);
@@ -173,130 +243,110 @@ export function StudentNotificationBell() {
         )
       : [];
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        containerRef.current &&
-        !containerRef.current.contains(target)
-      ) {
-        setIsOpen(false);
-      }
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setIsOpen(false);
-    }
-
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isOpen]);
+  const description = unreadNotifications.length
+    ? `${unreadNotifications.length} unread notification${
+        unreadNotifications.length === 1 ? "" : "s"
+      }.`
+    : "Nothing needs attention right now.";
 
   return (
-    <div ref={containerRef} className="relative">
-      <button
-        type="button"
-        aria-label="Open notifications"
-        aria-expanded={isOpen}
-        onClick={() => setIsOpen((open) => !open)}
-        className="relative inline-flex size-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-700 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-      >
-        <Bell aria-hidden="true" className="size-5" />
-        {unreadNotifications.length ? (
-          <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
-            {unreadNotifications.length > 99
-              ? "99+"
-              : unreadNotifications.length}
-          </span>
-        ) : null}
-      </button>
-      {isOpen ? (
-        <div className="absolute right-0 top-12 z-50 w-[min(22rem,calc(100vw-2rem))] rounded-2xl border border-gray-200 bg-white p-4 shadow-xl">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-black text-gray-950">Notifications</p>
-              <p className="mt-0.5 text-xs text-gray-500">
-                {unreadNotifications.length
-                  ? `${unreadNotifications.length} unread notification${
-                      unreadNotifications.length === 1 ? "" : "s"
-                    }.`
-                  : "Nothing needs attention right now."}
-              </p>
-            </div>
-            <Bell aria-hidden="true" className="size-4 text-red-700" />
-          </div>
-          {notifications.length ? (
-            <ul className="mt-3 space-y-2" aria-label="Student notifications">
-              {notifications.map((notification) => (
-                <li key={notification.id}>
-                  <Link
-                    to={notification.href}
-                    onClick={() => {
-                      if (notification.annualAccessApprovalNotificationId) {
-                        void readNotificationFetcher.submit(
-                          {
-                            notificationId:
-                              notification.annualAccessApprovalNotificationId,
-                          },
-                          {
-                            method: "post",
-                            action: "/ioio/notification-read",
-                          }
-                        );
-                      }
-                      if (storageKey) {
-                        const nextIds = readIds.includes(notification.id)
-                          ? readIds
-                          : [...readIds, notification.id];
-                        setReadState({ storageKey, ids: nextIds });
-                        try {
-                          window.localStorage.setItem(
-                            storageKey,
-                            JSON.stringify(nextIds)
-                          );
-                        } catch {
-                          // Keep the notification marked read for this mount.
-                        }
-                      }
-                      setIsOpen(false);
-                    }}
-                    className={`block rounded-xl border px-3 py-2 transition hover:border-red-200 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 ${
-                      unreadNotifications.some(
-                        (item) => item.id === notification.id
-                      )
-                        ? "border-red-100 bg-red-50/50"
-                        : "border-gray-100"
-                    }`}
-                  >
-                    <span className="block text-sm font-bold text-gray-950">
-                      {notification.title}
-                    </span>
-                    <span className="mt-0.5 block text-xs text-gray-600">
-                      {notification.message}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+    <NotificationPanel
+      mobile={mobile}
+      open={isOpen}
+      onOpenChange={setIsOpen}
+      label="Open notifications"
+      title="Notifications"
+      description={description}
+      triggerClassName="relative flex size-11 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-700 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 md:size-10"
+      headerIcon={
+        <Bell aria-hidden="true" className="size-4 shrink-0 text-red-700" />
+      }
+      trigger={
+        <>
+          <Bell aria-hidden="true" className="size-5" />
+          {unreadNotifications.length ? (
+            <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-red-700 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+              {unreadNotifications.length > 99
+                ? "99+"
+                : unreadNotifications.length}
+            </span>
           ) : null}
-        </div>
+        </>
+      }
+    >
+      {notifications.length ? (
+        <ul className="mt-3 space-y-2" aria-label="Student notifications">
+          {notifications.map((notification) => (
+            <li key={notification.id}>
+              <Link
+                to={notification.href}
+                onClick={() => {
+                  if (notification.annualAccessApprovalNotificationId) {
+                    void readNotificationFetcher.submit(
+                      {
+                        notificationId:
+                          notification.annualAccessApprovalNotificationId,
+                      },
+                      {
+                        method: "post",
+                        action: "/ioio/notification-read",
+                      }
+                    );
+                  }
+                  if (storageKey) {
+                    const nextIds = readIds.includes(notification.id)
+                      ? readIds
+                      : [...readIds, notification.id];
+                    setReadState({ storageKey, ids: nextIds });
+                    try {
+                      window.localStorage.setItem(
+                        storageKey,
+                        JSON.stringify(nextIds)
+                      );
+                    } catch {
+                      // Keep the notification marked read for this mount.
+                    }
+                  }
+                  setIsOpen(false);
+                }}
+                className={`block rounded-xl border px-3 py-2 transition hover:border-red-200 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 ${
+                  unreadNotifications.some(
+                    (item) => item.id === notification.id
+                  )
+                    ? "border-red-100 bg-red-50/50"
+                    : "border-gray-100"
+                }`}
+              >
+                <span className="block text-sm font-bold text-gray-950">
+                  {notification.title}
+                </span>
+                <span className="mt-0.5 block text-xs text-gray-600">
+                  {notification.message}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
       ) : null}
-    </div>
+    </NotificationPanel>
   );
 }
 
-function StudentAccountControls({ onNavigate }: { onNavigate?: () => void }) {
+function StudentAccountControls({
+  onNavigate,
+  compact = false,
+}: {
+  onNavigate?: () => void;
+  compact?: boolean;
+}) {
   return (
     <section
       aria-label="Student account"
-      className="mt-6 border-t border-gray-100 pt-4"
+      className={
+        compact
+          ? "mt-2 border-t border-gray-100 pt-2"
+          : "mt-6 border-t border-gray-100 pt-4"
+      }
     >
       <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
         Signed in
@@ -306,11 +356,13 @@ function StudentAccountControls({ onNavigate }: { onNavigate?: () => void }) {
         method="post"
         action="/logout"
         onSubmit={onNavigate}
-        className="mt-2"
+        className={compact ? "mt-1" : "mt-2"}
       >
         <button
           type="submit"
-          className="w-full rounded-xl border border-gray-200 px-3 py-2 text-left text-sm font-semibold text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+          className={`w-full rounded-xl border border-gray-200 px-3 py-2 text-left text-sm font-semibold text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+            compact ? "min-h-11" : ""
+          }`}
           aria-label="Log out of IOIO Lab Shelf"
         >
           Log out
@@ -519,29 +571,18 @@ function AnnualAccessStatusNotice() {
 }
 
 export default function StudentShell() {
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-
   return (
     <StudentCheckoutProvider>
-      <StudentShellContent
-        mobileMenuOpen={mobileMenuOpen}
-        setMobileMenuOpen={setMobileMenuOpen}
-      />
+      <StudentShellContent />
     </StudentCheckoutProvider>
   );
 }
 
-function StudentShellContent({
-  mobileMenuOpen,
-  setMobileMenuOpen,
-}: {
-  mobileMenuOpen: boolean;
-  setMobileMenuOpen: Dispatch<SetStateAction<boolean>>;
-}) {
+function StudentShellContent() {
   const { pathname } = useLocation();
   const isCatalog = pathname.replace(/\/+$/u, "") === "/ioio";
   return (
-    <div className="min-h-screen overflow-x-hidden bg-white text-gray-950">
+    <div className="min-h-screen w-full min-w-0 max-w-full overflow-x-clip bg-white text-gray-950">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-56 flex-col border-r border-red-100 bg-white p-4 md:flex">
         <Link
           to="/ioio"
@@ -560,33 +601,14 @@ function StudentShellContent({
       </aside>
 
       <div className="md:pl-56">
-        <header className="bg-white md:hidden">
-          <div className="flex items-center justify-between gap-3 p-4">
-            <Link
-              to="/ioio"
-              className="flex justify-center rounded-xl bg-red-800 px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-              aria-label="IOIO Lab home"
-            >
-              <Ioiologo compact />
-            </Link>
-            <div className="flex items-center gap-2">
-              <StudentNotificationBell />
-              <StudentBorrowListIndicator />
-              <button
-                type="button"
-                aria-expanded={mobileMenuOpen}
-                aria-controls="ioio-mobile-navigation"
-                onClick={() => setMobileMenuOpen((open) => !open)}
-                className="rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-              >
-                {mobileMenuOpen ? "Close" : "Menu"}
-              </button>
-            </div>
-          </div>
-        </header>
+        <MobileIoioHeader
+          homeHref="/ioio"
+          notifications={<StudentNotificationBell mobile />}
+          basket={<StudentBorrowListIndicator />}
+        />
 
-        <main
-          className={`mx-auto w-full px-4 pb-10 pt-6 sm:px-6 lg:px-8 ${
+        <IoioPageContainer
+          className={`pb-[calc(5rem+env(safe-area-inset-bottom))] pt-4 sm:px-6 md:pb-10 md:pt-6 lg:px-8 ${
             isCatalog ? "" : "max-w-6xl"
           }`}
         >
@@ -597,38 +619,15 @@ function StudentShellContent({
           <AnnualAccessBanner />
           <AnnualAccessStatusNotice />
           <Outlet />
-        </main>
+        </IoioPageContainer>
       </div>
 
-      {mobileMenuOpen ? (
-        <div className="fixed inset-0 z-40 md:hidden">
-          <button
-            type="button"
-            aria-label="Close navigation"
-            className="absolute inset-0 bg-gray-950/20"
-            onClick={() => setMobileMenuOpen(false)}
-          />
-          <aside
-            id="ioio-mobile-navigation"
-            className="absolute inset-y-0 right-0 w-[min(19rem,88vw)] overflow-y-auto border-l border-red-100 bg-white p-4 shadow-2xl"
-          >
-            <div className="mb-5 flex items-center justify-between">
-              <div className="flex justify-center rounded-xl bg-red-800 px-3 py-2.5">
-                <Ioiologo compact />
-              </div>
-              <span className="text-xs font-bold uppercase tracking-[0.16em] text-gray-400">
-                Student desk
-              </span>
-            </div>
-            <nav aria-label="IOIO student navigation">
-              <NavigationLinks onNavigate={() => setMobileMenuOpen(false)} />
-            </nav>
-            <StudentAccountControls
-              onNavigate={() => setMobileMenuOpen(false)}
-            />
-          </aside>
-        </div>
-      ) : null}
+      <MobileBottomNavigation
+        label="IOIO student mobile navigation"
+        items={mobilePrimaryItems}
+        moreItems={getStudentMobileMoreItems()}
+        account={<StudentAccountControls compact />}
+      />
     </div>
   );
 }

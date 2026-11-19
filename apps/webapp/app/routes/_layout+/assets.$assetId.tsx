@@ -642,6 +642,7 @@ export default function AssetDetailsPage() {
   return (
     <div className="relative">
       <Header
+        classNames="max-md:mx-0 max-md:[&_.header-buttons]:flex-wrap max-md:[&_h2]:[overflow-wrap:anywhere]"
         slots={{
           "left-of-title": (
             <AssetImage
@@ -685,7 +686,10 @@ export default function AssetDetailsPage() {
         </When>
         <BookingActionsDropdown />
       </Header>
-      <HorizontalTabs items={items} />
+      <HorizontalTabs
+        items={items}
+        className="max-md:mx-0 max-md:flex-wrap max-md:overflow-visible max-md:pl-0"
+      />
       <div>
         <Outlet />
       </div>

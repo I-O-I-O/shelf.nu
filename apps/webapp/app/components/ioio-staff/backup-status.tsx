@@ -121,7 +121,7 @@ export function BackupStatusItem() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
+          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
         >
           <span
             aria-hidden="true"

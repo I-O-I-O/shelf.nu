@@ -4907,75 +4907,94 @@ export async function updateAsset({
   }
 }
 
-export async function deleteAsset({
-  id,
-  organizationId,
-  actorUserId,
-}: Pick<Asset, "id"> & {
+type DeleteAssetArgs = Pick<Asset, "id"> & {
   organizationId: Organization["id"];
-  /** Optional — caller-supplied userId for the activity event actor. */
   actorUserId?: string;
-}) {
-  try {
-    const ownedImage = await db.asset.findFirst({
-      where: { id, organizationId },
-      select: {
-        mainImage: true,
-        mainImageStoragePath: true,
-        thumbnailImageStoragePath: true,
+};
+
+/** Deletes the record and writes its activity event within the caller's transaction. */
+export async function deleteAssetInTransaction(
+  { id, organizationId, actorUserId }: DeleteAssetArgs,
+  tx: Pick<typeof db, "asset" | "activityEvent" | "user">
+) {
+  const deleted = await tx.asset.delete({
+    where: { id, organizationId },
+    select: {
+      mainImage: true,
+      mainImageStoragePath: true,
+      thumbnailImageStoragePath: true,
+      reminders: {
+        select: { alertDateTime: true, activeSchedulerReference: true },
       },
-    });
-    // Use transaction to ensure delete and activity event are atomic
-    const deletedAsset = await db.$transaction(async (tx) => {
-      const deleted = await tx.asset.delete({
-        where: { id, organizationId },
-        select: {
-          reminders: {
-            select: { alertDateTime: true, activeSchedulerReference: true },
+    },
+  });
+  await recordEvent(
+    {
+      organizationId,
+      actorUserId: actorUserId ?? null,
+      action: "ASSET_DELETED",
+      entityType: "ASSET",
+      entityId: id,
+      assetId: id,
+    },
+    tx
+  );
+  return deleted;
+}
+
+/** External cleanup runs only after the database transaction commits. */
+export async function cleanupDeletedAsset(
+  id: string,
+  deleted: Awaited<ReturnType<typeof deleteAssetInTransaction>>,
+  protectSharedImages = false
+) {
+  await Promise.all(deleted.reminders.map(cancelAssetReminderScheduler));
+  const ownedPaths = [
+    deleted.mainImageStoragePath ??
+      (deleted.mainImage
+        ? extractStoragePath(deleted.mainImage, "assets")
+        : null),
+    deleted.thumbnailImageStoragePath,
+  ].filter((path): path is string => !!path);
+  await Promise.all(
+    ownedPaths.map(async (objectPath) => {
+      if (protectSharedImages) {
+        // Imported or converted individual units can share product photos.
+        // Legacy signed URLs may point at the same object with a different token.
+        const referenced = await db.asset.findFirst({
+          where: {
+            OR: [
+              { mainImageStoragePath: objectPath },
+              { thumbnailImageStoragePath: objectPath },
+              { mainImage: { contains: objectPath } },
+              { thumbnailImage: { contains: objectPath } },
+            ],
           },
-        },
-      });
-
-      // Activity event must be inside transaction for atomicity
-      await recordEvent(
-        {
-          organizationId,
-          actorUserId: actorUserId ?? null,
-          action: "ASSET_DELETED",
-          entityType: "ASSET",
-          entityId: id,
-          assetId: id,
-        },
-        tx
-      );
-
-      return deleted;
+          select: { id: true },
+        });
+        if (referenced) return;
+      }
+      await removeStorageImageObject({ bucketName: "assets", objectPath });
+    })
+  ).catch((cleanupCause: unknown) => {
+    Logger.dev("[IOIO IMAGE] deleted asset image cleanup failed", {
+      assetId: id,
+      cleanupCause,
     });
+  });
+}
 
-    // Cancel reminders outside transaction (cleanup operation, not critical for atomicity)
-    await Promise.all(deletedAsset.reminders.map(cancelAssetReminderScheduler));
-    const ownedPaths = [
-      ownedImage?.mainImageStoragePath ??
-        (ownedImage?.mainImage
-          ? extractStoragePath(ownedImage.mainImage, "assets")
-          : null),
-      ownedImage?.thumbnailImageStoragePath,
-    ].filter((path): path is string => !!path);
-    await Promise.all(
-      ownedPaths.map((objectPath) =>
-        removeStorageImageObject({ bucketName: "assets", objectPath })
-      )
-    ).catch((cleanupCause: unknown) => {
-      Logger.dev("[IOIO IMAGE] deleted asset image cleanup failed", {
-        assetId: id,
-        cleanupCause,
-      });
-    });
+export async function deleteAsset(args: DeleteAssetArgs) {
+  try {
+    const deleted = await db.$transaction((tx) =>
+      deleteAssetInTransaction(args, tx)
+    );
+    await cleanupDeletedAsset(args.id, deleted);
   } catch (cause) {
     throw new ShelfError({
       cause,
       message: "Something went wrong while deleting asset",
-      additionalData: { id, organizationId },
+      additionalData: { id: args.id, organizationId: args.organizationId },
       label,
     });
   }

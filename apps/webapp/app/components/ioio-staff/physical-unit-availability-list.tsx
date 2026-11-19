@@ -111,14 +111,14 @@ function PhysicalUnitRow({
 
   return (
     <>
-      <div className="flex min-w-0 items-center gap-3 px-4 py-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 py-2 md:flex md:gap-3 md:px-4 md:py-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-gray-900">
+          <p className="text-sm font-semibold text-gray-900 [overflow-wrap:anywhere] md:truncate">
             {unit.title}
           </p>
         </div>
         <span
-          className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyle(
+          className={`col-start-1 row-start-2 w-fit max-w-full shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold [overflow-wrap:anywhere] ${statusStyle(
             unit.status
           )}`}
         >
@@ -131,7 +131,7 @@ function PhysicalUnitRow({
                 type="button"
                 variant="secondary"
                 size="sm"
-                className="size-9 shrink-0 p-0"
+                className="col-start-2 row-span-2 row-start-1 size-11 shrink-0 p-0 md:size-9"
                 aria-label={`Actions for ${unit.title}`}
               >
                 <MoreHorizontalIcon className="size-4" />

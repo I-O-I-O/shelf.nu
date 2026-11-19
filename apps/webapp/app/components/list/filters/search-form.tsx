@@ -186,7 +186,9 @@ export const SearchForm = ({
             onClick={clearSearch}
           />
         ) : (
-          <SearchFieldTooltip />
+          <div className="hidden md:block">
+            <SearchFieldTooltip />
+          </div>
         )}
       </div>
     </div>

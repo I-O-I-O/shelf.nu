@@ -12,6 +12,9 @@ import type { StudentCheckoutItemDraft } from "~/components/ioio-student/checkou
 import { StudentCheckoutButton } from "~/components/ioio-student/student-ui";
 import StaffShell, {
   DEFAULT_STAFF_NAVIGATION_ORDER,
+  STAFF_LOAN_NAVIGATION,
+  STAFF_NAVIGATION,
+  getStaffMobileMoreItems,
   StaffNavigation,
 } from "./staff-shell";
 
@@ -120,6 +123,60 @@ function expectSelected(link: HTMLElement, selected: boolean) {
 }
 
 describe("IOIO staff Loans navigation active state", () => {
+  it("builds More from the desktop navigation in its personalized order", () => {
+    const expectedDestinations = DEFAULT_STAFF_NAVIGATION_ORDER.flatMap(
+      (to) => {
+        const desktopItem = STAFF_NAVIGATION.find((item) => item.to === to);
+        if (!desktopItem || to === "/home" || to === "/assets") return [];
+        return to === "/bookings"
+          ? [to, ...STAFF_LOAN_NAVIGATION.map((item) => item.to)]
+          : [to];
+      }
+    );
+    const moreItems = getStaffMobileMoreItems(
+      DEFAULT_STAFF_NAVIGATION_ORDER,
+      true
+    );
+
+    expect(moreItems.map((item) => item.to)).toEqual(expectedDestinations);
+    expect(moreItems.map((item) => item.to)).not.toContain("/operations");
+    for (const item of moreItems) {
+      const desktopItem = STAFF_NAVIGATION.find(
+        (candidate) => candidate.to === item.to
+      );
+      if (desktopItem) {
+        expect(item.label).toBe(desktopItem.label);
+        expect(item.Icon).toBe(desktopItem.Icon);
+        expect(item.group).toBe(desktopItem.group);
+      }
+    }
+    for (const desktopItem of STAFF_LOAN_NAVIGATION) {
+      const mobileItem = moreItems.find((item) => item.to === desktopItem.to);
+      expect(mobileItem?.label).toBe(desktopItem.label);
+      expect(mobileItem?.Icon).toBe(desktopItem.Icon);
+      expect(mobileItem?.group).toBe(desktopItem.group);
+    }
+  });
+
+  it("keeps Operations out of the staff phone tabs", () => {
+    renderStaffShell();
+
+    const navigation = screen.getByRole("navigation", {
+      name: "IOIO staff mobile navigation",
+    });
+    expect(screen.getByRole("main")).toHaveClass(
+      "w-full",
+      "min-w-0",
+      "max-w-7xl",
+      "px-4"
+    );
+    expect(within(navigation).getByText("Home")).toBeInTheDocument();
+    expect(within(navigation).getByText("Assets")).toBeInTheDocument();
+    expect(within(navigation).getByText("Checkout")).toBeInTheDocument();
+    expect(within(navigation).getByText("More")).toBeInTheDocument();
+    expect(within(navigation).queryByText("Operations")).toBeNull();
+  });
+
   it("uses the shared canonical Staff order by default", () => {
     renderNavigation("/home", DEFAULT_STAFF_NAVIGATION_ORDER);
 
@@ -355,7 +412,7 @@ describe("StaffShell account controls", () => {
   it("keeps shell actions and content spacing without a header divider", () => {
     renderStaffShell();
 
-    const header = screen.getByRole("banner");
+    const header = screen.getByTestId("ioio-mobile-header");
     expect(header).not.toHaveClass("border-b");
     expect(
       within(header).getByRole("button", {
@@ -377,9 +434,9 @@ describe("StaffShell account controls", () => {
     await user.click(
       screen.getByRole("button", { name: "Add to borrow list" })
     );
-    const basketLink = await screen.findByRole("link", {
-      name: /Open Basket, 1 selected item/,
-    });
+    const basketLink = await within(
+      screen.getByTestId("ioio-mobile-header")
+    ).findByRole("link", { name: /Open Basket, 1 selected item/ });
     expect(within(basketLink).getByText("1")).toBeInTheDocument();
 
     await user.click(basketLink);
@@ -407,7 +464,7 @@ describe("StaffShell account controls", () => {
     ).toBeNull();
     expect(screen.queryByRole("link", { name: "Invite your team" })).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Menu" }));
+    await user.click(screen.getByRole("button", { name: "More destinations" }));
 
     expect(screen.queryByText("Workspace")).toBeNull();
     expect(

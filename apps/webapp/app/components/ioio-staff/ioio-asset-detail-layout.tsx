@@ -5,11 +5,13 @@ import {
   type AssetDetailLocation,
 } from "~/components/assets/asset-detail-information";
 import { PageBackLink } from "~/components/shared/page-back-link";
+import { tw } from "~/utils/tw";
 
 const contentCardClasses =
   "w-full min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-4";
 
 export type IoioAssetDetailLayoutProps = {
+  className?: string;
   backTo: string;
   backLabel: string;
   title: string;
@@ -31,6 +33,7 @@ export type IoioAssetDetailLayoutProps = {
 };
 
 export function IoioAssetDetailLayout({
+  className,
   backTo,
   backLabel,
   title,
@@ -61,19 +64,27 @@ export function IoioAssetDetailLayout({
   } available`;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 pb-6 pt-0 sm:px-6 lg:px-8">
-      <PageBackLink to={backTo} className="mb-3 lg:!ml-0">
+    <div
+      className={tw(
+        "mx-auto w-full min-w-0 max-w-7xl px-4 pb-6 sm:px-6 lg:px-8",
+        className
+      )}
+    >
+      <PageBackLink
+        to={backTo}
+        className="mb-1 max-md:flex max-md:min-h-11 max-md:items-center md:mb-3 lg:!ml-0"
+      >
         {backLabel}
       </PageBackLink>
 
-      <header className="mb-4 flex flex-col gap-4 border-b border-gray-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <h1 className="break-words text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
+      <header className="mb-3 flex min-w-0 flex-col gap-2.5 border-b border-gray-200 pb-3 md:mb-4 md:flex-row md:flex-wrap md:items-center md:justify-between md:gap-4 md:pb-4">
+        <div className="min-w-0 md:flex-1">
+          <h1 className="break-words text-2xl font-black leading-tight tracking-tight text-gray-950 [overflow-wrap:anywhere] md:text-4xl">
             {title}
           </h1>
         </div>
         {actions ? (
-          <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 md:justify-end max-md:[&>a]:min-h-11 max-md:[&>button]:min-h-11">
             {actions}
           </div>
         ) : null}

@@ -8,6 +8,7 @@ export type AssetDetailImageProps =
       alt: string;
       withPreview: true;
       className?: string;
+      compactOnMobile?: boolean;
       variant?: "detail" | "compact";
     }
   | {
@@ -15,6 +16,7 @@ export type AssetDetailImageProps =
       alt: string;
       withPreview?: false;
       className?: string;
+      compactOnMobile?: boolean;
       variant?: "detail" | "compact";
     };
 
@@ -29,6 +31,8 @@ export function AssetDetailImage(props: AssetDetailImageProps) {
     variant === "detail"
       ? "flex min-h-0 w-full items-center justify-center p-2 sm:p-3"
       : "flex size-full min-h-0 items-center justify-center p-2 sm:p-3",
+    props.compactOnMobile &&
+      "max-md:aspect-[4/3] max-md:max-h-56 max-md:[&>img]:size-full max-md:[&>img]:max-h-full",
     props.className
   );
 

@@ -6,12 +6,6 @@ import {
   BookingStatus,
   CustomFieldType,
 } from "@prisma/client";
-import {
-  ArchiveIcon,
-  MoreHorizontalIcon,
-  PrinterIcon,
-  Trash2Icon,
-} from "lucide-react";
 import { data, redirect, useFetcher, useLoaderData } from "react-router";
 import type {
   MetaFunction,
@@ -23,7 +17,6 @@ import { z } from "zod";
 import { CustodyCard } from "~/components/assets/asset-custody-card";
 import { AssetDetailImage } from "~/components/assets/asset-image";
 import { AssetReminderCards } from "~/components/assets/asset-reminder-cards";
-import { DeleteAsset } from "~/components/assets/delete-asset";
 import { MoveUnitsDialog } from "~/components/assets/move-units-dialog";
 import { QuantityCustodyList } from "~/components/assets/quantity-custody-list";
 import { QuantityOverviewCard } from "~/components/assets/quantity-overview-card";
@@ -35,6 +28,7 @@ import Input from "~/components/forms/input";
 import { Switch } from "~/components/forms/switch";
 import Icon from "~/components/icons/icon";
 import { StaffItemDetail } from "~/components/ioio-staff/staff-item-detail";
+import { StaffItemDetailActions } from "~/components/ioio-staff/staff-item-detail-actions";
 import { StudentCheckoutButton } from "~/components/ioio-student/student-ui";
 import ContextualModal from "~/components/layout/contextual-modal";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -47,12 +41,6 @@ import { Button } from "~/components/shared/button";
 import { Card } from "~/components/shared/card";
 import { DateS } from "~/components/shared/date";
 import { DateTimePicker } from "~/components/shared/date-time-picker";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "~/components/shared/dropdown";
 import { InfoTooltip } from "~/components/shared/info-tooltip";
 import { InlineEditableField } from "~/components/shared/inline-editable-field";
 import { Tag } from "~/components/shared/tag";
@@ -1140,6 +1128,11 @@ export default function AssetOverview() {
   const inventoryCanEditGeneralItem = asset.assetModelId
     ? canEditAssetModel
     : canEditAsset;
+  const inventoryEditTarget = getStaffInventoryEditTarget({
+    assetId: asset.id,
+    assetModelId: asset.assetModelId,
+  });
+  const inventoryEditLabel = asset.assetModelId ? "Edit general item" : "Edit";
   const inventoryLabelAssetIds = individualProductSummary
     ? individualProductUnitIds
     : [asset.id];
@@ -1162,6 +1155,7 @@ export default function AssetOverview() {
               kitImage: asset.assetKits[0]?.kit.image ?? null,
             }}
             alt={`Image of ${inventoryDetailTitle}`}
+            compactOnMobile
             withPreview
           />
         }
@@ -1266,97 +1260,20 @@ export default function AssetOverview() {
           ) : null
         }
         actions={
-          <>
-            {inventoryCanEditGeneralItem ? (
-              <Button
-                to={getStaffInventoryEditTarget({
-                  assetId: asset.id,
-                  assetModelId: asset.assetModelId,
-                })}
-                size="sm"
-                variant="secondary"
-              >
-                {asset.assetModelId ? "Edit general item" : "Edit"}
-              </Button>
-            ) : null}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  aria-label="More item actions"
-                  tooltip="More item actions"
-                >
-                  <MoreHorizontalIcon className="size-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-52 p-1">
-                <DropdownMenuItem className="p-0">
-                  <Button
-                    to={`/labels?assetIds=${encodeURIComponent(
-                      inventoryLabelAssetIds.join(",")
-                    )}`}
-                    variant="link"
-                    className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-gray-700 hover:bg-gray-50"
-                  >
-                    <PrinterIcon className="size-4 shrink-0" />
-                    <span>Print label / QR</span>
-                  </Button>
-                </DropdownMenuItem>
-                {canEditAsset ? (
-                  <DropdownMenuItem
-                    className="p-0"
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    <DeleteAsset
-                      asset={{
-                        id: asset.id,
-                        title: inventoryDetailTitle,
-                        mainImage: asset.mainImage,
-                      }}
-                      behavior="archive"
-                      trigger={
-                        <Button
-                          type="button"
-                          variant="link"
-                          className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-gray-700 hover:bg-gray-50"
-                        >
-                          <ArchiveIcon className="size-4 shrink-0" />
-                          <span>Archive</span>
-                        </Button>
-                      }
-                    />
-                  </DropdownMenuItem>
-                ) : null}
-                {canEditAsset ? (
-                  <DropdownMenuItem
-                    className="p-0"
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    <DeleteAsset
-                      asset={{
-                        id: asset.id,
-                        title: inventoryDetailTitle,
-                        mainImage: asset.mainImage,
-                      }}
-                      behavior="trash"
-                      trigger={
-                        <Button
-                          type="button"
-                          variant="link"
-                          className="flex w-full items-center justify-start gap-3 rounded p-2 text-left text-red-700 hover:bg-red-50"
-                        >
-                          <Trash2Icon className="size-4 shrink-0" />
-                          <span>Delete</span>
-                        </Button>
-                      }
-                    />
-                  </DropdownMenuItem>
-                ) : null}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
+          <StaffItemDetailActions
+            asset={{
+              id: asset.id,
+              title: inventoryDetailTitle,
+              mainImage: asset.mainImage,
+            }}
+            editAction={
+              inventoryCanEditGeneralItem
+                ? { to: inventoryEditTarget, label: inventoryEditLabel }
+                : undefined
+            }
+            labelAssetIds={inventoryLabelAssetIds}
+            canManageLifecycle={canEditAsset}
+          />
         }
       />
     );

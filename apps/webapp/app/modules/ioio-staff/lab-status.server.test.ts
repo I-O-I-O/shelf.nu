@@ -76,6 +76,45 @@ describe("getLabStatus", () => {
     });
   });
 
+  it("reads management eligibility and borrowing state from the linked inventory records", async () => {
+    database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.operationType === "REPORT_PROBLEM"
+          ? [
+              { id: "report-1", reportType: "ITEM_DAMAGED", assetId: "single" },
+              { id: "report-2", reportType: "ITEM_DAMAGED", assetId: "pool" },
+              { id: "report-3", reportType: "OTHER", assetId: "single" },
+            ]
+          : []
+      )
+    );
+    database.asset.findMany.mockResolvedValue([
+      {
+        id: "single",
+        title: "Tester",
+        type: "INDIVIDUAL",
+        availableToBook: false,
+      },
+      {
+        id: "pool",
+        title: "Leads",
+        type: "QUANTITY_TRACKED",
+        quantity: 4,
+        availableToBook: true,
+      },
+    ]);
+
+    const status = await getLabStatus({ organizationId: "org-1" });
+    expect(
+      status.issues
+        .filter((issue) => issue.inventoryTarget)
+        .map((issue) => issue.inventoryTarget)
+    ).toEqual([
+      { assetId: "single", title: "Tester", pooled: false, disabled: true },
+      { assetId: "pool", title: "Leads", pooled: true, disabled: false },
+    ]);
+  });
+
   it("counts the preparation queue organization on Staff Dashboard", async () => {
     database.ioioWriteOperation.findMany.mockImplementation(({ where }) =>
       Promise.resolve(

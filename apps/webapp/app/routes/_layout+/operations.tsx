@@ -16,6 +16,7 @@ import {
 } from "react-router";
 import { AssetImage } from "~/components/assets/asset-image";
 import type { AssetForThumbnail } from "~/components/assets/asset-image/types";
+import { OperationsMobileSelector } from "~/components/ioio-staff/operations-mobile-selector";
 import {
   SelectableRow,
   toggleSelectionId,
@@ -3596,11 +3597,22 @@ export default function OperationsPage() {
   return (
     <>
       <ListContentWrapper>
-        <div className="space-y-5">
-          <h1 className="text-2xl font-black tracking-tight text-gray-950">
-            Lab status
-          </h1>
-          <div className="grid auto-rows-fr grid-cols-2 items-stretch gap-3 lg:grid-cols-4">
+        <div className="space-y-4 md:space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h1 className="text-2xl font-black tracking-tight text-gray-950">
+              Lab status
+            </h1>
+            <OperationsMobileSelector
+              activeId={view}
+              options={NAVIGATION_VIEWS.map((item) => ({
+                id: item,
+                label: VIEW_LABELS[item],
+                href:
+                  item === "all" ? "/operations" : `/operations?view=${item}`,
+              }))}
+            />
+          </div>
+          <div className="hidden auto-rows-fr grid-cols-2 items-stretch gap-3 md:grid lg:grid-cols-4">
             {SUMMARY_KEYS.map((item) => (
               <Link
                 key={item}
@@ -3622,7 +3634,7 @@ export default function OperationsPage() {
           </div>
 
           <div
-            className="flex flex-wrap items-stretch gap-2"
+            className="hidden flex-wrap items-stretch gap-2 md:flex"
             aria-label="Operations filters"
           >
             {NAVIGATION_VIEWS.map((item) => (

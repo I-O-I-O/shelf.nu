@@ -202,7 +202,10 @@ export function Layout({ children }: { children: ReactNode }) {
     <html lang="en" className="overflow-hidden">
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <meta
+          name="viewport"
+          content="width=device-width,initial-scale=1,viewport-fit=cover"
+        />
         {/* why: iOS Smart App Banner must be rendered here in <head>, not via a
             route `meta` export. React Router renders the leaf route's meta
             (not a merge of root + leaf), and 150+ routes export their own

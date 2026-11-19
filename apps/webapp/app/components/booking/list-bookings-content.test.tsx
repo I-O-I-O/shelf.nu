@@ -118,6 +118,7 @@ describe("MobileListBookingsContent", () => {
 
     render(<MobileListBookingsContent item={item} hasBulkActions />);
 
+    expect(screen.getByRole("article")).toHaveClass("w-full", "min-w-0");
     expect(screen.getByRole("link", { name: item.name })).toHaveClass(
       "break-words"
     );

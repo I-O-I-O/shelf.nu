@@ -20,6 +20,7 @@ import { LabStatusCard } from "~/components/ioio-staff/lab-status";
 import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
 import { db } from "~/database/db.server";
 import { countPendingHandbookReviews } from "~/modules/ioio-handbook/service.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
 import {
   DEFAULT_STAFF_DASHBOARD_PREFERENCES,
@@ -33,6 +34,8 @@ import {
   getStaffInventoryImportProposal,
   prepareStaffInventoryImport,
 } from "~/modules/ioio-staff/inventory-import.server";
+import { LAB_INVENTORY_ACTIONS } from "~/modules/ioio-staff/lab-inventory";
+import { manageLabInventory } from "~/modules/ioio-staff/lab-inventory.server";
 import { getDashboardLabTasks } from "~/modules/ioio-staff/lab-tasks.server";
 import { getPurchasingDashboardSummary } from "~/modules/ioio-staff/purchasing.server";
 import {
@@ -48,7 +51,10 @@ import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
-import { requirePermission } from "~/utils/roles.server";
+import {
+  requirePermission,
+  requirePermissionInOrganization,
+} from "~/utils/roles.server";
 import { resolveUserDisplayName } from "~/utils/user";
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -116,8 +122,65 @@ export async function action({ context, request }: ActionFunctionArgs) {
         "skip-row",
         "save-dashboard",
         "reset-dashboard",
+        "manage-lab-inventory",
       ])
       .parse(formData.get("intent"));
+
+    if (intent === "manage-lab-inventory") {
+      const { organizationId, userId } = await requireIoioStaffAccess({
+        context,
+        request,
+      });
+      const parsed = z
+        .enum(LAB_INVENTORY_ACTIONS)
+        .safeParse(formData.get("inventoryAction"));
+      const targets = z
+        .array(
+          z
+            .string()
+            .max(300)
+            .regex(/^[ps].+$/u)
+        )
+        .min(1)
+        .safeParse(formData.getAll("target"));
+      if (
+        !parsed.success ||
+        !targets.success ||
+        (parsed.data === "delete" && formData.get("confirmed") !== "yes")
+      ) {
+        throw new ShelfError({
+          cause: null,
+          message: "Select inventory items and confirm the requested action.",
+          label: "Request validation",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      await requirePermissionInOrganization({
+        organizationId,
+        userId,
+        request,
+        entity: PermissionEntity.asset,
+        action:
+          parsed.data === "delete"
+            ? PermissionAction.delete
+            : PermissionAction.update,
+      });
+      const selected = targets.data.map((encoded) => ({
+        reportId: encoded.slice(1),
+        pooled: encoded.startsWith("p"),
+      }));
+      const result = await manageLabInventory({
+        organizationId,
+        staffUserId: userId,
+        action: parsed.data,
+        targets: selected,
+      });
+      return payload({
+        kind: "lab-inventory-updated" as const,
+        count: result.count,
+      });
+    }
 
     if (intent === "save-dashboard" || intent === "reset-dashboard") {
       const { role } = await requirePermission({
@@ -344,6 +407,7 @@ export default function HomePage() {
     operations: labStatus ? (
       <LabStatusCard
         status={labStatus}
+        canManageInventory={isStaff}
         pendingHandbookReviews={pendingHandbookReviews ?? 0}
       />
     ) : null,
@@ -564,14 +628,14 @@ export default function HomePage() {
   };
 
   return (
-    <div className="-mx-4 min-h-full bg-white px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-5xl">
-        <header className="flex flex-wrap items-end justify-between gap-4">
+    <div className="-mx-4 min-h-full bg-white p-4 sm:p-6 lg:px-8">
+      <div className="mx-auto w-full min-w-0 max-w-5xl">
+        <header className="flex flex-wrap items-center justify-between gap-3 sm:items-end sm:gap-4">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-red-700">
               IOIO Lab / Staff
             </p>
-            <h1 className="mt-2 text-3xl font-black tracking-tight text-gray-950 sm:text-4xl">
+            <h1 className="mt-1 text-2xl font-black tracking-tight text-gray-950 sm:mt-2 sm:text-4xl">
               Staff Dashboard
             </h1>
           </div>
@@ -585,7 +649,7 @@ export default function HomePage() {
         ) : null}
 
         {isStaff ? (
-          <div className="mt-6 space-y-6">
+          <div className="mt-4 space-y-4 sm:mt-6 sm:space-y-6">
             {dashboardPreferences.order.map(
               (widgetId: StaffDashboardWidgetId) =>
                 hiddenWidgets.has(widgetId) ? null : (
@@ -616,21 +680,21 @@ function SystemStatusStrip({ status }: { status: StaffSystemStatus }) {
   return (
     <section
       aria-label="System status"
-      className="mt-7 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3"
+      className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 sm:mt-5 sm:px-4 sm:py-3"
     >
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <p className="text-xs font-bold uppercase tracking-[0.16em] text-gray-500">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-x-6">
+        <p className="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-gray-500">
           System status
         </p>
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-gray-700">
-          <p className="flex items-center gap-2">
+        <div className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-gray-700 sm:flex sm:flex-wrap sm:gap-x-6 sm:gap-y-2 sm:text-sm">
+          <p className="flex min-w-0 items-center gap-1.5">
             <StatusDot state={serverIsOnline ? "online" : "issue"} />
             <span>Server</span>
-            <span className="font-semibold text-gray-950">
+            <span className="truncate font-semibold text-gray-950">
               {serverIsOnline ? "Online" : "Issue"}
             </span>
           </p>
-          <p>
+          <p className="min-w-0 truncate">
             <span>Storage</span>{" "}
             <span className="font-semibold text-gray-950">
               {status.storagePercentUsed === null
@@ -638,10 +702,12 @@ function SystemStatusStrip({ status }: { status: StaffSystemStatus }) {
                 : `${status.storagePercentUsed}% used`}
             </span>
           </p>
-          <p className="flex items-center gap-2">
+          <p className="flex min-w-0 items-center gap-1.5">
             <StatusDot state={claudeDotState} />
             <span>Claude</span>
-            <span className="font-semibold text-gray-950">{claudeLabel}</span>
+            <span className="truncate font-semibold text-gray-950">
+              {claudeLabel}
+            </span>
           </p>
           <BackupStatusItem />
         </div>
@@ -671,7 +737,7 @@ function DashboardHoursValue({
   return (
     <div className="rounded-xl bg-gray-50 px-3 py-2.5">
       <p className="text-xs font-semibold text-gray-500">{label}</p>
-      <p className="mt-1 text-lg font-black tabular-nums text-gray-950">
+      <p className="mt-1 text-base font-black tabular-nums text-gray-950 sm:text-lg">
         {value}
       </p>
       {note ? <p className="mt-1 text-xs text-gray-500">{note}</p> : null}

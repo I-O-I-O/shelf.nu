@@ -24,7 +24,7 @@ const SheetOverlay = forwardRef<
 >(({ className, ...props }, ref) => (
   <SheetPrimitive.Overlay
     className={tw(
-      "fixed inset-0 z-50 bg-black/80  data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
       className
     )}
     {...props}
@@ -76,7 +76,11 @@ interface SheetContentProps
  */
 const SheetContent = forwardRef<
   ElementRef<typeof SheetPrimitive.Content>,
-  SheetContentProps & { hideCloseButton?: boolean }
+  SheetContentProps & {
+    hideCloseButton?: boolean;
+    overlayClassName?: string;
+    closeButtonClassName?: string;
+  }
 >(
   (
     {
@@ -85,19 +89,26 @@ const SheetContent = forwardRef<
       className,
       children,
       hideCloseButton = false,
+      overlayClassName,
+      closeButtonClassName,
       ...props
     },
     ref
   ) => (
     <SheetPortal>
-      <SheetOverlay />
+      <SheetOverlay className={overlayClassName} />
       <SheetPrimitive.Content
         ref={ref}
         className={tw(sheetVariants({ side, size }), className)}
         {...props}
       >
         <When truthy={!hideCloseButton}>
-          <SheetPrimitive.Close className="ring-offset-background data-[state=open]:bg-secondary absolute right-4 top-4 z-50 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+          <SheetPrimitive.Close
+            className={tw(
+              "ring-offset-background data-[state=open]:bg-secondary absolute right-4 top-4 z-50 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none",
+              closeButtonClassName
+            )}
+          >
             <X className="size-4" />
             <span className="sr-only">Close</span>
           </SheetPrimitive.Close>

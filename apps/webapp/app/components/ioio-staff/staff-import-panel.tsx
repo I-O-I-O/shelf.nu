@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ChevronRight } from "lucide-react";
 import {
   Link,
   useFetcher,
@@ -457,18 +458,40 @@ export function StaffImportPanel({
           </h3>
           <ul className="mt-2 space-y-2">
             {savedDrafts.map((draft) => (
-              <li key={draft.operationId}>
+              <li key={draft.operationId} className="min-w-0">
                 <Link
                   to={`${actionPath}?importOperation=${encodeURIComponent(
                     draft.operationId
                   )}#staff-inventory-import`}
-                  className="text-sm font-semibold text-red-800 underline hover:text-red-950"
+                  aria-label={`Open saved import ${draft.filename}, ${
+                    draft.rowCount
+                  } ${draft.rowCount === 1 ? "row" : "rows"}, ${
+                    draft.status === "SUCCEEDED" || draft.status === "PARTIAL"
+                      ? "implemented history"
+                      : "draft"
+                  }`}
+                  className="flex min-h-14 w-full min-w-0 items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left transition hover:border-red-200 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700"
                 >
-                  {draft.filename} · {draft.rowCount}{" "}
-                  {draft.rowCount === 1 ? "row" : "rows"} ·{" "}
-                  {draft.status === "SUCCEEDED" || draft.status === "PARTIAL"
-                    ? "Implemented history"
-                    : "Draft"}
+                  <span className="min-w-0 flex-1">
+                    <span
+                      title={draft.filename}
+                      className="block truncate text-sm font-semibold text-red-800"
+                    >
+                      {draft.filename}
+                    </span>
+                    <span className="mt-1 block text-xs font-medium text-gray-600">
+                      {draft.rowCount} {draft.rowCount === 1 ? "row" : "rows"}
+                      {" · "}
+                      {draft.status === "SUCCEEDED" ||
+                      draft.status === "PARTIAL"
+                        ? "Implemented history"
+                        : "Draft"}
+                    </span>
+                  </span>
+                  <ChevronRight
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-gray-400"
+                  />
                 </Link>
               </li>
             ))}

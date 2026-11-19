@@ -100,35 +100,37 @@ export function AssetDetailInformation({
   ];
 
   return (
-    <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+    <section className="w-full min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5">
       <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500">
         Details
       </h2>
       <div
-        className={`mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-xl border p-3.5 ${
+        className={`mt-2 flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-xl border px-3 py-2.5 [overflow-wrap:anywhere] md:mt-3 md:p-3.5 ${
           availabilityTone === "available"
             ? "border-green-200 bg-green-50 text-green-800"
             : "border-red-200 bg-red-50 text-red-800"
         }`}
       >
-        <p className="text-xl font-black tracking-tight sm:text-2xl">
+        <p className="min-w-0 text-base font-bold tabular-nums tracking-tight md:text-2xl md:font-black">
           {availability}
         </p>
         {availabilityDetail ? (
-          <p className="text-sm text-gray-600">{availabilityDetail}</p>
+          <p className="min-w-0 text-xs text-gray-600 md:text-sm">
+            {availabilityDetail}
+          </p>
         ) : null}
       </div>
-      <dl className="mt-4 grid grid-cols-2 gap-4 sm:gap-x-6">
+      <dl className="mt-3 grid grid-cols-2 gap-3 sm:gap-x-6 md:mt-4 md:gap-y-4">
         {fields.map((field) => (
-          <div key={field.label} className="min-w-0">
-            <dt className="text-xs font-bold uppercase tracking-wide text-gray-500">
+          <div key={field.label} className="min-w-0 max-md:first:col-span-2">
+            <dt className="text-xs font-bold uppercase tracking-wide text-gray-500 [overflow-wrap:anywhere]">
               {field.help ? (
                 <SettingHelpLabel label={field.label} help={field.help} />
               ) : (
                 field.label
               )}
             </dt>
-            <dd className="mt-1 break-words text-sm leading-5 text-gray-800">
+            <dd className="mt-1 break-words text-sm leading-5 text-gray-800 [overflow-wrap:anywhere]">
               {field.value}
             </dd>
           </div>
@@ -145,7 +147,7 @@ export function AssetDetailInformation({
                   field.label
                 )}
               </dt>
-              <dd className="mt-0.5 break-words text-sm leading-5 text-gray-800">
+              <dd className="mt-0.5 break-words text-sm leading-5 text-gray-800 [overflow-wrap:anywhere]">
                 {field.value}
               </dd>
             </div>

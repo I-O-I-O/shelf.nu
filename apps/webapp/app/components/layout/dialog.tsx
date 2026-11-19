@@ -102,7 +102,12 @@ export const Dialog = ({
       }}
       onKeyDown={handleActivationKeyPress(() => onClose())}
     >
-      <dialog ref={dialogRef} className={tw("dialog", className)} open={open}>
+      <dialog
+        ref={dialogRef}
+        aria-label={typeof title === "string" ? title : undefined}
+        className={tw("dialog", className)}
+        open={open}
+      >
         {/*
          * md:max-h-[calc(100vh-4rem)]: on desktop the dialog is `md:h-auto` and
          * the backdrop centers it without scrolling, so a tall body (e.g. the

@@ -12,6 +12,7 @@ import {
   Settings,
   Tags,
   Trash2,
+  ShoppingBasket,
 } from "lucide-react";
 import {
   Form,
@@ -21,6 +22,12 @@ import {
   useLocation,
   useRouteLoaderData,
 } from "react-router";
+import {
+  MobileBottomNavigation,
+  MobileIoioHeader,
+  type MobileNavigationItem,
+} from "~/components/ioio-shared/mobile-navigation";
+import { IoioPageContainer } from "~/components/ioio-shared/page-container";
 import { StaffLabStatusBell } from "~/components/ioio-staff/lab-status";
 import { StaffLogo } from "~/components/ioio-staff/staff-logo";
 import { StudentCheckoutProvider } from "~/components/ioio-student/checkout-context";
@@ -33,22 +40,141 @@ import {
 import { getMyLoansPath } from "~/modules/ioio-student/my-loans-navigation";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 
-const navigation = [
-  { to: "/home", label: "Dashboard", Icon: Home, end: true },
-  { to: "/handbook", label: "Handbook", Icon: ClipboardList, end: false },
-  { to: "/assets", label: "Inventory", Icon: PackageOpen, end: false },
-  { to: "/categories", label: "Categories", Icon: Tags, end: false },
-  { to: "/locations", label: "Locations", Icon: MapPin, end: false },
-  { to: "/bookings", label: "Loans", Icon: ClipboardList, end: false },
-  { to: "/calendar", label: "Calendar", Icon: CalendarDays, end: true },
-  { to: "/reports", label: "Analytics", Icon: BarChart3, end: false },
-  { to: "/settings", label: "Settings", Icon: Settings, end: false },
-  { to: "/staff/archived", label: "Archive", Icon: Archive, end: true },
-  { to: "/staff/trash", label: "Trash", Icon: Trash2, end: true },
+export const STAFF_NAVIGATION = [
+  { to: "/home", label: "Dashboard", Icon: Home, end: true, group: "Home" },
+  {
+    to: "/handbook",
+    label: "Handbook",
+    Icon: ClipboardList,
+    end: false,
+    group: "Browse",
+  },
+  {
+    to: "/assets",
+    label: "Inventory",
+    Icon: PackageOpen,
+    end: false,
+    group: "Browse",
+  },
+  {
+    to: "/categories",
+    label: "Categories",
+    Icon: Tags,
+    end: false,
+    group: "Browse",
+  },
+  {
+    to: "/locations",
+    label: "Locations",
+    Icon: MapPin,
+    end: false,
+    group: "Browse",
+  },
+  {
+    to: "/bookings",
+    label: "Loans",
+    Icon: ClipboardList,
+    end: false,
+    group: "Loans",
+  },
+  {
+    to: "/calendar",
+    label: "Calendar",
+    Icon: CalendarDays,
+    end: true,
+    group: "Loans",
+  },
+  {
+    to: "/reports",
+    label: "Analytics",
+    Icon: BarChart3,
+    end: false,
+    group: "Reports",
+  },
+  {
+    to: "/settings",
+    label: "Settings",
+    Icon: Settings,
+    end: false,
+    group: "Account",
+  },
+  {
+    to: "/staff/archived",
+    label: "Archive",
+    Icon: Archive,
+    end: true,
+    group: "Records",
+  },
+  {
+    to: "/staff/trash",
+    label: "Trash",
+    Icon: Trash2,
+    end: true,
+    group: "Records",
+  },
 ] as const;
 
-export const DEFAULT_STAFF_NAVIGATION_ORDER = navigation.map(({ to }) => to);
-type NavigationItem = (typeof navigation)[number];
+export const STAFF_LOAN_NAVIGATION = [
+  {
+    to: getMyLoansPath("staff"),
+    label: "My Loans",
+    Icon: ClipboardList,
+    end: false,
+    group: "Loans",
+  },
+] as const;
+
+const mobilePrimaryItems: MobileNavigationItem[] = [
+  { to: "/home", label: "Home", Icon: Home, end: true },
+  { to: "/assets", label: "Assets", Icon: PackageOpen },
+  { to: "/ioio/checkout", label: "Checkout", Icon: ShoppingBasket },
+];
+
+export function getStaffMobileMoreItems(
+  navigationOrder: readonly string[],
+  canViewLabTasks: boolean
+): MobileNavigationItem[] {
+  const primaryDestinations = new Set([
+    mobilePrimaryItems[0].to,
+    mobilePrimaryItems[1].to,
+  ]);
+
+  return navigationOrder.flatMap((to) => {
+    const item = STAFF_NAVIGATION.find((candidate) => candidate.to === to);
+    if (
+      !item ||
+      primaryDestinations.has(item.to) ||
+      !canViewStaffNavigationItem(item.to, canViewLabTasks)
+    ) {
+      return [];
+    }
+
+    const destination: MobileNavigationItem = {
+      to: item.to,
+      label: item.label,
+      Icon: item.Icon,
+      end: item.end,
+      group: item.group,
+    };
+    if (item.to !== "/bookings") return [destination];
+
+    return [
+      destination,
+      ...STAFF_LOAN_NAVIGATION.map((nestedItem) => ({
+        to: nestedItem.to,
+        label: nestedItem.label,
+        Icon: nestedItem.Icon,
+        end: nestedItem.end,
+        group: nestedItem.group,
+      })),
+    ];
+  });
+}
+
+export const DEFAULT_STAFF_NAVIGATION_ORDER = STAFF_NAVIGATION.map(
+  ({ to }) => to
+);
+type NavigationItem = (typeof STAFF_NAVIGATION)[number];
 
 function canViewStaffNavigationItem(path: string, canViewLabTasks: boolean) {
   return path !== "/operations/tasks" || canViewLabTasks;
@@ -81,26 +207,25 @@ export function StaffNavigation({
     }
   }, [location.pathname]);
   const orderedNavigation = navigationOrder
-    .map((to) => navigation.find((item) => item.to === to))
+    .map((to) => STAFF_NAVIGATION.find((item) => item.to === to))
     .filter((item): item is NavigationItem => Boolean(item))
     .filter((item) => canViewStaffNavigationItem(item.to, canViewLabTasks));
-  const activePath = navigation
-    .filter(({ to, end }) => {
-      const [pathname, query] = to.split("?");
-      const pathMatches = end
-        ? location.pathname === pathname
-        : location.pathname === pathname ||
-          location.pathname.startsWith(`${pathname}/`);
-      const mineQuery = new URLSearchParams(location.search).get("mine");
-      const isBookingList =
-        to === "/bookings" && location.pathname === pathname;
-      const queryMatches = query
-        ? mineQuery === "1"
-        : !isBookingList || mineQuery !== "1";
-      return pathMatches && queryMatches;
-    })
-    .sort((left, right) => right.to.length - left.to.length)[0]?.to;
-  const isStaffMyLoansActive = location.pathname === getMyLoansPath("staff");
+  const activePath = STAFF_NAVIGATION.filter(({ to, end }) => {
+    const [pathname, query] = to.split("?");
+    const pathMatches = end
+      ? location.pathname === pathname
+      : location.pathname === pathname ||
+        location.pathname.startsWith(`${pathname}/`);
+    const mineQuery = new URLSearchParams(location.search).get("mine");
+    const isBookingList = to === "/bookings" && location.pathname === pathname;
+    const queryMatches = query
+      ? mineQuery === "1"
+      : !isBookingList || mineQuery !== "1";
+    return pathMatches && queryMatches;
+  }).sort((left, right) => right.to.length - left.to.length)[0]?.to;
+  const activeLoanSubnavigation = STAFF_LOAN_NAVIGATION.find(
+    (item) => item.to === location.pathname
+  );
 
   return (
     <nav aria-label="IOIO staff navigation" className="space-y-0.5">
@@ -164,18 +289,24 @@ export function StaffNavigation({
               </div>
               {loansExpanded ? (
                 <div className="ml-7 space-y-0.5 border-l border-red-100 pl-2">
-                  <Link
-                    to={getMyLoansPath("staff")}
-                    aria-current={isStaffMyLoansActive ? "page" : undefined}
-                    onClick={onNavigate}
-                    className={`block min-h-11 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 md:min-h-9 md:py-1.5 ${
-                      isStaffMyLoansActive
-                        ? "bg-red-50 text-red-800"
-                        : "text-gray-600 hover:bg-red-50 hover:text-red-800"
-                    }`}
-                  >
-                    My Loans
-                  </Link>
+                  {STAFF_LOAN_NAVIGATION.map((item) => {
+                    const isActive = activeLoanSubnavigation?.to === item.to;
+                    return (
+                      <Link
+                        key={item.to}
+                        to={item.to}
+                        aria-current={isActive ? "page" : undefined}
+                        onClick={onNavigate}
+                        className={`block min-h-11 rounded-lg px-3 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-red-700 focus-visible:ring-offset-1 md:min-h-9 md:py-1.5 ${
+                          isActive
+                            ? "bg-red-50 text-red-800"
+                            : "text-gray-600 hover:bg-red-50 hover:text-red-800"
+                        }`}
+                      >
+                        {item.label}
+                      </Link>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
@@ -226,11 +357,21 @@ export function StaffNavigation({
   );
 }
 
-function StaffAccountControls({ onNavigate }: { onNavigate?: () => void }) {
+function StaffAccountControls({
+  onNavigate,
+  compact = false,
+}: {
+  onNavigate?: () => void;
+  compact?: boolean;
+}) {
   return (
     <section
       aria-label="Staff account"
-      className="mt-3 border-t border-gray-100 pt-3"
+      className={
+        compact
+          ? "mt-2 border-t border-gray-100 pt-2"
+          : "mt-3 border-t border-gray-100 pt-3"
+      }
     >
       <p className="px-3 text-[0.68rem] font-bold uppercase tracking-[0.14em] text-gray-400">
         Signed in
@@ -240,12 +381,14 @@ function StaffAccountControls({ onNavigate }: { onNavigate?: () => void }) {
         method="post"
         action="/logout"
         onSubmit={onNavigate}
-        className="mt-1.5"
+        className={compact ? "mt-1" : "mt-1.5"}
       >
         <button
           type="submit"
           aria-label="Log out of IOIO Lab Shelf"
-          className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-left text-sm font-semibold text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
+          className={`w-full rounded-lg border border-gray-200 px-3 py-1.5 text-left text-sm font-semibold text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 ${
+            compact ? "min-h-11" : ""
+          }`}
         >
           Log out
         </button>
@@ -255,7 +398,6 @@ function StaffAccountControls({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export default function StaffShell() {
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const location = useLocation();
   const isLabelGeneratorRoute = location.pathname === "/labels";
   const layoutData = useRouteLoaderData<typeof layoutLoader>(
@@ -339,7 +481,7 @@ export default function StaffShell() {
   return (
     <StudentCheckoutProvider>
       <div
-        className={`ioio-staff-surface -mx-4 min-h-full overflow-x-clip bg-white text-gray-950 ${
+        className={`ioio-staff-surface min-h-full w-full min-w-0 max-w-full overflow-x-clip bg-white text-gray-950 md:-mx-4 ${
           isLabelGeneratorRoute ? "ioio-label-route-surface" : ""
         }`}
       >
@@ -367,75 +509,47 @@ export default function StaffShell() {
         </aside>
 
         <div className="md:pl-60">
-          <header className="sticky top-0 z-20 bg-white">
-            <div className="flex items-center justify-between gap-3 p-4">
-              <Link
-                to="/home"
-                aria-label="IOIO Lab staff dashboard"
-                className="flex items-center justify-center rounded-lg bg-red-800 p-2 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 md:hidden"
-              >
-                <StaffLogo compact />
-              </Link>
-              <div className="ml-auto flex items-center gap-3">
-                <StaffLabStatusBell
-                  status={labStatus}
-                  readStateKey={
-                    layoutData?.user?.id && layoutData.currentOrganizationId
-                      ? `ioio-staff-lab-status-seen:${layoutData.currentOrganizationId}:${layoutData.user.id}`
-                      : undefined
-                  }
-                />
-                <StudentBorrowListIndicator showLabel />
-                <button
-                  type="button"
-                  aria-expanded={mobileMenuOpen}
-                  aria-controls="ioio-staff-mobile-navigation"
-                  onClick={() => setMobileMenuOpen((open) => !open)}
-                  className="rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-sm font-bold text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 md:hidden"
-                >
-                  {mobileMenuOpen ? "Close" : "Menu"}
-                </button>
-              </div>
+          <MobileIoioHeader
+            homeHref="/home"
+            notifications={
+              <StaffLabStatusBell
+                mobile
+                status={labStatus}
+                readStateKey={
+                  layoutData?.user?.id && layoutData.currentOrganizationId
+                    ? `ioio-staff-lab-status-seen:${layoutData.currentOrganizationId}:${layoutData.user.id}`
+                    : undefined
+                }
+              />
+            }
+            basket={<StudentBorrowListIndicator showLabel />}
+          />
+
+          <header className="sticky top-0 z-20 hidden bg-white md:block">
+            <div className="flex items-center justify-end gap-3 p-4">
+              <StaffLabStatusBell
+                status={labStatus}
+                readStateKey={
+                  layoutData?.user?.id && layoutData.currentOrganizationId
+                    ? `ioio-staff-lab-status-seen:${layoutData.currentOrganizationId}:${layoutData.user.id}`
+                    : undefined
+                }
+              />
+              <StudentBorrowListIndicator showLabel />
             </div>
           </header>
 
-          <main className="mx-auto max-w-7xl px-4 pb-10 pt-2 sm:px-6 lg:px-8">
+          <IoioPageContainer className="max-w-7xl pb-[calc(5rem+env(safe-area-inset-bottom))] pt-2 sm:px-6 md:pb-10 lg:px-8">
             <Outlet />
-          </main>
+          </IoioPageContainer>
         </div>
 
-        {mobileMenuOpen ? (
-          <div className="fixed inset-0 z-40 md:hidden">
-            <button
-              type="button"
-              aria-label="Close navigation"
-              className="absolute inset-0 bg-gray-950/20"
-              onClick={() => setMobileMenuOpen(false)}
-            />
-            <aside
-              id="ioio-staff-mobile-navigation"
-              className="absolute inset-y-0 right-0 w-[min(20rem,88vw)] overflow-y-auto border-l border-red-100 bg-white p-4 shadow-2xl"
-            >
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <div className="rounded-xl bg-red-800 p-2">
-                  <StaffLogo compact />
-                </div>
-                <span className="text-xs font-bold uppercase tracking-[0.16em] text-gray-400">
-                  Staff desk
-                </span>
-              </div>
-              <StaffNavigation
-                navigationOrder={navigationOrder}
-                onReorder={reorderNavigation}
-                onNavigate={() => setMobileMenuOpen(false)}
-                canViewLabTasks={canViewLabTasks}
-              />
-              <StaffAccountControls
-                onNavigate={() => setMobileMenuOpen(false)}
-              />
-            </aside>
-          </div>
-        ) : null}
+        <MobileBottomNavigation
+          label="IOIO staff mobile navigation"
+          items={mobilePrimaryItems}
+          moreItems={getStaffMobileMoreItems(navigationOrder, canViewLabTasks)}
+          account={<StaffAccountControls compact />}
+        />
       </div>
     </StudentCheckoutProvider>
   );

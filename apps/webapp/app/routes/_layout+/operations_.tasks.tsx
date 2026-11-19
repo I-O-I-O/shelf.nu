@@ -282,7 +282,7 @@ function TaskFields({
 }) {
   return (
     <>
-      <label className="block text-sm font-semibold text-gray-800">
+      <label className="block min-w-0 text-sm font-semibold text-gray-800">
         Title
         <input
           name="title"
@@ -290,10 +290,10 @@ function TaskFields({
           maxLength={180}
           defaultValue={task?.title ?? ""}
           placeholder="e.g. Check returned Arduino Kits"
-          className="mt-1 block h-10 w-full rounded-lg border border-gray-300 px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100"
+          className="mt-1 block h-11 w-full min-w-0 max-w-full rounded-lg border border-gray-300 px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100 max-md:text-base md:h-10"
         />
       </label>
-      <label className="block text-sm font-semibold text-gray-800">
+      <label className="block min-w-0 text-sm font-semibold text-gray-800">
         Description{" "}
         <span className="font-normal text-gray-500">(optional)</span>
         <textarea
@@ -301,16 +301,16 @@ function TaskFields({
           rows={3}
           maxLength={5000}
           defaultValue={task?.description ?? ""}
-          className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100"
+          className="mt-1 block w-full min-w-0 max-w-full resize-y rounded-lg border border-gray-300 px-3 py-2 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100 max-md:text-base"
         />
       </label>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <label className="block text-sm font-semibold text-gray-800">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <label className="block min-w-0 text-sm font-semibold text-gray-800">
           Assigned to
           <select
             name="assignedToUserId"
             defaultValue={task?.assignedToUserId ?? ""}
-            className="mt-1 block h-10 w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100"
+            className="mt-1 block h-11 w-full min-w-0 max-w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100 max-md:text-base md:h-10"
           >
             <option value="">Unassigned</option>
             {assignees.map((person) => (
@@ -320,21 +320,21 @@ function TaskFields({
             ))}
           </select>
         </label>
-        <label className="block text-sm font-semibold text-gray-800">
+        <label className="block min-w-0 text-sm font-semibold text-gray-800">
           Due date <span className="font-normal text-gray-500">(optional)</span>
           <input
             type="date"
             name="dueDate"
             defaultValue={task?.dueDateKey ?? ""}
-            className="mt-1 block h-10 w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100"
+            className="mt-1 block h-11 w-full min-w-0 max-w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100 max-md:text-base md:h-10"
           />
         </label>
-        <label className="block text-sm font-semibold text-gray-800">
+        <label className="block min-w-0 text-sm font-semibold text-gray-800">
           Priority
           <select
             name="priority"
             defaultValue={task?.priority ?? "IMPORTANT"}
-            className="mt-1 block h-10 w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100"
+            className="mt-1 block h-11 w-full min-w-0 max-w-full rounded-lg border border-gray-300 bg-white px-3 font-normal outline-none focus:border-red-600 focus:ring-2 focus:ring-red-100 max-md:text-base md:h-10"
           >
             <option value="URGENT">{LAB_TASK_PRIORITY_LABELS.URGENT}</option>
             <option value="IMPORTANT">
@@ -710,12 +710,13 @@ export default function LabTasksPage() {
           open={createOpen}
           onClose={closeCreate}
           title="Add task"
-          className="w-[min(40rem,calc(100vw-2rem))]"
+          className="max-md:inset-0 max-md:w-full max-md:overflow-hidden max-md:bg-white max-md:pt-[env(safe-area-inset-top)] md:w-[min(40rem,calc(100vw-2rem))] max-md:[&_.dialog-body]:overscroll-contain"
+          headerClassName="shrink-0 max-md:items-center max-md:px-4 max-md:py-1 max-md:[&>button]:m-0 max-md:[&>button]:size-11"
         >
-          <Form method="post" className="space-y-4">
+          <Form method="post" className="md:space-y-4">
             <input type="hidden" name="intent" value="create" />
             <input type="hidden" name="sort" value={sort} />
-            <div className="space-y-4 px-6 py-4">
+            <div className="min-w-0 space-y-3 px-4 pb-4 pt-1 md:space-y-4 md:px-6 md:pt-4">
               <TaskFields assignees={assignees} />
               {actionData &&
               !actionData.ok &&
@@ -728,13 +729,13 @@ export default function LabTasksPage() {
                 <button
                   type="button"
                   onClick={closeCreate}
-                  className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700"
+                  className="min-h-11 rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 md:min-h-0"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800"
+                  className="min-h-11 rounded-lg bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 md:min-h-0"
                 >
                   Add task
                 </button>

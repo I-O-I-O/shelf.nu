@@ -71,16 +71,19 @@ export function StaffItemDetail({
 
   return (
     <IoioAssetDetailLayout
+      className="max-md:px-0"
       backTo="/assets"
       backLabel="Back to inventory"
       title={title}
       description={description}
       image={image}
       actions={
-        <>
-          {borrowAction}
-          {actions}
-        </>
+        borrowAction || actions ? (
+          <>
+            {borrowAction}
+            {actions}
+          </>
+        ) : null
       }
       availableToBook={availableToBook}
       availableQuantity={availableQuantity}
@@ -94,10 +97,10 @@ export function StaffItemDetail({
       maxBorrowDays={maxBorrowDays}
       additionalFields={additionalFields}
     >
-      <div className="mt-5 space-y-4">
+      <div className="min-w-0 space-y-4 empty:hidden [&:not(:empty)]:mt-5">
         {qrLifecycle}
         {contents ? (
-          <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          <section className="min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5">
             <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500">
               Contents
             </h2>
@@ -105,7 +108,7 @@ export function StaffItemDetail({
           </section>
         ) : null}
         {physicalUnits?.length && physicalUnitsActionUrl ? (
-          <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+          <section className="min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5">
             <PhysicalUnitAvailabilityList
               units={physicalUnits}
               actionUrl={physicalUnitsActionUrl}

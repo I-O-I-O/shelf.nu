@@ -43,7 +43,10 @@ export function BulkListCardCheckbox({ item }: { item: ListItemData }) {
       }}
       className="flex size-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed"
     >
-      <FakeCheckbox checked={checked} className="text-primary" />
+      <FakeCheckbox
+        checked={checked}
+        className={checked ? "text-primary" : "text-white"}
+      />
     </button>
   );
 }

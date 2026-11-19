@@ -21,6 +21,7 @@ import {
   BookingStatus,
   ConsumptionCategory as ConsumptionCategoryEnum,
 } from "@prisma/client";
+import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import type { ExtendedPrismaClient } from "~/database/db.server";
 import { db } from "~/database/db.server";
 // `recordEvent` writes the structured activity-event audit row alongside the
@@ -456,6 +457,7 @@ type AdjustQuantityArgs = {
   organizationId: string;
   /** Optional note explaining the reason for the adjustment */
   note?: string;
+  tx?: Omit<ExtendedPrismaClient, ITXClientDenyList>;
 };
 
 /**
@@ -481,6 +483,7 @@ export async function adjustQuantity({
   userId,
   organizationId,
   note,
+  tx: outerTransaction,
 }: AdjustQuantityArgs) {
   try {
     if (quantity <= 0) {
@@ -492,7 +495,7 @@ export async function adjustQuantity({
       });
     }
 
-    return await db.$transaction(async (tx) => {
+    const adjust = async (tx: NonNullable<AdjustQuantityArgs["tx"]>) => {
       /** Step 1: Acquire row-level lock to prevent concurrent modifications */
       const asset = await lockAssetForQuantityUpdate(
         tx,
@@ -640,7 +643,10 @@ export async function adjustQuantity({
       );
 
       return updatedAsset;
-    });
+    };
+    return await (outerTransaction
+      ? adjust(outerTransaction)
+      : db.$transaction(adjust));
   } catch (cause) {
     /** Re-throw ShelfErrors as-is to preserve status/message */
     if (cause instanceof ShelfError) {

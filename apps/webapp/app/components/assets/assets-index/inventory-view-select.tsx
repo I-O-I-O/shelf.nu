@@ -20,9 +20,11 @@ function isInventoryQuickFilter(value: string): value is InventoryQuickFilter {
 
 export function InventoryViewSelect({
   value,
+  className,
   onChange,
 }: {
   value: InventoryQuickFilter;
+  className?: string;
   onChange: (value: InventoryQuickFilter) => void;
 }) {
   return (
@@ -38,7 +40,8 @@ export function InventoryViewSelect({
         aria-label="View"
         className={tw(
           INVENTORY_FILTER_TRIGGER_CLASS_NAME,
-          value !== "all" && "border-red-200 bg-red-50 text-red-800"
+          value !== "all" && "border-red-200 bg-red-50 text-red-800",
+          className
         )}
       >
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-left">

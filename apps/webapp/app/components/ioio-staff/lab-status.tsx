@@ -1,32 +1,55 @@
-import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { Activity, AlertTriangle, Bell, ChevronRight } from "lucide-react";
 import { Link } from "react-router";
+import { NotificationPanel } from "~/components/ioio-shared/notification-panel";
 import type {
   LabIssue,
   LabStatus,
 } from "~/modules/ioio-staff/lab-status.server";
 
-function IssueRow({ issue }: { issue: LabIssue }) {
+import { LabInventoryActions } from "./lab-inventory-actions";
+
+function IssueRow({
+  issue,
+  onClick,
+  controls,
+}: {
+  issue: LabIssue;
+  onClick?: () => void;
+  controls?: ReactNode;
+}) {
   return (
-    <li className="rounded-xl border border-gray-100 transition hover:border-red-200 hover:bg-red-50">
+    <li className="flex min-w-0 items-center rounded-xl border border-gray-100 transition hover:border-red-200 hover:bg-red-50">
       <Link
         to={issue.href}
+        onClick={onClick}
         aria-label={`${issue.title}: ${issue.detail}`}
-        className="flex items-center gap-3 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
       >
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
           <span className="block text-sm font-bold text-gray-950">
             {issue.title}
           </span>
           <span className="mt-0.5 block text-xs text-gray-500">
             {issue.detail}
           </span>
+          {controls && issue.inventoryTarget ? (
+            <span className="mt-1 block text-xs font-semibold text-gray-700">
+              {issue.inventoryTarget.pooled
+                ? "Pooled stock"
+                : issue.inventoryTarget.disabled
+                ? "Disabled"
+                : "Borrowing enabled"}
+            </span>
+          ) : null}
         </div>
         <ChevronRight
           aria-hidden="true"
           className="size-4 shrink-0 text-gray-400"
         />
       </Link>
+      {controls}
     </li>
   );
 }
@@ -109,17 +132,19 @@ function IssueSummary({
     },
   ] as const;
   return (
-    <div className="mt-4 grid auto-rows-fr grid-cols-2 items-stretch gap-2 sm:grid-cols-4">
+    <div className="mt-3 grid auto-rows-fr grid-cols-2 items-stretch gap-2 sm:mt-4 sm:grid-cols-4">
       {summaries.map(({ label, count, href }) => (
         <Link
           key={label}
           to={href}
-          className="flex h-full min-w-0 flex-col rounded-xl bg-gray-50 px-3 py-2 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1"
+          className="flex h-full min-w-0 flex-col rounded-xl bg-gray-50 px-2.5 py-2 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 sm:px-3"
         >
           <p className="break-words text-[0.68rem] font-bold uppercase tracking-wide text-gray-500">
             {label}
           </p>
-          <p className="mt-0.5 text-lg font-black text-gray-950">{count}</p>
+          <p className="mt-0.5 text-base font-black text-gray-950 sm:text-lg">
+            {count}
+          </p>
         </Link>
       ))}
     </div>
@@ -129,9 +154,11 @@ function IssueSummary({
 export function LabStatusCard({
   status,
   pendingHandbookReviews = 0,
+  canManageInventory = false,
 }: {
   status: LabStatus;
   pendingHandbookReviews?: number;
+  canManageInventory?: boolean;
 }) {
   const visibleIssues = status.issues.slice(0, 3);
   const actionableItemCount = countActionableItems(
@@ -142,13 +169,13 @@ export function LabStatusCard({
     <section
       aria-labelledby="lab-status-heading"
       id="lab-status"
-      className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
+      className="rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h2
             id="lab-status-heading"
-            className="mt-1 text-xl font-black tracking-tight text-gray-950"
+            className="mt-1 text-lg font-black tracking-tight text-gray-950 sm:text-xl"
           >
             Lab status
           </h2>
@@ -182,16 +209,28 @@ export function LabStatusCard({
             {actionableItemCount} item
             {actionableItemCount === 1 ? " needs" : "s need"} action.
           </p>
-          <ul className="mt-4 space-y-2" aria-label="Current lab issues">
-            {visibleIssues.map((issue) => (
-              <IssueRow key={issue.id} issue={issue} />
-            ))}
-          </ul>
-          {status.issues.length > visibleIssues.length ? (
-            <p className="mt-3 text-xs text-gray-500">
-              Showing 3 of {status.issues.length} items.
-            </p>
-          ) : null}
+          {canManageInventory &&
+          status.issues.some((issue) => issue.inventoryTarget) ? (
+            <LabInventoryActions
+              issues={status.issues}
+              renderIssue={(issue, controls) => (
+                <IssueRow key={issue.id} issue={issue} controls={controls} />
+              )}
+            />
+          ) : (
+            <>
+              <ul className="mt-4 space-y-2" aria-label="Current lab issues">
+                {visibleIssues.map((issue) => (
+                  <IssueRow key={issue.id} issue={issue} />
+                ))}
+              </ul>
+              {status.issues.length > visibleIssues.length ? (
+                <p className="mt-3 text-xs text-gray-500">
+                  Showing 3 of {status.issues.length} items.
+                </p>
+              ) : null}
+            </>
+          )}
         </section>
       ) : null}
       {status.readyForPickup > 0 ? (
@@ -235,13 +274,14 @@ export function LabStatusCard({
 
 export function StaffLabStatusBell({
   status,
+  mobile = false,
   readStateKey,
 }: {
   status: LabStatus | null;
+  mobile?: boolean;
   /** User and Team scoped browser storage key for the last seen issue keys. */
   readStateKey?: string;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [seenState, setSeenState] = useState<{
     key: string | undefined;
@@ -269,32 +309,6 @@ export function StaffLabStatusBell({
     }
   }, [readStateKey]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        containerRef.current &&
-        !containerRef.current.contains(target)
-      ) {
-        setIsOpen(false);
-      }
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setIsOpen(false);
-    }
-
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isOpen]);
-
   const currentIssueCount = status
     ? countActionableItems(status.issues, status.preparationTasks)
     : 0;
@@ -309,8 +323,7 @@ export function StaffLabStatusBell({
     status?.preparationTasks ?? 0
   );
 
-  function toggleOpen() {
-    const nextOpen = !isOpen;
+  function changeOpen(nextOpen: boolean) {
     if (nextOpen) {
       const currentIssueKeys = status?.issues.map(getLabIssueReadKey) ?? [];
       setSeenState({ key: readStateKey, issueKeys: currentIssueKeys });
@@ -328,79 +341,72 @@ export function StaffLabStatusBell({
     setIsOpen(nextOpen);
   }
 
+  const description = currentIssueCount
+    ? `${currentIssueCount} current actionable item${
+        currentIssueCount === 1 ? "" : "s"
+      }; ${newIssueCount ? `${newIssueCount} new.` : "all have been seen."}`
+    : "Nothing needs attention right now.";
+
   return (
-    <div ref={containerRef} className="relative">
-      <button
-        type="button"
-        aria-label="Open lab status notifications"
-        aria-expanded={isOpen}
-        onClick={toggleOpen}
-        className="flex size-10 cursor-pointer list-none items-center justify-center rounded-xl border border-gray-200 text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 [&::-webkit-details-marker]:hidden"
-      >
-        <Bell aria-hidden="true" className="size-4" />
-        {newIssueCount > 0 ? (
-          <span
-            className={
-              "absolute -right-1 -top-1 min-w-5 rounded-full px-1 text-center text-[0.65rem] font-black leading-5 text-white " +
-              "bg-red-700"
-            }
-          >
-            {newIssueCount > 99 ? "99+" : newIssueCount}
-          </span>
-        ) : null}
-      </button>
-      {isOpen ? (
-        <div className="absolute right-0 top-12 z-50 w-[min(22rem,calc(100vw-2rem))] rounded-2xl border border-gray-200 bg-white p-4 shadow-xl">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-black text-gray-950">Lab status</p>
-              <p className="mt-0.5 text-xs text-gray-500">
-                {currentIssueCount
-                  ? `${currentIssueCount} current actionable item${
-                      currentIssueCount === 1 ? "" : "s"
-                    }; ${
-                      newIssueCount
-                        ? `${newIssueCount} new.`
-                        : "all have been seen."
-                    }`
-                  : "Nothing needs attention right now."}
-              </p>
-            </div>
-            {status && status.severity !== "healthy" ? (
-              <AlertTriangle
-                aria-hidden="true"
-                className={
-                  "size-4 " +
-                  (status.severity === "critical"
-                    ? "text-red-700"
-                    : "text-orange-500")
-                }
-              />
-            ) : null}
-          </div>
-          {status?.issues.length ? (
-            <ul
-              className="mt-3 space-y-2"
-              aria-label="Lab status notifications"
+    <NotificationPanel
+      mobile={mobile}
+      open={isOpen}
+      onOpenChange={changeOpen}
+      label="Open lab status notifications"
+      title="Lab status"
+      description={description}
+      triggerClassName="flex size-11 cursor-pointer items-center justify-center rounded-xl border border-gray-200 text-gray-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-1 md:size-10"
+      headerIcon={
+        status && status.severity !== "healthy" ? (
+          <AlertTriangle
+            aria-hidden="true"
+            className={`size-4 shrink-0 ${
+              status.severity === "critical"
+                ? "text-red-700"
+                : "text-orange-500"
+            }`}
+          />
+        ) : null
+      }
+      trigger={
+        <>
+          <Bell aria-hidden="true" className="size-5 md:size-4" />
+          {newIssueCount > 0 ? (
+            <span
+              className={
+                "absolute -right-1 -top-1 min-w-5 rounded-full px-1 text-center text-[0.65rem] font-black leading-5 text-white " +
+                "bg-red-700"
+              }
             >
-              {status.issues.slice(0, 5).map((issue) => (
-                <IssueRow key={issue.id} issue={issue} />
-              ))}
-            </ul>
+              {newIssueCount > 99 ? "99+" : newIssueCount}
+            </span>
           ) : null}
-          {status && status.issues.length > 5 ? (
-            <p className="mt-3 text-xs text-gray-500">
-              Showing 5 of {currentIssueCount} current actionable items.
-            </p>
-          ) : null}
-          <Link
-            to="/operations"
-            className="mt-3 inline-flex text-xs font-bold text-red-700 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2"
-          >
-            Open operations
-          </Link>
-        </div>
+        </>
+      }
+    >
+      {status?.issues.length ? (
+        <ul className="mt-3 space-y-2" aria-label="Lab status notifications">
+          {status.issues.slice(0, 5).map((issue) => (
+            <IssueRow
+              key={issue.id}
+              issue={issue}
+              onClick={() => setIsOpen(false)}
+            />
+          ))}
+        </ul>
       ) : null}
-    </div>
+      {status && status.issues.length > 5 ? (
+        <p className="mt-3 text-xs text-gray-500">
+          Showing 5 of {currentIssueCount} current actionable items.
+        </p>
+      ) : null}
+      <Link
+        to="/operations"
+        onClick={() => setIsOpen(false)}
+        className="mt-3 inline-flex items-center text-xs font-bold text-red-700 hover:text-red-800 hover:underline focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 max-md:min-h-11"
+      >
+        Open operations
+      </Link>
+    </NotificationPanel>
   );
 }
