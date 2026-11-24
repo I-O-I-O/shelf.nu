@@ -1,9 +1,13 @@
 import { vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  requireAccess: vi.fn(),
-  upload: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const upload = vi.fn();
+  return {
+    requireAccess: vi.fn(),
+    upload,
+    from: vi.fn(() => ({ upload })),
+  };
+});
 
 // why: access control is owned by the shared Handbook authorization service;
 // this test verifies the upload route only proceeds with its returned workspace.
@@ -13,7 +17,7 @@ vi.mock("~/modules/ioio-handbook/access.server", () => ({
 // why: Supabase is external storage and must not be contacted by this route test.
 vi.mock("~/integrations/supabase/client", () => ({
   getSupabaseAdmin: () => ({
-    storage: { from: () => ({ upload: mocks.upload }) },
+    storage: { from: mocks.from },
   }),
 }));
 
@@ -66,13 +70,14 @@ describe("Handbook inline image upload route", () => {
 
     expect(response.data.ok).toBe(true);
     expect(response.data.src).toMatch(
-      /^\/api\/handbook-image\?path=handbook%2Forg-1%2F[0-9a-f-]{36}\.png$/u
+      /^\/api\/handbook-image\?path=handbook-private%2Forg-1%2F[0-9a-f-]{36}\.png$/u
     );
     expect(mocks.upload).toHaveBeenCalledWith(
-      expect.stringMatching(/^handbook\/org-1\/[0-9a-f-]{36}\.png$/u),
+      expect.stringMatching(/^handbook-private\/org-1\/[0-9a-f-]{36}\.png$/u),
       expect.any(Buffer),
       { contentType: "image/png", upsert: false }
     );
+    expect(mocks.from).toHaveBeenCalledWith("assets");
   });
 
   it("rejects files over 2 MB before storing them", async () => {

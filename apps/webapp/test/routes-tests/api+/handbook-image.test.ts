@@ -23,6 +23,7 @@ vi.mock("~/database/db.server", () => ({
 
 import { loader } from "~/routes/api+/handbook-image";
 import { PUBLIC_BUCKET } from "~/utils/constants";
+import { HANDBOOK_PRIVATE_IMAGE_PREFIX } from "~/modules/ioio-handbook/image.server";
 
 const path = "handbook/org-1/123e4567-e89b-12d3-a456-426614174000.png";
 const url = `https://app.example/api/handbook-image?path=${encodeURIComponent(
@@ -71,6 +72,21 @@ describe("Handbook image read route", () => {
       expect(mocks.download).toHaveBeenCalledWith(path);
     }
   );
+
+  it("reads new private image objects from the private assets bucket", async () => {
+    const privatePath = `${HANDBOOK_PRIVATE_IMAGE_PREFIX}/org-1/123e4567-e89b-12d3-a456-426614174000.png`;
+    const response = await loader(
+      args(
+        `https://app.example/api/handbook-image?path=${encodeURIComponent(
+          privatePath
+        )}`
+      )
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.from).toHaveBeenCalledWith("assets");
+    expect(mocks.download).toHaveBeenCalledWith(privatePath);
+  });
 
   it.each([
     "",

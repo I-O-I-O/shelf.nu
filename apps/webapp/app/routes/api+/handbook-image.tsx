@@ -3,7 +3,10 @@ import { data } from "react-router";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
-import { isHandbookImagePathForOrganization } from "~/modules/ioio-handbook/image.server";
+import {
+  HANDBOOK_PRIVATE_IMAGE_PREFIX,
+  isHandbookImagePathForOrganization,
+} from "~/modules/ioio-handbook/image.server";
 import { PUBLIC_BUCKET } from "~/utils/constants";
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
@@ -41,8 +44,13 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     }
   }
 
+  // New images are private; retain the public bucket for legacy content until
+  // those objects can be migrated and removed from public storage.
+  const bucket = path.startsWith(`${HANDBOOK_PRIVATE_IMAGE_PREFIX}/`)
+    ? "assets"
+    : PUBLIC_BUCKET;
   const { data: image, error } = await getSupabaseAdmin()
-    .storage.from(PUBLIC_BUCKET)
+    .storage.from(bucket)
     .download(path);
   if (error || !image) {
     throw data(

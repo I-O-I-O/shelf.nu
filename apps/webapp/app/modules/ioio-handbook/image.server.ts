@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
-import { PUBLIC_BUCKET } from "~/utils/constants";
 
 export const HANDBOOK_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+export const HANDBOOK_PRIVATE_IMAGE_PREFIX = "handbook-private";
 
 const IMAGE_FORMATS = [
   {
@@ -53,9 +53,13 @@ export async function uploadHandbookArticleImage({
     throw new Error("Upload a valid PNG, JPEG, or WebP image.");
   }
 
-  const path = `handbook/${organizationId}/${randomUUID()}.${format.extension}`;
+  const path = `${HANDBOOK_PRIVATE_IMAGE_PREFIX}/${organizationId}/${randomUUID()}.${
+    format.extension
+  }`;
   const { error } = await getSupabaseAdmin()
-    .storage.from(PUBLIC_BUCKET)
+    // Handbook content can be staff-only, so images must live in the private
+    // assets bucket and be served through the authorization-aware route.
+    .storage.from("assets")
     .upload(path, bytes, { contentType: format.contentType, upsert: false });
   if (error) throw error;
 
@@ -69,8 +73,11 @@ export function isHandbookImagePathForOrganization(
   path: string,
   organizationId: string
 ) {
+  const [prefix, pathOrganizationId, filename, ...extra] = path.split("/");
   return (
-    path.startsWith(`handbook/${organizationId}/`) &&
-    /^handbook\/[^/]+\/[0-9a-f-]{36}\.(?:png|jpg|webp)$/iu.test(path)
+    (prefix === "handbook" || prefix === HANDBOOK_PRIVATE_IMAGE_PREFIX) &&
+    pathOrganizationId === organizationId &&
+    extra.length === 0 &&
+    /^[0-9a-f-]{36}\.(?:png|jpg|webp)$/iu.test(filename ?? "")
   );
 }
