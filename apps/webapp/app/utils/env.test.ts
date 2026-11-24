@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getEnv } from "./env";
+import {
+  assertProductionSigningSecrets,
+  findWeakSigningSecrets,
+  getEnv,
+  initEnv,
+} from "./env";
 import { ShelfError } from "./error";
 
 // why: Mock isBrowser to ensure we're testing server-side behavior
@@ -191,5 +196,80 @@ describe("getEnv", () => {
         getEnv("SESSION_SECRET");
       }).toThrow(ShelfError);
     });
+  });
+});
+
+describe("production signing-secret validation", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  const strongSecrets = {
+    SESSION_SECRET: "generated-session-secret-value",
+    INVITE_TOKEN_SECRET: "generated-invite-secret-value",
+  };
+
+  it.each([
+    {
+      name: "SESSION_SECRET",
+      source: {
+        SESSION_SECRET: "super-duper-s3cret",
+        INVITE_TOKEN_SECRET: "private-invite",
+      },
+    },
+    {
+      name: "INVITE_TOKEN_SECRET",
+      source: {
+        SESSION_SECRET: "private-session",
+        INVITE_TOKEN_SECRET: "secret-test-invite",
+      },
+    },
+  ])(
+    "identifies a published $name without exposing its value",
+    ({ name, source }) => {
+      expect(findWeakSigningSecrets(source, "production")).toEqual([
+        `${name} is a published example value`,
+      ]);
+    }
+  );
+
+  it("rejects published example values at production initialization", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SESSION_SECRET", "super-duper-s3cret");
+    vi.stubEnv("INVITE_TOKEN_SECRET", "secret-test-invite");
+
+    let thrown: unknown;
+    try {
+      initEnv();
+    } catch (cause) {
+      thrown = cause;
+    }
+
+    expect(thrown).toBeInstanceOf(ShelfError);
+    expect((thrown as Error).message).toMatch(
+      /production signing secret configuration rejected.*SESSION_SECRET.*INVITE_TOKEN_SECRET/i
+    );
+    expect((thrown as Error).message).not.toContain("super-duper-s3cret");
+    expect((thrown as Error).message).not.toContain("secret-test-invite");
+  });
+
+  it.each(["development", "test"])(
+    "allows published test values outside production (%s)",
+    (nodeEnv) => {
+      expect(
+        findWeakSigningSecrets(
+          {
+            SESSION_SECRET: "super-duper-s3cret",
+            INVITE_TOKEN_SECRET: "secret-test-invite",
+          },
+          nodeEnv
+        )
+      ).toEqual([]);
+    }
+  );
+
+  it("accepts independently generated values in production", () => {
+    expect(findWeakSigningSecrets(strongSecrets, "production")).toEqual([]);
+    expect(() =>
+      assertProductionSigningSecrets(strongSecrets, "production")
+    ).not.toThrow();
   });
 });
