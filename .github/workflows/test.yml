@@ -17,23 +17,9 @@ name: 🧪 Test
 
 on:
   pull_request:
-  # Called by deploy.yml on pushes to main/dev. The secrets below are declared
-  # for the E2E job that currently lives commented-out at the bottom of this
-  # file; deploy.yml passes all six, so this block must not be removed.
+  # Trusted deployment workflows can require the same secret-free checks
+  # before staging or an explicitly approved production deployment.
   workflow_call:
-    secrets:
-      SESSION_SECRET:
-        required: true
-      SUPABASE_ANON_PUBLIC:
-        required: true
-      SUPABASE_SERVICE_ROLE:
-        required: true
-      SUPABASE_URL:
-        required: true
-      SERVER_URL:
-        required: true
-      DATABASE_URL:
-        required: true
 
 # Least privilege, pinned explicitly. The repo default is already `read`, but
 # pinning it means a future org-level default change cannot silently escalate
@@ -42,13 +28,39 @@ permissions:
   contents: read
 
 concurrency:
-  # PR number for PR runs; run_id on the workflow_call path so a push to main
-  # gets a unique group and can never be cancelled by a PR run. Note that in a
-  # reusable workflow the `github` context belongs to the CALLER.
+  # Each PR run shares a group, so a newer commit cancels stale checks.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  production-build:
+    name: 🏗️ Webapp production build (no publish)
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 📦 Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: ⎔ Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 📥 Install deps
+        run: pnpm install --frozen-lockfile
+        env:
+          PRISMA_SKIP_POSTINSTALL_GENERATE: "true"
+
+      # This compiles the app only. It does not connect to a database, build a
+      # container, publish an image, or receive deployment credentials.
+      - name: 🏗️ Build webapp
+        run: pnpm webapp:build
+
   lint:
     name: ⬣ ESLint
     runs-on: ubuntu-latest

@@ -1,0 +1,38 @@
+name: 📚 Docs build
+
+# Keep documentation build verification on PRs and main updates, but do not
+# publish the site. IOIO can add an explicitly approved publication workflow
+# after confirming whether Cloudflare Pages is still required.
+on:
+  push:
+    branches: [main]
+    paths: [apps/docs/**]
+  pull_request:
+    paths: [apps/docs/**]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 🔨 Build docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 📦 Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: ⎔ Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 📥 Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: 🔨 Build docs
+        run: pnpm docs:build

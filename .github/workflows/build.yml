@@ -1,36 +1,92 @@
-name: 🐳 Create and publish a Docker image
+name: 🐳 Publish a Docker image
 
+# Publishing is a separate, manually started release operation. Run this
+# workflow against a `shelf@X.Y.Z` tag after its source has been reviewed.
+# Configure required reviewers on the `image-publishing` environment.
 on:
-  push:
-    branches:
-      - main
-      - dev
-    # Release tags are `shelf@X.Y.Z`. Without this the workflow never runs for a
-    # release, so the version-pinned image the release notes tell self-hosted
-    # operators to pull is never built.
-    tags:
-      - "shelf@*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish (for example shelf@2.1.2)
+        required: true
+        type: string
 
 permissions:
-  actions: write
   contents: read
-  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
-    name: 🐳 Build
-    if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || github.ref_type == 'tag' }}
+  validate:
+    name: ✅ Validate release source
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      version: ${{ steps.release.outputs.version }}
+      latest: ${{ steps.release.outputs.latest }}
     steps:
-      - name: 🛑 Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.12.1
-
-      - name: ⬇️ Checkout repo
+      - name: ⬇️ Checkout main history
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: ✅ Resolve reviewed release tag
+        id: release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^shelf@[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a release tag such as shelf@2.1.2 or shelf@2.1.2-rc.1"
+            exit 1
+          fi
+
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            echo "Release tag does not exist in the checked repository"
+            exit 1
+          }
+
+          release_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$release_sha" origin/main || {
+            echo "Release tag must point to a commit already contained in main"
+            exit 1
+          }
+
+          version="${RELEASE_TAG#shelf@}"
+          echo "commit_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Only advance `latest` when publishing a stable tag for the exact
+          # main commit selected by this dispatch; republishing an older tag
+          # must not move the channel backwards.
+          if [[ "$version" != *-* && "$release_sha" == "$GITHUB_SHA" ]]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: 🐳 Publish release image
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    environment:
+      name: image-publishing
+    steps:
+      - name: ⬇️ Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
+          persist-credentials: false
 
       - name: 🥡 Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -42,55 +98,43 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          key: ${{ runner.os }}-buildx-${{ needs.validate.outputs.commit_sha }}
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: 👋 Log in to the Container registry
+      - name: 👋 Log in to the container registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🧪 Extract metadata (tags, labels) for Docker
+      - name: 🧪 Extract release image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
+          context: git
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # `latest` is published by exactly one rule below, gated on `main`.
-          # The default `latest=auto` would ALSO emit it for `type=match`, so a
-          # release tag would move `latest` — and tagging an older commit for a
-          # hotfix would drag `latest` backwards with it.
           flavor: |
             latest=false
-          # `type=ref,event=tag` would emit the git tag verbatim, but a Docker tag
-          # cannot contain `@` — `shelf@2.1.2` is sanitised into something that is
-          # not the version anyone was told to pull. Match the version out of the
-          # tag instead, so a release publishes a plain `2.1.2` image alongside
-          # `latest`.
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
-            type=ref,enable=${{ github.ref_type != 'tag' }},suffix=-{{sha}},event=branch
-            type=match,pattern=shelf@(.*),group=1
+            type=raw,value=latest,enable=${{ needs.validate.outputs.latest == 'true' }}
+            type=raw,value=${{ needs.validate.outputs.version }}
 
-      - name: 🛠 Build and push Docker image
+      - name: 🛠 Build and publish Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: apps/webapp/Dockerfile.image
           platforms: linux/amd64,linux/arm64
           push: true
-          # Note: provenance fixes unknown/unknown platform to be generated on build
-          # https://github.com/orgs/community/discussions/45969#discussioncomment-8170787
-          # https://github.com/docker/build-push-action/issues/820#issuecomment-1445131521
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
             REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
-            COMMIT_SHA=${{ github.sha }}
+            COMMIT_SHA=${{ needs.validate.outputs.commit_sha }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,mode=max,dest=/tmp/.buildx-cache-new
 
