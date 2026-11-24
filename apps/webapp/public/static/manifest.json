@@ -1,16 +1,16 @@
 {
-  "name": "shelf",
+  "name": "IOIO Lab",
   "lang": "en-US",
-  "short_name": "shelf",
-  "description": "Open Source Asset and Equipment tracking software that lets you create QR asset labels, manage and overview your assets across locations.",
+  "short_name": "IOIO",
+  "description": "IOIO Lab inventory and equipment management.",
   "start_url": "/",
   "display": "standalone",
   "scope": "/",
-  "theme_color": "#FFFFFF",
+  "theme_color": "#b91c1c",
   "background_color": "#FFFFFF",
   "icons": [
     {
-      "src": "/static/images/shelf-logo-x512.png",
+      "src": "/static/images/ioio-app-icon.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"

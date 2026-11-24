@@ -1,430 +1,106 @@
 /**
- * Dashboard (`/` after auth).
+ * Staff dashboard at /home after auth.
  *
- * Server-side aggregates the workspace KPIs surfaced on the landing tile
- * grid: asset count, total inventory value (QT-aware: `value × quantity`
- * via raw SQL since Prisma's `aggregate({_sum})` can't multiply), assets
- * by category / status, locations, team members, recent activity, and
- * onboarding state. Renders the dashboard hero, KPI tiles, the asset-
- * by-status donut, and the onboarding checklist; tile clicks navigate
- * into the corresponding index page or report.
+ * Dashboard widget data and status items continue to come from their
+ * authoritative Staff modules; ordering is a per-user presentation preference.
  */
-import { Prisma } from "@prisma/client";
+import type { ReactNode } from "react";
+import type { Prisma } from "@prisma/client";
 import type {
-  MetaFunction,
+  ActionFunctionArgs,
   LoaderFunctionArgs,
-  LinksFunction,
+  MetaFunction,
 } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
-import AnnouncementBar from "~/components/dashboard/announcement-bar";
-import AssetsByStatusChart from "~/components/dashboard/assets-by-status-chart";
-import OnboardingChecklist from "~/components/dashboard/checklist";
-import CustodiansList from "~/components/dashboard/custodians";
-import InventoryValueChart from "~/components/dashboard/inventory-value-chart";
-import NewestAssets from "~/components/dashboard/newest-assets";
+import { data, Link, useLoaderData, useRouteLoaderData } from "react-router";
+import { z } from "zod";
 import { ErrorContent } from "~/components/errors";
-import ActiveBookings from "~/components/home/active-bookings";
-import AssetGrowthChart from "~/components/home/asset-growth-chart";
-import KpiCards from "~/components/home/kpi-cards";
-import LocationDistribution from "~/components/home/location-distribution";
-import OverdueBookings from "~/components/home/overdue-bookings";
-import UpcomingBookings from "~/components/home/upcoming-bookings";
-import UpcomingReminders from "~/components/home/upcoming-reminders";
-import Header from "~/components/layout/header";
-import type { HeaderData } from "~/components/layout/header/types";
+import { BackupStatusItem } from "~/components/ioio-staff/backup-status";
+import { DashboardCustomizer } from "~/components/ioio-staff/dashboard-customizer";
+import { LabStatusCard } from "~/components/ioio-staff/lab-status";
+import { StaffInventoryTools } from "~/components/ioio-staff/staff-inventory-tools";
 import { db } from "~/database/db.server";
-import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
-import { getUpcomingRemindersForHomePage } from "~/modules/asset-reminder/service.server";
-import { getBookings } from "~/modules/booking/service.server";
-
-import styles from "~/styles/layout/skeleton-loading.css?url";
-import { appendToMetaTitle } from "~/utils/append-to-meta-title";
-import { getLocale } from "~/utils/client-hints";
-import { userPrefs } from "~/utils/cookies.server";
+import { countPendingHandbookReviews } from "~/modules/ioio-handbook/service.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
+import { answerStaffAssistant } from "~/modules/ioio-staff/assistant.server";
 import {
-  buildAssetsByStatusChart,
-  buildMonthlyGrowthData,
-  checklistOptions,
-  getCustodiansOrderedByTotalCustodies,
-} from "~/utils/dashboard.server";
-import { ShelfError, makeShelfError } from "~/utils/error";
-import { payload, error } from "~/utils/http.server";
-import { parseMarkdownToReact } from "~/utils/md";
+  DEFAULT_STAFF_DASHBOARD_PREFERENCES,
+  normalizeStaffDashboardPreferences,
+  type StaffDashboardWidgetId,
+} from "~/modules/ioio-staff/dashboard-preferences";
+import {
+  applyStaffInventoryImport,
+  cancelStaffInventoryImport,
+  skipStaffInventoryImportRow,
+  getStaffInventoryImportProposal,
+  prepareStaffInventoryImport,
+} from "~/modules/ioio-staff/inventory-import.server";
+import { LAB_INVENTORY_ACTIONS } from "~/modules/ioio-staff/lab-inventory";
+import { manageLabInventory } from "~/modules/ioio-staff/lab-inventory.server";
+import { getDashboardLabTasks } from "~/modules/ioio-staff/lab-tasks.server";
+import { getPurchasingDashboardSummary } from "~/modules/ioio-staff/purchasing.server";
+import {
+  getStaffSystemStatus,
+  type StaffSystemStatus,
+} from "~/modules/ioio-staff/system-status.server";
+import { getTAHoursDashboardSummary } from "~/modules/ioio-staff/ta-hours.server";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
+import { appendToMetaTitle } from "~/utils/append-to-meta-title";
+import { makeShelfError, ShelfError } from "~/utils/error";
+import { error, payload } from "~/utils/http.server";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
-import { requirePermission } from "~/utils/roles.server";
+import {
+  requirePermission,
+  requirePermissionInOrganization,
+} from "~/utils/roles.server";
+import { resolveUserDisplayName } from "~/utils/user";
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
 
   try {
-    const { organizationId, currentOrganization } = await requirePermission({
+    const { role, organizationId } = await requirePermission({
       userId,
       request,
       entity: PermissionEntity.dashboard,
       action: PermissionAction.read,
     });
-
-    const twelveMonthsAgo = new Date();
-    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
-    twelveMonthsAgo.setDate(1);
-    twelveMonthsAgo.setHours(0, 0, 0, 0);
-
-    // Fetch all data in parallel — targeted queries instead of loading all assets
+    const isStaff = role === "ADMIN" || role === "OWNER";
     const [
-      // 1a. Aggregated asset stats
-      assetAggregation,
-      valueKnownAssets,
-      // 1b. Assets by status
-      statusGroups,
-      // 1c. Monthly growth data
-      monthlyRows,
-      baselineCount,
-      // 1d. Top custodians (direct custody)
-      directCustodians,
-      // 1d. Bookings for custodian merge (ongoing + overdue)
-      { bookings: ongoingAndOverdueBookings },
-      // Upcoming bookings
-      { bookings: upcomingBookings },
-      // Overdue bookings
-      { bookings: overdueBookings },
-      // Active/ongoing bookings
-      { bookings: activeBookings },
-      // 1e. Newest 5 assets
-      newAssets,
-      // Upcoming reminders
-      upcomingReminders,
-      // Announcement
-      announcement,
-      // KPI counts
-      teamMembersCount,
-      locationDistribution,
-      locationsCount,
-      categoriesCount,
-      // Onboarding checklist booleans
-      checklistData,
-      // Cookie
-      cookieResult,
-    ] = await Promise.all([
-      // 1a. Asset count + total valuation
-      // QT-aware: multiplies valuation × quantity so qty-tracked assets are not silently underreported.
-      // `aggregate({_sum: { valuation }})` would only sum the per-unit price; QT assets with
-      // quantity > 1 would silently underreport. `$queryRaw` lets us express the multiplication.
-      Promise.all([
-        db.asset
-          .aggregate({
-            where: { organizationId },
-            _count: { _all: true },
-          })
-          .catch((cause) => {
-            throw new ShelfError({
-              cause,
-              message: "Failed to load asset aggregation",
-              additionalData: { userId, organizationId },
-              label: "Dashboard",
-            });
+      labTasks,
+      taHours,
+      purchasing,
+      savedDashboardPreferences,
+      systemStatus,
+      pendingHandbookReviews,
+    ] = isStaff
+      ? await Promise.all([
+          getDashboardLabTasks({ organizationId, userId }),
+          getTAHoursDashboardSummary(organizationId, userId),
+          getPurchasingDashboardSummary(organizationId),
+          db.user.findUnique({
+            where: { id: userId },
+            select: { staffDashboardPreferences: true },
           }),
-        db
-          // `Asset.valuation` is mapped to the DB column `value` (@map),
-          // so raw SQL must reference `value`. `COALESCE(quantity, 1)`
-          // mirrors `getAssetTotalValue` (which treats nullable quantity
-          // as 1, matching the INDIVIDUAL default). No `::bigint` cast —
-          // it truncated fractional Float valuations. SUM on a Float ×
-          // Int returns `double precision`, which arrives as a JS number.
-          .$queryRaw<{ total: number | null }[]>(
-            Prisma.sql`
-            SELECT COALESCE(SUM(COALESCE(value, 0) * COALESCE(quantity, 1)), 0) AS total
-            FROM "Asset"
-            WHERE "organizationId" = ${organizationId}
-          `
-          )
-          .catch((cause) => {
-            throw new ShelfError({
-              cause,
-              message: "Failed to load asset total valuation",
-              additionalData: { userId, organizationId },
-              label: "Dashboard",
-            });
-          }),
-      ]).then(([countResult, valuationRows]) => ({
-        _count: countResult._count,
-        totalValuation: Number(valuationRows[0]?.total ?? 0),
-      })),
-
-      // 1a. Count of assets with known valuation
-      db.asset.count({
-        where: { organizationId, valuation: { not: null } },
-      }),
-
-      // 1b. Assets grouped by status
-      db.asset.groupBy({
-        by: ["status"],
-        where: { organizationId },
-        _count: { _all: true },
-      }),
-
-      // 1c. Monthly asset creation counts (last 12 months)
-      db.$queryRaw<{ month_start: Date; assets_created: number }[]>`
-        SELECT date_trunc('month', "createdAt") AS month_start,
-               COUNT(*)::int AS assets_created
-        FROM "Asset"
-        WHERE "organizationId" = ${organizationId}
-          AND "createdAt" >= ${twelveMonthsAgo}
-        GROUP BY 1
-        ORDER BY 1`,
-
-      // 1c. Baseline count (assets before the 12-month window)
-      db.asset.count({
-        where: { organizationId, createdAt: { lt: twelveMonthsAgo } },
-      }),
-
-      // 1d. Team members with direct custody counts
-      db.teamMember.findMany({
-        where: { organizationId, custodies: { some: {} } },
-        include: {
-          user: {
-            select: {
-              firstName: true,
-              lastName: true,
-              displayName: true,
-              profilePicture: true,
-              email: true,
-            },
-          },
-          _count: { select: { custodies: true } },
-        },
-        orderBy: { custodies: { _count: "desc" } },
-        take: 20,
-      }),
-
-      // 1d. Ongoing + overdue bookings for custodian merge
-      // The four booking calls below render booking scalars, the custodian and
-      // `_count.bookingAssets` — never an asset row — so they all skip the
-      // per-booking asset payload.
-      getBookings({
-        organizationId,
-        userId,
-        page: 1,
-        // `perPage` is clamped to 20 for anything over 100, so the previous
-        // `perPage: 1000` merged custodians from the first 20 active bookings
-        // only. `takeCap` is the bounded escape hatch that sees them all.
-        takeCap: 1000,
-        statuses: ["ONGOING", "OVERDUE"],
-        includeAssets: false,
-        extraInclude: {
-          custodianTeamMember: true,
-          custodianUser: true,
-          _count: { select: { bookingAssets: true } },
-        },
-      }),
-
-      // Upcoming bookings (RESERVED, starting from now)
-      // Both bookingFrom and bookingTo are required for date filtering
-      getBookings({
-        organizationId,
-        userId,
-        page: 1,
-        perPage: 5,
-        statuses: ["RESERVED"],
-        bookingFrom: new Date(),
-        bookingTo: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
-        includeAssets: false,
-        extraInclude: {
-          custodianTeamMember: true,
-          custodianUser: true,
-          _count: { select: { bookingAssets: true } },
-        },
-      }),
-
-      // Overdue bookings
-      getBookings({
-        organizationId,
-        userId,
-        page: 1,
-        perPage: 5,
-        statuses: ["OVERDUE"],
-        includeAssets: false,
-        extraInclude: {
-          custodianTeamMember: true,
-          custodianUser: true,
-          _count: { select: { bookingAssets: true } },
-        },
-      }),
-
-      // Active/ongoing bookings
-      getBookings({
-        organizationId,
-        userId,
-        page: 1,
-        perPage: 5,
-        statuses: ["ONGOING"],
-        includeAssets: false,
-        extraInclude: {
-          custodianTeamMember: true,
-          custodianUser: true,
-          _count: { select: { bookingAssets: true } },
-        },
-      }),
-
-      // 1e. Newest 5 assets
-      db.asset
-        .findMany({
-          where: { organizationId },
-          orderBy: { createdAt: "desc" },
-          take: 5,
-          include: {
-            category: true,
-            custody: { select: { quantity: true } },
-            // Model cover image — `<AssetImage>` renders it for assets with
-            // no image of their own.
-            ...ASSET_MODEL_IMAGE_SELECT,
-          },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to load newest assets",
-            additionalData: { userId, organizationId },
-            label: "Dashboard",
-          });
-        }),
-
-      // Upcoming reminders
-      getUpcomingRemindersForHomePage({ organizationId }),
-
-      // Announcement
-      db.announcement
-        .findFirst({
-          where: { published: true },
-          orderBy: { createdAt: "desc" },
-        })
-        .catch((cause) => {
-          throw new ShelfError({
-            cause,
-            message: "Failed to load announcement",
-            additionalData: { userId, organizationId },
-            label: "Dashboard",
-          });
-        }),
-
-      // KPI: team members
-      db.teamMember.count({
-        where: { organizationId, deletedAt: null },
-      }),
-
-      // Location distribution (top 5)
-      // Counts pivot rows (one per asset placed at this location). Aggregating
-      // the pivot once and then resolving five names beats a correlated count
-      // per location, and `groupBy` only returns locations that have rows — the
-      // `> 0` filter the previous shape needed is implicit.
-      db.assetLocation
-        .groupBy({
-          by: ["locationId"],
-          where: { organizationId },
-          _count: { locationId: true },
-          orderBy: { _count: { locationId: "desc" } },
-          take: 5,
-        })
-        .then(async (groups) => {
-          if (groups.length === 0) return [];
-
-          const locations = await db.location.findMany({
-            where: {
-              id: { in: groups.map((g) => g.locationId) },
-              organizationId,
-            },
-            select: { id: true, name: true },
-          });
-          const nameById = new Map(locations.map((l) => [l.id, l.name]));
-
-          return groups.flatMap((g) => {
-            const locationName = nameById.get(g.locationId);
-            // Location deleted between the two queries — drop the row rather
-            // than render a nameless bar. The single-query shape could not
-            // produce this case, so it has no prior behaviour to preserve.
-            if (!locationName) return [];
-
-            return [
-              {
-                locationId: g.locationId,
-                locationName,
-                assetCount: g._count.locationId,
-              },
-            ];
-          });
-        }),
-
-      // KPI: total locations
-      db.location.count({
-        where: { organizationId },
-      }),
-
-      // KPI: total categories
-      db.category.count({
-        where: { organizationId },
-      }),
-
-      // Onboarding checklist counts
-      // Joins this `Promise.all` rather than being awaited after it: nothing
-      // above feeds it, so serialising it just added a round trip to the
-      // loader's critical path.
-      checklistOptions({ organizationId }),
-
-      // Cookie
-      userPrefs.parse(request.headers.get("Cookie")).then((c: any) => c || {}),
-    ]);
-
-    const totalAssets = assetAggregation._count._all;
-    const totalValuation = assetAggregation.totalValuation;
-
-    const header: HeaderData = {
-      title: "Home",
-    };
+          getStaffSystemStatus(),
+          countPendingHandbookReviews(organizationId),
+        ])
+      : [null, null, null, null, null, null];
 
     return payload({
-      header,
-      // KPI data
-      totalAssets,
-      teamMembersCount,
-      locationsCount,
-      categoriesCount,
-      // Widget data
-      upcomingBookings,
-      overdueBookings,
-      activeBookings,
-      upcomingReminders,
-      locationDistribution,
-      // Existing dashboard data
-      locale: getLocale(request),
-      currency: currentOrganization?.currency,
-      totalValuation,
-      valueKnownAssets,
-      newAssets,
-      skipOnboardingChecklist: cookieResult.skipOnboardingChecklist,
-      custodiansData: getCustodiansOrderedByTotalCustodies({
-        directCustodians,
-        bookings: ongoingAndOverdueBookings as any,
-      }),
-      assetsByStatus: buildAssetsByStatusChart(statusGroups),
-      assetGrowthData: buildMonthlyGrowthData(monthlyRows, baselineCount),
-      announcement: announcement
-        ? {
-            ...announcement,
-            content: parseMarkdownToReact(announcement.content),
-          }
-        : null,
-      checklistOptions: {
-        hasAssets: totalAssets > 0,
-        // `directCustodians` is already the "team members holding custody"
-        // query, with the same where clause the dropped `custodiesCount`
-        // used — `take: 20` cannot change a `> 0` test — so counting them
-        // again server-side was a redundant round trip.
-        hasCustodies: directCustodians.length > 0,
-        ...checklistData,
-      },
+      header: { title: "Home" },
+      isStaff,
+      labTasks,
+      taHours,
+      purchasing,
+      systemStatus,
+      pendingHandbookReviews,
+      dashboardPreferences: normalizeStaffDashboardPreferences(
+        savedDashboardPreferences?.staffDashboardPreferences
+      ),
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -432,65 +108,661 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
+export async function action({ context, request }: ActionFunctionArgs) {
+  try {
+    const formData = await request.formData();
+    const intent = z
+      .enum([
+        "ask",
+        "analyze-file",
+        "apply-import",
+        "apply-row",
+        "apply-selected",
+        "cancel-import",
+        "skip-row",
+        "save-dashboard",
+        "reset-dashboard",
+        "manage-lab-inventory",
+      ])
+      .parse(formData.get("intent"));
+
+    if (intent === "manage-lab-inventory") {
+      const { organizationId, userId } = await requireIoioStaffAccess({
+        context,
+        request,
+      });
+      const parsed = z
+        .enum(LAB_INVENTORY_ACTIONS)
+        .safeParse(formData.get("inventoryAction"));
+      const targets = z
+        .array(
+          z
+            .string()
+            .max(300)
+            .regex(/^[ps].+$/u)
+        )
+        .min(1)
+        .safeParse(formData.getAll("target"));
+      if (
+        !parsed.success ||
+        !targets.success ||
+        (parsed.data === "delete" && formData.get("confirmed") !== "yes")
+      ) {
+        throw new ShelfError({
+          cause: null,
+          message: "Select inventory items and confirm the requested action.",
+          label: "Request validation",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      await requirePermissionInOrganization({
+        organizationId,
+        userId,
+        request,
+        entity: PermissionEntity.asset,
+        action:
+          parsed.data === "delete"
+            ? PermissionAction.delete
+            : PermissionAction.update,
+      });
+      const selected = targets.data.map((encoded) => ({
+        reportId: encoded.slice(1),
+        pooled: encoded.startsWith("p"),
+      }));
+      const result = await manageLabInventory({
+        organizationId,
+        staffUserId: userId,
+        action: parsed.data,
+        targets: selected,
+      });
+      return payload({
+        kind: "lab-inventory-updated" as const,
+        count: result.count,
+      });
+    }
+
+    if (intent === "save-dashboard" || intent === "reset-dashboard") {
+      const { role } = await requirePermission({
+        userId: context.getSession().userId,
+        request,
+        entity: PermissionEntity.dashboard,
+        action: PermissionAction.read,
+      });
+      if (role !== "ADMIN" && role !== "OWNER") {
+        throw new ShelfError({
+          cause: null,
+          message: "Only Staff can customize this dashboard.",
+          label: "Permission",
+          status: 403,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const preferences =
+        intent === "reset-dashboard"
+          ? DEFAULT_STAFF_DASHBOARD_PREFERENCES
+          : (() => {
+              const raw = z
+                .string()
+                .min(1)
+                .max(5000)
+                .parse(formData.get("preferences"));
+              let value: unknown;
+              try {
+                value = JSON.parse(raw);
+              } catch {
+                throw new ShelfError({
+                  cause: null,
+                  message: "The dashboard layout could not be read. Try again.",
+                  label: "Request validation",
+                  status: 400,
+                  shouldBeCaptured: false,
+                });
+              }
+              return normalizeStaffDashboardPreferences(value);
+            })();
+
+      await db.user.update({
+        where: { id: context.getSession().userId },
+        data: {
+          staffDashboardPreferences: preferences as Prisma.InputJsonValue,
+        },
+      });
+      return payload({ kind: "dashboard-preferences-saved" });
+    }
+
+    if (intent === "ask") {
+      const question = z
+        .string()
+        .trim()
+        .min(1, "Ask a question about the workspace.")
+        .max(500)
+        .parse(formData.get("question"));
+      const answer = await answerStaffAssistant({
+        context,
+        request,
+        question,
+      });
+      return payload({ kind: "assistant", ...answer });
+    }
+
+    if (intent === "analyze-file") {
+      const file = formData.get("file");
+      if (!(file instanceof File)) {
+        throw new ShelfError({
+          cause: null,
+          message: "Choose a PDF file to review.",
+          label: "Assets",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+      const prepared = await prepareStaffInventoryImport({
+        context,
+        request,
+        file,
+      });
+      return payload({
+        kind: "import-proposal" as const,
+        proposal: prepared.proposal,
+      });
+    }
+
+    const operationId = z
+      .string()
+      .min(1)
+      .max(100)
+      .parse(formData.get("operationId"));
+    if (intent === "skip-row") {
+      const rowNumber = z.coerce
+        .number()
+        .int()
+        .positive()
+        .parse(formData.get("rowNumber"));
+      const proposalHash = z
+        .string()
+        .min(1)
+        .parse(formData.get("proposalHash"));
+      const result = await skipStaffInventoryImportRow({
+        context,
+        request,
+        operationId,
+        proposalHash,
+        rowNumber,
+      });
+      if ("status" in result)
+        return payload({ kind: "import-in-progress" as const, operationId });
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({
+        kind: "import-row-skipped" as const,
+        proposal,
+        rowNumber,
+      });
+    }
+    if (intent === "cancel-import") {
+      const result = await cancelStaffInventoryImport({
+        context,
+        request,
+        operationId,
+      });
+      return payload({ kind: "import-cancelled", result });
+    }
+    const pdfDecisions = formData.get("pdfDecisions");
+    const reviewDecisions = formData.get("reviewDecisions");
+    const proposalHash = formData.get("proposalHash");
+    if (typeof proposalHash !== "string") {
+      throw new ShelfError({
+        cause: null,
+        message: "Reload the import proposal and confirm it again.",
+        label: "Assets",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+    const result = await applyStaffInventoryImport({
+      context,
+      request,
+      operationId,
+      proposalHash,
+      allowSameFileReimport: formData.get("allowSameFileReimport") === "true",
+      applyOnlyRowNumber:
+        intent === "apply-row"
+          ? z.coerce.number().int().positive().parse(formData.get("rowNumber"))
+          : undefined,
+      applyOnlyRowNumbers:
+        intent === "apply-selected"
+          ? z
+              .array(z.number().int().positive())
+              .min(1)
+              .max(1000)
+              .parse(JSON.parse(String(formData.get("rowNumbers"))))
+          : undefined,
+      pdfDecisions: typeof pdfDecisions === "string" ? pdfDecisions : null,
+      reviewDecisions:
+        typeof reviewDecisions === "string" ? reviewDecisions : null,
+    });
+    if ("status" in result) {
+      if (result.status === "NEEDS_REVIEW")
+        return payload({ kind: "import-review-blocked" as const, ...result });
+      if (result.status === "DUPLICATE") {
+        return payload({ kind: "import-duplicate", duplicate: result });
+      }
+      return payload({
+        kind: "import-in-progress",
+        operationId: result.operationId,
+      });
+    }
+    if (result.remainingRows && result.remainingRows > 0) {
+      const proposal = await getStaffInventoryImportProposal({
+        context,
+        request,
+        operationId,
+      });
+      return payload({ kind: "import-partial" as const, proposal, result });
+    }
+    const proposal = await getStaffInventoryImportProposal({
+      context,
+      request,
+      operationId,
+    });
+    return payload({ kind: "import-complete" as const, proposal, result });
+  } catch (cause) {
+    const reason = makeShelfError(cause);
+    return data(error(reason), { status: reason.status });
+  }
+}
+
 export const meta: MetaFunction<typeof loader> = () => [
   { title: appendToMetaTitle("Home") },
 ];
-
-export const links: LinksFunction = () => [{ rel: "stylesheet", href: styles }];
 
 export const handle = {
   breadcrumb: () => <Link to="/home">Home</Link>,
 };
 
 export default function HomePage() {
-  const { skipOnboardingChecklist, checklistOptions } =
-    useLoaderData<typeof loader>();
-  const completedAllChecks = Object.values(checklistOptions).every(Boolean);
-
-  return (
-    <div>
-      <Header> </Header>
-      {completedAllChecks || skipOnboardingChecklist ? (
-        <div className="pb-8">
-          <AnnouncementBar />
-
-          {/* KPI Summary Cards */}
-          <div className="mt-4">
-            <KpiCards />
+  const {
+    dashboardPreferences,
+    isStaff,
+    labTasks,
+    purchasing,
+    systemStatus,
+    pendingHandbookReviews,
+    taHours,
+  } = useLoaderData<typeof loader>();
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+  const labStatus = layoutData?.labStatus ?? null;
+  const dashboardUser = layoutData?.user;
+  const dashboardUserName =
+    resolveUserDisplayName(dashboardUser) || "Your TA hours";
+  const hiddenWidgets = new Set(dashboardPreferences.hidden);
+  const widgets: Record<StaffDashboardWidgetId, ReactNode> = {
+    operations: labStatus ? (
+      <LabStatusCard
+        status={labStatus}
+        canManageInventory={isStaff}
+        pendingHandbookReviews={pendingHandbookReviews ?? 0}
+      />
+    ) : null,
+    purchasing: purchasing ? (
+      <section
+        aria-labelledby="dashboard-purchasing-heading"
+        className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2
+              id="dashboard-purchasing-heading"
+              className="text-lg font-black text-gray-950"
+            >
+              Purchasing
+            </h2>
+            <p className="text-sm text-gray-600">
+              Academic year {purchasing.academicYear}
+            </p>
           </div>
-
-          {/* Row 1: Trends & Value — wide chart + value card */}
-          <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
-            <div className="xl:col-span-2">
-              <AssetGrowthChart />
-            </div>
-            <InventoryValueChart />
+          <Link
+            to="/purchasing"
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            Open purchasing
+          </Link>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <DashboardHoursValue
+            label="Annual budget"
+            value={formatDashboardCurrency(
+              purchasing.budget,
+              purchasing.currency
+            )}
+          />
+          <DashboardHoursValue
+            label="Spent"
+            value={formatDashboardCurrency(
+              purchasing.spent,
+              purchasing.currency
+            )}
+          />
+          <DashboardHoursValue
+            label="Open requests"
+            value={String(purchasing.openRequests)}
+          />
+        </div>
+      </section>
+    ) : null,
+    lab_tasks: labTasks ? (
+      <section
+        aria-labelledby="dashboard-lab-tasks-heading"
+        className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2
+              id="dashboard-lab-tasks-heading"
+              className="text-lg font-black text-gray-950"
+            >
+              Lab tasks
+            </h2>
+            <p className="text-sm text-gray-600">
+              {labTasks.openCount} open task
+              {labTasks.openCount === 1 ? "" : "s"}
+            </p>
           </div>
-
-          {/* Widget Grid — 3-column rows */}
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {/* Row 2: Bookings pipeline */}
-            <UpcomingBookings />
-            <ActiveBookings />
-            <OverdueBookings />
-
-            {/* Row 3: Reminders, Status & Locations */}
-            <UpcomingReminders />
-            <AssetsByStatusChart />
-            <LocationDistribution />
-          </div>
-
-          {/* Row 4: People & Assets — 2-column */}
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <CustodiansList />
-            <NewestAssets />
+          <div className="flex items-center gap-2">
+            <Link
+              to="/operations/tasks?new=1"
+              reloadDocument
+              className="inline-flex items-center justify-center rounded-lg bg-red-700 px-3 py-2 text-sm font-bold text-white hover:bg-red-800"
+            >
+              Add task
+            </Link>
+            <Link
+              to="/operations/tasks"
+              reloadDocument
+              className="inline-flex items-center justify-center rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              View all
+            </Link>
           </div>
         </div>
-      ) : (
-        <OnboardingChecklist />
-      )}
+        {labTasks.tasks.length ? (
+          <ul className="mt-3 divide-y divide-gray-100">
+            {labTasks.tasks.map(
+              (
+                task: Awaited<
+                  ReturnType<typeof getDashboardLabTasks>
+                >["tasks"][number]
+              ) => (
+                <li
+                  key={task.id}
+                  className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2.5 first:pt-0 last:pb-0"
+                >
+                  <span className="min-w-0 text-sm font-semibold text-gray-900">
+                    {task.title}
+                  </span>
+                  <span className="text-xs text-gray-500">
+                    {task.assignedTo
+                      ? task.assignedTo.displayName ||
+                        [task.assignedTo.firstName, task.assignedTo.lastName]
+                          .filter(Boolean)
+                          .join(" ") ||
+                        task.assignedTo.email
+                      : "Unassigned"}
+                    {task.dueDate
+                      ? ` · Due ${new Intl.DateTimeFormat("en-GB", {
+                          day: "numeric",
+                          month: "short",
+                          timeZone: "UTC",
+                        }).format(task.dueDate)}`
+                      : ""}
+                    {task.isOverdue ? " · Overdue" : ""}
+                  </span>
+                </li>
+              )
+            )}
+          </ul>
+        ) : (
+          <p className="mt-3 text-sm text-gray-500">
+            No open tasks. Add one when something needs doing.
+          </p>
+        )}
+      </section>
+    ) : null,
+    ta_hours: taHours ? (
+      <section
+        aria-labelledby="dashboard-ta-hours-heading"
+        className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2
+            id="dashboard-ta-hours-heading"
+            className="text-lg font-black text-gray-950"
+          >
+            TA hours
+          </h2>
+          <Link
+            to={`/ta-hours?year=${encodeURIComponent(
+              taHours.academicYear
+            )}&view=overview`}
+            className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            View TA hours
+          </Link>
+        </div>
+        <div className="mt-4 flex min-w-0 items-start gap-3">
+          <img
+            src={
+              dashboardUser?.profilePicture || "/static/images/default_pfp.jpg"
+            }
+            alt=""
+            className="size-9 shrink-0 rounded-full object-cover"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <p className="min-w-0 truncate font-semibold text-gray-900">
+                {dashboardUserName}
+              </p>
+              {taHours.personalAllocatedHours > 0 ? (
+                <p
+                  className={`shrink-0 text-base font-bold tabular-nums ${
+                    taHours.personalHoursBalance < 0
+                      ? "text-green-700"
+                      : "text-gray-950"
+                  }`}
+                >
+                  {formatHours(Math.abs(taHours.personalHoursBalance))}{" "}
+                  {taHours.personalHoursBalance < 0 ? "overtime" : "left"}
+                </p>
+              ) : null}
+            </div>
+            {taHours.personalAllocatedHours > 0 ? (
+              <>
+                <p className="mt-0.5 text-sm text-gray-600">
+                  {formatDashboardHourAmount(taHours.personalWorkedHours)} of{" "}
+                  {formatHours(taHours.personalAllocatedHours)} worked
+                </p>
+                <div
+                  className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100"
+                  role="progressbar"
+                  aria-label={`${dashboardUserName}'s confirmed TA hours`}
+                  aria-valuemin={0}
+                  aria-valuemax={taHours.personalAllocatedHours}
+                  aria-valuenow={Math.min(
+                    taHours.personalWorkedHours,
+                    taHours.personalAllocatedHours
+                  )}
+                >
+                  <div
+                    className="h-full rounded-full bg-red-600 transition-[width]"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.max(
+                          0,
+                          (taHours.personalWorkedHours /
+                            taHours.personalAllocatedHours) *
+                            100
+                        )
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="mt-0.5 text-sm text-gray-600">
+                No TA-hours allocation for {taHours.academicYear}.
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+    ) : null,
+    inventory_import: <StaffInventoryTools />,
+  };
+
+  return (
+    <div className="-mx-4 min-h-full bg-white p-4 sm:p-6 lg:px-8">
+      <div className="mx-auto w-full min-w-0 max-w-5xl">
+        <header className="flex flex-wrap items-center justify-between gap-3 sm:items-end sm:gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-red-700">
+              IOIO Lab / Staff
+            </p>
+            <h1 className="mt-1 text-2xl font-black tracking-tight text-gray-950 sm:mt-2 sm:text-4xl">
+              Staff Dashboard
+            </h1>
+          </div>
+          {isStaff ? (
+            <DashboardCustomizer preferences={dashboardPreferences} />
+          ) : null}
+        </header>
+
+        {isStaff && systemStatus ? (
+          <SystemStatusStrip status={systemStatus} />
+        ) : null}
+
+        {isStaff ? (
+          <div className="mt-4 space-y-4 sm:mt-6 sm:space-y-6">
+            {dashboardPreferences.order.map(
+              (widgetId: StaffDashboardWidgetId) =>
+                hiddenWidgets.has(widgetId) ? null : (
+                  <div key={widgetId}>{widgets[widgetId]}</div>
+                )
+            )}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
+}
+
+function SystemStatusStrip({ status }: { status: StaffSystemStatus }) {
+  const serverIsOnline = status.server === "online";
+  const claudeLabel =
+    status.claude === "online"
+      ? "Online"
+      : status.claude === "offline"
+      ? "Offline"
+      : "Unavailable";
+  const claudeDotState =
+    status.claude === "online"
+      ? "online"
+      : status.claude === "offline"
+      ? "issue"
+      : "unavailable";
+  return (
+    <section
+      aria-label="System status"
+      className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 sm:mt-5 sm:px-4 sm:py-3"
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-x-6">
+        <p className="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-gray-500">
+          System status
+        </p>
+        <div className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5 text-xs text-gray-700 sm:flex sm:flex-wrap sm:gap-x-6 sm:gap-y-2 sm:text-sm">
+          <p className="flex min-w-0 items-center gap-1.5">
+            <StatusDot state={serverIsOnline ? "online" : "issue"} />
+            <span>Server</span>
+            <span className="truncate font-semibold text-gray-950">
+              {serverIsOnline ? "Online" : "Issue"}
+            </span>
+          </p>
+          <p className="min-w-0 truncate">
+            <span>Storage</span>{" "}
+            <span className="font-semibold text-gray-950">
+              {status.storagePercentUsed === null
+                ? "Unavailable"
+                : `${status.storagePercentUsed}% used`}
+            </span>
+          </p>
+          <p className="flex min-w-0 items-center gap-1.5">
+            <StatusDot state={claudeDotState} />
+            <span>Claude</span>
+            <span className="truncate font-semibold text-gray-950">
+              {claudeLabel}
+            </span>
+          </p>
+          <BackupStatusItem />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StatusDot({ state }: { state: "online" | "issue" | "unavailable" }) {
+  const color = {
+    online: "bg-green-600",
+    issue: "bg-red-600",
+    unavailable: "bg-gray-400",
+  }[state];
+  return <span aria-hidden="true" className={`size-2 rounded-full ${color}`} />;
+}
+
+function DashboardHoursValue({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: string;
+  note?: string;
+}) {
+  return (
+    <div className="rounded-xl bg-gray-50 px-3 py-2.5">
+      <p className="text-xs font-semibold text-gray-500">{label}</p>
+      <p className="mt-1 text-base font-black tabular-nums text-gray-950 sm:text-lg">
+        {value}
+      </p>
+      {note ? <p className="mt-1 text-xs text-gray-500">{note}</p> : null}
+    </div>
+  );
+}
+
+function formatHours(value: number) {
+  return `${new Intl.NumberFormat("en-SE", {
+    maximumFractionDigits: 2,
+  }).format(value)} h`;
+}
+
+function formatDashboardHourAmount(value: number) {
+  return new Intl.NumberFormat("en-SE", {
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatDashboardCurrency(amount: number, currency: string) {
+  return new Intl.NumberFormat("en-SE", {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 0,
+  }).format(amount);
 }
 
 export const ErrorBoundary = () => <ErrorContent />;

@@ -19,6 +19,7 @@ import {
   Prisma,
   Roles,
   OrganizationRoles,
+  OrganizationType,
   AssetIndexMode,
 } from "@prisma/client";
 import type { ITXClientDenyList } from "@prisma/client/runtime/library";
@@ -63,7 +64,7 @@ import {
   getPublicFileURL,
   parseFileFormData,
 } from "~/utils/storage.server";
-import { randomUsernameFromEmail } from "~/utils/user";
+import { randomUsernameFromEmail, resolveUserDisplayName } from "~/utils/user";
 import type { MergeInclude } from "~/utils/utils";
 import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import { type UpdateUserPayload, USER_STATIC_INCLUDE } from "./types";
@@ -74,6 +75,7 @@ import {
   caseInsensitiveEmailFilter,
   normalizeInviteEmail,
 } from "../invite/helpers";
+import { ensureInitialIoioTeamForUser } from "../ioio/initial-team.server";
 import { getOrganizationsBySsoDomain } from "../organization/service.server";
 import { USER_CONTACT_SELECT } from "../user-contact/constants";
 import {
@@ -116,14 +118,15 @@ export async function getUserByID(
       });
     }
 
-    const user = await db.user.findUniqueOrThrow({
+    const queryOptions: Prisma.UserFindUniqueOrThrowArgs = {
       where: { id },
       ...(select
         ? { select }
         : include
         ? { include }
         : { select: { id: true } }),
-    });
+    };
+    const user = await db.user.findUniqueOrThrow(queryOptions);
 
     return user;
   } catch (cause) {
@@ -141,18 +144,22 @@ export async function getUserWithContact<T extends Prisma.UserInclude>(
   id: string,
   include?: T
 ) {
-  type ReturnType = Prisma.UserGetPayload<{
-    include: T & { contact: true };
+  type SelectedContact = Prisma.UserContactGetPayload<{
+    select: typeof USER_CONTACT_SELECT;
+  }>;
+  type UserWithMaybeContact = Prisma.UserGetPayload<{
+    include: Omit<T, "contact">;
   }> & {
-    contact: NonNullable<
-      Prisma.UserContactGetPayload<{
-        select: typeof USER_CONTACT_SELECT;
-      }>
-    >; // Guarantee contact is never null
+    contact: SelectedContact | null;
+  };
+  type ReturnType = Prisma.UserGetPayload<{
+    include: Omit<T, "contact">;
+  }> & {
+    contact: NonNullable<SelectedContact>; // Guarantee contact is never null
   };
 
   try {
-    const user = await db.user.findUniqueOrThrow({
+    const queryOptions: Prisma.UserFindUniqueOrThrowArgs = {
       where: { id },
       include: {
         ...include,
@@ -160,7 +167,10 @@ export async function getUserWithContact<T extends Prisma.UserInclude>(
           select: USER_CONTACT_SELECT,
         },
       },
-    });
+    };
+    const user = (await db.user.findUniqueOrThrow(
+      queryOptions
+    )) as UserWithMaybeContact;
 
     // If contact exists, return user as-is
     if (user.contact) {
@@ -454,10 +464,17 @@ export async function createUserOrAttachOrg({
     }
 
     /** If the user already exists, we just attach the new org to it */
-    await createUserOrgAssociation(db, {
-      userId: shelfUser.id,
-      organizationIds: [organizationId],
-      roles,
+    await db.$transaction(async (tx) => {
+      await createUserOrgAssociation(tx, {
+        userId: shelfUser.id,
+        organizationIds: [organizationId],
+        roles,
+      });
+      await ensureUserTeamMember(tx, {
+        userId: shelfUser.id,
+        organizationId,
+        name: resolveUserDisplayName(shelfUser) || "Shelf member",
+      });
     });
 
     await ensureAssetIndexModeForRole({
@@ -1001,6 +1018,14 @@ export async function createUser(
     formatPrefs?: DetectedFormatPrefs;
     skipPersonalOrg?: boolean;
     /**
+     * OTP self-signup only: try the one-time IOIO Team initialization after
+     * inserting this Shelf user. The helper only initializes when this is the
+     * sole user and there is no existing Team.
+     */
+    bootstrapIoioTeamOnFreshSignup?: boolean;
+    /** Email/password IOIO signup that finishes account setup as a Student. */
+    ioioSignup?: boolean;
+    /**
      * What the signup link asked for (plan, trial, campaign), carried by the
      * signup flow. Recorded on the `signup_completed` event only; the
      * business-intel record is written at onboarding, which owns the cookie.
@@ -1020,6 +1045,8 @@ export async function createUser(
     createdWithInvite,
     formatPrefs,
     skipPersonalOrg,
+    bootstrapIoioTeamOnFreshSignup,
+    ioioSignup,
     signupIntent,
   } = payload;
 
@@ -1028,6 +1055,7 @@ export async function createUser(
    * and the caller hasn't opted out (e.g. SCIM provisioning)
    */
   const shouldCreatePersonalOrg = !skipPersonalOrg && !config.disableSignup;
+  let ioioStudentOrganizationId: Organization["id"] | null = null;
 
   try {
     const createdUser = await db.$transaction(
@@ -1127,10 +1155,77 @@ export async function createUser(
             }),
         ]);
 
+        // A workspace grant also needs Shelf's organization-scoped
+        // TeamMember mapping for booking custody. This mirrors the membership
+        // just granted above and does not grant additional workspace access.
+        if (organizationId && roles?.length) {
+          await ensureUserTeamMember(tx, {
+            userId: user.id,
+            organizationId,
+            name:
+              [firstName, lastName].filter(Boolean).join(" ") || "Shelf member",
+          });
+        }
+
+        const initialIoioTeam = bootstrapIoioTeamOnFreshSignup
+          ? await ensureInitialIoioTeamForUser({ tx, userId: user.id })
+          : null;
+
+        if (ioioSignup) {
+          if (initialIoioTeam) {
+            // The first verified IOIO account already has OWNER membership
+            // from Shelf's createOrganization service and selected Team.
+            await tx.user.update({
+              where: { id: user.id },
+              data: { onboarded: true },
+            });
+          } else {
+            // A new IOIO account on an initialized instance joins its sole
+            // Team as a Student through Shelf's normal membership association.
+            // Multiple Teams are ambiguous, so signup stays unassigned.
+            const teams = await tx.organization.findMany({
+              where: { type: OrganizationType.TEAM },
+              select: { id: true },
+              take: 2,
+            });
+            if (teams.length === 1) {
+              const [team] = teams;
+              await createUserOrgAssociation(tx, {
+                userId: user.id,
+                organizationIds: [team.id],
+                roles: [OrganizationRoles.SELF_SERVICE],
+              });
+              await ensureUserTeamMember(tx, {
+                userId: user.id,
+                organizationId: team.id,
+                name:
+                  [firstName, lastName].filter(Boolean).join(" ") ||
+                  "Shelf member",
+              });
+              ioioStudentOrganizationId = team.id;
+              await tx.user.update({
+                where: { id: user.id },
+                data: {
+                  lastSelectedOrganizationId: team.id,
+                  onboarded: true,
+                },
+              });
+            }
+          }
+        }
+
         return user;
       },
       { maxWait: 6000, timeout: 10000 }
     );
+
+    if (ioioStudentOrganizationId) {
+      await ensureAssetIndexModeForRole({
+        userId,
+        organizationId: ioioStudentOrganizationId,
+        role: OrganizationRoles.SELF_SERVICE,
+      });
+    }
 
     /**
      * Best-effort funnel analytics: a brand-new account was created. Fire-and-
@@ -1198,10 +1293,19 @@ export async function createUser(
           organizationId &&
           !existingUser.organizations.some((org) => org.id === organizationId)
         ) {
-          await createUserOrgAssociation(db, {
-            userId,
-            organizationIds: [organizationId],
-            roles: roles ?? [],
+          await db.$transaction(async (tx) => {
+            await createUserOrgAssociation(tx, {
+              userId,
+              organizationIds: [organizationId],
+              roles: roles ?? [],
+            });
+            await ensureUserTeamMember(tx, {
+              userId,
+              organizationId,
+              name:
+                [firstName, lastName].filter(Boolean).join(" ") ||
+                "Shelf member",
+            });
           });
           existingUser.organizations.push({ id: organizationId });
         }
@@ -1235,7 +1339,7 @@ export async function updateUser<T extends Prisma.UserInclude>(
   );
 
   try {
-    const updatedUser = await db.user.update({
+    const queryOptions: Prisma.UserUpdateArgs = {
       where: { id: updateUserPayload.id },
       data: {
         ...cleanClone,
@@ -1255,7 +1359,8 @@ export async function updateUser<T extends Prisma.UserInclude>(
       include: {
         ...extraIncludes,
       },
-    });
+    };
+    const updatedUser = await db.user.update(queryOptions);
 
     if (
       updateUserPayload.password &&

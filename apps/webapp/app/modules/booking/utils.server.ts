@@ -831,50 +831,44 @@ export function createBookingConflictConditions({
   fromDate,
   toDate,
   includeCurrentBooking = false,
+  ignoreBookingIds = [],
 }: {
   currentBookingId: string;
   fromDate?: Date | string | null;
   toDate?: Date | string | null;
   includeCurrentBooking?: boolean;
+  ignoreBookingIds?: string[];
 }): Prisma.Asset$bookingAssetsArgs {
+  const excludedBookingIds = includeCurrentBooking
+    ? ignoreBookingIds
+    : [...new Set([currentBookingId, ...ignoreBookingIds])];
+  const bookingIdFilter = excludedBookingIds.length
+    ? { id: { notIn: excludedBookingIds } }
+    : {};
   /** Booking-level where clause for date-overlap & status filtering */
   const bookingWhere: Prisma.BookingWhereInput =
     fromDate && toDate
       ? {
           OR: [
-            // Rule 1: RESERVED bookings always conflict
+            // Date ranges are half-open, matching the canonical availability
+            // sweep: a booking ending exactly when another starts does not
+            // overlap. OVERDUE remains a conflict for every future window
+            // because its actual return time is unknown.
             {
               status: BookingStatus.RESERVED,
-              ...(includeCurrentBooking
-                ? {}
-                : { id: { not: currentBookingId } }),
-              OR: [
-                {
-                  from: { lte: toDate },
-                  to: { gte: fromDate },
-                },
-                {
-                  from: { gte: fromDate },
-                  to: { lte: toDate },
-                },
-              ],
+              ...bookingIdFilter,
+              from: { lt: toDate },
+              to: { gt: fromDate },
             },
-            // Rule 2: ONGOING/OVERDUE bookings (filtered by asset status in helpers)
             {
-              status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-              ...(includeCurrentBooking
-                ? {}
-                : { id: { not: currentBookingId } }),
-              OR: [
-                {
-                  from: { lte: toDate },
-                  to: { gte: fromDate },
-                },
-                {
-                  from: { gte: fromDate },
-                  to: { lte: toDate },
-                },
-              ],
+              status: BookingStatus.ONGOING,
+              ...bookingIdFilter,
+              from: { lt: toDate },
+              to: { gt: fromDate },
+            },
+            {
+              status: BookingStatus.OVERDUE,
+              ...bookingIdFilter,
             },
           ],
         }

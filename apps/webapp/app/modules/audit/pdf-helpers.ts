@@ -10,6 +10,7 @@ import type {
   AuditAssetStatus,
 } from "@prisma/client";
 import { db } from "~/database/db.server";
+import { resolveAuditImageForPresentation } from "~/modules/audit/image.service.server";
 import type { ResolvedDisplayCode } from "~/modules/barcode/display";
 import { resolveDisplayCode } from "~/modules/barcode/display";
 import { rethrowIfClientError, ShelfError } from "~/utils/error";
@@ -224,8 +225,9 @@ export async function fetchAllAuditPdfRelatedData(
       ])
     );
 
-    // Fetch all images for this audit with asset relationship
-    const images = await db.auditImage.findMany({
+    // Fetch all images for this audit with asset relationship.
+    // Resolve canonical storage paths before PDF/UI presentation.
+    const rawImages = await db.auditImage.findMany({
       where: { auditSessionId },
       include: {
         auditAsset: {
@@ -242,6 +244,10 @@ export async function fetchAllAuditPdfRelatedData(
       },
       orderBy: { createdAt: "asc" },
     });
+
+    const images = await Promise.all(
+      rawImages.map((image) => resolveAuditImageForPresentation(image))
+    );
 
     // Split images into general and asset-specific groups
     const generalImages = images.filter((img) => img.auditAssetId === null);

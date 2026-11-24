@@ -27,6 +27,8 @@ import type { ExtendedPrismaClient } from "~/database/db.server";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { getPeakReservedUnitsByAsset } from "~/modules/asset/availability-primitives.server";
+import { assertAssetsBorrowable } from "~/modules/asset/borrowability.server";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import {
   updateBarcodes,
   validateBarcodeUniqueness,
@@ -1589,6 +1591,7 @@ export async function updateKitImage({
         withoutEnlargement: true,
       },
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
+      allowEmptyFile: true,
     });
 
     const image = fileData.get("image") as string;
@@ -2039,6 +2042,18 @@ export async function getKit<const T extends Prisma.KitInclude | undefined>({
         label,
         status: 404,
         shouldBeCaptured: false, // In this case we shouldnt be capturing the error
+      });
+    }
+
+    const imageRows = (
+      kit as { assetKits?: Array<{ asset: object }> }
+    ).assetKits?.filter((row) => row.asset && typeof row.asset === "object");
+    if (Array.isArray(imageRows)) {
+      const resolved = await resolveAssetImagesForPresentation(
+        imageRows.map((row) => row.asset)
+      );
+      imageRows.forEach((row, index) => {
+        row.asset = resolved[index];
       });
     }
 
@@ -3368,6 +3383,11 @@ export async function bulkAssignKitCustody({
      * 2. Update status of all kits to IN_CUSTODY
      */
     return await db.$transaction(async (tx) => {
+      await assertAssetsBorrowable(
+        tx,
+        allAssetsOfAllKits.map((asset) => asset.id),
+        organizationId
+      );
       // SECURITY (cross-org IDOR): custodianId comes from request input. The
       // org-scoped lookup above is only used for the note text — the writes
       // below connect the raw id, so prove it belongs to this org first or an

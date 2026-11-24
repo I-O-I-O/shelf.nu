@@ -22,6 +22,10 @@ export type ModelFilterProps = {
   /** name of key in loader which passing the total count */
   countKey: string;
   model: ModelFilters;
+  /** Always search the current server-side model, even when all rows were
+   * supplied by the route loader. This avoids stale results in long-lived
+   * pickers when records are removed or reparented. */
+  forceServerSearch?: boolean;
   /** If none is passed then values will not be added in query params */
   selectionMode?: "append" | "set" | "none";
   /**
@@ -82,6 +86,7 @@ export function useModelFilters({
   countKey,
   initialDataKey,
   selectionMode = "append",
+  forceServerSearch = false,
   transformItem,
   onSelectionChange,
 }: ModelFilterProps) {
@@ -125,8 +130,10 @@ export function useModelFilters({
   );
   const items = useMemo(() => {
     const baseItems =
-      searchQuery && fetcher.data && !fetcher.data.error
+      searchQuery && fetcher.data && "filters" in fetcher.data
         ? fetcher.data.filters
+        : forceServerSearch && searchQuery
+        ? []
         : initialData[initialDataKey];
 
     const transformedItems = transformItemUsingTransformer(
@@ -145,6 +152,7 @@ export function useModelFilters({
     searchQuery,
     transformItem,
     hasAllData,
+    forceServerSearch,
   ]);
 
   /**
@@ -219,8 +227,14 @@ export function useModelFilters({
     } else {
       setSearchQuery(e.currentTarget.value);
 
-      // Only fetch from server if we don't have all data
-      if (!hasAllData) {
+      // Complete loader data can be used locally for most pickers. A caller
+      // can opt into a fresh server query when picker records may have changed
+      // while the form stayed mounted.
+      if (forceServerSearch || !hasAllData) {
+        // `useFetcher` retains its previous result while a new request is in
+        // flight. Clear it for forced searches so a removed or reparented
+        // location from the earlier query cannot remain selectable.
+        if (forceServerSearch) fetcher.reset();
         void fetcher.submit(
           {
             ...model,

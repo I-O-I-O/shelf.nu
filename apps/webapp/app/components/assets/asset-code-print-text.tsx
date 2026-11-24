@@ -39,7 +39,7 @@ export function AssetCodePrintText({
 
   return (
     <div className="flex flex-col items-start gap-0.5">
-      <span className="break-all font-mono text-sm font-medium text-gray-900">
+      <span className="ioio-identifier break-all font-mono text-sm font-medium text-gray-900">
         {displayCode.value}
       </span>
       {displayCode.isFallback ? (

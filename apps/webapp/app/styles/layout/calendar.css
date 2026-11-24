@@ -5,6 +5,70 @@
   border-top-right-radius: 0.5rem !important;
 }
 
+/* Staff Calendar presentation. Keep these rules scoped so shared calendars
+ * retain their existing behavior. */
+.ioio-calendar-shell {
+  @apply overflow-hidden bg-white;
+}
+
+.ioio-calendar-shell .fc {
+  @apply bg-white text-gray-700;
+}
+
+.ioio-calendar-shell .fc-theme-standard .fc-scrollgrid {
+  @apply border-0;
+}
+
+.ioio-calendar-shell .fc-theme-standard td,
+.ioio-calendar-shell .fc-theme-standard th {
+  @apply border-gray-100;
+}
+
+.ioio-calendar-shell .fc-col-header-cell-cushion {
+  @apply px-2 py-3 text-[0.68rem] font-bold uppercase tracking-[0.12em] text-gray-500;
+}
+
+.ioio-calendar-shell .fc-daygrid-day-frame {
+  @apply min-h-[118px] !important;
+}
+
+.ioio-calendar-shell .fc-daygrid-day-number {
+  @apply m-1 inline-flex size-7 items-center justify-center rounded-full p-0 text-sm text-gray-600;
+}
+
+.ioio-calendar-shell .fc-daygrid-day.fc-day-other .fc-daygrid-day-number {
+  @apply text-gray-300;
+}
+
+.ioio-calendar-shell .fc-day-today {
+  @apply bg-red-50/40 !important;
+}
+
+.ioio-calendar-shell .fc-day-today .fc-daygrid-day-number {
+  @apply bg-red-700 font-semibold text-white;
+}
+
+.ioio-calendar-shell .fc-event {
+  @apply !my-0.5 !rounded-md !border-l-2 !border-gray-300 !shadow-none !transition-colors;
+}
+
+.ioio-calendar-shell .fc-event:hover,
+.ioio-calendar-shell .fc-event:focus {
+  @apply !border-red-400 !shadow-sm;
+}
+
+.ioio-calendar-shell .fc-event-main {
+  @apply !overflow-hidden !p-1;
+}
+
+.ioio-calendar-shell .inner-event-card-wrapper {
+  @apply max-w-full;
+}
+
+.ioio-calendar-shell .fc-daygrid-more-link {
+  @apply font-semibold text-red-700 hover:text-red-800;
+}
+
 .fc {
   @apply bg-white;
 }

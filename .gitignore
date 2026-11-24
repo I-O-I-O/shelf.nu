@@ -88,3 +88,7 @@ node-compile-cache/
 
 # Planning docs / specs — kept locally, never committed
 superpowers/
+
+# Sensitive database backup artifacts
+*.dump
+*.dump.incomplete

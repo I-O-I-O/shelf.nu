@@ -34,7 +34,7 @@ const CommandDialog = ({
       <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm" />
       <DialogPrimitive.Content
         className={tw(
-          "fixed left-1/2 top-1/2 z-50 w-full max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl",
+          "fixed inset-x-0 bottom-0 z-50 h-[min(32rem,85dvh)] w-full max-w-none translate-x-0 translate-y-0 overflow-hidden rounded-t-xl border border-gray-200 bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:h-[min(32rem,80dvh)] sm:w-[calc(100vw-2rem)] sm:max-w-xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl sm:pb-0",
           className
         )}
       >

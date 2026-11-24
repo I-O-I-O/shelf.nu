@@ -1,4 +1,5 @@
 import type { AssetModel, Organization, Prisma, User } from "@prisma/client";
+import { extractStoragePath } from "~/components/assets/asset-image/utils";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import type { RecordEventTxClient } from "~/modules/activity-event/service.server";
@@ -18,17 +19,54 @@ import {
   maybeUniqueConstraintViolation,
 } from "~/utils/error";
 import { ALL_SELECTED_KEY } from "~/utils/list";
+import { Logger } from "~/utils/logger";
 import { assertCategoryBelongsToOrg } from "~/utils/org-validation.server";
-import { getFileUploadPath, parseFileFormData } from "~/utils/storage.server";
+import {
+  getFileUploadPath,
+  parseFileFormData,
+  removeStorageImageObject,
+  resolveStorageImageUrl,
+} from "~/utils/storage.server";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
 
 const label: ErrorLabel = "Asset Model";
+
+type AssetModelImageFields = {
+  image: string | null;
+  thumbnailImage: string | null;
+  imageStoragePath: string | null;
+  thumbnailImageStoragePath: string | null;
+};
+
+/** Resolve model image paths for the edit form and model picker. */
+async function resolveAssetModelImages<T extends AssetModelImageFields>(
+  model: T
+): Promise<T> {
+  const [image, thumbnailImage] = await Promise.all([
+    resolveStorageImageUrl({
+      bucketName: PUBLIC_BUCKET,
+      objectPath: model.imageStoragePath,
+      legacyUrl: model.image,
+      isPublic: true,
+    }),
+    resolveStorageImageUrl({
+      bucketName: PUBLIC_BUCKET,
+      objectPath: model.thumbnailImageStoragePath,
+      legacyUrl: model.thumbnailImage,
+      isPublic: true,
+    }),
+  ]);
+
+  return { ...model, image, thumbnailImage };
+}
 
 /**
  * Creates a new asset model (template/grouping entity for assets).
  * Asset models provide default values when creating new assets from them.
  */
 export async function createAssetModel({
+  id: modelId,
+  importIdentityKey,
   name,
   description,
   defaultCategoryId,
@@ -36,6 +74,9 @@ export async function createAssetModel({
   userId,
   organizationId,
 }: Pick<AssetModel, "name" | "organizationId"> & {
+  id?: AssetModel["id"];
+  /** Import-only exact identity; null/undefined preserves native semantics. */
+  importIdentityKey?: AssetModel["importIdentityKey"];
   description?: string | null;
   defaultCategoryId?: string | null;
   defaultValuation?: number | null;
@@ -56,6 +97,8 @@ export async function createAssetModel({
   try {
     return await db.assetModel.create({
       data: {
+        ...(modelId ? { id: modelId } : {}),
+        ...(importIdentityKey ? { importIdentityKey } : {}),
         name: name.trim(),
         description,
         defaultValuation,
@@ -71,6 +114,17 @@ export async function createAssetModel({
       },
     });
   } catch (cause) {
+    if (
+      importIdentityKey &&
+      cause instanceof Error &&
+      "code" in cause &&
+      cause.code === "P2002"
+    ) {
+      const concurrentWinner = await db.assetModel.findFirst({
+        where: { organizationId, importIdentityKey },
+      });
+      if (concurrentWinner) return concurrentWinner;
+    }
     throw maybeUniqueConstraintViolation(cause, "AssetModel", {
       additionalData: { userId, organizationId },
     });
@@ -123,7 +177,10 @@ export async function getAssetModels(params: {
       db.assetModel.count({ where }),
     ]);
 
-    return { assetModels, totalAssetModels };
+    return {
+      assetModels: await Promise.all(assetModels.map(resolveAssetModelImages)),
+      totalAssetModels,
+    };
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -142,7 +199,7 @@ export async function getAssetModel({
   organizationId,
 }: Pick<AssetModel, "id" | "organizationId">) {
   try {
-    return await db.assetModel.findFirstOrThrow({
+    const model = await db.assetModel.findFirstOrThrow({
       where: { id, organizationId },
       include: {
         defaultCategory: {
@@ -156,6 +213,7 @@ export async function getAssetModel({
         _count: { select: { assets: { where: { mainImage: null } } } },
       },
     });
+    return await resolveAssetModelImages(model);
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -217,6 +275,29 @@ export async function updateAssetModel({
   }
 }
 
+/** Sets a proposed description only while the reviewed prior value is current. */
+export async function updateAssetModelDescriptionIfUnchanged({
+  assetModelId,
+  organizationId,
+  expectedDescription,
+  description,
+}: {
+  assetModelId: AssetModel["id"];
+  organizationId: Organization["id"];
+  expectedDescription: string | null;
+  description: string;
+}) {
+  const result = await db.assetModel.updateMany({
+    where: {
+      id: assetModelId,
+      organizationId,
+      description: expectedDescription,
+    },
+    data: { description },
+  });
+  return result.count === 1;
+}
+
 /**
  * Uploads (or replaces) an asset model's cover image.
  *
@@ -241,12 +322,41 @@ export async function updateAssetModelImage({
   request,
   assetModelId,
   organizationId,
+  onlyIfMissing = false,
+  maxProcessedBytes,
 }: {
   request: Request;
   assetModelId: AssetModel["id"];
   organizationId: Organization["id"];
+  /** Preserve an image that already exists, including a concurrent write. */
+  onlyIfMissing?: boolean;
+  maxProcessedBytes?: number;
 }): Promise<string | null> {
+  let uploadedImagePaths: string[] = [];
+  let imageSaved = false;
+
   try {
+    if (onlyIfMissing) {
+      const current = await db.assetModel.findFirst({
+        where: { id: assetModelId, organizationId },
+        select: {
+          image: true,
+          thumbnailImage: true,
+          imageStoragePath: true,
+          thumbnailImageStoragePath: true,
+        },
+      });
+      if (!current) throw new Error("AssetModel is unavailable.");
+      if (
+        current.image ||
+        current.thumbnailImage ||
+        current.imageStoragePath ||
+        current.thumbnailImageStoragePath
+      ) {
+        return null;
+      }
+    }
+
     const fileData = await parseFileFormData({
       request,
       bucketName: PUBLIC_BUCKET,
@@ -267,6 +377,8 @@ export async function updateAssetModelImage({
       generateThumbnail: true,
       thumbnailSize: 108,
       maxFileSize: ASSET_MAX_IMAGE_UPLOAD_SIZE,
+      allowEmptyFile: true,
+      maxProcessedBytes,
     });
 
     const uploaded = fileData.get("image") as string | null;
@@ -280,6 +392,19 @@ export async function updateAssetModelImage({
      * paths; without it, a bare path string. Handle both.
      */
     const { imagePath, thumbnailPath } = parseUploadedImagePaths(uploaded);
+    uploadedImagePaths = [imagePath, thumbnailPath].filter(
+      (path): path is string => Boolean(path)
+    );
+
+    const previousImage = await db.assetModel.findFirst({
+      where: { id: assetModelId, organizationId },
+      select: {
+        image: true,
+        thumbnailImage: true,
+        imageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
+    });
 
     const {
       data: { publicUrl: image },
@@ -296,13 +421,89 @@ export async function updateAssetModelImage({
      * belonging to another workspace matches zero rows instead of being
      * overwritten.
      */
-    await db.assetModel.update({
-      where: { id: assetModelId, organizationId },
-      data: { image, thumbnailImage },
+    const imageData = {
+      image,
+      thumbnailImage,
+      imageStoragePath: imagePath,
+      thumbnailImageStoragePath: thumbnailPath,
+    };
+    if (onlyIfMissing) {
+      const saved = await db.assetModel.updateMany({
+        where: {
+          id: assetModelId,
+          organizationId,
+          image: null,
+          thumbnailImage: null,
+          imageStoragePath: null,
+          thumbnailImageStoragePath: null,
+        },
+        data: imageData,
+      });
+      if (saved.count !== 1) {
+        await Promise.all(
+          uploadedImagePaths.map((objectPath) =>
+            removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+          )
+        );
+        uploadedImagePaths = [];
+        return null;
+      }
+    } else {
+      await db.assetModel.update({
+        where: { id: assetModelId, organizationId },
+        data: imageData,
+      });
+    }
+    imageSaved = true;
+
+    const previousPaths = [
+      previousImage?.imageStoragePath,
+      previousImage?.image
+        ? extractStoragePath(previousImage.image, PUBLIC_BUCKET)
+        : null,
+      previousImage?.thumbnailImageStoragePath,
+      previousImage?.thumbnailImage
+        ? extractStoragePath(previousImage.thumbnailImage, PUBLIC_BUCKET)
+        : null,
+    ].filter(
+      (path, index, paths): path is string =>
+        Boolean(path) &&
+        !uploadedImagePaths.includes(path as string) &&
+        paths.indexOf(path) === index
+    );
+
+    await Promise.all(
+      previousPaths.map((objectPath) =>
+        removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+      )
+    ).catch((cleanupCause: unknown) => {
+      Logger.dev("[ASSET MODEL IMAGE] replaced image cleanup failed", {
+        assetModelId,
+        cleanupCause,
+      });
     });
 
     return image;
   } catch (cause) {
+    if (!imageSaved && uploadedImagePaths.length > 0) {
+      await Promise.all(
+        uploadedImagePaths.map((objectPath) =>
+          removeStorageImageObject({
+            bucketName: PUBLIC_BUCKET,
+            objectPath,
+          })
+        )
+      ).catch((cleanupCause: unknown) => {
+        Logger.dev(
+          "[ASSET MODEL IMAGE] failed upload cleanup after save error",
+          {
+            assetModelId,
+            cleanupCause,
+          }
+        );
+      });
+    }
+
     throw new ShelfError({
       cause,
       message: isLikeShelfError(cause)
@@ -312,6 +513,62 @@ export async function updateAssetModelImage({
       label,
     });
   }
+}
+
+/** Clears the shared model image and removes its owned storage objects. */
+export async function clearAssetModelImage({
+  assetModelId,
+  organizationId,
+}: {
+  assetModelId: AssetModel["id"];
+  organizationId: Organization["id"];
+}) {
+  const model = await db.assetModel.findFirst({
+    where: { id: assetModelId, organizationId },
+    select: {
+      image: true,
+      thumbnailImage: true,
+      imageStoragePath: true,
+      thumbnailImageStoragePath: true,
+    },
+  });
+
+  if (!model) {
+    throw new ShelfError({
+      cause: null,
+      title: "Asset model not found",
+      message: "This inventory product could not be found.",
+      additionalData: { assetModelId, organizationId },
+      label,
+      status: 404,
+      shouldBeCaptured: false,
+    });
+  }
+
+  await db.assetModel.updateMany({
+    where: { id: assetModelId, organizationId },
+    data: {
+      image: null,
+      thumbnailImage: null,
+      imageStoragePath: null,
+      thumbnailImageStoragePath: null,
+    },
+  });
+
+  const paths = [
+    model.imageStoragePath ??
+      (model.image ? extractStoragePath(model.image, PUBLIC_BUCKET) : null),
+    model.thumbnailImageStoragePath ??
+      (model.thumbnailImage
+        ? extractStoragePath(model.thumbnailImage, PUBLIC_BUCKET)
+        : null),
+  ].filter((path): path is string => Boolean(path));
+
+  await Promise.all(
+    paths.map((objectPath) =>
+      removeStorageImageObject({ bucketName: PUBLIC_BUCKET, objectPath })
+    )
+  );
 }
 
 /**

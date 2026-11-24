@@ -14,6 +14,7 @@ export const Dialog = ({
   className,
   headerClassName,
   wrapperClassName,
+  showCloseButton = true,
 }: {
   title: string | ReactNode;
   children: ReactNode;
@@ -22,6 +23,7 @@ export const Dialog = ({
   className?: string;
   headerClassName?: string;
   wrapperClassName?: string;
+  showCloseButton?: boolean;
 }) => {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const onCloseRef = useRef(onClose);
@@ -100,7 +102,12 @@ export const Dialog = ({
       }}
       onKeyDown={handleActivationKeyPress(() => onClose())}
     >
-      <dialog ref={dialogRef} className={tw("dialog", className)} open={open}>
+      <dialog
+        ref={dialogRef}
+        aria-label={typeof title === "string" ? title : undefined}
+        className={tw("dialog", className)}
+        open={open}
+      >
         {/*
          * md:max-h-[calc(100vh-4rem)]: on desktop the dialog is `md:h-auto` and
          * the backdrop centers it without scrolling, so a tall body (e.g. the
@@ -130,15 +137,17 @@ export const Dialog = ({
             )}
           >
             {title}
-            <Button
-              type="button"
-              onClick={onClose}
-              variant="link"
-              className={"mt-2 leading-none text-gray-500 md:right-6"}
-              aria-label="Close dialog"
-            >
-              <XIcon />
-            </Button>
+            {showCloseButton ? (
+              <Button
+                type="button"
+                onClick={onClose}
+                variant="link"
+                className={"mt-2 leading-none text-gray-500 md:right-6"}
+                aria-label="Close dialog"
+              >
+                <XIcon />
+              </Button>
+            ) : null}
           </div>
           <div className="dialog-body grow overflow-auto">{children}</div>
         </div>

@@ -2139,6 +2139,8 @@ export const assetQueryFragment = (options: AssetQueryOptions = {}) => {
       a."updatedAt" AS "assetUpdatedAt",
       a."userId" AS "assetUserId",
       a."mainImage" AS "assetMainImage",
+      a."mainImageStoragePath" AS "assetMainImageStoragePath",
+      a."thumbnailImageStoragePath" AS "assetThumbnailImageStoragePath",
       a."thumbnailImage" AS "assetThumbnailImage",
       a."mainImageExpiration" AS "assetMainImageExpiration",
       l.id AS "assetLocationId",
@@ -2162,6 +2164,8 @@ export const assetQueryFragment = (options: AssetQueryOptions = {}) => {
       -- without adding them to GROUP BY. AssetModel declares no @map, so the
       -- column names here match the Prisma field names.
       am.image AS "assetModelImage",
+      am."imageStoragePath" AS "assetModelImageStoragePath",
+      am."thumbnailImageStoragePath" AS "assetModelThumbnailImageStoragePath",
       am."thumbnailImage" AS "assetModelThumbnailImage",
       k.id AS "kitId",
       k.name AS "kitName",
@@ -2456,6 +2460,8 @@ export const assetReturnFragment = (options: AssetReturnOptions = {}) => {
           'updatedAt', ${updatedAtField},
           'userId', aq."assetUserId", 
           'mainImage', aq."assetMainImage",
+          'mainImageStoragePath', aq."assetMainImageStoragePath",
+          'thumbnailImageStoragePath', aq."assetThumbnailImageStoragePath",
           'thumbnailImage', aq."assetThumbnailImage",
           'mainImageExpiration', ${mainImageExpirationField},
           'categoryId', aq."assetCategoryId",
@@ -2467,6 +2473,8 @@ export const assetReturnFragment = (options: AssetReturnOptions = {}) => {
             WHEN aq."assetModelId" IS NULL THEN NULL
             ELSE jsonb_build_object(
               'image', aq."assetModelImage",
+              'imageStoragePath', aq."assetModelImageStoragePath",
+              'thumbnailImageStoragePath', aq."assetModelThumbnailImageStoragePath",
               'thumbnailImage', aq."assetModelThumbnailImage"
             )
           END,

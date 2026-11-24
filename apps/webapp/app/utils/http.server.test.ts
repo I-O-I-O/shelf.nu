@@ -1,5 +1,6 @@
 /** Unit tests for the shared HTTP server utilities. */
 import { z } from "zod";
+import { ASSET_LIFECYCLE_INTENT } from "~/modules/asset/lifecycle-intent";
 import type { FailureReason } from "./error";
 import { ShelfError } from "./error";
 import {
@@ -406,6 +407,40 @@ describe(parseData.name, () => {
         validationErrors: {
           id: {
             message: "Required",
+          },
+        },
+      });
+    }
+  });
+
+  it("reproduces the Staff Inventory lifecycle failure when the form omits intent", () => {
+    const formData = new FormData();
+    formData.set("currentSearchParams", "");
+    formData.set("assetIds[0]", "asset-001");
+    const schema = z.object({
+      intent: z.enum([
+        ASSET_LIFECYCLE_INTENT.ARCHIVE,
+        ASSET_LIFECYCLE_INTENT.TRASH,
+      ] as const),
+    });
+
+    try {
+      parseData(formData, schema);
+      throw new Error("Expected the missing lifecycle intent to fail");
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(ShelfError);
+      expect(cause).toMatchObject({
+        status: 400,
+        title: "Validation error",
+        message: "Required",
+        label: "Request validation",
+        additionalData: {
+          data: {
+            currentSearchParams: "",
+            assetIds: ["asset-001"],
+          },
+          validationErrors: {
+            intent: { message: "Required" },
           },
         },
       });

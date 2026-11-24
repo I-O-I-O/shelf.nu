@@ -1010,7 +1010,7 @@ export async function exportBookingsFromIndexToCsv({
       });
       bookings = bookingsData.bookings;
     } else {
-      bookings = await db.booking.findMany({
+      const queryOptions: Prisma.BookingFindManyArgs = {
         where: {
           id: { in: bookingsIds },
           organizationId,
@@ -1062,7 +1062,8 @@ export async function exportBookingsFromIndexToCsv({
           },
           tags: { select: { name: true } },
         },
-      });
+      };
+      bookings = await db.booking.findMany(queryOptions);
     }
 
     // Fetch partial check-in state for the exported bookings in a single

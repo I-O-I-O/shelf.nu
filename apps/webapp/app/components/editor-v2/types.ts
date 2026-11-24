@@ -19,6 +19,11 @@ export interface ToolbarState {
   link: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  headingLevel?: 2 | 3;
+  headingTitle?: string;
+  canMoveHeadingUp?: boolean;
+  canMoveHeadingDown?: boolean;
+  canAddSubsection?: boolean;
 }
 
 export interface BubbleState {
@@ -40,6 +45,13 @@ export interface LinkDialogState {
   open: boolean;
   href: string;
   range: { from: number; to: number } | null;
+}
+
+export interface HandbookArticleLinkTarget {
+  slug: string;
+  title: string;
+  categoryName: string;
+  staffOnly?: boolean;
 }
 
 export interface RawBlockDialogState {

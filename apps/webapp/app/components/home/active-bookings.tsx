@@ -1,7 +1,6 @@
-import { useLoaderData } from "react-router";
 import { useCanUseBookings } from "~/hooks/use-can-use-bookings";
-import type { loader } from "~/routes/_layout+/home";
 import { getBookingCustodianName } from "~/utils/bookings";
+import type { DashboardBooking } from "./dashboard-booking";
 import { PremiumFeatureTeaser } from "./premium-feature-teaser";
 import { ClickableTr } from "../dashboard/clickable-tr";
 import { DashboardEmptyState } from "../dashboard/empty-state";
@@ -10,18 +9,17 @@ import { DateS } from "../shared/date";
 
 import { Table, Td } from "../table";
 
-type BookingItem = ReturnType<
-  typeof useLoaderData<typeof loader>
->["activeBookings"][number];
-
 /** Check if the return date is within 24h */
 function isReturningSoon(date: string | Date): boolean {
   const diffMs = new Date(date).getTime() - Date.now();
   return diffMs > 0 && diffMs < 24 * 60 * 60 * 1000;
 }
 
-export default function ActiveBookings() {
-  const { activeBookings } = useLoaderData<typeof loader>();
+export default function ActiveBookings({
+  activeBookings,
+}: {
+  activeBookings: DashboardBooking[];
+}) {
   const canUseBookings = useCanUseBookings();
 
   return (
@@ -52,14 +50,9 @@ export default function ActiveBookings() {
       ) : activeBookings.length > 0 ? (
         <Table className="flex-1">
           <tbody>
-            {activeBookings.map((booking: BookingItem) => {
+            {activeBookings.map((booking) => {
               const custodian = getBookingCustodianName(booking);
-              const assetCount =
-                (
-                  booking as BookingItem & {
-                    _count?: { bookingAssets?: number };
-                  }
-                )._count?.bookingAssets ?? 0;
+              const assetCount = booking._count?.bookingAssets ?? 0;
               const returningSoon = isReturningSoon(booking.to);
 
               return (

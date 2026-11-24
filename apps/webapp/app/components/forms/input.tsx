@@ -124,6 +124,7 @@ const Input = forwardRef(function Input(
     className: inputClasses,
     onChange,
     ref,
+    required,
     ...rest,
   };
 

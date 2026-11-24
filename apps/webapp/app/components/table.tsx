@@ -18,7 +18,7 @@ export function Table({
   return (
     <div
       className={tw(
-        "relative",
+        "relative min-w-0 max-w-full",
         isOverflowing && "overflowing",
         modeIsAdvanced && "flex flex-1 flex-col"
       )}
@@ -33,7 +33,7 @@ export function Table({
       <div
         ref={containerRef}
         className={tw(
-          "list-table-wrapper",
+          "list-table-wrapper min-w-0 max-w-full",
           modeIsAdvanced
             ? "overflow-auto"
             : "scrollbar-top scrollbar-always-visible"

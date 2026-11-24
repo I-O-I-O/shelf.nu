@@ -12,13 +12,14 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { signUpWithEmailPass } from "~/modules/auth/service.server";
+import { config } from "~/config/shelf.config";
 import {
   readSignupIntent,
   serializeSignupIntent,
 } from "~/modules/signup-intent/cookie.server";
 import { findUserByEmail } from "~/modules/user/service.server";
-import { validateNonSSOSignup } from "~/utils/sso.server";
 import { action, loader } from "~/routes/_auth+/join";
+import { validateNonSSOSignup } from "~/utils/sso.server";
 
 // why: account creation is a Supabase call; the tests assert on what the
 // responses carry, not on the account.
@@ -39,8 +40,8 @@ vi.mock("~/utils/sso.server", () => ({
 // module-level connect rejects in a DB-less test env.
 vi.mock("~/database/db.server", () => ({ db: {} }));
 
-const createDataMock = vi.hoisted(() => {
-  return () =>
+const createDataMock = vi.hoisted(
+  () => () =>
     vi.fn((body: unknown, init?: ResponseInit) => {
       const headers = new Headers(init?.headers);
       headers.set("Content-Type", "application/json");
@@ -48,8 +49,8 @@ const createDataMock = vi.hoisted(() => {
         status: init?.status || 200,
         headers,
       });
-    });
-});
+    })
+);
 
 // why: mocking Remix's data() so loader and action results are readable
 // Responses (status, headers, JSON body) rather than internal payload objects.
@@ -70,7 +71,7 @@ const TEAM_TRIAL_INTENT = {
 };
 
 /** A request carrying the given `Set-Cookie` value back as its `Cookie`. */
-async function cookieHeaderFor(setCookieValue: string) {
+function cookieHeaderFor(setCookieValue: string) {
   return setCookieValue.split(";")[0];
 }
 
@@ -84,6 +85,8 @@ function loaderArgs(url: string, isAuthenticated = false, cookie?: string) {
 
 function signupActionArgs({ cookie }: { cookie?: string } = {}) {
   const body = new URLSearchParams({
+    firstName: "New",
+    lastName: "Person",
     email: EMAIL,
     password: PASSWORD,
     confirmPassword: PASSWORD,
@@ -114,7 +117,7 @@ async function signupIntentSetBy(response: Response) {
     return null;
   }
   const request = new Request("http://localhost:3000/otp", {
-    headers: { Cookie: await cookieHeaderFor(setCookie) },
+    headers: { Cookie: cookieHeaderFor(setCookie) },
   });
   return readSignupIntent(request);
 }
@@ -148,7 +151,7 @@ describe("join loader — reading the signup link", () => {
   });
 
   it("clears an intent left by an earlier visit when the link carries none", async () => {
-    const staleCookie = await cookieHeaderFor(
+    const staleCookie = cookieHeaderFor(
       await serializeSignupIntent(TEAM_TRIAL_INTENT)
     );
 
@@ -189,25 +192,41 @@ describe("join loader — reading the signup link", () => {
 describe("join action — password signup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    config.disableSignup = false;
     vi.mocked(findUserByEmail).mockResolvedValue(null);
     vi.mocked(signUpWithEmailPass).mockResolvedValue({} as never);
     vi.mocked(validateNonSSOSignup).mockResolvedValue(undefined);
   });
 
   it("hands the intent on to the code step with a fresh window", async () => {
-    const cookie = await cookieHeaderFor(
+    const cookie = cookieHeaderFor(
       await serializeSignupIntent(TEAM_TRIAL_INTENT)
     );
 
     const response = (await action(signupActionArgs({ cookie }))) as Response;
 
     expect(response.status).toBe(302);
+    expect(signUpWithEmailPass).toHaveBeenCalledWith(EMAIL, PASSWORD, {
+      firstName: "New",
+      lastName: "Person",
+    });
     expect(response.headers.get("Location")).toBe(
       `/otp?email=${encodeURIComponent(EMAIL)}&mode=confirm_signup`
     );
     await expect(signupIntentSetBy(response)).resolves.toEqual(
       TEAM_TRIAL_INTENT
     );
+  });
+
+  it("rejects direct POST requests when signup is disabled before side effects", async () => {
+    config.disableSignup = true;
+
+    const response = (await action(signupActionArgs())) as Response;
+
+    expect(response.status).toBe(403);
+    expect(validateNonSSOSignup).not.toHaveBeenCalled();
+    expect(findUserByEmail).not.toHaveBeenCalled();
+    expect(signUpWithEmailPass).not.toHaveBeenCalled();
   });
 
   it("redirects exactly as before when no intent is being carried", async () => {
@@ -226,7 +245,7 @@ describe("join action — password signup", () => {
         status: 400,
       })
     );
-    const cookie = await cookieHeaderFor(
+    const cookie = cookieHeaderFor(
       await serializeSignupIntent(TEAM_TRIAL_INTENT)
     );
 

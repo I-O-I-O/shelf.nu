@@ -16,8 +16,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { revokeAllSessions } from "~/modules/auth/service.server";
 import { getLegacyLoginDecisionForUser } from "~/modules/auth/sso-enforcement.server";
+import {
+  getSelectedOrganization,
+  setSelectedOrganizationIdCookie,
+} from "~/modules/organization/context.server";
 import { getUserByID } from "~/modules/user/service.server";
 import { loader } from "~/routes/_layout+/_layout";
+import type * as CookiesServer from "~/utils/cookies.server";
 
 // @vitest-environment node
 
@@ -38,15 +43,23 @@ vi.mock("~/modules/user/service.server", () => ({
   getUserByID: vi.fn(),
 }));
 
+// why: selected organization membership and signed cookie behavior are the
+// inputs under test; this keeps layout tests independent from Prisma.
+vi.mock("~/modules/organization/context.server", () => ({
+  getSelectedOrganization: vi.fn(),
+  setSelectedOrganizationIdCookie: vi.fn(),
+}));
+
 // why: importing the route loads ~/database/db.server, whose module-level
 // connect rejects in a DB-less test env; nothing here reaches a query.
-vi.mock("~/database/db.server", () => ({ db: {} }));
+vi.mock("~/database/db.server", () => ({
+  db: { ioioLabTA: { findUnique: vi.fn().mockResolvedValue(null) } },
+}));
 
 // why: the per-page cookie is parsed alongside the user fetch and is
 // irrelevant to the guard.
 vi.mock("~/utils/cookies.server", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("~/utils/cookies.server")>();
+  const actual = await importOriginal<typeof CookiesServer>();
   return {
     ...actual,
     initializePerPageCookieOnLayout: vi.fn().mockResolvedValue({}),
@@ -65,10 +78,10 @@ const USER = {
 };
 
 /** Runs the loader for a signed-in user, returning the response and context. */
-async function load() {
+async function load(path = "/assets") {
   const destroySession = vi.fn();
   const response = (await loader({
-    request: new Request("https://app.shelf.nu/assets"),
+    request: new Request(`https://app.shelf.nu${path}`),
     params: {},
     context: {
       getSession: () => ({
@@ -132,5 +145,118 @@ describe("_layout loader SSO session guard", () => {
     expect(revokeAllSessions).not.toHaveBeenCalled();
     expect(destroySession).not.toHaveBeenCalled();
     expect(response.headers.get("Location")).toBe("/onboarding");
+  });
+
+  it.each(["/calendar?view=week", "/bookings?mine=1"])(
+    "selects the user's only authorized staff Team before loading %s",
+    async (path) => {
+      const staffUser = { ...USER, onboarded: true };
+      vi.mocked(getUserByID).mockResolvedValue(staffUser as never);
+      vi.mocked(getSelectedOrganization).mockResolvedValue({
+        organizationId: "personal-1",
+        organizations: [],
+        currentOrganization: { id: "personal-1", type: "PERSONAL" },
+        userOrganizations: [
+          {
+            organizationId: "personal-1",
+            roles: ["OWNER"],
+            organization: { type: "PERSONAL" },
+            user: { lastSelectedOrganizationId: "personal-1" },
+          },
+          {
+            organizationId: "ioio-team-1",
+            roles: ["ADMIN"],
+            organization: { type: "TEAM" },
+            user: { lastSelectedOrganizationId: "personal-1" },
+          },
+        ],
+        cookieRefreshNeeded: false,
+      } as never);
+      vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+        "selected-organization-id=ioio-team-1"
+      );
+
+      const { response } = await load(path);
+
+      expect(response.headers.get("Location")).toBe(path);
+      expect(response.headers.get("X-Remix-Reload-Document")).toBe("true");
+      expect(response.headers.getSetCookie()).toContain(
+        "selected-organization-id=ioio-team-1"
+      );
+      expect(setSelectedOrganizationIdCookie).toHaveBeenCalledWith(
+        "ioio-team-1"
+      );
+    }
+  );
+
+  it("selects a Student's authorized Team in the background", async () => {
+    vi.mocked(getUserByID).mockResolvedValue({
+      ...USER,
+      onboarded: true,
+    } as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "personal-1",
+      organizations: [],
+      currentOrganization: { id: "personal-1", type: "PERSONAL" },
+      userOrganizations: [
+        {
+          organizationId: "personal-1",
+          roles: ["OWNER"],
+          organization: { type: "PERSONAL" },
+          user: { lastSelectedOrganizationId: "personal-1" },
+        },
+        {
+          organizationId: "ioio-team-1",
+          roles: ["SELF_SERVICE"],
+          organization: { type: "TEAM" },
+          user: { lastSelectedOrganizationId: "personal-1" },
+        },
+      ],
+      cookieRefreshNeeded: false,
+    } as never);
+    vi.mocked(setSelectedOrganizationIdCookie).mockResolvedValue(
+      "selected-organization-id=ioio-team-1"
+    );
+
+    const { response } = await load("/ioio");
+
+    expect(response.headers.get("Location")).toBe("/ioio");
+    expect(response.headers.get("X-Remix-Reload-Document")).toBe("true");
+    expect(response.headers.getSetCookie()).toContain(
+      "selected-organization-id=ioio-team-1"
+    );
+  });
+
+  it("redirects Students away from staff routes", async () => {
+    const studentUser = {
+      ...USER,
+      onboarded: true,
+      userOrganizations: [
+        {
+          roles: ["SELF_SERVICE"],
+          labIntroductionCompleted: true,
+          organization: { id: "ioio-team-1" },
+        },
+      ],
+    };
+    vi.mocked(getUserByID).mockResolvedValue(studentUser as never);
+    vi.mocked(getSelectedOrganization).mockResolvedValue({
+      organizationId: "ioio-team-1",
+      organizations: [],
+      currentOrganization: { id: "ioio-team-1", type: "TEAM" },
+      userOrganizations: [
+        {
+          organizationId: "ioio-team-1",
+          roles: ["SELF_SERVICE"],
+          organization: { type: "TEAM" },
+          user: { lastSelectedOrganizationId: "ioio-team-1" },
+        },
+      ],
+      cookieRefreshNeeded: false,
+    } as never);
+
+    const { response } = await load("/calendar");
+
+    expect(response.headers.get("Location")).toBe("/ioio");
   });
 });

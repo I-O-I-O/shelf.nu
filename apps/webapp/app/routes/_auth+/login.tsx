@@ -3,30 +3,23 @@ import type {
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import {
-  data,
-  redirect,
-  useActionData,
-  useLoaderData,
-  useNavigation,
-} from "react-router";
+import { data, redirect, useActionData, useNavigation } from "react-router";
 
 import { useZorm } from "react-zorm";
 import { z } from "zod";
 import { Form } from "~/components/custom-form";
 
 import Input from "~/components/forms/input";
-import PasswordInput from "~/components/forms/password-input";
+import { IoioAuthPrimaryButton } from "~/components/ioio/auth-primary-button";
 import { Button } from "~/components/shared/button";
-import { config } from "~/config/shelf.config";
 import { useSearchParams } from "~/hooks/search-params";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
-import { ContinueWithEmailForm } from "~/modules/auth/components/continue-with-email-form";
 import {
   INVALID_CREDENTIALS_MESSAGE,
   signInWithEmail,
 } from "~/modules/auth/service.server";
 import { isSsoDomainEmail } from "~/modules/auth/sso-enforcement.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 
 import {
   getSelectedOrganization,
@@ -49,18 +42,102 @@ import {
   parseData,
   safeRedirect,
 } from "~/utils/http.server";
+import {
+  resolveIoioAccountDestination,
+  resolveIoioAccountMembership,
+} from "~/utils/ioio-role-routing";
 import { validEmail } from "~/utils/misc";
 
-export function loader({ context }: LoaderFunctionArgs) {
-  const title = "Log in";
-  const subHeading = "Welcome back! Enter your details below to log in.";
-  const { disableSignup, disableSSO } = config;
+async function getAuthenticatedLanding({
+  userId,
+  request,
+  requestedDestination,
+}: {
+  userId: string;
+  request: Request;
+  requestedDestination?: string | null;
+}) {
+  // A verified login is also the recovery boundary for an interrupted
+  // one-user setup. Existing Team installations return immediately without
+  // writing anything.
+  const initializedTeam = await ensureInitialIoioTeamForUser({ userId });
 
-  if (context.isAuthenticated) {
-    return redirect("/assets");
+  const selected = await getSelectedOrganization({ userId, request });
+  if (selected.noVisibleOrganizations) {
+    return {
+      destination: "/sso-pending-assignment",
+      organizationId: null,
+    };
   }
 
-  return data(payload({ title, subHeading, disableSignup, disableSSO }));
+  const membership = resolveIoioAccountMembership(
+    selected.userOrganizations,
+    selected.organizationId,
+    selected.currentOrganization.type,
+    selected.userOrganizations?.[0]?.user?.lastSelectedOrganizationId
+  );
+  if (!membership) {
+    throw new ShelfError({
+      cause: null,
+      title: "IOIO Team organization required",
+      message:
+        "Your account must belong to one authorized IOIO Team workspace. Please contact IOIO Staff to resolve workspace access.",
+      status: 403,
+      label: "Organization",
+      shouldBeCaptured: false,
+    });
+  }
+
+  const organizationId = membership.organizationId;
+  const roles = membership.roles;
+  const defaultDestination = resolveIoioAccountDestination(roles);
+  if (!defaultDestination) {
+    throw new ShelfError({
+      cause: null,
+      title: "Account role could not be resolved",
+      message: "Your account role could not be verified. Please contact Staff.",
+      status: 403,
+      label: "Permission",
+      shouldBeCaptured: false,
+    });
+  }
+
+  const safeDestination = safeRedirect(
+    initializedTeam
+      ? defaultDestination
+      : requestedDestination || defaultDestination,
+    defaultDestination
+  );
+
+  return {
+    destination:
+      resolveIoioAccountDestination(roles, safeDestination) ??
+      defaultDestination,
+    organizationId,
+  };
+}
+
+export async function loader({ context, request }: LoaderFunctionArgs) {
+  const title = "Welcome back";
+
+  if (context.isAuthenticated) {
+    const { userId } = context.getSession();
+    const landing = await getAuthenticatedLanding({
+      userId,
+      request,
+      requestedDestination: new URL(request.url).searchParams.get("redirectTo"),
+    });
+    const headers = landing.organizationId
+      ? [
+          setCookie(
+            await setSelectedOrganizationIdCookie(landing.organizationId)
+          ),
+        ]
+      : [];
+    return redirect(landing.destination, { headers });
+  }
+
+  return data(payload({ title }));
 }
 
 const LoginFormSchema = z.object({
@@ -158,19 +235,24 @@ export async function action({ context, request }: ActionFunctionArgs) {
          * Theoretically, the user should always have a selected organization cookie as soon as they login for the first time
          * However we do this check to make sure they are still part of that organization
          */
-        const { organizationId } = await getSelectedOrganization({
+        const landing = await getAuthenticatedLanding({
           userId,
           request,
+          requestedDestination: redirectTo,
         });
 
-        // Set the auth session and redirect to the assets page
+        // Set the Shelf session, retain the selected-workspace cookie, and
+        // land on the authenticated IOIO surface for this membership.
         context.setSession(authSession);
 
-        return redirect(safeRedirect(redirectTo || "/assets"), {
-          headers: [
-            setCookie(await setSelectedOrganizationIdCookie(organizationId)),
-          ],
-        });
+        const headers = landing.organizationId
+          ? [
+              setCookie(
+                await setSelectedOrganizationIdCookie(landing.organizationId)
+              ),
+            ]
+          : [];
+        return redirect(landing.destination, { headers });
       }
     }
 
@@ -192,18 +274,13 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 ];
 
 export default function IndexLoginForm() {
-  const { disableSignup, disableSSO } = useLoaderData<typeof loader>();
   const zo = useZorm("NewQuestionWizardScreen", LoginFormSchema);
   const [searchParams] = useSearchParams();
   const redirectTo = searchParams.get("redirectTo") ?? undefined;
   const acceptedInvite = searchParams.get("acceptedInvite");
   const passwordReset = searchParams.get("password_reset");
-  /** Set by the app layout when it ends a session whose address must use SSO. */
-  const ssoRequired = searchParams.get("sso_required");
+  const passwordChanged = searchParams.get("password_changed");
   const data = useActionData<typeof action>();
-  const ssoDomainHint = Boolean(
-    data && "ssoDomainHint" in data && data.ssoDomainHint
-  );
 
   const navigation = useNavigation();
   const disabled = isFormProcessing(navigation.state);
@@ -215,8 +292,7 @@ export default function IndexLoginForm() {
     <div className="w-full max-w-md">
       {acceptedInvite ? (
         <div className="mb-8 text-center text-success-600">
-          Successfully accepted workspace invite. Please login to see your new
-          workspace.
+          Your IOIO access has been updated. Log in to continue.
         </div>
       ) : null}
 
@@ -226,11 +302,9 @@ export default function IndexLoginForm() {
           password to login.
         </div>
       ) : null}
-
-      {ssoRequired ? (
-        <div role="alert" className="mb-8 text-center text-error-600">
-          This email address signs in with single sign-on. Please use Login with
-          SSO.
+      {passwordChanged ? (
+        <div className="mb-8 text-center text-success-600" role="status">
+          Password changed successfully. Please sign in again.
         </div>
       ) : null}
       <Form ref={zo.ref} method="post" replace className="flex flex-col gap-5">
@@ -238,100 +312,61 @@ export default function IndexLoginForm() {
           <Input
             ref={emailInputRef}
             data-test-id="email"
-            label="Email address"
-            placeholder="zaans@huisje.com"
+            label="Email"
+            placeholder="student@example.com"
             required
             name={zo.fields.email()}
             type="email"
             autoComplete="username"
             disabled={disabled}
-            inputClassName="w-full"
+            inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
             error={zo.errors.email()?.message || data?.error.message}
           />
         </div>
-        <PasswordInput
+        <Input
           label="Password"
-          placeholder="**********"
+          placeholder="Enter your password"
           data-test-id="password"
           name={zo.fields.password()}
+          type="password"
           autoComplete="current-password"
           disabled={disabled}
-          inputClassName="w-full"
+          inputClassName="w-full rounded-xl shadow-none focus:border-red-600 focus:ring-2 focus:ring-red-600"
           error={zo.errors.password()?.message || data?.error.message}
         />
         <input type="hidden" name={zo.fields.redirectTo()} value={redirectTo} />
-        {ssoDomainHint ? (
-          <p role="status" className="text-sm text-gray-600">
-            If your organization uses single sign-on, use{" "}
-            <Button variant="link" to="/sso-login">
-              Login with SSO
-            </Button>
-            .
-          </p>
-        ) : null}
-        <Button
-          className="text-center"
+        <IoioAuthPrimaryButton
           type="submit"
           data-test-id="login"
           disabled={disabled}
         >
-          Log In
-        </Button>
-        <div className="flex flex-col items-center justify-center">
-          <div className="text-center text-sm text-gray-500">
-            Don't remember your password?{" "}
-            <Button
-              variant="link"
-              to={{
-                pathname: "/forgot-password",
-                search: searchParams.toString(),
-              }}
-            >
-              Reset password
-            </Button>
-          </div>
-        </div>
+          {disabled ? "Logging in..." : "Log in"}
+        </IoioAuthPrimaryButton>
       </Form>
-      {!disableSSO && (
-        <div className="mt-6 text-center">
-          <Button variant="link" to="/sso-login">
-            Login with SSO
+      <div className="mt-5 flex flex-col items-center gap-2 text-center text-sm text-gray-500">
+        <Button
+          variant="link"
+          className="text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
+          to={{
+            pathname: "/forgot-password",
+            search: searchParams.toString(),
+          }}
+        >
+          Forgot password?
+        </Button>
+        <p>
+          Don&apos;t have an account?{" "}
+          <Button
+            variant="link"
+            className="font-semibold text-red-700 hover:text-red-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2"
+            to={{
+              pathname: "/join",
+              search: searchParams.toString(),
+            }}
+          >
+            Sign up
           </Button>
-        </div>
-      )}
-
-      <div className="mt-6">
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-gray-300" />
-          </div>
-          <div className="relative flex justify-center text-sm">
-            <span className="bg-white px-2 text-gray-500">
-              Or use a{" "}
-              <strong title="One Time Password (OTP) is the most secure way to login. We will send you a code to your email.">
-                One Time Password
-              </strong>
-            </span>
-          </div>
-        </div>
-        <div className="mt-6">
-          <ContinueWithEmailForm mode="login" />
-        </div>
-        {disableSignup ? null : (
-          <div className="mt-6 text-center text-sm text-gray-500">
-            Don't have an account?{" "}
-            <Button
-              variant="link"
-              data-test-id="signupButton"
-              to={{
-                pathname: "/join",
-                search: searchParams.toString(),
-              }}
-            >
-              Sign up
-            </Button>
-          </div>
-        )}
+        </p>
       </div>
     </div>
   );

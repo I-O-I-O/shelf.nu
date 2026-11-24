@@ -1,7 +1,6 @@
 import { OrganizationRoles } from "@prisma/client";
 import { data, type ActionFunctionArgs } from "react-router";
 import { z } from "zod";
-import { db } from "~/database/db.server";
 import {
   requireMobileAuth,
   requireMobilePermission,

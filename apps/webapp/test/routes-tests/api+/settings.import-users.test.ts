@@ -16,6 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs } from "@mocks/remix";
 
 import { bulkInviteUsers } from "~/modules/invite/service.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { action } from "~/routes/api+/settings.import-users";
 import type { CSVData } from "~/utils/csv.server";
 import { csvDataFromRequest } from "~/utils/csv.server";
@@ -27,6 +28,11 @@ import { assertUserCanInviteUsersToWorkspace } from "~/utils/subscription.server
 
 // why: the route parses an uploaded file; we drive rows in directly instead
 vi.mock("~/utils/csv.server", () => ({ csvDataFromRequest: vi.fn() }));
+
+// why: verify the route delegates staff authorization without depending on membership data.
+vi.mock("~/modules/ioio-staff/access.server", () => ({
+  requireIoioStaffAccess: vi.fn(),
+}));
 
 // why: authorization is not under test here
 vi.mock("~/utils/roles.server", () => ({ requirePermission: vi.fn() }));
@@ -90,6 +96,11 @@ describe("settings.import-users", () => {
     vi.mocked(requirePermission).mockResolvedValue({
       organizationId: "org-1",
     } as Awaited<ReturnType<typeof requirePermission>>);
+    vi.mocked(requireIoioStaffAccess).mockResolvedValue({
+      organizationId: "org-1",
+      userId: "user-1",
+      role: OrganizationRoles.OWNER,
+    } as Awaited<ReturnType<typeof requireIoioStaffAccess>>);
     vi.mocked(assertUserCanInviteUsersToWorkspace).mockResolvedValue(undefined);
     vi.mocked(bulkInviteUsers).mockResolvedValue(
       {} as Awaited<ReturnType<typeof bulkInviteUsers>>

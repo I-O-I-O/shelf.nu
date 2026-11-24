@@ -8,6 +8,10 @@ import type {
 } from "@prisma/client";
 import { AssetType, BookingStatus, Prisma } from "@prisma/client";
 import invariant from "tiny-invariant";
+import {
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+} from "~/components/location/ioio-location-colors";
 import { db } from "~/database/db.server";
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
 import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
@@ -45,6 +49,7 @@ import {
   removePublicFile,
   removePublicFiles,
 } from "~/utils/storage.server";
+import { MAX_LOCATION_HIERARCHY_DEPTH } from "./picker-select.server";
 import {
   formatLocationLink,
   buildAssetListMarkup,
@@ -69,7 +74,109 @@ import { createNote } from "../note/service.server";
 import { getUserByID } from "../user/service.server";
 
 const label: ErrorLabel = "Location";
-const MAX_LOCATION_DEPTH = 12;
+const MAX_LOCATION_DEPTH = MAX_LOCATION_HIERARCHY_DEPTH;
+
+type IoioLocationColorTransaction = {
+  $queryRaw<T = unknown>(
+    query: TemplateStringsArray,
+    ...values: string[]
+  ): Promise<T>;
+  location: {
+    findMany(args: {
+      where: Prisma.LocationWhereInput;
+      select: { id: true; name: true; parentId: true; color: true };
+    }): Promise<Array<Pick<Location, "id" | "name" | "parentId" | "color">>>;
+  };
+};
+
+async function validateIoioLocationColorInTransaction({
+  tx,
+  organizationId,
+  parentId,
+  color,
+  locationType,
+  currentLocationId,
+  previousColor,
+}: {
+  tx: IoioLocationColorTransaction;
+  organizationId: string;
+  parentId: string | null;
+  color: string | null | undefined;
+  locationType: "room" | "section";
+  currentLocationId?: string;
+  previousColor?: string | null;
+}) {
+  // Serialize color assignments in this room (or among root rooms). The read
+  // and write below must share a lock so two simultaneous creates cannot both
+  // observe the same palette color as free.
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${organizationId}), hashtext(${
+    parentId ?? "ioio-rooms"
+  }))::text AS locked`;
+  const where: Prisma.LocationWhereInput =
+    locationType === "section"
+      ? parentId
+        ? { organizationId, OR: [{ parentId }, { id: parentId }] }
+        : { organizationId, parentId: null }
+      : { organizationId, parentId };
+  const locations = await tx.location.findMany({
+    where,
+    select: { id: true, name: true, parentId: true, color: true },
+  });
+  const message =
+    locationType === "room"
+      ? getIoioRoomColorError({ color, locations, currentLocationId })
+      : getIoioSectionColorError({
+          color,
+          locations,
+          parentId,
+          currentLocationId,
+        });
+  if (message) {
+    throw new ShelfError({
+      cause: null,
+      message,
+      label,
+      status: 400,
+      shouldBeCaptured: false,
+    });
+  }
+  if (
+    locationType === "room" &&
+    currentLocationId &&
+    previousColor?.toLowerCase() !== color?.toLowerCase()
+  ) {
+    const children = await tx.location.findMany({
+      where: { organizationId, parentId: currentLocationId },
+      select: { id: true, name: true, parentId: true, color: true },
+    });
+    const inheritedSections = children.filter((child) => !child.color);
+    for (const section of inheritedSections) {
+      const conflict = getIoioSectionColorError({
+        color,
+        locations: [
+          ...children,
+          {
+            id: currentLocationId,
+            name: "",
+            parentId: null,
+            color,
+          },
+        ],
+        parentId: currentLocationId,
+        currentLocationId: section.id,
+      });
+      if (conflict) {
+        throw new ShelfError({
+          cause: null,
+          message: `Changing this room color would conflict with ${section.name}. ${conflict}`,
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+  }
+}
 
 /**
  * SECURITY: Asserts that every supplied asset ID belongs to `organizationId`.
@@ -270,19 +377,21 @@ export async function getLocation(
       ...assetsWhere,
     };
 
+    const locationQueryOptions: Prisma.LocationFindFirstOrThrowArgs = {
+      where: {
+        OR: [
+          { id, organizationId },
+          ...(userOrganizations?.length
+            ? [{ id, organizationId: { in: otherOrganizationIds } }]
+            : []),
+        ],
+      },
+      include: locationInclude,
+    };
+
     const [location, totalAssetsWithinLocation, assets] = await Promise.all([
       /** Get the items */
-      db.location.findFirstOrThrow({
-        where: {
-          OR: [
-            { id, organizationId },
-            ...(userOrganizations?.length
-              ? [{ id, organizationId: { in: otherOrganizationIds } }]
-              : []),
-          ],
-        },
-        include: locationInclude,
-      }),
+      db.location.findFirstOrThrow(locationQueryOptions),
 
       /** Count them */
       db.asset.count({
@@ -814,10 +923,14 @@ export async function createLocation({
   userId,
   organizationId,
   parentId,
+  color,
+  ioioColorType,
 }: Pick<Location, "description" | "name" | "address"> & {
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
+  color?: Location["color"];
+  ioioColorType?: "room" | "section";
 }) {
   try {
     // Geocode the address if provided
@@ -833,11 +946,21 @@ export async function createLocation({
 
     // Use transaction to ensure location creation and activity event are atomic
     const created = await db.$transaction(async (tx) => {
+      if (ioioColorType) {
+        await validateIoioLocationColorInTransaction({
+          tx,
+          organizationId,
+          parentId: validatedParentId ?? null,
+          color,
+          locationType: ioioColorType,
+        });
+      }
       const location = await tx.location.create({
         data: {
           name: name.trim(),
           description,
           address,
+          ...(color !== undefined ? { color } : {}),
           latitude: coordinates?.lat || null,
           longitude: coordinates?.lon || null,
           user: {
@@ -981,6 +1104,62 @@ export async function deleteLocation({
      * location is gone. Its URLs cannot be read back after the row is deleted.
      */
     const location = await db.$transaction(async (tx) => {
+      // Lock the parent row before checking its dependants. A concurrent child
+      // insert must wait on this lock and then fail its FK check if we delete
+      // the location, rather than slipping past the check and being promoted
+      // by the self-relation's ON DELETE SET NULL behavior.
+      await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id
+        FROM "Location"
+        WHERE id = ${id} AND "organizationId" = ${organizationId}
+        FOR UPDATE
+      `;
+
+      const child = await tx.location.findFirst({
+        where: { parentId: id },
+        select: { id: true },
+      });
+      if (child) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location contains child locations. Move or delete them first.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const assignedAsset = await tx.assetLocation.findFirst({
+        where: { locationId: id },
+        select: { id: true },
+      });
+      if (assignedAsset) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location contains assigned assets. Move them before deleting the location.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const kit = await tx.kit.findFirst({
+        where: { locationId: id },
+        select: { id: true },
+      });
+      if (kit) {
+        throw new ShelfError({
+          cause: null,
+          message:
+            "This location is used by a kit. Move the kit before deleting the location.",
+          label,
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
       const deleted = await tx.location.delete({
         where: { id, organizationId },
       });
@@ -998,6 +1177,7 @@ export async function deleteLocation({
 
     return location;
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while deleting the location",
@@ -1012,12 +1192,23 @@ export async function updateLocation(payload: {
   name?: Location["name"];
   address?: Location["address"];
   description?: Location["description"];
+  color?: Location["color"];
   userId: User["id"];
   organizationId: Organization["id"];
   parentId?: Location["parentId"];
+  ioioColorType?: "room" | "section";
 }) {
-  const { id, name, address, description, userId, organizationId, parentId } =
-    payload;
+  const {
+    id,
+    name,
+    address,
+    description,
+    color,
+    userId,
+    organizationId,
+    parentId,
+    ioioColorType,
+  } = payload;
 
   try {
     // Get the current location to check for changes
@@ -1030,6 +1221,7 @@ export async function updateLocation(payload: {
         latitude: true,
         longitude: true,
         parentId: true,
+        color: true,
         parent: { select: { id: true, name: true } },
       },
     });
@@ -1059,12 +1251,27 @@ export async function updateLocation(payload: {
 
     // Use transaction to ensure location update and activity event are atomic
     const updatedLocation = await db.$transaction(async (tx) => {
+      if (ioioColorType) {
+        await validateIoioLocationColorInTransaction({
+          tx,
+          organizationId,
+          parentId:
+            validatedParentId === undefined
+              ? currentLocation.parentId
+              : validatedParentId,
+          color: color === undefined ? currentLocation.color : color,
+          locationType: ioioColorType,
+          currentLocationId: id,
+          previousColor: currentLocation.color,
+        });
+      }
       const location = await tx.location.update({
         where: { id, organizationId },
         data: {
           name: name?.trim(),
           description,
           address,
+          ...(color !== undefined ? { color } : {}),
           ...(shouldUpdateCoordinates && {
             latitude: coordinates?.lat || null,
             longitude: coordinates?.lon || null,
@@ -1321,15 +1528,115 @@ export async function bulkDeleteLocations({
       where: locationIds.includes(ALL_SELECTED_KEY)
         ? { organizationId }
         : { id: { in: locationIds }, organizationId },
-      select: { id: true, imageId: true, imageUrl: true, thumbnailUrl: true },
+      select: {
+        id: true,
+        parentId: true,
+        imageId: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+      },
     });
 
     await db.$transaction(async (tx) => {
-      /** Deleting all locations */
-      await tx.location.deleteMany({
-        // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: ids come from `locations` fetched above with `organizationId` in the where clause, so they are already org-proven before this delete
-        where: { id: { in: locations.map((location) => location.id) } },
-      });
+      const selectedIds = locations.map((location) => location.id);
+      if (selectedIds.length) {
+        // Prevent concurrent child inserts from racing the non-selected-child
+        // check in the same way as the single-location delete path.
+        await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM "Location"
+          WHERE "organizationId" = ${organizationId}
+            AND id IN (${Prisma.join(selectedIds)})
+          FOR UPDATE
+        `;
+
+        const outsideChild = await tx.location.findFirst({
+          // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: the FK can reference a selected location from another organization, so this must find every child that ON DELETE SET NULL would promote
+          where: {
+            parentId: { in: selectedIds },
+            id: { notIn: selectedIds },
+          },
+          select: { id: true },
+        });
+        if (outsideChild) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations contain child locations that are not selected. Move or delete them first.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const assignedAsset = await tx.assetLocation.findFirst({
+          where: { locationId: { in: selectedIds } },
+          select: { id: true },
+        });
+        if (assignedAsset) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations contain assigned assets. Move them before deleting the locations.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const kit = await tx.kit.findFirst({
+          where: { locationId: { in: selectedIds } },
+          select: { id: true },
+        });
+        if (kit) {
+          throw new ShelfError({
+            cause: null,
+            message:
+              "Some selected locations are used by kits. Move the kits before deleting the locations.",
+            label,
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      /**
+       * Delete selected locations from the deepest level upward. Deleting a
+       * selected parent first would invoke ON DELETE SET NULL on a selected
+       * child, even though both rows are scheduled for deletion.
+       */
+      const selectedById = new Map(
+        locations.map((location) => [location.id, location])
+      );
+      const depthOf = (location: (typeof locations)[number]) => {
+        let depth = 0;
+        let current = location;
+        const visited = new Set<string>();
+        while (
+          current.parentId &&
+          selectedById.has(current.parentId) &&
+          !visited.has(current.id)
+        ) {
+          visited.add(current.id);
+          depth += 1;
+          current = selectedById.get(current.parentId)!;
+        }
+        return depth;
+      };
+      const locationsByDepth = new Map<number, string[]>();
+      for (const location of locations) {
+        const depth = depthOf(location);
+        const idsAtDepth = locationsByDepth.get(depth) ?? [];
+        idsAtDepth.push(location.id);
+        locationsByDepth.set(depth, idsAtDepth);
+      }
+      for (const [, idsAtDepth] of [...locationsByDepth].sort(
+        ([left], [right]) => right - left
+      )) {
+        await tx.location.deleteMany({
+          where: { id: { in: idsAtDepth }, organizationId },
+        });
+      }
 
       /** Deleting images of locations */
       const locationWithImages = locations.filter(
@@ -1355,10 +1662,45 @@ export async function bulkDeleteLocations({
      */
     void safeRemoveImageFilesOfLocations(locations);
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while bulk deleting locations.",
       additionalData: { locationIds, organizationId },
+      label,
+    });
+  }
+}
+
+export async function removeLocationImage({
+  locationId,
+  organizationId,
+}: {
+  locationId: Location["id"];
+  organizationId: Organization["id"];
+}) {
+  try {
+    const location = await db.location.findUniqueOrThrow({
+      where: { id: locationId, organizationId },
+      select: { id: true, imageUrl: true, thumbnailUrl: true },
+    });
+
+    await db.location.update({
+      where: { id: locationId, organizationId },
+      data: {
+        imageUrl: null,
+        thumbnailUrl: null,
+        imageStoragePath: null,
+        thumbnailImageStoragePath: null,
+      },
+    });
+
+    await safeRemoveImageFilesOfLocations([location]);
+  } catch (cause) {
+    throw new ShelfError({
+      cause,
+      message: "Something went wrong while removing the location image.",
+      additionalData: { locationId, organizationId },
       label,
     });
   }
@@ -1380,6 +1722,7 @@ export async function updateLocationImage({
   try {
     const fileData = await parseFileFormData({
       request,
+      allowEmptyFile: true,
       bucketName: PUBLIC_BUCKET,
       newFileName: getFileUploadPath({
         organizationId,

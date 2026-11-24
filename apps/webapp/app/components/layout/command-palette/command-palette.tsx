@@ -488,6 +488,7 @@ export function CommandPalette() {
   const layoutData = useRouteLoaderData<LayoutLoaderResponse>(
     "routes/_layout+/_layout"
   );
+  const isIoioStaff = Boolean(layoutData?.isIoioStaff);
 
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -533,7 +534,11 @@ export function CommandPalette() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
+      if (
+        !isIoioStaff &&
+        event.key.toLowerCase() === "k" &&
+        (event.metaKey || event.ctrlKey)
+      ) {
         event.preventDefault();
         setOpen(!open);
       }
@@ -545,7 +550,7 @@ export function CommandPalette() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, setOpen]);
+  }, [isIoioStaff, open, setOpen]);
 
   useEffect(() => {
     if (!open) {

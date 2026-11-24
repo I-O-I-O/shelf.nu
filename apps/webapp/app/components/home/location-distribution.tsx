@@ -1,21 +1,23 @@
-import { useLoaderData } from "react-router";
-import type { loader } from "~/routes/_layout+/home";
 import { ClickableTr } from "../dashboard/clickable-tr";
 import { DashboardEmptyState } from "../dashboard/empty-state";
 import { Button } from "../shared/button";
 
 import { Table, Td } from "../table";
 
-type LocationItem = ReturnType<
-  typeof useLoaderData<typeof loader>
->["locationDistribution"][number];
+export type DashboardLocationDistributionItem = {
+  locationId: string;
+  locationName: string;
+  assetCount: number;
+};
 
-export default function LocationDistribution() {
-  const { locationDistribution } = useLoaderData<typeof loader>();
-
+export default function LocationDistribution({
+  locationDistribution,
+}: {
+  locationDistribution: DashboardLocationDistributionItem[];
+}) {
   const maxCount =
     locationDistribution.length > 0
-      ? Math.max(...locationDistribution.map((l: LocationItem) => l.assetCount))
+      ? Math.max(...locationDistribution.map((l) => l.assetCount))
       : 0;
 
   return (
@@ -37,7 +39,7 @@ export default function LocationDistribution() {
       {locationDistribution.length > 0 ? (
         <Table className="flex-1">
           <tbody>
-            {locationDistribution.map((loc: LocationItem) => (
+            {locationDistribution.map((loc) => (
               <ClickableTr
                 key={loc.locationId}
                 to={`/locations/${loc.locationId}`}

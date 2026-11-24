@@ -34,7 +34,12 @@ export const RequestDeleteUser = () => {
   const zo = useZorm("RequestDeleteUser", Schema);
 
   useEffect(() => {
-    if (actionData && !actionData?.error && actionData.success) {
+    if (
+      actionData &&
+      !actionData.error &&
+      "success" in actionData &&
+      actionData.success
+    ) {
       setOpen(false);
     }
   }, [actionData]);

@@ -1,15 +1,23 @@
+import type { Currency } from "@prisma/client";
 import { Text, ProgressCircle } from "@tremor/react";
-import { useLoaderData } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
-import type { loader } from "~/routes/_layout+/home";
 import { formatCurrency } from "~/utils/currency";
 import { DashboardEmptyState } from "./empty-state";
 import FallbackLoading from "./fallback-loading";
 
-export default function InventoryValueChart() {
-  const { currency, totalAssets, totalValuation, valueKnownAssets, locale } =
-    useLoaderData<typeof loader>();
-
+export default function InventoryValueChart({
+  currency,
+  totalAssets,
+  totalValuation,
+  valueKnownAssets,
+  locale,
+}: {
+  currency: Currency;
+  totalAssets: number;
+  totalValuation: number;
+  valueKnownAssets: number;
+  locale: string;
+}) {
   return (
     <div className="flex h-full flex-col rounded border border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b px-4 py-3 md:px-6">

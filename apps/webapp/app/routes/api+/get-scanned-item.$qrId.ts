@@ -224,13 +224,19 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     const sequentialId = parseSequentialId(qrId);
 
     if (sequentialId) {
-      const asset = await db.asset.findFirst({
+      const queryOptions: Prisma.AssetFindFirstArgs = {
         where: {
           organizationId,
           sequentialId,
         },
         include: assetInclude,
-      });
+      };
+      // The base scanner include always carries the image relation. The
+      // allowlisted extras cannot replace it, while the generated args type
+      // intentionally widens Prisma's returned include shape.
+      const asset = (await db.asset.findFirst(
+        queryOptions
+      )) as Prisma.AssetGetPayload<{ include: typeof ASSET_INCLUDE }> | null;
 
       if (asset) {
         return data(

@@ -141,15 +141,18 @@ function makeQtAsset(overrides: Record<string, unknown> = {}) {
 function makeBooking({
   status,
   assetCount = 1,
+  displayQuantity,
 }: {
   status: string;
   assetCount?: number;
+  displayQuantity?: number;
 }) {
   return {
     id: "booking-1",
     name: "Test booking",
     status,
     _count: { bookingAssets: assetCount },
+    ...(displayQuantity === undefined ? {} : { displayQuantity }),
   } as unknown as Parameters<typeof BookingAssetsSidebar>[0]["booking"];
 }
 
@@ -191,6 +194,20 @@ beforeEach(() => {
 });
 
 describe("BookingAssetsSidebar QT stock badges", () => {
+  it("uses the booked unit total for compact loan triggers", () => {
+    render(
+      <BookingAssetsSidebar
+        booking={makeBooking({
+          status: "RESERVED",
+          assetCount: 1,
+          displayQuantity: 2,
+        })}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "2 items" })).toBeInTheDocument();
+  });
+
   it("renders the red InsufficientStockBadge when bookedQuantity exceeds bookable", async () => {
     const asset = makeQtAsset();
     const booking = makeBooking({ status: "ONGOING" });

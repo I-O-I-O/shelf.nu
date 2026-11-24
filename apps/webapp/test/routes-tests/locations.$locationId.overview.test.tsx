@@ -175,8 +175,8 @@ describe("LocationOverview component", () => {
 
     render(<LocationOverview />);
 
-    expect(screen.getByText("ID")).toBeInTheDocument();
-    expect(screen.getByText("loc-123")).toBeInTheDocument();
+    expect(screen.queryByText("ID")).not.toBeInTheDocument();
+    expect(screen.queryByText("loc-123")).not.toBeInTheDocument();
     expect(screen.getByText("Created")).toBeInTheDocument();
     // DateS now formats via the real prefs-bound formatter (no Intl mock).
     // Compute the expected string from the same formatter + stubbed prefs,

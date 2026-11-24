@@ -610,7 +610,7 @@ function AssignReservationHeader({
           idPrefix="assign"
         />
         {pendingModelRows.length > 0 ? (
-          <ul className="flex max-h-[176px] flex-col gap-2 overflow-y-auto border-t border-gray-200 pt-3 pr-1">
+          <ul className="flex max-h-[176px] flex-col gap-2 overflow-y-auto border-t border-gray-200 pr-1 pt-3">
             {pendingModelRows.map((row) => (
               <PendingModelRowItem
                 key={row.key}

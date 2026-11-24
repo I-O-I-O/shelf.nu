@@ -166,6 +166,8 @@ export default function EditCategory() {
           <div className="mb-6 lg:mb-0">
             <ColorInput
               name={zo.fields.color()}
+              label="Hex color"
+              showPreview
               disabled={disabled}
               error={zo.errors.color()?.message}
               hideErrorText

@@ -90,17 +90,26 @@ describe("findConflictingKits", () => {
     // what keeps a standalone asset from counting as the kit.
     expect(where.assetKitId).toEqual({ in: ["ak-a1"] });
     expect(where.booking.organizationId).toBe("org-1");
-    // The same RESERVED / ONGOING / OVERDUE window assets are checked against,
-    // with the current booking excluded.
+    // Date-overlapping RESERVED and ONGOING rows use the same half-open window
+    // as availability. OVERDUE rows always conflict because their return time
+    // is unknown. Every clause excludes the current booking.
     const windowClauses = where.booking.OR;
-    expect(windowClauses).toHaveLength(2);
+    expect(windowClauses).toHaveLength(3);
     expect(windowClauses[0]).toMatchObject({
       status: BookingStatus.RESERVED,
-      id: { not: "booking-current" },
+      id: { notIn: ["booking-current"] },
+      from: { lt: TO },
+      to: { gt: FROM },
     });
     expect(windowClauses[1]).toMatchObject({
-      status: { in: [BookingStatus.ONGOING, BookingStatus.OVERDUE] },
-      id: { not: "booking-current" },
+      status: BookingStatus.ONGOING,
+      id: { notIn: ["booking-current"] },
+      from: { lt: TO },
+      to: { gt: FROM },
+    });
+    expect(windowClauses[2]).toMatchObject({
+      status: BookingStatus.OVERDUE,
+      id: { notIn: ["booking-current"] },
     });
   });
 

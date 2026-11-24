@@ -21,6 +21,15 @@ vi.mock("react-router", async () => {
 });
 
 describe("Button", () => {
+  it("keeps standard actions at a phone-sized touch height", () => {
+    render(<Button type="button">Save changes</Button>);
+
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveClass(
+      "min-h-11",
+      "md:min-h-0"
+    );
+  });
+
   it("renders link variant as left-aligned text without button layout styles", () => {
     render(
       <Button variant="link" target="_blank" to="https://example.com">

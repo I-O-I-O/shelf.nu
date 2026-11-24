@@ -9,36 +9,27 @@ import listPlugin from "@fullcalendar/list";
 import luxonPlugin from "@fullcalendar/luxon3";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
-import { type BookingStatus, type Tag } from "@prisma/client";
+import { BookingStatus, type Tag } from "@prisma/client";
+import { Plus } from "lucide-react";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, Link, useLoaderData } from "react-router";
+import { data, Link, Outlet, useLoaderData, useLocation } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
-import BookingFilters from "~/components/booking/booking-filters";
-import CreateBookingDialog from "~/components/booking/create-booking-dialog";
-
 import { CalendarNavigation } from "~/components/calendar/calendar-navigation";
-import CalendarSubscribeDialog from "~/components/calendar/calendar-subscribe-dialog";
 import renderEventCard from "~/components/calendar/event-card";
+import { IoioCalendarFilters } from "~/components/calendar/ioio-calendar-filters";
 import TitleContainer from "~/components/calendar/title-container";
 import { ViewButtonGroup } from "~/components/calendar/view-button-group";
 import FallbackLoading from "~/components/dashboard/fallback-loading";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
-import { Button } from "~/components/shared/button";
 import { Spinner } from "~/components/shared/spinner";
 import type { TeamMemberForBadge } from "~/components/user/team-member-badge";
 import { useSearchParams } from "~/hooks/search-params";
 import { useDateFormatter } from "~/hooks/use-date-formatter";
 import { useDisabled } from "~/hooks/use-disabled";
-import { hasGetAllValue } from "~/hooks/use-model-filters";
 import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { getBookingsForCalendar } from "~/modules/booking/service.server";
-import { getMemberCalendarFeedUrl } from "~/modules/calendar-subscription/service.server";
-import { getTagsForBookingTagsFilter } from "~/modules/tag/service.server";
-import {
-  getTeamMemberForCustodianFilter,
-  getTeamMemberForForm,
-} from "~/modules/team-member/service.server";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "~/modules/ioio-student/availability.server";
 import calendarStyles from "~/styles/layout/calendar.css?url";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
@@ -51,16 +42,13 @@ import {
 } from "~/utils/calendar";
 import { getWeekStartingAndEndingDates } from "~/utils/date-fns";
 import { makeShelfError, ShelfError } from "~/utils/error";
-import { payload, error, getCurrentSearchParams } from "~/utils/http.server";
-import { getParamsValues } from "~/utils/list";
-import { parseMarkdownToReact } from "~/utils/md";
+import { payload, error } from "~/utils/http.server";
 import { isPersonalOrg } from "~/utils/organization";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-import { bookingsSearchFieldTooltipText } from "./bookings._index";
 
 export function links() {
   return [{ rel: "stylesheet", href: calendarStyles }];
@@ -113,6 +101,9 @@ export type CalendarExtendedProps = {
   /** Availability view only: ISO instant of the latest check-in among the
    * folded slices; null unless `returned`. */
   returnedAt?: string | null;
+  /** Calendar-only product summaries for IOIO staff reservations (e.g. Kit ×4). */
+  assetNames?: string[];
+  isIoioReservation?: boolean;
 };
 
 // Loader Function to Return Bookings Data
@@ -122,11 +113,11 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
 
   try {
     const {
-      isSelfServiceOrBase,
       currentOrganization,
       organizationId,
       canSeeAllBookings,
       canSeeAllCustody,
+      role,
     } = await requirePermission({
       userId,
       request,
@@ -141,6 +132,7 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
         message:
           "You cannot use bookings in a personal workspaces. Please create a Team workspace to create bookings.",
         label: "Booking",
+        status: 403,
         shouldBeCaptured: false,
       });
     }
@@ -149,48 +141,78 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
       title: `Calendar`,
     };
 
-    const searchParams = getCurrentSearchParams(request);
-    const { teamMemberIds } = getParamsValues(searchParams);
-    const [
-      teamMembersData,
-      teamMembersForFormData,
-      tagsData,
-      events,
-      calendarFeedUrl,
-    ] = await Promise.all([
-      // Team members for filters - when canSeeAllCustody is false, only current user's team member
-      getTeamMemberForCustodianFilter({
-        organizationId,
-        selectedTeamMembers: teamMemberIds,
-        getAll:
-          searchParams.has("getAll") &&
-          hasGetAllValue(searchParams, "teamMember"),
-        filterByUserId: !canSeeAllCustody,
-        userId,
-      }),
-      // Team members for CreateBookingDialog - BASE/SELF_SERVICE always get their team member
-      isSelfServiceOrBase
-        ? getTeamMemberForForm({
-            organizationId,
-            userId,
-            isSelfServiceOrBase,
-            getAll:
-              searchParams.has("getAll") &&
-              hasGetAllValue(searchParams, "teamMember"),
-          })
-        : Promise.resolve(null), // ADMIN users reuse teamMembersData
-      getTagsForBookingTagsFilter({
-        organizationId,
-      }),
-      getBookingsForCalendar({
-        request,
-        organizationId,
-        userId,
-        canSeeAllBookings,
-        canSeeAllCustody,
-      }),
-      getMemberCalendarFeedUrl({ organizationId, userId }),
-    ]);
+    const allEvents = await getBookingsForCalendar({
+      request,
+      organizationId,
+      userId,
+      canSeeAllBookings,
+      canSeeAllCustody,
+    });
+
+    // IOIO Calendar is the staff reservation planner. Generic Shelf loans
+    // remain available from Loans and should not be mixed into this view.
+    const reservationEventsByBookingId = new Map<
+      string,
+      (typeof allEvents)[number]
+    >();
+    for (const event of allEvents) {
+      const details = event.extendedProps;
+      // Shelf creates a DRAFT before reservation validation completes. It is
+      // not a confirmed planning reservation and failed attempts can leave
+      // these drafts behind, so keep them out of the IOIO reservation calendar.
+      if (
+        !details ||
+        details.description !== IOIO_STAFF_RESERVATION_DESCRIPTION ||
+        details.status === BookingStatus.DRAFT
+      ) {
+        continue;
+      }
+
+      const existing = reservationEventsByBookingId.get(details.id);
+      if (existing?.extendedProps) {
+        // A booking may have multiple membership-backed event candidates in
+        // upstream data. Fold their product summaries under the booking ID;
+        // keep the booking's original date range and reservation identity.
+        reservationEventsByBookingId.set(details.id, {
+          ...existing,
+          extendedProps: {
+            ...existing.extendedProps,
+            assetNames: [
+              ...new Set([
+                ...(existing.extendedProps.assetNames ?? []),
+                ...(details.assetNames ?? []),
+              ]),
+            ],
+          },
+        });
+      } else {
+        reservationEventsByBookingId.set(details.id, event);
+      }
+    }
+
+    const events = [...reservationEventsByBookingId.entries()].map(
+      ([bookingId, event]) => {
+        const details = event.extendedProps;
+        if (!details) return event;
+
+        return {
+          ...event,
+          // FullCalendar and click handling use the canonical reservation ID,
+          // never a physical asset or BookingAsset membership ID.
+          id: bookingId,
+          title: [(details.assetNames ?? []).join(" + "), details.name]
+            .filter(Boolean)
+            .join(" · "),
+          extendedProps: {
+            ...details,
+            isIoioReservation: true,
+            url: `/calendar/new-reservation?bookingId=${encodeURIComponent(
+              bookingId
+            )}`,
+          },
+        };
+      }
+    );
 
     const modelName = {
       singular: "booking",
@@ -200,22 +222,9 @@ export const loader = async ({ request, context }: LoaderFunctionArgs) => {
     return payload({
       header,
       events,
-      organizationId,
-      ...teamMembersData,
-      // For BASE/SELF_SERVICE users, provide dedicated form team members
-      // For ADMIN users, reuse the filter team members
-      teamMembersForForm:
-        teamMembersForFormData?.teamMembers ?? teamMembersData.teamMembers,
-      currentOrganization,
-      ...tagsData,
+      canManageIoioReservations: role === "ADMIN" || role === "OWNER",
+      search: "",
       modelName,
-      isSelfServiceOrBase,
-      userId,
-      calendarFeedUrl,
-      searchFieldTooltip: {
-        title: "Search your bookings",
-        text: parseMarkdownToReact(bookingsSearchFieldTooltipText),
-      },
     });
   } catch (cause) {
     const reason = makeShelfError(cause);
@@ -228,6 +237,11 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 
 // Calendar Component
 export default function Calendar() {
+  const location = useLocation();
+  return location.pathname === "/calendar" ? <CalendarPage /> : <Outlet />;
+}
+
+function CalendarPage() {
   const { isMd } = useViewportHeight();
   const { prefs } = useDateFormatter();
   // Drive FullCalendar's clock (12h vs 24h) from the user's time-format pref.
@@ -238,9 +252,7 @@ export default function Calendar() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [subscribeOpen, setSubscribeOpen] = useState(false);
-  const { events, calendarFeedUrl, organizationId } =
-    useLoaderData<typeof loader>();
+  const { events, canManageIoioReservations } = useLoaderData<typeof loader>();
   const isLoading = useDisabled();
   const [calendarHeader, setCalendarHeader] = useState<{
     title?: string;
@@ -258,7 +270,8 @@ export default function Calendar() {
   const initialDate = useMemo(() => {
     const startParam = searchParams.get("start");
     if (startParam) {
-      return new Date(startParam);
+      const parsedDate = new Date(startParam);
+      if (!Number.isNaN(parsedDate.getTime())) return parsedDate;
     }
     return new Date(); // Default to current date
   }, [searchParams]);
@@ -288,7 +301,11 @@ export default function Calendar() {
     updateTitle(view);
   };
 
-  const updateViewClasses = (calendarContainer: any, viewType: any) => {
+  const updateViewClasses = (
+    calendarContainer: HTMLElement | null,
+    viewType: string
+  ) => {
+    if (!calendarContainer) return;
     calendarContainer.classList.remove("month-view", "week-view", "day-view");
     if (viewType === "dayGridMonth") {
       calendarContainer.classList.add("month-view");
@@ -301,20 +318,22 @@ export default function Calendar() {
 
   return (
     <>
-      <Header hidePageDescription>
-        <CreateBookingDialog
-          trigger={
-            <Button type="button" aria-label="new booking">
-              New booking
-            </Button>
-          }
-        />
+      <Header subHeading="Plan upcoming equipment reservations.">
+        {canManageIoioReservations ? (
+          <Link
+            to="/calendar/new-reservation"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-red-700 px-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+          >
+            <Plus className="size-4 shrink-0" aria-hidden="true" />
+            New reservation
+          </Link>
+        ) : null}
       </Header>
 
-      <BookingFilters className="mt-4" hideSortBy />
+      <IoioCalendarFilters className="mt-4" />
 
-      <div className="mt-4">
-        <div className="flex items-center justify-between gap-4 rounded-t-md border bg-white px-4 py-3">
+      <div className="mt-5 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-gray-50/70 p-3 sm:px-4">
           <div className="flex items-center gap-2">
             <TitleContainer
               calendarTitle={calendarHeader.title}
@@ -328,7 +347,7 @@ export default function Calendar() {
             )}
           </div>
 
-          <div className="flex items-center">
+          <div className="flex flex-wrap items-center gap-2">
             <CalendarNavigation
               calendarRef={calendarRef}
               updateTitle={() => updateTitle(calendarView)}
@@ -343,109 +362,103 @@ export default function Calendar() {
                 ]}
                 currentView={calendarView}
                 onViewChange={handleViewChange}
+                size="xs"
+                activeClassName="!border-red-700 !bg-red-700 !text-white"
+                className="rounded-lg border border-gray-200 bg-white [&>button]:!h-9 [&>button]:!py-0"
               />
             ) : null}
-
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="ml-3"
-              onClick={() => setSubscribeOpen(true)}
-            >
-              Subscribe
-            </Button>
           </div>
         </div>
-        <ClientOnly fallback={<FallbackLoading className="size-[150px]" />}>
-          {() => (
-            <FullCalendar
-              ref={calendarRef}
-              // luxonPlugin registers named-IANA-timezone resolution so
-              // `timeZone={prefs.timeZone}` below renders events in the user's
-              // chosen zone instead of falling back to UTC (see import note).
-              plugins={[dayGridPlugin, listPlugin, timeGridPlugin, luxonPlugin]}
-              initialView={calendarView}
-              initialDate={initialDate}
-              expandRows={true}
-              height="auto"
-              // Week start, display timezone, and 12/24h clock all follow the
-              // acting user's resolved formatting prefs (see useDateFormatter).
-              firstDay={prefs.weekStartsOn}
-              timeZone={prefs.timeZone}
-              nowIndicator
-              headerToolbar={false}
-              events={events}
-              slotEventOverlap={true}
-              dayMaxEvents={3}
-              dayMaxEventRows={4}
-              moreLinkClick="popover"
-              eventMouseEnter={handleEventMouseEnter("dayGridMonth")}
-              eventMouseLeave={handleEventMouseLeave("dayGridMonth")}
-              eventClick={handleEventClick}
-              windowResize={handleWindowResize}
-              eventContent={renderEventCard}
-              eventTimeFormat={{
-                hour: "numeric",
-                minute: "2-digit",
-                meridiem: "short",
-                hour12,
-              }}
-              // Slot labels (timeGrid Week/Day axis) also honor the 12/24h pref.
-              slotLabelFormat={{
-                hour: "numeric",
-                minute: "2-digit",
-                omitZeroMinute: true,
-                meridiem: "short",
-                hour12,
-              }}
-              viewDidMount={(args) => {
-                const calendarContainer = args.el;
-                const viewType = args.view.type;
-                updateViewClasses(calendarContainer, viewType);
-                updateTitle(viewType);
-              }}
-              datesSet={(args) => {
-                const calendarContainer = document.querySelector(".fc");
-                const viewType = args.view.type;
+        <div className="ioio-calendar-shell">
+          <ClientOnly fallback={<FallbackLoading className="size-[150px]" />}>
+            {() => (
+              <FullCalendar
+                ref={calendarRef}
+                // luxonPlugin registers named-IANA-timezone resolution so
+                // `timeZone={prefs.timeZone}` below renders events in the user's
+                // chosen zone instead of falling back to UTC (see import note).
+                plugins={[
+                  dayGridPlugin,
+                  listPlugin,
+                  timeGridPlugin,
+                  luxonPlugin,
+                ]}
+                initialView={calendarView}
+                initialDate={initialDate}
+                expandRows={true}
+                height="auto"
+                // Week start, display timezone, and 12/24h clock all follow the
+                // acting user's resolved formatting prefs (see useDateFormatter).
+                firstDay={prefs.weekStartsOn}
+                timeZone={prefs.timeZone}
+                nowIndicator
+                headerToolbar={false}
+                events={events}
+                slotEventOverlap={true}
+                dayMaxEvents={3}
+                dayMaxEventRows={4}
+                moreLinkClick="popover"
+                eventMouseEnter={handleEventMouseEnter("dayGridMonth")}
+                eventMouseLeave={handleEventMouseLeave("dayGridMonth")}
+                eventClick={handleEventClick}
+                windowResize={handleWindowResize}
+                eventContent={renderEventCard}
+                eventTimeFormat={{
+                  hour: "numeric",
+                  minute: "2-digit",
+                  meridiem: "short",
+                  hour12,
+                }}
+                // Slot labels (timeGrid Week/Day axis) also honor the 12/24h pref.
+                slotLabelFormat={{
+                  hour: "numeric",
+                  minute: "2-digit",
+                  omitZeroMinute: true,
+                  meridiem: "short",
+                  hour12,
+                }}
+                viewDidMount={(args) => {
+                  const calendarContainer = args.el;
+                  const viewType = args.view.type;
+                  updateViewClasses(calendarContainer, viewType);
+                  updateTitle(viewType);
+                }}
+                datesSet={(args) => {
+                  const calendarContainer =
+                    document.querySelector<HTMLElement>(".fc");
+                  const viewType = args.view.type;
 
-                updateViewClasses(calendarContainer, viewType);
+                  updateViewClasses(calendarContainer, viewType);
 
-                // Only update URL params after initial load
-                if (!isInitialLoad) {
-                  setSearchParams((prev) => {
-                    const newParams = new URLSearchParams(prev);
-                    newParams.set("start", args.start.toISOString());
-                    newParams.set("end", args.end.toISOString());
-                    return newParams;
-                  });
-                } else {
-                  setIsInitialLoad(false);
-                }
-              }}
-              eventClassNames={(eventInfo) => {
-                const viewType = eventInfo.view.type;
-                const isOneDay = isOneDayEvent(
-                  eventInfo.event.start,
-                  eventInfo.event.end
-                );
-                return getStatusClasses(
-                  eventInfo.event.extendedProps.status,
-                  isOneDay,
-                  viewType
-                );
-              }}
-            />
-          )}
-        </ClientOnly>
+                  // Only update URL params after initial load
+                  if (!isInitialLoad) {
+                    setSearchParams((prev) => {
+                      const newParams = new URLSearchParams(prev);
+                      newParams.set("start", args.start.toISOString());
+                      newParams.set("end", args.end.toISOString());
+                      return newParams;
+                    });
+                  } else {
+                    setIsInitialLoad(false);
+                  }
+                }}
+                eventClassNames={(eventInfo) => {
+                  const viewType = eventInfo.view.type;
+                  const isOneDay = isOneDayEvent(
+                    eventInfo.event.start,
+                    eventInfo.event.end
+                  );
+                  return getStatusClasses(
+                    eventInfo.event.extendedProps.status,
+                    isOneDay,
+                    viewType
+                  );
+                }}
+              />
+            )}
+          </ClientOnly>
+        </div>
       </div>
-
-      <CalendarSubscribeDialog
-        organizationId={organizationId}
-        calendarFeedUrl={calendarFeedUrl}
-        open={subscribeOpen}
-        onClose={() => setSubscribeOpen(false)}
-      />
     </>
   );
 }

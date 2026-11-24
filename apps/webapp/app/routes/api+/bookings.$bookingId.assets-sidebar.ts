@@ -25,6 +25,7 @@ import { data, type LoaderFunctionArgs } from "react-router";
 import { z } from "zod";
 import type { DispositionBreakdown } from "~/components/booking/booking-assets-sidebar";
 import { db } from "~/database/db.server";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { BOOKINGS_LIST_ASSETS_INCLUDE } from "~/modules/booking/constants";
 import { bookingDraftVisibilityClause } from "~/modules/booking/service.server";
 import { canSeeBooking } from "~/utils/booking-authorization.server";
@@ -186,9 +187,15 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       }
     }
 
+    const resolvedAssets = await resolveAssetImagesForPresentation(
+      booking.bookingAssets.map((row) => row.asset)
+    );
     return data(
       payload({
-        bookingAssets: booking.bookingAssets,
+        bookingAssets: booking.bookingAssets.map((row, index) => ({
+          ...row,
+          asset: resolvedAssets[index],
+        })),
         dispositionedByAsset,
         dispositionBreakdownByAsset,
         checkedOutByAsset,

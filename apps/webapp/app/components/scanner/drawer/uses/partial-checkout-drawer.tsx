@@ -388,7 +388,10 @@ export default function PartialCheckoutDrawer({
   const bookingAssetIds = new Set(bookingAssetsList.map((a) => a.id));
 
   // Get assets that have already been checked out (should be excluded from count)
-  const alreadyCheckedOut = new Set(checkedOutAssetIds || []);
+  const alreadyCheckedOut = useMemo(
+    () => new Set(checkedOutAssetIds || []),
+    [checkedOutAssetIds]
+  );
 
   // Assets already returned via partial check-in. They are AVAILABLE again but
   // DONE for this booking, so they must NOT be offered for checkout nor counted

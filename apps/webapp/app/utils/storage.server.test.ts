@@ -9,15 +9,28 @@ import {
   MAX_PUBLIC_FILES_PER_REMOVE,
   parseFileFormData,
   removePublicFiles,
+  resolveStorageImageUrl,
   uploadFile,
 } from "./storage.server";
 
 // why: the Supabase admin client talks to storage over HTTP; stub `remove` so
 // the tests stay offline and can assert the paths sent in each request
-const storageRemoveMock = vi.hoisted(() => vi.fn());
+const { storageRemoveMock, storageUploadMock, storageSignMock } = vi.hoisted(
+  () => ({
+    storageRemoveMock: vi.fn(),
+    storageUploadMock: vi.fn(),
+    storageSignMock: vi.fn(),
+  })
+);
 vi.mock("~/integrations/supabase/client", () => ({
   getSupabaseAdmin: () => ({
-    storage: { from: () => ({ remove: storageRemoveMock }) },
+    storage: {
+      from: () => ({
+        remove: storageRemoveMock,
+        upload: storageUploadMock,
+        createSignedUrl: storageSignMock,
+      }),
+    },
   }),
 }));
 
@@ -383,5 +396,367 @@ describe("unreadable image upload", () => {
       shouldBeCaptured: false,
       title: "Image could not be read",
     });
+  });
+
+  it("returns a useful validation error for a non-image MIME type", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File(["not an image"], "asset.txt", { type: "text/plain" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+      })
+    ).rejects.toMatchObject({
+      status: 400,
+      shouldBeCaptured: false,
+      title: "Unsupported image format",
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+  });
+
+  it("reproduces an unselected file input being rejected as an unsupported image", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File([], "", { type: "application/octet-stream" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+      })
+    ).rejects.toMatchObject({
+      title: "Unsupported image format",
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+  });
+
+  it.each(["mainImage", "image"])(
+    "omits an empty %s file input when optional uploads allow it",
+    async (fieldName) => {
+      const form = new FormData();
+      form.append(
+        fieldName,
+        new File([], "", { type: "application/octet-stream" })
+      );
+
+      const parsed = await parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+        allowEmptyFile: true,
+      });
+
+      expect(parsed.has(fieldName)).toBe(false);
+    }
+  );
+
+  it("still rejects a named unsupported file when optional uploads allow no selection", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File(["not an image"], "asset.txt", { type: "text/plain" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+        allowEmptyFile: true,
+      })
+    ).rejects.toMatchObject({
+      status: 400,
+      title: "Unsupported image format",
+      message:
+        "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+    });
+  });
+
+  it("returns a useful validation error when the file exceeds its limit", async () => {
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File(["12345"], "asset.png", { type: "image/png" })
+    );
+
+    await expect(
+      parseFileFormData({
+        request: new Request("http://localhost/assets/new", {
+          method: "POST",
+          body: form,
+        }),
+        newFileName: "asset-1/main",
+        bucketName: "assets",
+        maxFileSize: 4,
+        allowEmptyFile: true,
+      })
+    ).rejects.toMatchObject({ status: 400, title: "File too large" });
+  });
+});
+
+describe("partial image upload cleanup", () => {
+  beforeEach(() => {
+    storageRemoveMock.mockReset().mockResolvedValue({ error: null });
+    storageUploadMock.mockReset();
+  });
+
+  it("stores direct uploads with the WebP extension and content type", async () => {
+    const sharp = (await import("sharp")).default;
+    const buffer = await sharp({
+      create: { width: 64, height: 48, channels: 3, background: "#e12d3d" },
+    })
+      .png()
+      .toBuffer();
+    storageUploadMock.mockResolvedValue({
+      data: { path: "org-1/assets/legacy-thumbnail.webp" },
+      error: null,
+    });
+
+    const result = await uploadFile(
+      (async function* () {
+        await Promise.resolve();
+        yield new Uint8Array(buffer);
+      })(),
+      {
+        filename: "org-1/assets/legacy-thumbnail.png",
+        contentType: "image/png",
+        bucketName: "assets",
+      }
+    );
+
+    expect(result).toBe("org-1/assets/legacy-thumbnail.webp");
+    expect(storageUploadMock).toHaveBeenCalledWith(
+      "org-1/assets/legacy-thumbnail.webp",
+      expect.any(Uint8Array),
+      { contentType: "image/webp", upsert: false }
+    );
+  });
+
+  it("removes the original object when thumbnail upload fails", async () => {
+    const sharp = (await import("sharp")).default;
+    const buffer = await sharp({
+      create: { width: 64, height: 48, channels: 3, background: "#e12d3d" },
+    })
+      .png()
+      .toBuffer();
+
+    storageUploadMock
+      .mockResolvedValueOnce({
+        data: { path: "org-1/asset-1/main.webp" },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: null,
+        error: { name: "StorageApiError", message: "thumbnail write failed" },
+      });
+
+    await expect(
+      uploadFile(
+        (async function* () {
+          await Promise.resolve();
+          yield new Uint8Array(buffer);
+        })(),
+        {
+          filename: "org-1/asset-1/main.png",
+          contentType: "image/png",
+          bucketName: "assets",
+          resizeOptions: { width: 1200, withoutEnlargement: true },
+          generateThumbnail: true,
+        }
+      )
+    ).rejects.toMatchObject({ message: expect.stringContaining("uploading") });
+
+    expect(storageRemoveMock).toHaveBeenCalledWith([
+      "org-1/asset-1/main.webp",
+      "org-1/asset-1/main-thumbnail.webp",
+    ]);
+  });
+
+  it("stores processed image bytes as WebP and returns canonical paths", async () => {
+    const sharp = (await import("sharp")).default;
+    const buffer = await sharp({
+      create: { width: 64, height: 48, channels: 3, background: "#e12d3d" },
+    })
+      .png()
+      .toBuffer();
+    storageUploadMock.mockImplementation((path: string) =>
+      Promise.resolve({ data: { path }, error: null })
+    );
+    const form = new FormData();
+    form.append(
+      "mainImage",
+      new File([new Uint8Array(buffer)], "asset.png", { type: "image/png" })
+    );
+
+    const result = await parseFileFormData({
+      request: new Request("http://localhost/assets/new", {
+        method: "POST",
+        body: form,
+      }),
+      newFileName: "org-1/assets/asset-1/main-image",
+      bucketName: "assets",
+      resizeOptions: { width: 1200, withoutEnlargement: true },
+      generateThumbnail: true,
+    });
+
+    expect(JSON.parse(String(result.get("mainImage")))).toEqual({
+      originalPath: "org-1/assets/asset-1/main-image.webp",
+      thumbnailPath: "org-1/assets/asset-1/main-image-thumbnail.webp",
+    });
+    expect(storageUploadMock).toHaveBeenNthCalledWith(
+      1,
+      "org-1/assets/asset-1/main-image.webp",
+      expect.any(Buffer),
+      { contentType: "image/webp", upsert: false }
+    );
+    expect(storageUploadMock).toHaveBeenNthCalledWith(
+      2,
+      "org-1/assets/asset-1/main-image-thumbnail.webp",
+      expect.any(Buffer),
+      { contentType: "image/webp", upsert: true }
+    );
+    expect(storageRemoveMock).not.toHaveBeenCalled();
+  });
+});
+
+it("enforces the requested final byte cap after canonical processing and before storage", async () => {
+  const sharp = (await import("sharp")).default;
+  const bytes = await sharp({
+    create: { width: 128, height: 128, channels: 3, background: "#abc" },
+  })
+    .png()
+    .toBuffer();
+  storageUploadMock.mockClear();
+  await expect(
+    uploadFile(
+      (async function* () {
+        await Promise.resolve();
+        yield bytes;
+      })(),
+      {
+        filename: "org/product",
+        contentType: "image/png",
+        bucketName: "assets",
+        maxProcessedBytes: 1,
+      }
+    )
+  ).rejects.toThrow();
+  expect(storageUploadMock).not.toHaveBeenCalled();
+});
+
+describe("image presentation URL stability", () => {
+  it.each([
+    "assets/org/qualified.webp",
+    "/assets/org/qualified.webp",
+    "/storage/v1/object/sign/assets/org/qualified.webp?token=secret",
+    "https://old-storage.example/storage/v1/object/sign/assets/org/qualified.webp?token=secret",
+  ])("resolves stored reference %s to its object key", async (objectPath) => {
+    storageSignMock.mockClear();
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/qualified" },
+      error: null,
+    });
+    expect(
+      await resolveStorageImageUrl({
+        bucketName: "assets",
+        objectPath,
+        isPublic: false,
+      })
+    ).toBe("https://storage.example/qualified");
+    // Equivalent references share the cached signature after normalization.
+    if (storageSignMock.mock.calls.length)
+      expect(storageSignMock).toHaveBeenCalledWith(
+        "org/qualified.webp",
+        259200
+      );
+  });
+
+  it("resolves a relative legacy signed URL without treating the token as part of the key", async () => {
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/legacy" },
+      error: null,
+    });
+    expect(
+      await resolveStorageImageUrl({
+        bucketName: "assets",
+        legacyUrl:
+          "/storage/v1/object/sign/assets/org/legacy-relative.webp?token=secret",
+        isPublic: false,
+      })
+    ).toBe("https://storage.example/legacy");
+    expect(storageSignMock).toHaveBeenCalledWith(
+      "org/legacy-relative.webp",
+      259200
+    );
+  });
+
+  it("reuses a signature across concurrent and repeated loader reads", async () => {
+    storageSignMock.mockResolvedValue({
+      data: { signedUrl: "https://storage.example/stable?token=one" },
+      error: null,
+    });
+    const options = {
+      bucketName: "assets" as const,
+      objectPath: "org/asset/stability.webp",
+      isPublic: false,
+    };
+    const urls = await Promise.all([
+      resolveStorageImageUrl(options),
+      resolveStorageImageUrl(options),
+    ]);
+    expect(await resolveStorageImageUrl(options)).toBe(urls[0]);
+    expect(urls[0]).toBe(urls[1]);
+    expect(storageSignMock).toHaveBeenCalledTimes(1);
+    storageSignMock.mockClear();
+    await resolveStorageImageUrl({
+      ...options,
+      objectPath: "org/asset/replacement.webp",
+    });
+    expect(storageSignMock).toHaveBeenCalledWith(
+      "org/asset/replacement.webp",
+      259200
+    );
+  });
+
+  it("does not cache a failed signing request", async () => {
+    const options = {
+      bucketName: "assets" as const,
+      objectPath: "org/asset/retry.webp",
+      isPublic: false,
+    };
+    storageSignMock.mockResolvedValueOnce({
+      data: null,
+      error: { message: "Object not found" },
+    });
+    await expect(resolveStorageImageUrl(options)).rejects.toThrow();
+    storageSignMock.mockResolvedValueOnce({
+      data: { signedUrl: "https://storage.example/recovered" },
+      error: null,
+    });
+    expect(await resolveStorageImageUrl(options)).toBe(
+      "https://storage.example/recovered"
+    );
   });
 });

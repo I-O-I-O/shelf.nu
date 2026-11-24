@@ -6,7 +6,7 @@
  * ## "Busy ≠ dead"
  *
  * Fly's health check (`fly.toml`: `services.http_checks`) has a hard 2s
- * timeout. The DB probe below goes through Prisma's pooled connection, and
+ * timeout. The shared DB probe goes through Prisma's pooled connection, and
  * when that pool saturates, the query BLOCKS waiting for a free connection
  * (up to `pool_timeout`, ~20s) instead of failing fast. If we let that block
  * the HTTP response, Fly's 2s check times out, marks the machine unhealthy,
@@ -17,7 +17,8 @@
  * `Healthcheck failed` events.
  *
  * The fix: race the DB probe against a short internal timeout, well under
- * Fly's 2s budget.
+ * Fly's 2s budget. The shared probe is also used by the staff dashboard's
+ * quick system-status indicator.
  * - Probe resolves first -> DB is healthy -> 200.
  * - Internal timeout wins first -> the process is alive, just waiting on a
  *   busy pool -> still 200 (with a `degraded: true` body flag), so Fly does
@@ -29,8 +30,9 @@
  */
 import { data } from "react-router";
 
-import { db } from "~/database/db.server";
 import { ShelfError } from "~/utils/error";
+import { checkApplicationHealth } from "~/utils/healthcheck.server";
+import { HEALTHCHECK_DB_TIMEOUT_MS } from "~/utils/healthcheck.shared";
 import { payload, error } from "~/utils/http.server";
 import { Logger } from "~/utils/logger";
 
@@ -40,14 +42,7 @@ import { Logger } from "~/utils/logger";
  * headroom for request routing/serialization so a "busy" verdict still
  * makes it back to Fly inside its window instead of racing it.
  */
-export const HEALTHCHECK_DB_TIMEOUT_MS = 1000;
-
-/**
- * Sentinel value resolved by the internal timeout when it wins the race
- * against the DB probe. Distinguishes "timed out" from "probe resolved with
- * an actual (falsy) value" without relying on `undefined`.
- */
-const HEALTHCHECK_TIMEOUT = Symbol("healthcheck-timeout");
+export { HEALTHCHECK_DB_TIMEOUT_MS };
 
 /**
  * Fly.io HTTP health check loader. See the file-level doc above for the
@@ -61,24 +56,9 @@ const HEALTHCHECK_TIMEOUT = Symbol("healthcheck-timeout");
  *   DB connection failure).
  */
 export async function loader() {
-  // Deliberately runs against the pooled Prisma client -- a saturated pool is
-  // exactly the failure mode this route needs to detect and NOT treat as
-  // death.
-  const probe = db.user.findFirst({
-    select: { id: true },
-  });
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<typeof HEALTHCHECK_TIMEOUT>((resolve) => {
-    timer = setTimeout(() => {
-      resolve(HEALTHCHECK_TIMEOUT);
-    }, HEALTHCHECK_DB_TIMEOUT_MS);
-  });
-
   try {
-    const result = await Promise.race([probe, timeout]);
-
-    if (result === HEALTHCHECK_TIMEOUT) {
+    const health = await checkApplicationHealth();
+    if (health === "degraded") {
       // Accepted tradeoff: elapsed time alone can't tell a busy pool apart from
       // a genuinely-broken-but-slow DB path (a wedged socket / stalled TLS
       // handshake that hangs instead of erroring). Both land here and return
@@ -91,11 +71,6 @@ export async function loader() {
       // unhealthy-threshold), not time-based escalation here -- escalating to
       // 503 after N slow checks would re-trigger the cascade under a sustained
       // fleet-wide saturation.
-
-      // why: the probe lost the race but is still in flight. Attach a no-op
-      // handler so its eventual rejection can't surface as an unhandled
-      // promise rejection after this request has already responded.
-      void probe.catch(() => {});
 
       Logger.warn(
         `Healthcheck: DB probe did not resolve within ${HEALTHCHECK_DB_TIMEOUT_MS}ms. ` +
@@ -119,9 +94,5 @@ export async function loader() {
       ),
       { status: 503 }
     );
-  } finally {
-    // Clears the timer whichever side of the race won -- avoids a dangling
-    // timer keeping the event loop busy when the probe wins.
-    clearTimeout(timer);
   }
 }

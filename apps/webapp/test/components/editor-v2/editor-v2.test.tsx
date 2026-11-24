@@ -182,7 +182,9 @@ describe("EditorV2", () => {
       name: "Edit link",
     });
     expect(dialog).toBeInTheDocument();
-    expect(screen.getByLabelText("URL")).toHaveValue("https://example.com");
+    expect(screen.getByLabelText("External URL")).toHaveValue(
+      "https://example.com"
+    );
   });
 
   it("opens the link dialog when selecting plain text", async () => {
@@ -210,7 +212,7 @@ describe("EditorV2", () => {
     });
     expect(dialog).toBeInTheDocument();
 
-    const urlInput = screen.getByLabelText("URL");
+    const urlInput = screen.getByLabelText("External URL");
     expect(urlInput).toHaveValue("");
 
     await act(async () => {

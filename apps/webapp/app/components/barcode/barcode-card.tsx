@@ -20,7 +20,7 @@ export const BarcodeCard = ({
       <span className="inline-flex w-fit items-center rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
         {barcode.type}
       </span>
-      <span className="max-w-full  truncate font-mono text-gray-700">
+      <span className="ioio-identifier max-w-full truncate font-mono text-gray-700">
         {barcode.value}
       </span>
       {barcode.type === "EAN13" && (

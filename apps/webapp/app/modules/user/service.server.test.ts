@@ -21,6 +21,8 @@ import {
 } from "@mocks/user";
 import { db, type ExtendedPrismaClient } from "~/database/db.server";
 import { captureServerEvent } from "~/integrations/posthog/client.server";
+import { ensureAssetIndexModeForRole } from "~/modules/asset-index-settings/service.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 
 import { USER_WITH_SSO_DETAILS_SELECT } from "./fields";
 import {
@@ -46,14 +48,22 @@ vitest.mock("~/database/db.server", () => ({
       findFirst: vitest.fn().mockResolvedValue(null),
       findMany: vitest.fn().mockResolvedValue([]),
       findUnique: vitest.fn().mockResolvedValue(null),
+      update: vitest.fn().mockResolvedValue({}),
     },
     organization: {
       findFirst: vitest.fn().mockResolvedValue({
         id: ORGANIZATION_ID,
       }),
+      findMany: vitest.fn().mockResolvedValue([]),
     },
     userOrganization: {
       upsert: vitest.fn().mockResolvedValue({}),
+    },
+    // why: borrowing custody uses Shelf's canonical organization-scoped member
+    // row, and signup tests verify that provisioning stays transactional.
+    teamMember: {
+      findFirst: vitest.fn().mockResolvedValue(null),
+      create: vitest.fn().mockResolvedValue({ id: "member-a" }),
     },
   },
 }));
@@ -71,6 +81,14 @@ vitest.mock("~/modules/asset-index-settings/service.server", () => ({
 }));
 
 const username = `test-user-${USER_ID}`;
+
+const ioioInitialTeamMocks = vitest.hoisted(() => ({
+  ensureInitialIoioTeamForUser: vitest.fn(),
+}));
+
+// why: these tests verify when signup enters the IOIO bootstrap boundary; the
+// boundary's lock and persistent-state decisions are tested in its own suite.
+vitest.mock("~/modules/ioio/initial-team.server", () => ioioInitialTeamMocks);
 
 describe(createUserAccountForTesting.name, () => {
   it("should return null if no auth account created", async () => {
@@ -461,6 +479,15 @@ describe(createUserOrAttachOrg.name, () => {
 
     expect(result.id).toBe(USER_ID);
     expect(db.userOrganization.upsert).toHaveBeenCalled();
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Existing User",
+          organizationId: ORGANIZATION_ID,
+          userId: USER_ID,
+        },
+      })
+    );
     expect(db.user.create).not.toHaveBeenCalled();
   });
 
@@ -608,6 +635,8 @@ describe(createUser.name, () => {
   beforeEach(() => {
     vitest.clearAllMocks();
     // @ts-expect-error missing vitest type
+    ensureInitialIoioTeamForUser.mockResolvedValue(null);
+    // @ts-expect-error missing vitest type
     db.user.create.mockResolvedValue(newUserMock);
     // why: the mocked $transaction just invokes the callback with the mocked db,
     // so the callback's `tx.user.create` resolves to whatever db.user.create does
@@ -650,6 +679,132 @@ describe(createUser.name, () => {
     const createArg = db.user.create.mock.calls[0][0];
     expect(createArg.data.dateFormat).toBeUndefined();
     expect(createArg.data.timeZone).toBeUndefined();
+  });
+
+  it("checks for the initial Team after creating the OTP signup user", async () => {
+    const events: string[] = [];
+    // @ts-expect-error missing vitest type
+    db.user.create.mockImplementationOnce(() => {
+      events.push("user-create");
+      return Promise.resolve(newUserMock);
+    });
+    // @ts-expect-error missing vitest type
+    ensureInitialIoioTeamForUser.mockImplementationOnce(() => {
+      events.push("ensure-initial-team");
+      return Promise.resolve({ id: "team-initial" });
+    });
+
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      bootstrapIoioTeamOnFreshSignup: true,
+    });
+
+    expect(events).toEqual(["user-create", "ensure-initial-team"]);
+    expect(ensureInitialIoioTeamForUser).toHaveBeenCalledWith({
+      tx: db,
+      userId: USER_ID,
+    });
+  });
+
+  it("adds a new IOIO signup to the sole Team with SELF_SERVICE access", async () => {
+    // @ts-expect-error missing vitest type
+    db.organization.findMany.mockResolvedValueOnce([{ id: "ioio-team-1" }]);
+
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      firstName: "Jane",
+      lastName: "Student",
+      bootstrapIoioTeamOnFreshSignup: true,
+      ioioSignup: true,
+    });
+
+    expect(db.userOrganization.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          organizationId: "ioio-team-1",
+          roles: [OrganizationRoles.SELF_SERVICE],
+        }),
+      })
+    );
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Jane Student",
+          organizationId: "ioio-team-1",
+          userId: USER_ID,
+        },
+      })
+    );
+    expect(db.user.update).toHaveBeenCalledWith({
+      where: { id: USER_ID },
+      data: {
+        lastSelectedOrganizationId: "ioio-team-1",
+        onboarded: true,
+      },
+    });
+    expect(ensureAssetIndexModeForRole).toHaveBeenCalledWith({
+      userId: USER_ID,
+      organizationId: "ioio-team-1",
+      role: OrganizationRoles.SELF_SERVICE,
+    });
+  });
+
+  it("provisions a Shelf team-member row alongside a new organization role", async () => {
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      firstName: "Staff",
+      lastName: "Member",
+      organizationId: ORGANIZATION_ID,
+      roles: [OrganizationRoles.ADMIN],
+    });
+
+    expect(db.teamMember.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "Staff Member",
+          organizationId: ORGANIZATION_ID,
+          userId: USER_ID,
+        },
+      })
+    );
+  });
+
+  it("marks the first IOIO account onboarded after Shelf creates its OWNER Team", async () => {
+    // @ts-expect-error missing vitest type
+    ensureInitialIoioTeamForUser.mockResolvedValueOnce({ id: "ioio-team-1" });
+
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+      firstName: "Jane",
+      lastName: "Staff",
+      bootstrapIoioTeamOnFreshSignup: true,
+      ioioSignup: true,
+    });
+
+    expect(db.user.update).toHaveBeenCalledWith({
+      where: { id: USER_ID },
+      data: { onboarded: true },
+    });
+    expect(db.organization.findMany).not.toHaveBeenCalled();
+    expect(db.userOrganization.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attempt initial-Team bootstrap for non-signup account creation", async () => {
+    await createUser({
+      email: USER_EMAIL,
+      userId: USER_ID,
+      username,
+    });
+
+    expect(ensureInitialIoioTeamForUser).not.toHaveBeenCalled();
   });
 
   it("returns the existing user when create throws a P2002 unique violation on id", async () => {

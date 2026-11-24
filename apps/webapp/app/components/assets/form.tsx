@@ -27,6 +27,8 @@ import { updateDynamicTitleAtom } from "~/atoms/dynamic-title-atom";
 import { fileErrorAtom, assetImageValidateFileAtom } from "~/atoms/file";
 import { useAutoFocus } from "~/hooks/use-auto-focus";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
+import { assetAdvancedSettingsSchema } from "~/modules/asset/advanced-settings";
+import { assetBorrowabilitySchema } from "~/modules/asset/borrowability";
 import { getPrimaryKit, isQuantityTracked } from "~/modules/asset/utils";
 import type {
   AssetEditLoaderData,
@@ -165,6 +167,12 @@ export const NewAssetFormSchema = z.object({
       .nonnegative("Min quantity cannot be negative")
       .nullable()
   ),
+  // IOIO advanced options are rendered by IoioAssetCreateForm, while this
+  // schema is the route action's parser. Keep the field optional so older or
+  // non-IOIO forms retain their existing behavior, but accept the selected
+  // value so the edit action can persist it.
+  returnHandling: assetAdvancedSettingsSchema.shape.returnHandling.optional(),
+  availableToBook: assetBorrowabilitySchema,
   consumptionType: z
     .nativeEnum(ConsumptionType, {
       errorMap: () => ({ message: "Please select a consumption type" }),
@@ -978,6 +986,7 @@ export const AssetForm = ({
                     sequentialId ? sequentialId.split("-")[1] || "0001" : "0001"
                   }
                   className="w-full text-center font-mono"
+                  inputClassName="ioio-identifier"
                   placeholder="0001"
                 />
               </div>
@@ -989,6 +998,14 @@ export const AssetForm = ({
         <FormRow rowLabel={"Main image"} className="pt-[10px]">
           <ImageFileField
             name="mainImage"
+            pasteImages
+            pasteUploadUrl={
+              asset?.id
+                ? `/api/inventory-image-upload?kind=asset&id=${encodeURIComponent(
+                    asset.id
+                  )}`
+                : undefined
+            }
             label="Main image"
             /*
               One picture for both tiers of the cascade. `clearMainImage` makes
@@ -1037,7 +1054,10 @@ export const AssetForm = ({
                 wide on upload.
               </>
             }
-            onFileChange={(file) => setHasPickedImage(Boolean(file))}
+            onFileChange={(file) => {
+              setHasPickedImage(Boolean(file));
+              if (file) setClearMainImage(false);
+            }}
             aboveInput={
               <>
                 <When

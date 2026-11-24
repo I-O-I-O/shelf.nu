@@ -1,4 +1,4 @@
-import { BarcodeType, OrganizationRoles } from "@prisma/client";
+import { BarcodeType } from "@prisma/client";
 import { DateTime } from "luxon";
 import type {
   ActionFunctionArgs,
@@ -6,13 +6,20 @@ import type {
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { redirect, data, useLoaderData, Outlet } from "react-router";
+import {
+  redirect,
+  data,
+  useLoaderData,
+  Outlet,
+  useRouteLoaderData,
+} from "react-router";
 import { z } from "zod";
 import { createSetReminderSchema } from "~/components/asset-reminder/set-or-edit-reminder-dialog";
 import ActionsDropdown from "~/components/assets/actions-dropdown";
 import { AssetImage } from "~/components/assets/asset-image/component";
 import { AssetStatusBadge } from "~/components/assets/asset-status-badge";
 import BookingActionsDropdown from "~/components/assets/booking-actions-dropdown";
+import { StaffAssetDetailShell } from "~/components/ioio-staff/staff-asset-detail-shell";
 
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -35,7 +42,13 @@ import {
   normalizeBarcodeValue,
 } from "~/modules/barcode/validation";
 import { computeBookingAssetRemainingToCheckOut } from "~/modules/booking/service.server";
+import {
+  archiveIoioItems,
+  getIoioAssetLifecycleRedirectTarget,
+  trashIoioItems,
+} from "~/modules/ioio-staff/archive.server";
 import { getTeamMembersForQuantityCustody } from "~/modules/team-member/service.server";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import assetCss from "~/styles/asset.css?url";
 
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
@@ -107,6 +120,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         action: PermissionAction.read,
       });
 
+    const lifecycleRedirect = await getIoioAssetLifecycleRedirectTarget({
+      organizationId,
+      assetId: id,
+    });
+    if (lifecycleRedirect) return redirect(lifecycleRedirect);
+
     const asset = await getAsset({
       id,
       organizationId,
@@ -115,6 +134,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       include: {
         // Model cover image for an asset with no image of its own
         ...ASSET_MODEL_IMAGE_SELECT,
+        assetModel: {
+          select: {
+            name: true,
+            ...ASSET_MODEL_IMAGE_SELECT.assetModel.select,
+          },
+        },
         // Explicit select rather than `include: { custodian: true }`: the
         // include returned every `Custody` scalar, `teamMemberId` among them —
         // a stable per-holder identifier that survives redaction (which only
@@ -282,7 +307,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       : { teamMembers: [], totalTeamMembers: 0 };
 
     const header: HeaderData = {
-      title: asset.title,
+      title: asset.assetModel?.name ?? asset.title,
     };
 
     /**
@@ -331,6 +356,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       z.object({
         intent: z.enum([
           "delete",
+          "archive",
+          "trash",
           "relink-qr-code",
           "set-reminder",
           "add-barcode",
@@ -340,6 +367,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const intent2ActionMap: { [K in typeof intent]: PermissionAction } = {
       delete: PermissionAction.delete,
+      archive: PermissionAction.delete,
+      trash: PermissionAction.delete,
       "relink-qr-code": PermissionAction.update,
       "set-reminder": PermissionAction.update,
       "add-barcode": PermissionAction.update,
@@ -353,6 +382,42 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
     });
 
     switch (intent) {
+      case "archive": {
+        await archiveIoioItems({
+          organizationId,
+          itemIds: [id],
+          archivedById: userId,
+        });
+        sendNotification({
+          title: "Asset archived",
+          message: "The item was archived and can be restored later.",
+          icon: { name: "success", variant: "success" },
+          senderId: userId,
+        });
+        return redirect("/assets");
+      }
+
+      case "trash": {
+        await trashIoioItems({
+          organizationId,
+          items: [{ itemType: "ASSET", itemId: id }],
+          trashedById: userId,
+        });
+        sendNotification({
+          title: "Item deleted",
+          message: "The item was moved to Trash and can be restored later.",
+          icon: { name: "success", variant: "success" },
+          senderId: userId,
+        });
+        const requestedReturnTo = formData.get("redirectTo");
+        const inventoryReturnTo =
+          typeof requestedReturnTo === "string" &&
+          /^\/assets(?:\?.*)?$/.test(requestedReturnTo)
+            ? safeRedirect(requestedReturnTo, "/assets")
+            : "/assets";
+        return redirect(inventoryReturnTo);
+      }
+
       case "delete": {
         const { mainImageUrl } = parseData(
           formData,
@@ -539,8 +604,18 @@ export const links: LinksFunction = () => [
 
 export default function AssetDetailsPage() {
   const { asset } = useLoaderData<typeof loader>();
-
   const { roles } = useUserRoleHelper();
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+
+  if (layoutData?.isIoioStaff) {
+    return (
+      <StaffAssetDetailShell bookAction={<BookingActionsDropdown />}>
+        <Outlet />
+      </StaffAssetDetailShell>
+    );
+  }
 
   const items = [
     { to: "overview", content: "Overview" },
@@ -567,6 +642,7 @@ export default function AssetDetailsPage() {
   return (
     <div className="relative">
       <Header
+        classNames="max-md:mx-0 max-md:[&_.header-buttons]:flex-wrap max-md:[&_h2]:[overflow-wrap:anywhere]"
         slots={{
           "left-of-title": (
             <AssetImage
@@ -587,14 +663,16 @@ export default function AssetDetailsPage() {
           ),
         }}
         subHeading={
-          <div className="flex gap-2">
-            <AssetStatusBadge
-              id={asset.id}
-              status={asset.status}
-              availableToBook={asset.availableToBook}
-              asset={asset}
-            />
-          </div>
+          asset.assetModelId ? null : (
+            <div className="flex gap-2">
+              <AssetStatusBadge
+                id={asset.id}
+                status={asset.status}
+                availableToBook={asset.availableToBook}
+                asset={asset}
+              />
+            </div>
+          )
         }
       >
         <When
@@ -608,7 +686,10 @@ export default function AssetDetailsPage() {
         </When>
         <BookingActionsDropdown />
       </Header>
-      <HorizontalTabs items={items} />
+      <HorizontalTabs
+        items={items}
+        className="max-md:mx-0 max-md:flex-wrap max-md:overflow-visible max-md:pl-0"
+      />
       <div>
         <Outlet />
       </div>

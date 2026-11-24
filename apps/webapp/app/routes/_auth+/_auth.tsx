@@ -1,7 +1,5 @@
 import { Link, useMatches, Outlet } from "react-router";
 import { ErrorContent } from "~/components/errors";
-import { ShelfSymbolLogo } from "~/components/marketing/logos";
-import SubHeading from "~/components/shared/sub-heading";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 
 export const loader = () => null;
@@ -18,37 +16,37 @@ export default function App() {
   const { title, subHeading } = data;
 
   return (
-    <main className="flex h-screen">
-      <div className="flex size-full flex-col items-center justify-center p-6 lg:p-10">
-        <div className=" mb-8 text-center">
-          <Link to="/" reloadDocument>
-            <ShelfSymbolLogo />
-          </Link>
+    <main className="min-h-screen bg-white text-gray-950">
+      <div className="mx-auto flex min-h-screen w-full max-w-md flex-col items-center justify-center px-6 py-10">
+        <Link
+          to="/"
+          reloadDocument
+          aria-label="IOIO Lab home"
+          className="rounded-3xl focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-2"
+        >
+          <div className="flex aspect-[316/129] w-72 max-w-full items-center justify-center overflow-hidden rounded-3xl bg-red-700 p-2 sm:w-80">
+            <img
+              src="/static/images/ioio-logo-white.png"
+              alt="IOIO Lab"
+              className="size-full object-contain"
+            />
+          </div>
+        </Link>
 
-          <h1>{title}</h1>
+        <div className="mt-9 w-full">
+          <h1 className="text-center text-2xl font-bold text-gray-950">
+            {title}
+          </h1>
           {subHeading && (
-            <SubHeading className="max-w-md">{subHeading}</SubHeading>
+            <p className="mt-2 text-center text-sm text-gray-500">
+              {subHeading}
+            </p>
           )}
-        </div>
-        <div className=" w-[360px]">
-          <Outlet />
+          <div className="mt-7">
+            <Outlet />
+          </div>
         </div>
       </div>
-      <aside className="relative hidden h-full flex-col items-end justify-end p-8 lg:flex lg:w-[700px] xl:w-[900px]">
-        {/* eslint-disable react/jsx-no-target-blank */}
-        <a
-          href="https://www.shelf.nu/?ref=shelf_app_auth_image"
-          className="relative z-20 mt-4 w-[150px] text-right text-sm text-white no-underline hover:text-white/80"
-          target="_blank"
-        >
-          shelf.nu
-        </a>
-        <img
-          className="absolute inset-0 size-full max-w-none object-cover"
-          src="/static/images/auth-cover.webp"
-          alt="John Singer Sargent - A Corner of the Library in Venice, 1904/1907 "
-        />
-      </aside>
     </main>
   );
 }

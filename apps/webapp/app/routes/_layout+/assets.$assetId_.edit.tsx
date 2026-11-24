@@ -1,6 +1,5 @@
 import { useMemo } from "react";
-import { TagUseFor } from "@prisma/client";
-import { useAtomValue } from "jotai";
+import { AssetType, TagUseFor } from "@prisma/client";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
@@ -8,22 +7,43 @@ import type {
 } from "react-router";
 import { data, redirect, useLoaderData } from "react-router";
 import { z } from "zod";
-import { dynamicTitleAtom } from "~/atoms/dynamic-title-atom";
-import { AssetForm, NewAssetFormSchema } from "~/components/assets/form";
+import {
+  IoioAssetCreateForm,
+  NewAssetFormSchema,
+} from "~/components/assets/ioio-asset-create-form";
 
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
-import { Button } from "~/components/shared/button";
+import { db } from "~/database/db.server";
 import {
+  getPhysicalUnitNumberFromTitle,
+  normalizePhysicalUnitNumber,
+} from "~/modules/asset/physical-unit";
+import {
+  bulkUpdateAssetCategory,
+  bulkUpdateAssetLocation,
   getAllEntriesForCreateAndEdit,
   getAsset,
+  convertIndividualProductToQuantityTracked,
+  convertQuantityTrackedAssetBulk,
+  ensureIndividualAssetModel,
   updateAsset,
   updateAssetMainImage,
 } from "~/modules/asset/service.server";
 import { getPrimaryLocation } from "~/modules/asset/utils";
-import { getAssetModels } from "~/modules/asset-model/service.server";
-
+import { getAssetIndexSettings } from "~/modules/asset-index-settings/service.server";
+import {
+  clearAssetModelImage,
+  getAssetModel,
+  getAssetModels,
+  updateAssetModel,
+  updateAssetModelImage,
+} from "~/modules/asset-model/service.server";
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
+import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import { updateKitLocation } from "~/modules/kit/service.server";
+import { createQr } from "~/modules/qr/service.server";
+
 import { buildTagsSet } from "~/modules/tag/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { extractBarcodesFromFormData } from "~/utils/barcode-form-data.server";
@@ -32,7 +52,7 @@ import {
   mergedSchema,
 } from "~/utils/custom-fields";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import {
   assertIsPost,
   payload,
@@ -43,12 +63,14 @@ import {
   parseData,
   safeRedirect,
 } from "~/utils/http.server";
+import { Logger } from "~/utils/logger";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
 import { slugify } from "~/utils/slugify";
+import { removeStorageImageObject } from "~/utils/storage.server";
 
 export type AssetEditLoaderData = typeof loader;
 
@@ -60,6 +82,8 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
   });
 
   try {
+    const productGroupMode =
+      new URL(request.url).searchParams.get("productGroup") === "1";
     const { organizationId, currentOrganization, userOrganizations } =
       await requirePermission({
         userId,
@@ -80,6 +104,7 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
               select: {
                 id: true,
                 name: true,
+                locationId: true,
               },
             },
           },
@@ -87,7 +112,10 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         // Pull the primary placement so the edit form can pre-fill the
         // location picker.
         assetLocations: {
-          select: { location: { select: { id: true } } },
+          select: {
+            locationId: true,
+            location: { select: { id: true, name: true } },
+          },
         },
         barcodes: {
           select: {
@@ -96,10 +124,104 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
             value: true,
           },
         },
+        qrCodes: {
+          take: 1,
+          select: { id: true, createdAt: true },
+        },
+        assetModel: { select: { id: true, name: true } },
       },
       userOrganizations,
       request,
     });
+
+    const isPhysicalUnit =
+      asset.type === AssetType.INDIVIDUAL && Boolean(asset.assetModelId);
+
+    // Physical-unit availability and label actions live on the inventory
+    // detail page. The Edit route should open the existing product-level
+    // Shelf editor for model-linked units.
+    if (isPhysicalUnit && !productGroupMode) {
+      return redirect(`/assets/${encodeURIComponent(id)}/edit?productGroup=1`);
+    }
+
+    if (
+      productGroupMode &&
+      (!asset.assetModelId || asset.type !== "INDIVIDUAL")
+    ) {
+      return redirect(`/assets/${encodeURIComponent(id)}/edit`);
+    }
+
+    const archivedAssetIds = asset.assetModelId
+      ? await getIoioArchivedItemIds({
+          organizationId,
+          itemType: "ASSET",
+        })
+      : [];
+    const productGroup =
+      productGroupMode && asset.assetModelId
+        ? await getAssetModel({
+            id: asset.assetModelId,
+            organizationId,
+          })
+        : null;
+    const physicalUnitRecords = asset.assetModelId
+      ? await db.asset.findMany({
+          where: {
+            organizationId,
+            assetModelId: asset.assetModelId,
+            type: "INDIVIDUAL",
+            id: { notIn: archivedAssetIds },
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            availableToBook: true,
+            assetLocations: { select: { locationId: true } },
+            qrCodes: {
+              take: 1,
+              select: { id: true, createdAt: true },
+            },
+          },
+        })
+      : asset.type === "INDIVIDUAL"
+      ? [
+          {
+            id: asset.id,
+            title: asset.title,
+            status: asset.status,
+            availableToBook: asset.availableToBook,
+            assetLocations: asset.assetLocations.map(({ locationId }) => ({
+              locationId,
+            })),
+            qrCodes: asset.qrCodes?.slice(0, 1) ?? [],
+          },
+        ]
+      : [];
+    const physicalUnits = physicalUnitRecords.map((unit) => ({
+      id: unit.id,
+      title: unit.title,
+      status: unit.status,
+      availableToBook: unit.availableToBook,
+      assetLocations: unit.assetLocations,
+      qrId: unit.qrCodes[0]?.id ?? null,
+      qrCreatedAt: unit.qrCodes[0]?.createdAt ?? null,
+    }));
+
+    const productLocationIds = productGroup
+      ? Array.from(
+          new Set(
+            physicalUnits.map(
+              (unit) => unit.assetLocations[0]?.locationId ?? null
+            )
+          )
+        )
+      : [];
+    const productLocationIsMixed = productLocationIds.length > 1;
+    const productLocationId = productLocationIsMixed
+      ? null
+      : productLocationIds[0] ?? null;
 
     const [
       { categories, totalCategories, tags, locations, totalLocations },
@@ -110,9 +232,15 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
         organizationId,
         defaults: {
           category: asset.categoryId,
-          location: getPrimaryLocation(asset)?.id ?? null,
+          location: productGroup
+            ? productLocationId
+            : getPrimaryLocation(asset)?.id ?? null,
         },
         tagUseFor: TagUseFor.ASSET,
+        // Edit uses Shelf's searchable LocationSelect, so seed only its normal
+        // selected row + first page. Searches must read current DB records
+        // instead of keeping the entire location tree in client state.
+        includeAllLocations: false,
       }),
       getAssetModels({ organizationId, page: 1, perPage: 100 }),
     ]);
@@ -125,12 +253,15 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
     });
 
     const header: HeaderData = {
-      title: `Edit | ${asset.title}`,
+      title: `Edit | ${productGroup?.name ?? asset.title}`,
       subHeading: asset.id,
     };
 
     return payload({
       asset,
+      productGroup,
+      productLocationId,
+      productLocationIsMixed,
       header,
       categories,
       totalCategories,
@@ -140,9 +271,12 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       totalLocations,
       assetModels,
       totalAssetModels,
+      physicalUnits,
       currency: currentOrganization?.currency,
       customFields,
-      referer: getRefererPath(request),
+      // Inventory edits should always have a useful way back, including when
+      // the form was opened directly or in a new tab without a Referer.
+      referer: getRefererPath(request) ?? "/assets",
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
@@ -168,7 +302,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
   try {
     assertIsPost(request);
 
-    const { organizationId, canUseBarcodes } = await requirePermission({
+    const { organizationId, canUseBarcodes, role } = await requirePermission({
       userId,
       request,
       entity: PermissionEntity.asset,
@@ -177,6 +311,201 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
 
     const clonedRequest = request.clone();
     const formData = await clonedRequest.formData();
+
+    if (formData.get("intent") === "ensure-individual-model") {
+      const assetModelId = await ensureIndividualAssetModel({
+        id,
+        organizationId,
+        userId,
+      });
+
+      return payload({ assetModelId });
+    }
+
+    if (
+      formData.get("intent") === "update-physical-unit-number" ||
+      formData.get("intent") === "ensure-physical-unit-qr"
+    ) {
+      const unitId = String(formData.get("unitId") ?? "");
+      if (formData.get("intent") === "update-physical-unit-number") {
+        await requirePermission({
+          userId,
+          request,
+          entity: PermissionEntity.assetModel,
+          action: PermissionAction.update,
+        });
+      }
+      const parent = await db.asset.findFirst({
+        where: { id, organizationId },
+        select: { assetModelId: true, type: true },
+      });
+      const unit = unitId
+        ? await db.asset.findFirst({
+            where: {
+              id: unitId,
+              organizationId,
+              type: AssetType.INDIVIDUAL,
+              assetModelId: parent?.assetModelId ?? "__missing__",
+            },
+            select: {
+              id: true,
+              title: true,
+              assetModelId: true,
+              qrCodes: { take: 1, select: { id: true } },
+            },
+          })
+        : null;
+      const archivedUnit = unitId
+        ? await db.ioioArchivedItem.findFirst({
+            where: {
+              organizationId,
+              itemType: "ASSET",
+              itemId: unitId,
+              restoredAt: null,
+            },
+            select: { itemId: true },
+          })
+        : null;
+
+      if (
+        !parent?.assetModelId ||
+        parent.type !== AssetType.INDIVIDUAL ||
+        !unit ||
+        archivedUnit
+      ) {
+        throw new ShelfError({
+          cause: null,
+          title: "Physical unit not found",
+          message: "This physical unit is no longer part of the product.",
+          label: "Assets",
+          status: 404,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (formData.get("intent") === "update-physical-unit-number") {
+        const normalizedUnitNumber = normalizePhysicalUnitNumber(
+          String(formData.get("unitNumber") ?? "")
+        );
+        if (!normalizedUnitNumber) {
+          throw new ShelfError({
+            cause: null,
+            title: "Invalid unit number",
+            message: "Enter a unit number such as 001 or #001.",
+            label: "Assets",
+            status: 400,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const siblings = await db.asset.findMany({
+          where: {
+            organizationId,
+            assetModelId: parent.assetModelId,
+            type: AssetType.INDIVIDUAL,
+            NOT: { id: unit.id },
+          },
+          select: { id: true, title: true },
+        });
+        const duplicate = siblings.find(
+          (sibling) =>
+            getPhysicalUnitNumberFromTitle(sibling.title) ===
+            normalizedUnitNumber
+        );
+        if (duplicate) {
+          throw new ShelfError({
+            cause: null,
+            title: "Unit number already exists",
+            message: `Unit #${normalizedUnitNumber} already exists for this product.`,
+            label: "Assets",
+            status: 409,
+            shouldBeCaptured: false,
+          });
+        }
+
+        const productModel = await db.assetModel.findFirst({
+          where: { id: parent.assetModelId, organizationId },
+          select: { name: true },
+        });
+        if (!productModel) {
+          throw new ShelfError({
+            cause: null,
+            message: "The product model could not be found.",
+            label: "Assets",
+            status: 404,
+            shouldBeCaptured: false,
+          });
+        }
+
+        await db.asset.update({
+          where: { id: unit.id, organizationId },
+          data: { title: `${productModel.name} #${normalizedUnitNumber}` },
+        });
+        return payload({
+          success: true,
+          intent: "update-physical-unit-number",
+          unitId: unit.id,
+        });
+      }
+
+      const qrId =
+        unit.qrCodes[0]?.id ??
+        (
+          await createQr({
+            userId,
+            assetId: unit.id,
+            organizationId,
+          })
+        ).id;
+      return payload({
+        success: true,
+        intent: "ensure-physical-unit-qr",
+        unitId: unit.id,
+        qrId,
+      });
+    }
+
+    if (formData.get("intent") === "convert-product-to-quantity") {
+      await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.assetModel,
+        action: PermissionAction.update,
+      });
+      const conversion = await convertIndividualProductToQuantityTracked({
+        id,
+        organizationId,
+        userId,
+      });
+      sendNotification({
+        title: "Tracking changed",
+        message: `The product is now tracked as one Quantity item with ${conversion.quantity} units.`,
+        icon: { name: "success", variant: "success" },
+        senderId: userId,
+      });
+      return payload(conversion);
+    }
+
+    if (formData.get("intent") === "convert-all-units") {
+      const conversion = await convertQuantityTrackedAssetBulk({
+        id,
+        organizationId,
+        userId,
+      });
+
+      sendNotification({
+        title: "Quantity converted",
+        message: `${conversion.convertedCount} individual assets are now tracked separately.`,
+        icon: { name: "success", variant: "success" },
+        senderId: userId,
+      });
+
+      return payload({
+        convertedAssetIds: conversion.createdAssetIds,
+        convertedCount: conversion.convertedCount,
+        remainingQuantity: conversion.remainingQuantity,
+      });
+    }
 
     const searchParams = getCurrentSearchParams(request);
 
@@ -202,6 +531,155 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       additionalData: { userId, organizationId },
     });
 
+    if (
+      formData.get("productGroup") === "1" ||
+      new URL(request.url).searchParams.get("productGroup") === "1"
+    ) {
+      await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.assetModel,
+        action: PermissionAction.update,
+      });
+
+      const representative = await db.asset.findFirst({
+        where: { id, organizationId },
+        select: { assetModelId: true, type: true },
+      });
+      if (
+        !representative?.assetModelId ||
+        representative.type !== "INDIVIDUAL"
+      ) {
+        throw new ShelfError({
+          cause: null,
+          message: "This item is no longer an individually tracked product.",
+          label: "Assets",
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const productModel = await getAssetModel({
+        id: representative.assetModelId,
+        organizationId,
+      });
+      const archivedAssetIds = await getIoioArchivedItemIds({
+        organizationId,
+        itemType: "ASSET",
+      });
+      const productUnits = await db.asset.findMany({
+        where: {
+          organizationId,
+          assetModelId: productModel.id,
+          type: "INDIVIDUAL",
+          id: { notIn: archivedAssetIds },
+        },
+        select: { id: true, title: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      });
+
+      if (productUnits.length === 0) {
+        throw new ShelfError({
+          cause: null,
+          message: "This product has no active physical units to edit.",
+          label: "Assets",
+          status: 409,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const settings = await getAssetIndexSettings({
+        userId,
+        organizationId,
+        canUseBarcodes,
+        role,
+      });
+      const categoryId =
+        parsedData.category && parsedData.category !== "uncategorized"
+          ? parsedData.category
+          : null;
+      const locationChangeSubmitted = formData.has("newLocationId");
+
+      if (
+        locationChangeSubmitted &&
+        (parsedData.newLocationId ?? "") !==
+          (parsedData.currentLocationId ?? "")
+      ) {
+        await bulkUpdateAssetLocation({
+          userId,
+          assetIds: productUnits.map((unit) => unit.id),
+          organizationId,
+          newLocationId: parsedData.newLocationId || null,
+          currentSearchParams: null,
+          settings,
+          strict: true,
+        });
+      }
+
+      await bulkUpdateAssetCategory({
+        userId,
+        assetIds: productUnits.map((unit) => unit.id),
+        organizationId,
+        categoryId,
+        currentSearchParams: null,
+        settings,
+      });
+
+      await updateAssetModel({
+        id: productModel.id,
+        organizationId,
+        name: parsedData.title,
+        description: parsedData.description,
+        defaultCategoryId: categoryId,
+      });
+
+      const uploadedProductImage = await updateAssetModelImage({
+        request,
+        assetModelId: productModel.id,
+        organizationId,
+      });
+      if (formData.get("clearMainImage") === "true" && !uploadedProductImage) {
+        await clearAssetModelImage({
+          assetModelId: productModel.id,
+          organizationId,
+        });
+      }
+
+      await Promise.all(
+        productUnits.map((unit) => {
+          const unitTitle = replaceProductNamePrefix({
+            title: unit.title,
+            previousName: productModel.name,
+            nextName: parsedData.title,
+          });
+          return updateAsset({
+            id: unit.id,
+            ...(unitTitle ? { title: unitTitle } : {}),
+            availableToBook: parsedData.availableToBook,
+            minQuantity: parsedData.minQuantity,
+            requiresBorrowApproval: parsedData.requiresBorrowApproval,
+            requiresStaffPreparation: parsedData.requiresStaffPreparation,
+            requiresReturnPhoto: parsedData.requiresReturnPhoto,
+            maxBorrowDays: parsedData.maxBorrowDays,
+            extensionBorrowDays: parsedData.extensionBorrowDays,
+            returnHandling: parsedData.returnHandling,
+            userId,
+            organizationId,
+            request,
+          });
+        })
+      );
+
+      sendNotification({
+        title: "Inventory product updated",
+        message: "The product and its active physical units have been updated.",
+        icon: { name: "success", variant: "success" },
+        senderId: userId,
+      });
+
+      return redirect(safeRedirect(parsedData.redirectTo, "/assets"));
+    }
+
     const customFieldsValues = extractCustomFieldValuesFromPayload({
       payload: parsedData,
       customFieldDef: customFields,
@@ -212,6 +690,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       assetId: id,
       userId: authSession.userId,
       organizationId,
+      allowEmptyFile: true,
     });
 
     /**
@@ -247,20 +726,63 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      availableToBook,
+      requiresBorrowApproval,
+      requiresStaffPreparation,
+      requiresReturnPhoto,
+      maxBorrowDays,
+      extensionBorrowDays,
+      returnHandling,
+      type,
     } = parsedData;
 
     /** This checks if tags are passed and build the  */
     const tags = buildTagsSet(parsedData.tags);
 
-    /**
-     * Barcodes are only read when the workspace holds the add-on. Without it
-     * the form has no barcode section, so `undefined` leaves the asset's
-     * existing barcodes untouched: `updateAsset` only reconciles a list it is
-     * given, and an empty list would read as "remove every barcode".
-     */
+    /** Extract barcode data from form */
     const barcodes = canUseBarcodes
       ? extractBarcodesFromFormData(formData)
       : undefined;
+
+    /**
+     * A kit-linked asset cannot receive a second manual placement when it is
+     * individually tracked. In that case the location picker edits the
+     * parent kit location, which already cascades the native Shelf placement
+     * to its contents. Keep the asset update itself location-neutral so the
+     * existing asset service remains the authority for placement writes.
+     */
+    let assetLocationId = newLocationId;
+    let assetCurrentLocationId = currentLocationId;
+    const assetWithKit = await getAsset({
+      id,
+      organizationId,
+      request,
+      include: {
+        assetKits: {
+          take: 1,
+          select: {
+            kit: { select: { id: true, locationId: true } },
+          },
+        },
+      },
+    });
+    const parentKit = assetWithKit.assetKits[0]?.kit;
+    if (parentKit) {
+      const requestedLocationId = newLocationId || null;
+      if (requestedLocationId !== parentKit.locationId) {
+        await updateKitLocation({
+          id: parentKit.id,
+          organizationId,
+          currentLocationId: parentKit.locationId,
+          newLocationId: requestedLocationId,
+          userId,
+        });
+      }
+
+      const resolvedLocationId = requestedLocationId ?? "";
+      assetLocationId = resolvedLocationId;
+      assetCurrentLocationId = resolvedLocationId;
+    }
 
     await updateAsset({
       id,
@@ -269,8 +791,8 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       categoryId: category ? category : "uncategorized",
       assetModelId: assetModelId || null,
       tags,
-      newLocationId,
-      currentLocationId,
+      newLocationId: assetLocationId,
+      currentLocationId: assetCurrentLocationId,
       userId: authSession.userId,
       customFieldsValues,
       barcodes,
@@ -284,13 +806,41 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      availableToBook,
+      requiresBorrowApproval,
+      requiresStaffPreparation,
+      requiresReturnPhoto,
+      maxBorrowDays,
+      extensionBorrowDays,
+      returnHandling,
+      type,
       // Nulled inside updateAsset's transaction — see `shouldClearImage`.
       ...(shouldClearImage && {
         mainImage: null,
         mainImageExpiration: null,
         thumbnailImage: null,
+        mainImageStoragePath: null,
+        thumbnailImageStoragePath: null,
       }),
     });
+
+    if (shouldClearImage) {
+      await Promise.all(
+        [
+          assetWithKit.mainImageStoragePath,
+          assetWithKit.thumbnailImageStoragePath,
+        ]
+          .filter((path): path is string => !!path)
+          .map((objectPath) =>
+            removeStorageImageObject({ bucketName: "assets", objectPath })
+          )
+      ).catch((cleanupCause: unknown) => {
+        Logger.dev("[IOIO IMAGE] cleared asset image cleanup failed", {
+          assetId: id,
+          cleanupCause,
+        });
+      });
+    }
 
     sendNotification({
       title: "Asset updated",
@@ -303,64 +853,102 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       return redirect(`/assets/new`);
     }
 
-    // If redirectTo is provided, redirect back to previous page
-    // Otherwise stay on current page (e.g., when opened in new tab)
-    if (redirectTo) {
-      return redirect(safeRedirect(redirectTo, `/assets/${id}`));
-    }
-
-    return payload({ success: true });
+    // Return to the originating Inventory view when available; direct/new-tab
+    // edits fall back to the Inventory list instead of the generic asset page.
+    return redirect(safeRedirect(redirectTo, "/assets"));
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
     return data(error(reason), { status: reason.status });
   }
 }
 
+function replaceProductNamePrefix({
+  title,
+  previousName,
+  nextName,
+}: {
+  title: string;
+  previousName: string;
+  nextName: string;
+}) {
+  if (previousName === nextName) return undefined;
+  if (!title.toLocaleLowerCase().startsWith(previousName.toLocaleLowerCase())) {
+    return undefined;
+  }
+  return `${nextName}${title.slice(previousName.length)}`;
+}
+
 export default function AssetEditPage() {
-  const title = useAtomValue(dynamicTitleAtom);
-  const { asset, referer } = useLoaderData<typeof loader>();
+  const {
+    asset,
+    physicalUnits,
+    productGroup,
+    productLocationId,
+    productLocationIsMixed,
+    referer,
+  } = useLoaderData<typeof loader>();
   const tags = useMemo(
     () => asset.tags?.map((tag) => ({ label: tag.name, value: tag.id })) || [],
     [asset.tags]
   );
 
+  const generalTitle = productGroup?.name ?? asset.title;
+
   return (
     <div className="relative">
-      <Header
-        title={
-          <Button to={`/assets/${asset.id}`} variant={"inherit"}>
-            {title !== "" ? title : asset.title}
-          </Button>
+      <Header title="Edit general item" hideQuickFind />
+      <IoioAssetCreateForm
+        id={asset.id}
+        sequentialId={asset.sequentialId}
+        mainImage={productGroup?.image ?? asset.mainImage}
+        thumbnailImage={productGroup?.thumbnailImage ?? asset.thumbnailImage}
+        mainImageExpiration={
+          !productGroup && asset.mainImageExpiration
+            ? new Date(asset.mainImageExpiration)
+            : null
         }
+        title={generalTitle}
+        categoryId={asset.categoryId}
+        assetModelId={asset.assetModelId}
+        locationId={
+          productGroup
+            ? productLocationId
+            : getPrimaryLocation(asset)?.id ?? null
+        }
+        description={productGroup?.description ?? asset.description}
+        valuation={asset.valuation}
+        type={asset.type}
+        quantity={asset.quantity}
+        minQuantity={asset.minQuantity}
+        consumptionType={asset.consumptionType}
+        unitOfMeasure={asset.unitOfMeasure}
+        availableToBook={
+          productGroup
+            ? physicalUnits.some((unit) => unit.availableToBook)
+            : asset.availableToBook
+        }
+        requiresBorrowApproval={asset.requiresBorrowApproval}
+        requiresStaffPreparation={asset.requiresStaffPreparation}
+        requiresReturnPhoto={asset.requiresReturnPhoto}
+        maxBorrowDays={asset.maxBorrowDays}
+        extensionBorrowDays={asset.extensionBorrowDays}
+        returnHandling={asset.returnHandling}
+        tags={tags}
+        barcodes={asset.barcodes}
+        preferredBarcodeId={asset.preferredBarcodeId}
+        showAssetModel={false}
+        physicalUnits={physicalUnits}
+        productGroup={
+          productGroup
+            ? {
+                name: productGroup.name,
+                locationIsMixed: productLocationIsMixed,
+                hasImage: Boolean(productGroup.image),
+              }
+            : undefined
+        }
+        referer={referer}
       />
-      <div className=" items-top flex justify-between">
-        <AssetForm
-          id={asset.id}
-          sequentialId={asset.sequentialId}
-          mainImage={asset.mainImage}
-          thumbnailImage={asset.thumbnailImage}
-          mainImageExpiration={
-            asset.mainImageExpiration
-              ? new Date(asset.mainImageExpiration)
-              : null
-          }
-          title={asset.title}
-          categoryId={asset.categoryId}
-          assetModelId={asset.assetModelId}
-          locationId={getPrimaryLocation(asset)?.id ?? null}
-          description={asset.description}
-          valuation={asset.valuation}
-          type={asset.type}
-          quantity={asset.quantity}
-          minQuantity={asset.minQuantity}
-          consumptionType={asset.consumptionType}
-          unitOfMeasure={asset.unitOfMeasure}
-          tags={tags}
-          barcodes={asset.barcodes}
-          preferredBarcodeId={asset.preferredBarcodeId}
-          referer={referer}
-        />
-      </div>
     </div>
   );
 }

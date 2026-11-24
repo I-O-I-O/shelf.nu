@@ -10,6 +10,7 @@ import {
   SHOW_HOW_DID_YOU_FIND_US,
 } from "~/utils/env";
 import { Config } from "./types";
+import { IOIO_FAVICON_PATH } from "./ioio-brand";
 
 export const config: Config = {
   sendOnboardingEmail: SEND_ONBOARDING_EMAIL || false,
@@ -23,7 +24,7 @@ export const config: Config = {
     fullLogo: "/static/images/logo-full-color(x2).png",
     symbol: "/static/images/shelf-symbol.png",
   },
-  faviconPath: "/static/favicon.ico",
+  faviconPath: IOIO_FAVICON_PATH,
   emailPrimaryColor: "#EF6820",
   showHowDidYouFindUs: SHOW_HOW_DID_YOU_FIND_US || false,
   collectBusinessIntel:

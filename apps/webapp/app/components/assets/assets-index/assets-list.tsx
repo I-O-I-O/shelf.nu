@@ -3,10 +3,12 @@ import { useEffect, useMemo } from "react";
 import { m } from "framer-motion";
 import { useSetAtom } from "jotai";
 import { Package } from "lucide-react";
-import { useFetcher, useFetchers, useLoaderData } from "react-router";
+import { useFetchers, useLoaderData } from "react-router";
 import { setDisabledBulkItemsAtom } from "~/atoms/list";
 import { List, type ListProps } from "~/components/list";
+import { BulkListCardCheckbox } from "~/components/list/bulk-actions/bulk-list-card-checkbox";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
+import type { ListItemData } from "~/components/list/list-item";
 import { LocationBadge } from "~/components/location/location-badge";
 import { Button } from "~/components/shared/button";
 import { EmptyTableValue } from "~/components/shared/empty-table-value";
@@ -26,9 +28,7 @@ import { AssetIndexSettingsProvider } from "~/context/asset-index-settings-conte
 import { useAssetIndexColumns } from "~/hooks/use-asset-index-columns";
 import { useAssetIndexView } from "~/hooks/use-asset-index-view";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
-import { useDisabled } from "~/hooks/use-disabled";
 import { useIsUserAssetsPage } from "~/hooks/use-is-user-assets-page";
-import { useViewportHeight } from "~/hooks/use-viewport-height";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import type { AssetsFromViewItem } from "~/modules/asset/types";
 import { getPrimaryLocation, isQuantityTracked } from "~/modules/asset/utils";
@@ -50,17 +50,20 @@ import BulkActionsDropdown from "../bulk-actions-dropdown";
 import { AdvancedAssetRow } from "./advanced-asset-row";
 import { AdvancedTableHeader } from "./advanced-table-header";
 import { AssetIndexPagination } from "./asset-index-pagination";
+import { AssetModelAssetsSheet } from "./asset-model-assets-sheet";
 import { AssetModelRow } from "./asset-model-row";
 import { AssetModelSortHeader } from "./asset-model-sort-header";
 import AssetQuickActions from "./asset-quick-actions";
 import { AssetIndexFilters } from "./filters";
 import { ListItemTagsColumn } from "./list-item-tags-column";
+import { MobileAssetCard } from "./mobile-asset-card";
 import BookSelectedModelsDropdown from "./model-booking/book-selected-models-dropdown";
 import { getUnselectableModelRows } from "./model-booking/unselectable-model-rows";
+import { useAssetAvailabilityData } from "./use-asset-availability-data";
 import AvailabilityCalendar from "../../availability-calendar/availability-calendar";
 import { ResourceTitleLink } from "../../availability-calendar/resource-title-link";
+import ImageWithPreview from "../../image-with-preview/image-with-preview";
 import { CategoryBadge } from "../category-badge";
-import { useAssetAvailabilityData } from "./use-asset-availability-data";
 
 /**
  * The model view's bulk-action toolbar, built once.
@@ -112,7 +115,6 @@ export const AssetsList = ({
   // Memoize so the object reference stays stable across re-renders,
   // allowing React.memo on AdvancedAssetRow to work effectively.
   const advancedExtraProps = useMemo(() => ({ columns }), [columns]);
-  const { isMd } = useViewportHeight();
   const isUserPage = useIsUserAssetsPage();
   const { isBase, roles } = useUserRoleHelper();
   const fetchers = useFetchers();
@@ -284,43 +286,37 @@ export const AssetsList = ({
         </m.div>
       </When>
 
-      {!isMd && !modeIsSimple ? (
-        <AdvancedModeMobileFallback />
-      ) : (
-        <ListContentWrapper className="md:mt-0">
-          <AssetIndexFilters
-            disableTeamMemberFilter={disableTeamMemberFilter}
-          />
-          {isModelView ? (
-            <>
-              <div className="-mb-2 flex flex-col gap-1 px-1 text-sm text-gray-500">
-                <div className="flex items-center gap-1">
-                  <span>
-                    {`${totalRollupAssets} ${
-                      totalRollupAssets === 1 ? "asset" : "assets"
-                    } match your filters`}
-                  </span>
-                  {/* The asset count here is deliberately smaller than the list
+      <ListContentWrapper className="md:mt-0">
+        <AssetIndexFilters disableTeamMemberFilter={disableTeamMemberFilter} />
+        {isModelView ? (
+          <>
+            <div className="-mb-2 flex flex-col gap-1 px-1 text-sm text-gray-500">
+              <div className="flex items-center gap-1">
+                <span>
+                  {`${totalRollupAssets} ${
+                    totalRollupAssets === 1 ? "asset" : "assets"
+                  } match your filters`}
+                </span>
+                {/* The asset count here is deliberately smaller than the list
                       view's for the same filters: models are an INDIVIDUAL-only
                       concept, so quantity-tracked assets are not part of this
                       rollup. Stated rather than left for the reader to discover
                       as apparent data loss when switching views. */}
-                  <InfoTooltip
-                    iconClassName="size-4"
-                    content={
-                      <>
-                        <h6>Asset models</h6>
-                        <p>
-                          Counts cover the assets matching your current filters.
-                          Asset models apply to individually-tracked assets
-                          only, so quantity-tracked assets are not included
-                          here.
-                        </p>
-                      </>
-                    }
-                  />
-                </div>
-                {/* Reads the workspace's own model count, not the rollup's.
+                <InfoTooltip
+                  iconClassName="size-4"
+                  content={
+                    <>
+                      <h6>Asset models</h6>
+                      <p>
+                        Counts cover the assets matching your current filters.
+                        Asset models apply to individually-tracked assets only,
+                        so quantity-tracked assets are not included here.
+                      </p>
+                    </>
+                  }
+                />
+              </div>
+              {/* Reads the workspace's own model count, not the rollup's.
                     `totalAssetModels` counts AssetModel rows in the
                     organization and no filter narrows it, so this says "this
                     workspace has no models" and can never be mistaken for "no
@@ -335,181 +331,239 @@ export const AssetsList = ({
                     action. A list with rows is the common case: a workspace with
                     unassigned individually-tracked assets renders the "No
                     model" row, so no empty state mounts to carry the message. */}
-                <When
-                  truthy={totalAssetModels === 0 && modelRollupItems.length > 0}
-                >
-                  <p>
-                    No asset models in this workspace yet.{" "}
-                    {ASSET_MODEL_EXPLAINER}{" "}
-                    {canCreateAssetModels ? (
-                      <Button
-                        to="/settings/asset-models/new"
-                        variant="link"
-                        className="font-normal"
-                      >
-                        Create an asset model
-                      </Button>
-                    ) : (
-                      <span>
-                        A workspace administrator creates them in settings.
-                      </span>
-                    )}
-                  </p>
-                </When>
-              </div>
-              {/* Freezing is switched off here: it pins the header's name
+              <When
+                truthy={totalAssetModels === 0 && modelRollupItems.length > 0}
+              >
+                <p>
+                  No asset models in this workspace yet. {ASSET_MODEL_EXPLAINER}{" "}
+                  {canCreateAssetModels ? (
+                    <Button
+                      to="/settings/asset-models/new"
+                      variant="link"
+                      className="font-normal"
+                    >
+                      Create an asset model
+                    </Button>
+                  ) : (
+                    <span>
+                      A workspace administrator creates them in settings.
+                    </span>
+                  )}
+                </p>
+              </When>
+            </div>
+            {/* Freezing is switched off here: it pins the header's name
                   cell with `sticky left-[48px]`, and `AssetModelRow` applies no
                   matching class to the name cell beneath it — so the pinned
                   header would slide over unpinned body cells. */}
-              <AssetIndexSettingsProvider freezeColumn={false}>
-                <List
-                  title="Asset models"
-                  // The ONLY model count on this screen. `totalItems` counts
-                  // rendered rows, which includes the "No model" bucket, and a
-                  // bucket is not a model; `totalModels` excludes it. Two
-                  // counts of the same thing disagreeing is worse than either.
-                  countLabelIsTotal
-                  countLabel={() =>
-                    `${totalModelsShown} ${
-                      totalModelsShown === 1 ? "asset model" : "asset models"
-                    }`
-                  }
-                  ItemComponent={AssetModelRow}
-                  customPagination={<AssetIndexPagination />}
-                  // The name header is drawn here rather than by `ListHeader`,
-                  // for two reasons that both only hold on this view: it has to
-                  // be a sort control, and `ListHeader`'s own name cell carries
-                  // the advanced-mode options popover, whose "Freeze column"
-                  // and "Hide asset image" both configure the asset list and
-                  // neither reaches a model row.
-                  hideFirstHeaderColumn
-                  headerChildren={modelHeaderChildren}
-                  items={modelRollupItems}
-                  extraItemComponentProps={modelExtraProps}
-                  bulkActions={
-                    canBookSelectedModels ? MODEL_BULK_ACTIONS : undefined
-                  }
-                  // "Select all N entries" has no meaning here: both booking
-                  // endpoints take an explicit list of models with a quantity
-                  // each, so a marker standing for "every model matching the
-                  // filters" would reserve only the page in front of the user
-                  // while the header claimed the whole set.
-                  disableSelectAllItems
-                  // The zero-data slot, not the filtered one. `EmptyState`
-                  // renders its own "nothing matched" copy whenever a search or
-                  // a filter is set and reaches this content only when none is,
-                  // so copy about filters here is shown exactly when no filter
-                  // was applied.
-                  //
-                  // Reaching it at all takes an empty rollup with no filters
-                  // active: no model rows, and nothing in the "No model" row
-                  // either. The call to action is the model, because that is the
-                  // part a reader can act on from here.
-                  customEmptyStateContent={{
-                    title: "No asset models yet",
-                    text: ASSET_MODEL_EXPLAINER,
-                    ...(canCreateAssetModels
-                      ? {
-                          newButtonRoute: "/settings/asset-models/new",
-                          newButtonContent: "New asset model",
-                          // `EmptyState` names its default button after the
-                          // loader's model, which is the asset. Spread last, so
-                          // this is the accessible name that survives.
-                          buttonProps: { "aria-label": "New asset model" },
-                        }
-                      : {}),
-                  }}
-                />
-              </AssetIndexSettingsProvider>
-            </>
-          ) : isAvailabilityView && shouldShowAvailabilityView ? (
-            <>
-              <AvailabilityCalendar
-                resources={resources}
-                events={events}
-                resourceLabelContent={({ resource }) => {
-                  const displayCode = currentOrganization
-                    ? resolveDisplayCode({
-                        entity: {
-                          sequentialId: resource.extendedProps?.sequentialId,
-                          preferredBarcodeId:
-                            resource.extendedProps?.preferredBarcodeId,
-                          qrCodes: resource.extendedProps?.qrCodes,
-                          barcodes: resource.extendedProps?.barcodes,
-                        },
-                        organization: currentOrganization,
-                        entityKind: "asset",
-                      })
-                    : null;
-                  return (
-                    <div className="flex items-center gap-2 px-2">
-                      <AssetImage
-                        asset={{
-                          id: resource.id,
-                          mainImage: resource.extendedProps?.mainImage,
-                          thumbnailImage:
-                            resource.extendedProps?.thumbnailImage,
-                          mainImageExpiration:
-                            resource.extendedProps?.mainImageExpiration,
-                          assetModel:
-                            resource.extendedProps?.assetModel ?? null,
-                        }}
-                        alt={`Image of ${resource.title}`}
-                        className="size-14 shrink-0 rounded border object-cover"
-                        withPreview
-                      />
-                      <div className="flex min-w-0 flex-1 flex-col gap-1">
-                        <ResourceTitleLink
-                          to={`/assets/${resource.id}`}
-                          title={resource.title}
-                        />
-                        <div className="flex flex-wrap items-center gap-2">
-                          <AssetStatusBadge
-                            id={resource.id}
-                            status={resource.extendedProps?.status}
-                            availableToBook={
-                              resource.extendedProps?.availableToBook
-                            }
-                            asset={resource.extendedProps}
-                          />
-                          <CategoryBadge
-                            category={resource.extendedProps?.category}
-                          />
-                          {displayCode ? (
-                            <AssetCodeBadge {...displayCode} />
-                          ) : null}
-                        </div>
-                      </div>
-                    </div>
-                  );
+            <AssetIndexSettingsProvider freezeColumn={false}>
+              <List
+                title="Asset models"
+                // The ONLY model count on this screen. `totalItems` counts
+                // rendered rows, which includes the "No model" bucket, and a
+                // bucket is not a model; `totalModels` excludes it. Two
+                // counts of the same thing disagreeing is worse than either.
+                countLabelIsTotal
+                countLabel={() =>
+                  `${totalModelsShown} ${
+                    totalModelsShown === 1 ? "asset model" : "asset models"
+                  }`
+                }
+                ItemComponent={AssetModelRow}
+                MobileItemComponent={MobileAssetModelCard}
+                customPagination={<AssetIndexPagination />}
+                // The name header is drawn here rather than by `ListHeader`,
+                // for two reasons that both only hold on this view: it has to
+                // be a sort control, and `ListHeader`'s own name cell carries
+                // the advanced-mode options popover, whose "Freeze column"
+                // and "Hide asset image" both configure the asset list and
+                // neither reaches a model row.
+                hideFirstHeaderColumn
+                headerChildren={modelHeaderChildren}
+                items={modelRollupItems}
+                extraItemComponentProps={modelExtraProps}
+                bulkActions={
+                  canBookSelectedModels ? MODEL_BULK_ACTIONS : undefined
+                }
+                // "Select all N entries" has no meaning here: both booking
+                // endpoints take an explicit list of models with a quantity
+                // each, so a marker standing for "every model matching the
+                // filters" would reserve only the page in front of the user
+                // while the header claimed the whole set.
+                disableSelectAllItems
+                // The zero-data slot, not the filtered one. `EmptyState`
+                // renders its own "nothing matched" copy whenever a search or
+                // a filter is set and reaches this content only when none is,
+                // so copy about filters here is shown exactly when no filter
+                // was applied.
+                //
+                // Reaching it at all takes an empty rollup with no filters
+                // active: no model rows, and nothing in the "No model" row
+                // either. The call to action is the model, because that is the
+                // part a reader can act on from here.
+                customEmptyStateContent={{
+                  title: "No asset models yet",
+                  text: ASSET_MODEL_EXPLAINER,
+                  ...(canCreateAssetModels
+                    ? {
+                        newButtonRoute: "/settings/asset-models/new",
+                        newButtonContent: "New asset model",
+                        // `EmptyState` names its default button after the
+                        // loader's model, which is the asset. Spread last, so
+                        // this is the accessible name that survives.
+                        buttonProps: { "aria-label": "New asset model" },
+                      }
+                    : {}),
                 }}
               />
-              <AssetIndexPagination />
-            </>
-          ) : (
-            <List
-              title="Assets"
-              ItemComponent={modeIsSimple ? ListAssetContent : AdvancedAssetRow}
-              customPagination={<AssetIndexPagination />}
-              bulkActions={
-                disableBulkActions || isBase ? undefined : (
-                  <BulkActionsDropdown />
-                )
-              }
-              customEmptyStateContent={
-                customEmptyStateContent ? customEmptyStateContent : undefined
-              }
-              headerChildren={headerChildren}
-              extraItemComponentProps={
-                modeIsSimple ? undefined : advancedExtraProps
-              }
+            </AssetIndexSettingsProvider>
+          </>
+        ) : isAvailabilityView && shouldShowAvailabilityView ? (
+          <>
+            <AvailabilityCalendar
+              resources={resources}
+              events={events}
+              resourceLabelContent={({ resource }) => {
+                const displayCode = currentOrganization
+                  ? resolveDisplayCode({
+                      entity: {
+                        sequentialId: resource.extendedProps?.sequentialId,
+                        preferredBarcodeId:
+                          resource.extendedProps?.preferredBarcodeId,
+                        qrCodes: resource.extendedProps?.qrCodes,
+                        barcodes: resource.extendedProps?.barcodes,
+                      },
+                      organization: currentOrganization,
+                      entityKind: "asset",
+                    })
+                  : null;
+                return (
+                  <div className="flex items-center gap-2 px-2">
+                    <AssetImage
+                      asset={{
+                        id: resource.id,
+                        mainImage: resource.extendedProps?.mainImage,
+                        thumbnailImage: resource.extendedProps?.thumbnailImage,
+                        mainImageExpiration:
+                          resource.extendedProps?.mainImageExpiration,
+                        assetModel: resource.extendedProps?.assetModel ?? null,
+                      }}
+                      alt={`Image of ${resource.title}`}
+                      className="size-14 shrink-0 rounded border object-cover"
+                      withPreview
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <ResourceTitleLink
+                        to={`/assets/${resource.id}`}
+                        title={resource.title}
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <AssetStatusBadge
+                          id={resource.id}
+                          status={resource.extendedProps?.status}
+                          availableToBook={
+                            resource.extendedProps?.availableToBook
+                          }
+                          asset={resource.extendedProps}
+                        />
+                        <CategoryBadge
+                          category={resource.extendedProps?.category}
+                        />
+                        {displayCode ? (
+                          <AssetCodeBadge {...displayCode} />
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }}
             />
-          )}
-        </ListContentWrapper>
-      )}
+            <AssetIndexPagination />
+          </>
+        ) : (
+          <List
+            title="Assets"
+            ItemComponent={modeIsSimple ? ListAssetContent : AdvancedAssetRow}
+            MobileItemComponent={MobileAssetCard}
+            customPagination={<AssetIndexPagination />}
+            bulkActions={
+              disableBulkActions || isBase ? undefined : <BulkActionsDropdown />
+            }
+            customEmptyStateContent={
+              customEmptyStateContent ? customEmptyStateContent : undefined
+            }
+            headerChildren={headerChildren}
+            extraItemComponentProps={
+              modeIsSimple ? undefined : advancedExtraProps
+            }
+          />
+        )}
+      </ListContentWrapper>
     </div>
   );
 };
+
+function MobileAssetModelCard({
+  item: listItem,
+  hasBulkActions = false,
+}: {
+  item: ListItemData;
+  hasBulkActions?: boolean;
+}) {
+  // The model view's loader also supplies an ID for the synthetic "No model" row.
+  const item = listItem as AssetModelRollupRow & { id: string };
+  const isNoModel = item.assetModelId === null;
+
+  return (
+    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
+      <div className="flex min-w-0 items-start gap-3">
+        {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
+        {item.thumbnailImage || item.image ? (
+          <ImageWithPreview
+            thumbnailUrl={item.thumbnailImage ?? item.image ?? undefined}
+            alt=""
+            className="size-12 shrink-0 rounded border object-cover"
+          />
+        ) : (
+          <div
+            aria-hidden="true"
+            className="size-12 shrink-0 rounded border border-dashed border-gray-300"
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="break-words font-semibold text-gray-900">
+            {isNoModel ? "No model" : item.name}
+          </p>
+          {item.defaultCategoryId && item.defaultCategoryName ? (
+            <div className="mt-1">
+              <CategoryBadge
+                category={{
+                  id: item.defaultCategoryId,
+                  name: item.defaultCategoryName,
+                  color: item.defaultCategoryColor ?? "#808080",
+                }}
+              />
+            </div>
+          ) : null}
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <span className="font-medium">{item.matchingAssets} assets</span>
+            <span className="text-gray-600">{item.available} in</span>
+            <span className="text-gray-600">{item.checkedOut} out</span>
+          </div>
+          <AssetModelAssetsSheet
+            bucket={
+              item.assetModelId === null
+                ? { kind: "unassigned" }
+                : { kind: "model", assetModelId: item.assetModelId }
+            }
+            title={isNoModel ? "No model" : item.name ?? "Asset model"}
+            matchingAssets={item.matchingAssets}
+          />
+        </div>
+      </div>
+    </article>
+  );
+}
 
 export const ListAssetContent = ({
   item,
@@ -717,31 +771,3 @@ export const ListAssetContent = ({
     </>
   );
 };
-
-function AdvancedModeMobileFallback() {
-  const fetcher = useFetcher();
-  const disabled = useDisabled(fetcher);
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2">
-      <p className="text-center">
-        Advanced mode is currently not available on mobile.
-      </p>
-      <fetcher.Form
-        method="post"
-        action="/api/asset-index-settings"
-        onSubmit={() => {
-          window.scrollTo({
-            top: 0,
-            behavior: "smooth",
-          });
-        }}
-      >
-        <input type="hidden" name="intent" value="changeMode" />
-
-        <Button type="submit" name="mode" value="SIMPLE" disabled={disabled}>
-          Change to simple mode
-        </Button>
-      </fetcher.Form>
-    </div>
-  );
-}

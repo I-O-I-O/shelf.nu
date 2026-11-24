@@ -2,6 +2,16 @@ import { db } from "~/database/db.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
 import type { BookingForEmail } from "~/emails/types";
+import { shouldSendOptionalEmail } from "~/modules/email-preferences/service.server";
+import {
+  getResolvedEmailTemplate,
+  renderEmailTemplate,
+} from "~/modules/email-templates/service.server";
+import {
+  formatPickupHours,
+  IOIO_OPENING_HOURS_GUIDANCE,
+} from "~/modules/ioio-staff/preparation";
+import { getWorkingHoursForOrganization } from "~/modules/working-hours/service.server";
 import type { ClientHint } from "~/utils/client-hints";
 import { getTimeRemainingMessage } from "~/utils/date-fns";
 import type { ResolvedFormatPrefs } from "~/utils/date-format";
@@ -109,13 +119,19 @@ export const checkoutReminderEmailContent = (args: BasicEmailContentArgs) =>
  * This is the content of the email sent to the custodian when a booking is checked in.
  */
 
-export const checkinReminderEmailContent = (args: BasicEmailContentArgs) =>
+export const checkinReminderEmailContent = (
+  args: BasicEmailContentArgs & { ioioReturnReminder?: boolean }
+) =>
   baseBookingTextEmailContent({
     ...args,
-    emailContent: `Your booking is due for checkin in ${getTimeRemainingMessage(
-      new Date(args.to),
-      new Date()
-    )}.`,
+    emailContent: args.ioioReturnReminder
+      ? `Please return your equipment by ${formatDate(args.to, args.prefs, {
+          includeTime: false,
+        })}. If you need more time, request an extension from Staff. Check IOIO opening hours before returning.`
+      : `Your booking is due for checkin in ${getTimeRemainingMessage(
+          new Date(args.to),
+          new Date()
+        )}.`,
   });
 
 /**
@@ -138,7 +154,8 @@ export async function sendCheckinReminder(
   booking: BookingForEmail,
   assetCount: number,
   hints: ClientHint,
-  organizationId: string
+  organizationId: string,
+  options: { ioioReturnReminder?: boolean } = {}
 ) {
   const recipients = await getBookingNotificationRecipients({
     booking,
@@ -149,13 +166,27 @@ export async function sendCheckinReminder(
 
   if (recipients.length === 0) return;
 
+  const customTemplate = await getResolvedEmailTemplate(
+    organizationId,
+    "booking_checkin_reminder"
+  );
+  if (customTemplate?.enabled === false) return;
+  const activeTemplate = customTemplate?.enabled ? customTemplate : null;
+  const ioioOpeningHours = await getIoioOpeningHours(organizationId);
+
   const custodian =
     resolveUserDisplayName(booking.custodianUser) ||
     (booking.custodianTeamMember?.name as string);
 
-  const subject = `🔔 Checkin reminder (${booking.name}) - shelf.nu`;
+  const subject = options.ioioReturnReminder
+    ? `IOIO return reminder: ${booking.name}`
+    : `🔔 Checkin reminder (${booking.name}) - shelf.nu`;
+  const unitNumber = booking.name.match(/(#[0-9]+)\b/u)?.[1] ?? "";
 
   for (const recipient of recipients) {
+    if (!(await shouldSendOptionalEmail(recipient.userId, "RETURN_REMINDER"))) {
+      continue;
+    }
     // Recipient prefs resolved from the ALREADY-LOADED row (raw pref fields on
     // NotificationRecipient); hints is the null-field fallback only. Pure —
     // no per-recipient DB fetch (avoids an N+1 in the fan-out).
@@ -170,6 +201,7 @@ export async function sendCheckinReminder(
       to: booking.to!,
       bookingId: booking.id,
       customEmailFooter: booking.organization.customEmailFooter,
+      ioioReturnReminder: options.ioioReturnReminder,
     });
 
     const html = await bookingUpdatesTemplateString({
@@ -183,14 +215,44 @@ export async function sendCheckinReminder(
       recipientReason: recipient.reason,
       recipientEmail: recipient.email,
     });
+    const rendered = activeTemplate
+      ? renderEmailTemplate(activeTemplate, {
+          displayName:
+            [recipient.firstName, recipient.lastName]
+              .filter(Boolean)
+              .join(" ") || recipient.email,
+          bookingName: booking.name,
+          assetCount,
+          startDate: booking.from?.toLocaleDateString() ?? "",
+          endDate: booking.to?.toLocaleDateString() ?? "",
+          itemName: booking.name.replace(/\s+#[0-9]+\b/u, ""),
+          unitNumber,
+          dueDate: booking.to?.toLocaleDateString() ?? "",
+          ioioOpeningHours,
+          bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+          organizationName: booking.organization.name,
+        })
+      : null;
 
     sendEmail({
       to: recipient.email,
-      subject,
-      text,
-      html,
+      subject: rendered?.subject || subject,
+      text: rendered?.body || text,
+      html: rendered
+        ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+            rendered.body
+          )}</div>`
+        : html,
     });
   }
+}
+
+async function getIoioOpeningHours(organizationId: string) {
+  const workingHours = await getWorkingHoursForOrganization(organizationId);
+  const formatted = formatPickupHours(workingHours);
+  return formatted.startsWith("See the IOIO Lab opening hours.")
+    ? IOIO_OPENING_HOURS_GUIDANCE
+    : `IOIO Lab opening hours: ${formatted}\n\n${IOIO_OPENING_HOURS_GUIDANCE}`;
 }
 
 /**
@@ -330,6 +392,13 @@ export async function sendBookingUpdatedEmail({
 
     if (!booking) return;
 
+    const customTemplate = await getResolvedEmailTemplate(
+      organizationId,
+      "booking_updated"
+    );
+    if (customTemplate?.enabled === false) return;
+    const activeTemplate = customTemplate?.enabled ? customTemplate : null;
+
     // Don't send update emails for draft bookings — the booking hasn't
     // been reserved yet, so emailing about changes is noise.
     // Exception: custodian changes still send emails even in draft,
@@ -379,6 +448,20 @@ export async function sendBookingUpdatedEmail({
         prefs: recipientPrefs,
         changes,
       });
+      const rendered = activeTemplate
+        ? renderEmailTemplate(activeTemplate, {
+            displayName:
+              [recipient.firstName, recipient.lastName]
+                .filter(Boolean)
+                .join(" ") || recipient.email,
+            bookingName: booking.name,
+            assetCount: booking._count.bookingAssets,
+            startDate: booking.from?.toLocaleDateString() ?? "",
+            endDate: booking.to?.toLocaleDateString() ?? "",
+            bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+            organizationName: booking.organization.name,
+          })
+        : null;
 
       const html = await bookingUpdatesTemplateString({
         booking,
@@ -392,9 +475,13 @@ export async function sendBookingUpdatedEmail({
 
       sendEmail({
         to: recipient.email,
-        subject,
-        text,
-        html,
+        subject: rendered?.subject || subject,
+        text: rendered?.body || text,
+        html: rendered
+          ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+              rendered.body
+            )}</div>`
+          : html,
       });
     }
 
@@ -428,6 +515,17 @@ export async function sendBookingUpdatedEmail({
             prefs: oldCustodianPrefs,
             changes,
           });
+          const rendered = activeTemplate
+            ? renderEmailTemplate(activeTemplate, {
+                displayName: oldCustodianEmail,
+                bookingName: booking.name,
+                assetCount: booking._count.bookingAssets,
+                startDate: booking.from?.toLocaleDateString() ?? "",
+                endDate: booking.to?.toLocaleDateString() ?? "",
+                bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+                organizationName: booking.organization.name,
+              })
+            : null;
 
           const html = await bookingUpdatesTemplateString({
             booking,
@@ -441,9 +539,13 @@ export async function sendBookingUpdatedEmail({
 
           sendEmail({
             to: oldCustodianEmail,
-            subject,
-            text,
-            html,
+            subject: rendered?.subject || subject,
+            text: rendered?.body || text,
+            html: rendered
+              ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+                  rendered.body
+                )}</div>`
+              : html,
           });
         }
       }
@@ -458,4 +560,13 @@ export async function sendBookingUpdatedEmail({
       })
     );
   }
+}
+
+function escapeEmailHtml(value: string) {
+  return value.replace(
+    /[&<>"]/g,
+    (character) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character] ??
+      character
+  );
 }

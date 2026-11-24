@@ -9,17 +9,34 @@
 import { OrganizationRoles } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createActionArgs } from "@mocks/remix";
-
-import * as userService from "~/modules/user/service.server";
-import * as rolesServer from "~/utils/roles.server";
 import { sendEmail } from "~/emails/mail.server";
+import type * as AuthService from "~/modules/auth/service.server";
+import type * as SsoEnforcement from "~/modules/auth/sso-enforcement.server";
+
 import {
   assertEmailChangeAllowed,
   SSO_EMAIL_CHANGE_REFUSED_MESSAGE,
 } from "~/modules/auth/sso-enforcement.server";
+import * as userService from "~/modules/user/service.server";
+import { action } from "~/routes/_layout+/account-details.general";
 import { ShelfError } from "~/utils/error";
 
-import { action } from "~/routes/_layout+/account-details.general";
+import * as rolesServer from "~/utils/roles.server";
+
+const { mockChangeAccountPassword, mockSendResetPasswordLink } = vi.hoisted(
+  () => ({
+    mockChangeAccountPassword: vi.fn(),
+    mockSendResetPasswordLink: vi.fn(),
+  })
+);
+// why: the route delegates password verification and recovery email delivery
+// to Auth services; these tests pin the authenticated identity and action
+// wiring without contacting Supabase.
+vi.mock("~/modules/auth/service.server", async (importOriginal) => ({
+  ...(await importOriginal<typeof AuthService>()),
+  changeAccountPassword: mockChangeAccountPassword,
+  sendResetPasswordLink: mockSendResetPasswordLink,
+}));
 
 // @vitest-environment node
 
@@ -58,10 +75,7 @@ vi.mock("~/emails/mail.server", () => ({
 // (sso-enforcement.server.test.ts); here only whether the action asks it before
 // starting the change matters. The message constant stays real.
 vi.mock("~/modules/auth/sso-enforcement.server", async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import("~/modules/auth/sso-enforcement.server")
-    >();
+  const actual = await importOriginal<typeof SsoEnforcement>();
   return {
     SSO_EMAIL_CHANGE_REFUSED_MESSAGE: actual.SSO_EMAIL_CHANGE_REFUSED_MESSAGE,
     assertEmailChangeAllowed: vi.fn(),
@@ -122,6 +136,161 @@ describe("account-details.general action — updateFormatPrefs", () => {
       weekStart: "MONDAY",
       timeZone: "Europe/London",
     });
+  });
+});
+
+describe("account-details.general password actions", () => {
+  const passwordFields = {
+    intent: "changePassword",
+    type: "changePassword",
+    currentPassword: "old-password",
+    newPassword: "new-password-123",
+    confirmPassword: "new-password-123",
+  };
+
+  function requestPasswordAction(
+    fields: Record<string, string>,
+    session = {
+      userId: "user-1",
+      email: "student@example.com",
+      accessToken: "session-access",
+      refreshToken: "session-refresh",
+    }
+  ) {
+    const destroySession = vi.fn();
+    const request = new Request("http://localhost/account-details/general", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+    });
+
+    return {
+      destroySession,
+      result: action(
+        createActionArgs({
+          request,
+          context: {
+            getSession: () => session,
+            destroySession,
+          } as never,
+        })
+      ),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(rolesServer.requirePermission).mockResolvedValue({} as never);
+    mockChangeAccountPassword.mockResolvedValue(undefined);
+    mockSendResetPasswordLink.mockResolvedValue(undefined);
+  });
+
+  it("passes the current session identity and all three fields to Supabase service", async () => {
+    const { result, destroySession } = requestPasswordAction(passwordFields);
+    const response = await result;
+
+    expect(mockChangeAccountPassword).toHaveBeenCalledWith({
+      id: "user-1",
+      accessToken: "session-access",
+      refreshToken: "session-refresh",
+      currentPassword: "old-password",
+      newPassword: "new-password-123",
+    });
+    expect(destroySession).toHaveBeenCalledOnce();
+    expect((response as Response).headers.get("Location")).toBe(
+      "/login?password_changed=true"
+    );
+  });
+
+  it("keeps the user on the form when current-password verification fails", async () => {
+    mockChangeAccountPassword.mockRejectedValueOnce(
+      new ShelfError({
+        cause: null,
+        message: "Current password is incorrect.",
+        label: "Auth",
+        status: 400,
+        shouldBeCaptured: false,
+      })
+    );
+    const { result, destroySession } = requestPasswordAction(passwordFields);
+    const response = (await result) as unknown as {
+      data: { error?: { message: string; additionalData?: unknown } };
+      init?: { status?: number };
+    };
+
+    expect(destroySession).not.toHaveBeenCalled();
+    expect(response.data.error?.message).toBe("Current password is incorrect.");
+    expect(response.init?.status).toBe(400);
+    expect(JSON.stringify(response.data.error?.additionalData)).not.toContain(
+      "old-password"
+    );
+    expect(JSON.stringify(response.data.error?.additionalData)).not.toContain(
+      "new-password-123"
+    );
+  });
+
+  it.each([
+    ["currentPassword", "Current password is required."],
+    ["newPassword", "Password is too short. Minimum 8 characters."],
+    ["confirmPassword", "Password is too short. Minimum 8 characters."],
+  ])("requires %s", async (field, expectedMessage) => {
+    const fields = { ...passwordFields };
+    delete fields[field as keyof typeof fields];
+    const { result } = requestPasswordAction(fields);
+    const response = (await result) as unknown as {
+      data: { error?: { message: string } };
+    };
+
+    expect(response.data.error?.message).toBe(expectedMessage);
+    expect(mockChangeAccountPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched new-password confirmation", async () => {
+    const { result } = requestPasswordAction({
+      ...passwordFields,
+      confirmPassword: "different-password",
+    });
+    const response = (await result) as unknown as {
+      data: { error?: { message: string; additionalData?: unknown } };
+    };
+
+    expect(response.data.error?.message).toBe(
+      "New password and confirmation must match."
+    );
+    expect(JSON.stringify(response.data.error?.additionalData)).not.toContain(
+      "different-password"
+    );
+    expect(mockChangeAccountPassword).not.toHaveBeenCalled();
+  });
+
+  it("continues to enforce the shared password length policy", async () => {
+    const longPassword = "a".repeat(73);
+    const { result } = requestPasswordAction({
+      ...passwordFields,
+      newPassword: longPassword,
+      confirmPassword: longPassword,
+    });
+    const response = (await result) as unknown as {
+      data: { error?: { message: string } };
+    };
+
+    expect(response.data.error?.message).toContain("72 characters");
+    expect(mockChangeAccountPassword).not.toHaveBeenCalled();
+  });
+
+  it("sends reset email only to the currently signed-in account", async () => {
+    const { result } = requestPasswordAction({
+      intent: "requestPasswordReset",
+      type: "requestPasswordReset",
+      email: "other@example.com",
+    });
+    const response = await result;
+
+    expect(mockSendResetPasswordLink).toHaveBeenCalledWith(
+      "student@example.com"
+    );
+    expect(response).toMatchObject({ resetEmailRequested: true, error: null });
+    expect(mockChangeAccountPassword).not.toHaveBeenCalled();
   });
 });
 

@@ -1,33 +1,68 @@
-import { useAtomValue } from "jotai";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { data, redirect, redirectDocument } from "react-router";
-import { dynamicTitleAtom } from "~/atoms/dynamic-title-atom";
+import { data, redirect, useLoaderData } from "react-router";
+import { z } from "zod";
 import Header from "~/components/layout/header";
 import {
-  LocationForm,
-  NewLocationFormSchema,
-} from "~/components/location/form";
-
+  getFirstAvailableIoioColor,
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+  getUsedIoioRoomColors,
+  getUsedIoioSectionColors,
+  IOIO_LOCATION_COLOR_VALUES,
+} from "~/components/location/ioio-location-colors";
+import { IoioLocationCreationForm } from "~/components/location/ioio-location-creation-form";
 import { db } from "~/database/db.server";
 import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
+import {
+  findDuplicateIoioSiblingName,
+  getIoioLocationParentError,
+} from "~/modules/location/ioio-hierarchy";
 import {
   createLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
-import { makeShelfError } from "~/utils/error";
+import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
-const title = "New Location";
+
+const title = "New location";
+
+const IoioLocationCreationSchema = z.object({
+  locationType: z.enum(["room", "section", "shelf", "container"]),
+  name: z.string().optional(),
+  parentId: z
+    .string()
+    .optional()
+    .transform((value) => (value ? value : null)),
+  color: z
+    .string()
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value || null))
+    .refine(
+      (value) => !value || IOIO_LOCATION_COLOR_VALUES.includes(value),
+      "Choose a supported location color."
+    ),
+});
+
+function throwLocationValidationError(message: string): never {
+  throw new ShelfError({
+    cause: null,
+    message,
+    label: "Location",
+    status: 400,
+    shouldBeCaptured: false,
+  });
+}
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
@@ -35,22 +70,23 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
 
   try {
     const { organizationId } = await requirePermission({
-      userId: authSession.userId,
+      userId,
       request,
       entity: PermissionEntity.location,
       action: PermissionAction.create,
     });
-
+    const pickerUrl = new URL(request.url);
+    pickerUrl.searchParams.set("getAll", "location");
     const { locations, totalLocations } = await getLocationsForCreateAndEdit({
       organizationId,
-      request,
+      request: new Request(pickerUrl),
     });
 
-    const header = {
-      title,
-    };
-
-    return payload({ header, locations, totalLocations });
+    return payload({
+      header: { title },
+      locations,
+      totalLocations,
+    });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     throw data(error(reason), { status: reason.status });
@@ -72,80 +108,135 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
   try {
     const { organizationId } = await requirePermission({
-      userId: authSession.userId,
+      userId,
       request,
       entity: PermissionEntity.location,
       action: PermissionAction.create,
     });
-
-    /** Here we need to clone the request as we need 2 different streams:
-     * 1. Access form data for creating asset
-     * 2. Access form data via upload handler to be able to upload the file
-     *
-     * This solution is based on : https://github.com/remix-run/remix/issues/3971#issuecomment-1222127635
-     */
-    const clonedRequest = request.clone();
-
+    const imageRequest = request.clone();
     const parsedData = parseData(
-      await clonedRequest.formData(),
-      NewLocationFormSchema,
+      await request.formData(),
+      IoioLocationCreationSchema,
       {
         additionalData: { userId, organizationId },
       }
     );
+    const { locationType, name, parentId, color: submittedColor } = parsedData;
+    const finalName = name?.trim() ?? "";
 
-    const {
-      name,
-      description,
-      address,
-      addAnother,
+    if (!finalName) throwLocationValidationError("A name is required.");
+
+    const parent = parentId
+      ? await db.location.findFirst({
+          where: { id: parentId, organizationId },
+          select: {
+            id: true,
+            name: true,
+            parentId: true,
+            color: true,
+            parent: { select: { parentId: true } },
+          },
+        })
+      : null;
+
+    const parentError = getIoioLocationParentError({
+      locationType,
       parentId,
-      preventRedirect,
-    } = parsedData;
+      parent: parent
+        ? {
+            name: parent.name,
+            parentId: parent.parentId,
+            grandparentId: parent.parent?.parentId ?? null,
+          }
+        : null,
+    });
+    if (parentError) throwLocationValidationError(parentError);
+
+    const siblingLocations = await db.location.findMany({
+      where: { organizationId, parentId: parentId ?? null },
+      select: { id: true, name: true, parentId: true, color: true },
+    });
+    const colorLocations = parent
+      ? [...siblingLocations, parent]
+      : siblingLocations;
+    const duplicate = findDuplicateIoioSiblingName(
+      siblingLocations.map(({ name: siblingName }) => siblingName),
+      finalName
+    );
+
+    if (duplicate) {
+      throwLocationValidationError(
+        `A location named ${duplicate} already exists in ${
+          parent?.name ?? "the top level"
+        }.`
+      );
+    }
+
+    const color =
+      locationType === "room"
+        ? submittedColor ??
+          getFirstAvailableIoioColor(
+            getUsedIoioRoomColors({ locations: siblingLocations })
+          )
+        : locationType === "section"
+        ? submittedColor ??
+          getFirstAvailableIoioColor(
+            getUsedIoioSectionColors({
+              locations: colorLocations,
+              parentId,
+            })
+          )
+        : null;
+    if (locationType === "room") {
+      const colorError = getIoioRoomColorError({
+        color,
+        locations: colorLocations,
+      });
+      if (colorError) throwLocationValidationError(colorError);
+    }
+    if (locationType === "section") {
+      const colorError = getIoioSectionColorError({
+        color,
+        locations: colorLocations,
+        parentId,
+      });
+      if (colorError) throwLocationValidationError(colorError);
+    }
 
     const location = await createLocation({
-      name,
-      description,
-      address,
-      userId: authSession.userId,
+      name: finalName,
+      description: "",
+      address: "",
+      userId,
       organizationId,
       parentId,
+      color,
+      ioioColorType:
+        locationType === "room" || locationType === "section"
+          ? locationType
+          : undefined,
     });
 
     await updateLocationImage({
-      request,
+      request: imageRequest,
       locationId: location.id,
       organizationId,
+      prevImageUrl: location.imageUrl,
+      prevThumbnailUrl: location.thumbnailUrl,
     });
-
-    const locationWithImage =
-      (await db.location.findUnique({
-        where: { id: location.id, organizationId },
-        select: {
-          id: true,
-          name: true,
-          thumbnailUrl: true,
-          imageUrl: true,
-        },
-      })) ?? location;
 
     sendNotification({
       title: "Location created",
       message: "Your location has been created successfully",
       icon: { name: "success", variant: "success" },
-      senderId: authSession.userId,
+      senderId: userId,
     });
 
-    if (preventRedirect === "true") {
-      return data(payload({ success: true, location: locationWithImage }));
+    if (new URL(request.url).searchParams.get("returnTo") === "/labels") {
+      return redirect(`/labels?locationId=${location.id}`);
     }
 
-    /** If the user clicked add-another, reload the document to clear the form */
-    if (addAnother) {
-      return redirectDocument("/locations/new");
-    }
-
-    return redirect(`/locations/${location.id}`);
+    return redirect(`/locations?selectedLocation=${location.id}&created=1`);
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });
@@ -153,14 +244,12 @@ export async function action({ context, request }: ActionFunctionArgs) {
 }
 
 export default function NewLocationPage() {
-  const title = useAtomValue(dynamicTitleAtom);
+  const { locations } = useLoaderData<typeof loader>();
 
   return (
     <div className="relative">
-      <Header title={title ? title : "Untitled location"} />
-      <div>
-        <LocationForm />
-      </div>
+      <Header title="New location" />
+      <IoioLocationCreationForm locations={locations} />
     </div>
   );
 }

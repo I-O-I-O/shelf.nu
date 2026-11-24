@@ -1,4 +1,4 @@
-import { Bold, Italic, Link as LinkIcon } from "lucide-react";
+import { Bold, Code, Italic, Link as LinkIcon } from "lucide-react";
 
 import type { BubbleState } from "../types";
 import { ToolbarButton } from "./toolbar";
@@ -7,9 +7,11 @@ interface BubbleMenuProps {
   state: BubbleState;
   onBold: () => void;
   onItalic: () => void;
+  onInlineCode: () => void;
   onLink: () => void;
   boldActive: boolean;
   italicActive: boolean;
+  codeActive: boolean;
   linkActive: boolean;
 }
 
@@ -17,9 +19,11 @@ export function BubbleMenu({
   state,
   onBold,
   onItalic,
+  onInlineCode,
   onLink,
   boldActive,
   italicActive,
+  codeActive,
   linkActive,
 }: BubbleMenuProps) {
   if (!state.visible) {
@@ -48,6 +52,13 @@ export function BubbleMenu({
         icon={<Italic size={16} aria-hidden="true" />}
         onClick={onItalic}
         active={italicActive}
+        isToggle
+      />
+      <ToolbarButton
+        label="Inline code"
+        icon={<Code size={16} aria-hidden="true" />}
+        onClick={onInlineCode}
+        active={codeActive}
         isToggle
       />
       <ToolbarButton

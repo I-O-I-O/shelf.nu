@@ -1,0 +1,2096 @@
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { FormEvent, ReactNode } from "react";
+import type { OrganizationRoles } from "@prisma/client";
+import { AssetStatus } from "@prisma/client";
+import { useAtomValue, useSetAtom } from "jotai";
+import {
+  ArchiveIcon,
+  ChevronDownIcon,
+  FolderInputIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  PrinterIcon,
+  Trash2Icon,
+} from "lucide-react";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useRevalidator,
+} from "react-router";
+import { openBulkDialogAtom } from "~/atoms/bulk-update-dialog";
+import {
+  bulkSelectionKey,
+  removeSelectedBulkItemsAtom,
+  selectedBulkItemsAtom,
+  setSelectedBulkItemsAtom,
+} from "~/atoms/list";
+import { AssetImage } from "~/components/assets/asset-image";
+import { getQuantityData } from "~/components/assets/asset-status-badge/quantity-data";
+import { InventoryBulkActionBar } from "~/components/assets/assets-index/inventory-bulk-action-bar";
+import {
+  formatInventoryLocationName,
+  getInventoryLocationContext,
+  getInventoryLocationGroup,
+  isUniqueInventoryLocationName,
+  sortInventoryLocationItems,
+  type InventoryLocationOption,
+} from "~/components/assets/assets-index/inventory-location-options";
+import {
+  applyInventoryQuickFilter,
+  type InventoryQuickFilter,
+} from "~/components/assets/assets-index/inventory-quick-filters";
+import {
+  InventoryViewSelect,
+  INVENTORY_FILTER_TRIGGER_CLASS_NAME,
+} from "~/components/assets/assets-index/inventory-view-select";
+import { partitionInventoryVisibilitySelection } from "~/components/assets/assets-index/inventory-visibility-selection";
+import { MobileAssetFilters } from "~/components/assets/assets-index/mobile-asset-filters";
+import { StaffInventoryMobileCard } from "~/components/assets/assets-index/staff-inventory-mobile-card";
+import {
+  STAFF_INVENTORY_UPDATED_AT_HEADING,
+  StaffInventoryUpdatedAt,
+} from "~/components/assets/assets-index/staff-inventory-updated-at";
+import { useClearInventorySelectionOnSuccess } from "~/components/assets/assets-index/use-clear-inventory-selection-on-success";
+import BulkArchiveDialog from "~/components/assets/bulk-archive-dialog";
+import BulkCategoryUpdateDialog from "~/components/assets/bulk-category-update-dialog";
+import BulkDownloadQrDialog from "~/components/assets/bulk-download-qr-dialog";
+import BulkLocationUpdateDialog from "~/components/assets/bulk-location-update-dialog";
+import BulkTrashDialog from "~/components/assets/bulk-trash-dialog";
+import { CategoryBadge } from "~/components/assets/category-badge";
+import { StaffInventoryUndoNotice } from "~/components/assets/staff-inventory-undo-notice";
+import type { BulkUpdateSuccessContext } from "~/components/bulk-update-dialog/bulk-update-dialog";
+import DynamicDropdown from "~/components/dynamic-dropdown/dynamic-dropdown";
+import { ChevronRight } from "~/components/icons/library";
+import { Dialog, DialogPortal } from "~/components/layout/dialog";
+import { EmptyState } from "~/components/list/empty-state";
+import { SearchForm } from "~/components/list/filters/search-form";
+import type { ListItemData } from "~/components/list/list-item";
+import { Pagination } from "~/components/list/pagination";
+import { IoioLocationCascadeSelect } from "~/components/location/ioio-location-cascade-select";
+import { getEffectiveIoioLocationColor } from "~/components/location/ioio-location-colors";
+import { LocationBadge } from "~/components/location/location-badge";
+import { Badge } from "~/components/shared/badge";
+import { Button } from "~/components/shared/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "~/components/shared/dropdown";
+import { EmptyTableValue } from "~/components/shared/empty-table-value";
+import { Th, Td } from "~/components/table";
+import {
+  useClearValueFromParams,
+  useSearchParams,
+  useSearchParamHasValue,
+} from "~/hooks/search-params";
+import { useDateFormatter } from "~/hooks/use-date-formatter";
+import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
+import { getPhysicalUnitLabelFromTitle } from "~/modules/asset/physical-unit";
+import {
+  buildStaffInventoryDisplayRows,
+  findStaffInventoryImageCandidate,
+  getStaffInventoryActionTargets,
+  getStaffInventoryEditTarget,
+  type StaffInventoryDisplayRow,
+} from "~/modules/asset/staff-inventory-view";
+import type { AssetsFromViewItem } from "~/modules/asset/types";
+import { getPrimaryLocation, isQuantityTracked } from "~/modules/asset/utils";
+import type {
+  BulkMutationUndo,
+  BulkUndoRequest,
+} from "~/modules/ioio-staff/bulk-undo";
+import { getIoioPhysicalUnitState } from "~/modules/ioio-staff/inventory-unit-state";
+import {
+  getSelectedAssetModelIds,
+  MAX_ORGANIZE_SELECTED_MODELS,
+} from "~/modules/ioio-staff/organize-selection";
+import {
+  getIoioKitDisplayName,
+  getIoioPhysicalUnitDisplayName,
+} from "~/modules/kit/ioio-kit-presentation";
+import type { AssetIndexLoaderData } from "~/routes/_layout+/assets._index";
+import type { ResolvedFormatPrefs } from "~/utils/date-format";
+import { IOIO_KIT_CATEGORY_FILTER } from "~/utils/list";
+import {
+  PermissionAction,
+  PermissionEntity,
+} from "~/utils/permissions/permission.data";
+import { userHasPermission } from "~/utils/permissions/permission.validator.client";
+import { tw } from "~/utils/tw";
+
+type StaffInventorySourceItem = AssetsFromViewItem & {
+  ioioAvailable?: number;
+  physicalAvailable?: number;
+  preparedPickupHeld?: boolean;
+  blockingIssueReported?: boolean;
+  ioioPreparationStates?: string[];
+  ioioBookingStates?: Array<{
+    status: string;
+    isSoftStaffReservation: boolean;
+  }>;
+};
+type StaffInventoryItem = StaffInventoryDisplayRow<StaffInventorySourceItem>;
+type ExpandedUnitAction =
+  | "category"
+  | "location"
+  | "print"
+  | "archive"
+  | "trash";
+
+type ExpandedUnitActionRequest = {
+  action: ExpandedUnitAction;
+  targetIds: string[];
+};
+
+function uniqueAssetIds(assetIds: string[]) {
+  return [...new Set(assetIds)];
+}
+
+function isStaffInventoryItemHidden(item: {
+  ioioHidden?: boolean;
+  assetModelId?: string | null;
+  assetModel?: { ioioHidden?: boolean } | null;
+}) {
+  return Boolean(item.ioioHidden || item.assetModel?.ioioHidden);
+}
+
+function canUpdateVisibilityForItems(
+  roles: OrganizationRoles[] | undefined,
+  items: ListItemData[]
+) {
+  return (
+    items.length > 0 &&
+    items.every((item) => {
+      const assetModelId =
+        item.assetModelId ?? (item.assetModel as { id?: string } | null)?.id;
+      return userHasPermission({
+        roles,
+        entity: assetModelId
+          ? PermissionEntity.assetModel
+          : PermissionEntity.asset,
+        action: PermissionAction.update,
+      });
+    })
+  );
+}
+
+type StaffInventoryListProps = {
+  headerActions?: ReactNode;
+  customEmptyStateContent?: {
+    title: string;
+    text: ReactNode;
+    newButtonRoute?: string;
+    newButtonContent?: string;
+  };
+};
+
+export function StaffInventoryList({
+  headerActions,
+  customEmptyStateContent,
+}: StaffInventoryListProps) {
+  const { items } = useLoaderData<AssetIndexLoaderData>();
+  const rows = useMemo(
+    () =>
+      buildStaffInventoryDisplayRows(
+        items as unknown as StaffInventorySourceItem[]
+      ),
+    [items]
+  ) as StaffInventoryItem[];
+
+  const hasItems = rows.length > 0;
+  const selectedItems = useAtomValue(selectedBulkItemsAtom);
+  const selectedAssetModelIds = useMemo(
+    () => getSelectedAssetModelIds(selectedItems),
+    [selectedItems]
+  );
+  const setSelectedItems = useSetAtom(setSelectedBulkItemsAtom);
+  const removeSelectedItems = useSetAtom(removeSelectedBulkItemsAtom);
+  const openBulkDialog = useSetAtom(openBulkDialogAtom);
+  const navigate = useNavigate();
+  const { prefs } = useDateFormatter();
+  const { roles } = useUserRoleHelper();
+  const canBulkUpdate = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.update,
+  });
+  const canBulkDelete = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.delete,
+  });
+  const canPrintLabels = userHasPermission({
+    roles,
+    entity: PermissionEntity.qr,
+    action: PermissionAction.read,
+  });
+  const selectedKeys = useMemo(
+    () => new Set(selectedItems.map(bulkSelectionKey)),
+    [selectedItems]
+  );
+  const isInventoryRowSelected = (item: StaffInventoryItem) =>
+    getStaffInventoryActionTargets(item).every((member) =>
+      selectedKeys.has(bulkSelectionKey(member))
+    );
+  const toggleInventoryRow = (item: StaffInventoryItem) => {
+    const targets = getStaffInventoryActionTargets(item);
+    if (targets.every((member) => selectedKeys.has(bulkSelectionKey(member)))) {
+      removeSelectedItems(targets);
+    } else {
+      setSelectedItems(targets);
+    }
+  };
+  const visibleSelectedCount = rows.filter(isInventoryRowSelected).length;
+  const allVisibleSelected =
+    rows.length > 0 && visibleSelectedCount === rows.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
+  const [undoAction, setUndoAction] = useState<BulkUndoRequest | null>(null);
+  const visibilityFetcher = useFetcher<{ success?: boolean }>();
+  const pendingVisibilitySelectionRef = useRef<ListItemData[] | null>(null);
+  const {
+    hiddenItems: selectedHiddenItems,
+    visibleItems: selectedVisibleItems,
+  } = partitionInventoryVisibilitySelection(selectedItems);
+  const canHideSelected = canUpdateVisibilityForItems(
+    roles,
+    selectedVisibleItems
+  );
+  const canUnhideSelected = canUpdateVisibilityForItems(
+    roles,
+    selectedHiddenItems
+  );
+
+  useClearInventorySelectionOnSuccess({
+    data: visibilityFetcher.data,
+    state: visibilityFetcher.state,
+    pendingSelectionRef: pendingVisibilitySelectionRef,
+  });
+
+  const submitVisibilityChange = (hidden: boolean) => {
+    const targetItems = hidden ? selectedVisibleItems : selectedHiddenItems;
+    const assetIds = uniqueAssetIds(targetItems.map((item) => item.id));
+    if (assetIds.length === 0) return;
+
+    pendingVisibilitySelectionRef.current = [...selectedItems];
+    const formData = new FormData();
+    formData.set("intent", hidden ? "hide-asset" : "unhide-asset");
+    assetIds.forEach((assetId, index) => {
+      formData.set(`assetIds[${index}]`, assetId);
+    });
+    void visibilityFetcher.submit(formData, { method: "post" });
+  };
+
+  const rememberBulkAction = useCallback(
+    (context: BulkUpdateSuccessContext) => {
+      const undo = context.fetcherData?.undo as BulkMutationUndo | undefined;
+      if (!undo) return;
+
+      const entries = context.selectedItems
+        .filter((item) => item.id)
+        .map((item) => ({
+          assetId: item.id,
+          ...(undo.operation === "category"
+            ? {
+                previousCategoryId: item.category?.id ?? null,
+                expectedCategoryId: undo.targetCategoryId ?? null,
+              }
+            : {}),
+          ...(undo.operation === "location"
+            ? {
+                previousLocationId:
+                  item.assetLocations?.[0]?.location?.id ?? null,
+                expectedLocationId: undo.targetLocationId ?? null,
+              }
+            : {}),
+        }));
+
+      if (entries.length > 0) {
+        setUndoAction({
+          operation: undo.operation,
+          createdAt: Date.now(),
+          entries,
+        });
+      }
+    },
+    []
+  );
+
+  const clearUndoAction = useCallback(() => setUndoAction(null), []);
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
+  const toggleAllVisible = (checked: boolean) => {
+    if (checked) {
+      setSelectedItems(
+        rows
+          .filter((item) => !isInventoryRowSelected(item))
+          .flatMap(getStaffInventoryActionTargets)
+      );
+      return;
+    }
+
+    removeSelectedItems(rows.flatMap(getStaffInventoryActionTargets));
+  };
+  return (
+    <div className="flex flex-col gap-4 pb-5 pt-4">
+      <section className="overflow-hidden rounded border border-gray-200 bg-white">
+        <div className="flex flex-col gap-3 border-b border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Inventory</h2>
+          </div>
+          {headerActions ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {headerActions}
+            </div>
+          ) : null}
+        </div>
+        <StaffInventoryFilters />
+        {selectedItems.length > 0 ? (
+          <InventoryBulkActionBar
+            selectedCount={selectedItems.length}
+            canUpdate={canBulkUpdate}
+            canDelete={canBulkDelete}
+            canPrintLabels={canPrintLabels}
+            canHide={canHideSelected}
+            canUnhide={canUnhideSelected}
+            canOrganizeSelected={Boolean(
+              canBulkUpdate &&
+                selectedAssetModelIds &&
+                selectedAssetModelIds.length > 0 &&
+                selectedAssetModelIds.length <= MAX_ORGANIZE_SELECTED_MODELS
+            )}
+            onOrganizeSelected={() => {
+              if (
+                !selectedAssetModelIds ||
+                selectedAssetModelIds.length === 0 ||
+                selectedAssetModelIds.length > MAX_ORGANIZE_SELECTED_MODELS
+              )
+                return;
+              const params = new URLSearchParams();
+              selectedAssetModelIds.forEach((id) =>
+                params.append("selectedModelId", id)
+              );
+              void navigate(`/staff/organize?${params.toString()}`);
+            }}
+            onChangeCategory={() => openBulkDialog("category")}
+            onChangeLocation={() => openBulkDialog("location")}
+            onArchive={() => openBulkDialog("archive")}
+            onTrash={() => openBulkDialog("trash")}
+            onHide={() => submitVisibilityChange(true)}
+            onUnhide={() => submitVisibilityChange(false)}
+            onPrintLabels={() => {
+              const assetIds = uniqueAssetIds(
+                selectedItems.map((item) => item.id)
+              )
+                .map(encodeURIComponent)
+                .join(",");
+              void navigate(`/labels?assetIds=${assetIds}`);
+            }}
+          />
+        ) : null}
+        {!hasItems ? (
+          <EmptyState
+            customContent={customEmptyStateContent}
+            modelName={{ singular: "inventory item", plural: "inventory" }}
+            filteredEmptyMessage={({ search }) =>
+              search
+                ? `No inventory found for "${search}".`
+                : "No inventory matches these filters."
+            }
+          />
+        ) : (
+          <>
+            <div className="hidden overflow-hidden md:block">
+              <table className="w-full table-fixed border-collapse">
+                <thead>
+                  <tr>
+                    <Th className="w-[4%] px-2">
+                      <input
+                        ref={headerCheckboxRef}
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={(event) =>
+                          toggleAllVisible(event.target.checked)
+                        }
+                        aria-label="Select all visible inventory items"
+                        className="size-4 rounded border-gray-300 text-red-600 focus:ring-red-600"
+                      />
+                    </Th>
+                    <Th className="w-[19%] md:px-3">Item</Th>
+                    <Th className="w-[17%] md:px-3">Category</Th>
+                    <Th className="w-[17%] md:px-3">Location</Th>
+                    <Th className="w-[11%] px-1 md:px-2">Quantity</Th>
+                    <Th className="w-[14%] md:px-3">
+                      {STAFF_INVENTORY_UPDATED_AT_HEADING}
+                    </Th>
+                    <Th className="w-[18%] md:px-3">Actions</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((item) => (
+                    <StaffInventoryRow
+                      key={item.id}
+                      item={item}
+                      prefs={prefs}
+                      selected={isInventoryRowSelected(item)}
+                      onToggle={() => toggleInventoryRow(item)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="divide-y divide-gray-200 md:hidden">
+              {rows.map((item) => (
+                <StaffInventoryMobileRow
+                  key={item.id}
+                  item={item}
+                  selected={isInventoryRowSelected(item)}
+                  onToggle={() => toggleInventoryRow(item)}
+                />
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+      <Pagination className="border-t border-gray-200 bg-white" />
+      {undoAction ? (
+        <StaffInventoryUndoNotice
+          action={undoAction}
+          onExpire={clearUndoAction}
+        />
+      ) : null}
+      <BulkCategoryUpdateDialog />
+      <BulkLocationUpdateDialog />
+      <BulkArchiveDialog onSuccess={rememberBulkAction} />
+      <BulkTrashDialog onSuccess={rememberBulkAction} />
+    </div>
+  );
+}
+
+function StaffInventoryFilters() {
+  const { categories, locations } = useLoaderData<AssetIndexLoaderData>();
+  const filterParams = [
+    "status",
+    "category",
+    "location",
+    "assetKitFilter",
+    "ioioVisibility",
+  ];
+  const hasFiltersToClear = useSearchParamHasValue(...filterParams);
+  const clearFilters = useClearValueFromParams(...filterParams);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedCategoryIds = searchParams
+    .getAll("category")
+    .filter((id) => id !== IOIO_KIT_CATEGORY_FILTER);
+  const selectedCategory =
+    selectedCategoryIds.length === 1
+      ? categories.find((category) => category.id === selectedCategoryIds[0])
+      : undefined;
+  const selectedLocationId = searchParams.get("location");
+  const selectedLocation = locations.find(
+    (location) => location.id === selectedLocationId
+  );
+  const selectedLocationCount = searchParams.getAll("location").length;
+  const selectedLocationColor = selectedLocation
+    ? getEffectiveIoioLocationColor({ location: selectedLocation, locations })
+    : null;
+  const clearLocation = useClearValueFromParams("location");
+  const hasAdditionalFilters = ["status", "category", "assetKitFilter"].some(
+    (key) => searchParams.getAll(key).length > 0
+  );
+  const categoryFilterLabel =
+    selectedCategoryIds.length === 0
+      ? "Category"
+      : selectedCategoryIds.length === 1
+      ? selectedCategory?.name ??
+        (selectedCategoryIds[0] === "uncategorized"
+          ? "Uncategorized"
+          : "Category")
+      : `Category +${selectedCategoryIds.length}`;
+  const categoryFilterColor =
+    selectedCategoryIds.length === 1 &&
+    selectedCategoryIds[0] !== "uncategorized"
+      ? selectedCategory?.color ?? null
+      : null;
+  const activeFilterTriggerClassName = "border-red-200 bg-red-50 text-red-800";
+  const activeStatus = searchParams.get("status");
+  const kitsSelected =
+    searchParams.get("assetKitFilter") === "IN_OTHER_KITS" ||
+    searchParams.getAll("category").includes(IOIO_KIT_CATEGORY_FILTER);
+  const viewFilter: InventoryQuickFilter = kitsSelected
+    ? "kits"
+    : searchParams.get("ioioVisibility") === "hidden"
+    ? "hidden"
+    : activeStatus === AssetStatus.AVAILABLE
+    ? "available"
+    : activeStatus === AssetStatus.CHECKED_OUT
+    ? "checked-out"
+    : "all";
+
+  const renderViewFilter = (compact: boolean) => (
+    <InventoryViewSelect
+      value={viewFilter}
+      className={compact ? "h-11 min-h-11 w-full" : undefined}
+      onChange={(value) =>
+        setSearchParams((current) => applyInventoryQuickFilter(current, value))
+      }
+    />
+  );
+
+  const renderCategoryFilter = (compact: boolean) => (
+    <DynamicDropdown
+      trigger={
+        <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
+          {categoryFilterColor ? (
+            <span
+              aria-hidden="true"
+              className="size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: categoryFilterColor }}
+            />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">{categoryFilterLabel}</span>
+          <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+        </span>
+      }
+      triggerWrapperClassName={tw(
+        INVENTORY_FILTER_TRIGGER_CLASS_NAME,
+        compact && "h-11 min-h-11 w-full",
+        selectedCategoryIds.length > 0 && activeFilterTriggerClassName
+      )}
+      model={{ name: "category", queryKey: "name" }}
+      label="Filter by category"
+      placeholder="Search categories"
+      initialDataKey="categories"
+      countKey="totalCategories"
+      onSelectionChange={() =>
+        setSearchParams((current) => {
+          current.delete("category", IOIO_KIT_CATEGORY_FILTER);
+          return current;
+        })
+      }
+      withoutValueItem={{ id: "uncategorized", name: "Uncategorized" }}
+      hideCounter
+    />
+  );
+
+  const renderLocationFilter = (compact: boolean) => (
+    <DynamicDropdown
+      trigger={
+        <span className="flex w-full min-w-0 cursor-pointer items-center gap-2 text-left">
+          {selectedLocation && selectedLocationColor ? (
+            <span
+              aria-hidden="true"
+              className="size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: selectedLocationColor.color }}
+            />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">
+            {selectedLocation
+              ? formatInventoryLocationName(selectedLocation.name)
+              : "Location"}
+          </span>
+          {selectedLocationCount > 1 ? (
+            <span className="shrink-0 text-xs text-gray-500">
+              +{selectedLocationCount - 1}
+            </span>
+          ) : null}
+          {selectedLocation ? (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Clear location filter"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                clearLocation();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  clearLocation();
+                }
+              }}
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-sm leading-none text-gray-600 hover:bg-gray-200 hover:text-gray-950 focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-1"
+            >
+              <span aria-hidden="true">×</span>
+            </span>
+          ) : null}
+          <ChevronRight className="ml-auto size-4 shrink-0 rotate-90" />
+        </span>
+      }
+      triggerWrapperClassName={tw(
+        INVENTORY_FILTER_TRIGGER_CLASS_NAME,
+        compact && "h-11 min-h-11 w-full",
+        selectedLocation && activeFilterTriggerClassName
+      )}
+      model={{ name: "location", queryKey: "name" }}
+      label="Filter by location"
+      placeholder="Search locations"
+      initialDataKey="locations"
+      countKey="totalLocations"
+      allValueItem={{ name: "All locations" }}
+      getItemGroup={(item) =>
+        getInventoryLocationGroup(
+          item as InventoryLocationOption,
+          locations as InventoryLocationOption[]
+        )
+      }
+      sortItems={(items) =>
+        sortInventoryLocationItems(
+          items as InventoryLocationOption[],
+          locations as InventoryLocationOption[]
+        ) as typeof items
+      }
+      renderItem={(item) =>
+        renderInventoryLocationOption(
+          item as InventoryLocationOption,
+          locations as InventoryLocationOption[]
+        )
+      }
+      withoutValueItem={{ id: "without-location", name: "Without location" }}
+      hideCounter
+    />
+  );
+
+  const renderClearFilters = () =>
+    hasFiltersToClear && hasAdditionalFilters ? (
+      <Button
+        type="button"
+        variant="link"
+        className="h-9 shrink-0 rounded-lg px-2 font-normal text-gray-500 hover:bg-red-50 hover:text-red-800"
+        onClick={clearFilters}
+      >
+        Clear filters
+      </Button>
+    ) : null;
+
+  return (
+    <div className="ioio-inventory-filters flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50/50 px-4 py-3 text-sm text-gray-500">
+      <SearchForm
+        className="w-full min-w-0 md:min-w-[240px] md:flex-[1_1_320px]"
+        label="Search inventory"
+        placeholder="Search inventory..."
+      />
+      <MobileAssetFilters>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              View
+            </span>
+            {renderViewFilter(true)}
+          </div>
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Category
+            </span>
+            {renderCategoryFilter(true)}
+          </div>
+          <div className="space-y-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Location
+            </span>
+            {renderLocationFilter(true)}
+          </div>
+          {renderClearFilters()}
+        </div>
+      </MobileAssetFilters>
+      <div className="hidden shrink-0 flex-wrap items-center gap-3 md:flex">
+        {renderViewFilter(false)}
+        {renderCategoryFilter(false)}
+        {renderLocationFilter(false)}
+        {renderClearFilters()}
+      </div>
+    </div>
+  );
+}
+
+function renderInventoryLocationOption(
+  item: InventoryLocationOption,
+  locations: InventoryLocationOption[]
+) {
+  const context = getInventoryLocationContext(item, locations);
+  const uniqueName = isUniqueInventoryLocationName(item, locations);
+  return (
+    <span className="flex min-w-0 flex-col">
+      <span className="truncate">{formatInventoryLocationName(item.name)}</span>
+      {!uniqueName && context ? (
+        <span className="truncate text-xs text-gray-500">{context}</span>
+      ) : null}
+    </span>
+  );
+}
+
+type StaffInventoryQuantities = {
+  totalQuantity: number;
+  availableQuantity: number;
+  inUseQuantity: number;
+  outOfServiceQuantity: number;
+};
+
+function getStaffInventoryQuantities(
+  item: StaffInventoryItem
+): StaffInventoryQuantities {
+  if (item.isExpandable) {
+    return item.members.reduce<StaffInventoryQuantities>(
+      (summary, member) => {
+        const memberQuantity: StaffInventoryQuantities =
+          getStaffInventoryQuantities({
+            ...member,
+            duplicateRecordCount: 1,
+            members: [member],
+            logicalTitle: member.title,
+            isExpandable: false,
+          });
+        return {
+          totalQuantity: summary.totalQuantity + memberQuantity.totalQuantity,
+          availableQuantity:
+            summary.availableQuantity + memberQuantity.availableQuantity,
+          inUseQuantity: summary.inUseQuantity + memberQuantity.inUseQuantity,
+          outOfServiceQuantity:
+            summary.outOfServiceQuantity + memberQuantity.outOfServiceQuantity,
+        };
+      },
+      {
+        totalQuantity: 0,
+        availableQuantity: 0,
+        inUseQuantity: 0,
+        outOfServiceQuantity: 0,
+      }
+    );
+  }
+
+  const quantityData = getQuantityData(item);
+  const totalQuantity = isQuantityTracked(item) ? item.quantity ?? 0 : 1;
+  if (isQuantityTracked(item)) {
+    const availableQuantity = Math.max(
+      0,
+      item.ioioAvailable ??
+        item.physicalAvailable ??
+        quantityData?.available ??
+        (item.availableToBook && item.status !== "CHECKED_OUT"
+          ? totalQuantity
+          : 0)
+    );
+    return {
+      totalQuantity,
+      availableQuantity,
+      inUseQuantity: item.availableToBook
+        ? Math.max(0, totalQuantity - availableQuantity)
+        : 0,
+      outOfServiceQuantity: item.availableToBook ? 0 : totalQuantity,
+    };
+  }
+
+  const unitState = getStaffInventoryUnitState(item);
+  return {
+    totalQuantity,
+    availableQuantity: unitState === "Available" ? 1 : 0,
+    inUseQuantity: unitState === "In use" ? 1 : 0,
+    outOfServiceQuantity:
+      unitState === "Out of service" || unitState === "Broken" ? 1 : 0,
+  };
+}
+
+function getStaffInventoryUnitState(item: StaffInventorySourceItem) {
+  return getIoioPhysicalUnitState({
+    assetStatus: item.custody.length > 0 ? "IN_CUSTODY" : item.status,
+    availableToBook: item.availableToBook,
+    bookingStates:
+      item.ioioBookingStates ??
+      item.bookingAssets.map(({ booking }) => ({
+        status: booking.status,
+        isSoftStaffReservation: false,
+      })),
+    preparationStates:
+      item.ioioPreparationStates ??
+      (item.preparedPickupHeld ? ["READY_FOR_PICKUP"] : []),
+    issueReportTypes: item.blockingIssueReported ? ["ITEM_DAMAGED"] : [],
+    availableAccordingToIoioInventory:
+      item.ioioAvailable !== undefined
+        ? item.ioioAvailable > 0
+        : item.status === AssetStatus.AVAILABLE &&
+          item.availableToBook &&
+          !item.preparedPickupHeld &&
+          item.custody.length === 0,
+  });
+}
+
+function StaffInventoryRow({
+  item,
+  prefs,
+  selected,
+  onToggle,
+}: {
+  item: StaffInventoryItem;
+  prefs: ResolvedFormatPrefs;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const { roles } = useUserRoleHelper();
+  const [searchParams] = useSearchParams();
+  const location = getPrimaryLocation(item);
+  const { availableQuantity, totalQuantity } =
+    getStaffInventoryQuantities(item);
+  const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
+  const isHidden = isStaffInventoryItemHidden(item);
+  const [expanded, setExpanded] = useState(false);
+  const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
+    string[]
+  >([]);
+  const [physicalUnitAction, setPhysicalUnitAction] =
+    useState<ExpandedUnitActionRequest | null>(null);
+  useEffect(() => {
+    const memberIds = new Set(item.members.map((member) => member.id));
+    setSelectedPhysicalUnitIds((ids) => ids.filter((id) => memberIds.has(id)));
+  }, [item.members]);
+  return (
+    <Fragment>
+      <tr className="hover:bg-gray-50">
+        <Td className="w-[4%] px-2">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggle}
+            aria-label={`Select ${item.logicalTitle}`}
+            className="size-4 rounded border-gray-300 text-red-600 focus:ring-red-600"
+          />
+        </Td>
+        <Td className="min-w-0 whitespace-normal md:px-3">
+          <div className="flex items-center gap-3">
+            <AssetImage
+              asset={{
+                id: imageItem.id,
+                mainImage: imageItem.mainImage,
+                thumbnailImage: imageItem.thumbnailImage,
+                mainImageExpiration: imageItem.mainImageExpiration,
+                assetModel: imageItem.assetModel ?? null,
+                kitImage: imageItem.assetKits?.[0]?.kit?.image ?? null,
+              }}
+              alt={`Image of ${item.logicalTitle}`}
+              useThumbnail={false}
+              className="size-9 shrink-0 rounded border object-cover"
+            />
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <Button
+                  to={`/assets/${item.id}`}
+                  state={{
+                    inventoryReturnTo: `/assets${
+                      searchParams.size ? `?${searchParams}` : ""
+                    }`,
+                  }}
+                  variant="link"
+                  className="min-w-0 truncate p-0 text-left font-medium text-gray-900 hover:text-gray-700"
+                  title={item.logicalTitle}
+                >
+                  {item.logicalTitle}
+                </Button>
+                {isHidden ? (
+                  <Badge color="#E5E7EB" textColor="#374151" withDot={false}>
+                    Hidden
+                  </Badge>
+                ) : null}
+                {item.isExpandable ? (
+                  <button
+                    type="button"
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-red-50 text-xs font-semibold text-red-700 hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-600"
+                    aria-label={
+                      (expanded ? "Collapse " : "Expand ") + item.logicalTitle
+                    }
+                    aria-expanded={expanded}
+                    onClick={() => setExpanded((value) => !value)}
+                  >
+                    <ChevronDownIcon
+                      className={
+                        "size-4 transition-transform" +
+                        (expanded ? " rotate-180" : "")
+                      }
+                    />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </Td>
+        <Td className="min-w-0 whitespace-normal md:px-3">
+          <CategoryBadge
+            className="max-w-full whitespace-normal break-words text-left"
+            category={
+              item.category
+                ? {
+                    ...item.category,
+                  }
+                : null
+            }
+          />
+        </Td>
+        <Td className="min-w-0 whitespace-normal md:px-3">
+          {location ? (
+            <LocationBadge
+              location={{
+                id: location.id,
+                name: formatStaffLocationName(location.name),
+                parentId: location.parentId ?? undefined,
+                childCount: location._count?.children ?? 0,
+              }}
+              className="ml-0 max-w-full whitespace-normal break-words text-left"
+            />
+          ) : (
+            <EmptyTableValue />
+          )}
+        </Td>
+        <Td className="px-1 text-center md:px-2">
+          <div className="flex min-w-0 flex-col items-center">
+            <span
+              aria-label={`${availableQuantity} of ${totalQuantity} available`}
+            >
+              <QuantityPill
+                available={availableQuantity}
+                total={totalQuantity}
+              />
+            </span>
+          </div>
+        </Td>
+        <Td className="whitespace-nowrap text-sm text-gray-600">
+          <StaffInventoryUpdatedAt value={item.updatedAt} prefs={prefs} />
+        </Td>
+        <Td className="md:px-3">
+          <StaffInventoryActions
+            item={item}
+            roles={roles}
+            physicalUnitIds={selectedPhysicalUnitIds}
+            onPhysicalUnitAction={(action) =>
+              setPhysicalUnitAction({
+                action,
+                targetIds: uniqueAssetIds(selectedPhysicalUnitIds),
+              })
+            }
+          />
+        </Td>
+      </tr>
+      {item.isExpandable && expanded ? (
+        <StaffInventoryExpandedUnits
+          item={item}
+          roles={roles}
+          selectedUnitIds={selectedPhysicalUnitIds}
+          onSelectedUnitIdsChange={setSelectedPhysicalUnitIds}
+          actionRequest={physicalUnitAction}
+          onActionRequestChange={setPhysicalUnitAction}
+        />
+      ) : null}
+    </Fragment>
+  );
+}
+
+function StaffInventoryExpandedUnits({
+  item,
+  roles,
+  selectedUnitIds,
+  onSelectedUnitIdsChange,
+  actionRequest,
+  onActionRequestChange,
+}: {
+  item: StaffInventoryItem;
+  roles: OrganizationRoles[] | undefined;
+  selectedUnitIds: string[];
+  onSelectedUnitIdsChange: (ids: string[]) => void;
+  actionRequest: ExpandedUnitActionRequest | null;
+  onActionRequestChange: (request: ExpandedUnitActionRequest | null) => void;
+}) {
+  return (
+    <tr className="bg-gray-50/70">
+      <Td colSpan={7} className="px-4 py-3 md:px-6">
+        <StaffInventoryExpandedUnitsContent
+          item={item}
+          roles={roles}
+          selectedUnitIds={selectedUnitIds}
+          onSelectedUnitIdsChange={onSelectedUnitIdsChange}
+          actionRequest={actionRequest}
+          onActionRequestChange={onActionRequestChange}
+        />
+      </Td>
+    </tr>
+  );
+}
+
+function StaffInventoryExpandedUnitsContent({
+  item,
+  roles,
+  selectedUnitIds,
+  onSelectedUnitIdsChange,
+  actionRequest,
+  onActionRequestChange,
+}: {
+  item: StaffInventoryItem;
+  roles: OrganizationRoles[] | undefined;
+  selectedUnitIds: string[];
+  onSelectedUnitIdsChange: (ids: string[]) => void;
+  actionRequest: ExpandedUnitActionRequest | null;
+  onActionRequestChange: (request: ExpandedUnitActionRequest | null) => void;
+}) {
+  const { categories, locations } = useLoaderData<AssetIndexLoaderData>();
+  const navigate = useNavigate();
+  const revalidator = useRevalidator();
+  const fetcher = useFetcher<{
+    success?: boolean;
+    error?: { message?: string };
+  }>();
+  const selectedUnits = useMemo(
+    () =>
+      item.members
+        .slice()
+        .sort((left, right) =>
+          left.title.localeCompare(right.title, undefined, { numeric: true })
+        ),
+    [item.members]
+  );
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  const pendingDirectLifecycleIdsRef = useRef<string[] | null>(null);
+  const lastHandledMutationResponseRef = useRef<unknown>(null);
+  const canUpdate = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.update,
+  });
+  const canDelete = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.delete,
+  });
+  const canReadQr = userHasPermission({
+    roles,
+    entity: PermissionEntity.qr,
+    action: PermissionAction.read,
+  });
+  const canReturnUnitToService = roles?.some(
+    (role) => role === "ADMIN" || role === "OWNER"
+  );
+  const selectedUnitSet = useMemo(
+    () => new Set(selectedUnitIds),
+    [selectedUnitIds]
+  );
+  const allSelected =
+    selectedUnits.length > 0 &&
+    selectedUnits.every((unit) => selectedUnitSet.has(unit.id));
+  const someSelected = selectedUnitIds.length > 0 && !allSelected;
+  const actionTargets = selectedUnits.filter(
+    (unit) => actionRequest?.targetIds.includes(unit.id) ?? false
+  );
+  const ioioLocations = locations.map(({ id, name, parentId }) => ({
+    id,
+    name,
+    parentId,
+  }));
+
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelected;
+  }, [someSelected]);
+
+  useEffect(() => {
+    const response = fetcher.data;
+    if (
+      fetcher.state !== "idle" ||
+      !response?.success ||
+      response === lastHandledMutationResponseRef.current
+    ) {
+      return;
+    }
+    lastHandledMutationResponseRef.current = response;
+
+    if (actionRequest) {
+      const targetIds = actionRequest.targetIds;
+      onActionRequestChange(null);
+      onSelectedUnitIdsChange(
+        selectedUnitIds.filter((id) => !targetIds.includes(id))
+      );
+      void revalidator.revalidate();
+      return;
+    }
+
+    const completedDirectIds = pendingDirectLifecycleIdsRef.current;
+    if (!completedDirectIds) return;
+    pendingDirectLifecycleIdsRef.current = null;
+    onSelectedUnitIdsChange(
+      selectedUnitIds.filter((id) => !completedDirectIds.includes(id))
+    );
+    void revalidator.revalidate();
+  }, [
+    actionRequest,
+    fetcher.data,
+    fetcher.state,
+    onActionRequestChange,
+    onSelectedUnitIdsChange,
+    revalidator,
+    selectedUnitIds,
+  ]);
+
+  const openAction = (
+    nextAction: ExpandedUnitAction,
+    targetIds = selectedUnitIds
+  ) => {
+    const uniqueTargetIds = uniqueAssetIds(targetIds);
+    if (uniqueTargetIds.length === 0) return;
+    pendingDirectLifecycleIdsRef.current = null;
+    onActionRequestChange({
+      action: nextAction,
+      targetIds: uniqueTargetIds,
+    });
+  };
+
+  const getUnitActionTargets = (unitId: string) =>
+    uniqueAssetIds(
+      selectedUnitIds.includes(unitId) ? selectedUnitIds : [unitId]
+    );
+
+  const returnUnitToService = (assetId: string) => {
+    pendingDirectLifecycleIdsRef.current = [assetId];
+    void fetcher.submit(
+      {
+        intent: "return-unit-to-service",
+        assetId,
+      },
+      { method: "post" }
+    );
+  };
+
+  const printSelectedLabels = useCallback(
+    (targetIds = selectedUnitIds) => {
+      const uniqueTargetIds = uniqueAssetIds(targetIds);
+      if (uniqueTargetIds.length === 0) return;
+      const assetIds = uniqueTargetIds.map(encodeURIComponent).join(",");
+      void navigate(`/labels?assetIds=${assetIds}`);
+    },
+    [navigate, selectedUnitIds]
+  );
+
+  useEffect(() => {
+    if (actionRequest?.action !== "print") return;
+    printSelectedLabels(actionRequest.targetIds);
+    onActionRequestChange(null);
+  }, [actionRequest, onActionRequestChange, printSelectedLabels]);
+
+  const toggleAll = (checked: boolean) => {
+    onSelectedUnitIdsChange(
+      checked ? selectedUnits.map((unit) => unit.id) : []
+    );
+  };
+
+  const busy = fetcher.state !== "idle";
+  const formError = fetcher.data?.error?.message;
+
+  return (
+    <div className="space-y-2 border-l-2 border-red-200 pl-3 sm:pl-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          Physical units
+        </span>
+        <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+          <input
+            ref={selectAllRef}
+            type="checkbox"
+            checked={allSelected}
+            onChange={(event) => toggleAll(event.target.checked)}
+            aria-label={`Select all ${selectedUnits.length} physical units`}
+            className="size-4 rounded border-gray-300 text-red-600 focus:ring-red-600"
+          />
+          <span>Select all {selectedUnits.length}</span>
+        </label>
+      </div>
+
+      {selectedUnitIds.length > 0 ? (
+        <p className="rounded-md border border-red-100 bg-red-50/60 p-2 text-sm font-semibold text-gray-900">
+          {selectedUnitIds.length} selected
+        </p>
+      ) : null}
+
+      <div className="space-y-1">
+        {selectedUnits.map((member) => {
+          const location = getPrimaryLocation(member);
+          const unitLabel = getUnitLabel(member.title);
+          const unitState = getStaffInventoryUnitState(member);
+          return (
+            <div
+              key={member.id}
+              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-3 gap-y-1 rounded-md border border-gray-200 bg-white px-2 py-1.5 text-sm"
+            >
+              <input
+                id={`expanded-unit-${member.id}`}
+                type="checkbox"
+                checked={selectedUnitSet.has(member.id)}
+                onChange={() =>
+                  onSelectedUnitIdsChange(
+                    selectedUnitIds.includes(member.id)
+                      ? selectedUnitIds.filter((id) => id !== member.id)
+                      : [...selectedUnitIds, member.id]
+                  )
+                }
+                aria-label={`Select physical unit ${unitLabel}`}
+                className="size-4 shrink-0 rounded border-gray-300 text-red-600 focus:ring-red-600"
+              />
+              <span className="min-w-0 whitespace-normal break-words font-medium text-gray-900">
+                <span className="ioio-identifier">{unitLabel}</span>
+              </span>
+              <div className="flex min-w-0 items-center justify-end gap-2">
+                <Badge
+                  color={
+                    unitState === "Available"
+                      ? "#dcfce7"
+                      : unitState === "Broken"
+                      ? "#fee2e2"
+                      : "#f3f4f6"
+                  }
+                  textColor={
+                    unitState === "Available"
+                      ? "#166534"
+                      : unitState === "Broken"
+                      ? "#991b1b"
+                      : "#374151"
+                  }
+                  withDot={false}
+                  className="shrink-0 px-2 py-1 text-xs font-semibold"
+                >
+                  {unitState}
+                </Badge>
+                <span className="hidden shrink-0 text-xs font-medium text-gray-600 sm:inline">
+                  QR: {member.qrCodes?.[0]?.id ? "Active" : "Not assigned"}
+                </span>
+                {location ? (
+                  <span className="hidden min-w-0 max-w-28 truncate text-xs text-gray-500 lg:inline">
+                    {formatStaffLocationName(location.name)}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {canUpdate ? (
+                  <Button
+                    to={`/assets/${member.id}/edit`}
+                    size="sm"
+                    variant="secondary"
+                    className="size-8 shrink-0 rounded-lg p-1.5"
+                    aria-label={`Edit ${unitLabel}`}
+                    tooltip="Edit this physical unit"
+                  >
+                    <PencilIcon className="size-4" />
+                  </Button>
+                ) : null}
+                {canUpdate || canDelete || canReadQr ? (
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className="size-8 rounded-lg p-1.5"
+                        aria-label={`More actions for ${unitLabel}`}
+                      >
+                        <MoreHorizontalIcon className="size-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="min-w-52 max-w-60"
+                    >
+                      {canUpdate ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2"
+                          onSelect={() =>
+                            openAction(
+                              "category",
+                              getUnitActionTargets(member.id)
+                            )
+                          }
+                        >
+                          <FolderInputIcon className="size-5 shrink-0" />
+                          <span>Change category</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canReturnUnitToService &&
+                      member.status === AssetStatus.AVAILABLE &&
+                      !member.availableToBook &&
+                      !member.blockingIssueReported &&
+                      !member.preparedPickupHeld &&
+                      member.custody.length === 0 &&
+                      member.bookingAssets.length === 0 ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-green-800"
+                          onSelect={() => returnUnitToService(member.id)}
+                        >
+                          <span>Return to service</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canUpdate ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2"
+                          onSelect={() =>
+                            openAction(
+                              "location",
+                              getUnitActionTargets(member.id)
+                            )
+                          }
+                        >
+                          <FolderInputIcon className="size-5 shrink-0" />
+                          <span>Change location</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canReadQr ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2"
+                          onSelect={() =>
+                            printSelectedLabels(getUnitActionTargets(member.id))
+                          }
+                        >
+                          <PrinterIcon className="size-5 shrink-0" />
+                          <span>Print label / QR</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canDelete ? <DropdownMenuSeparator /> : null}
+                      {canDelete ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2"
+                          onSelect={() =>
+                            openAction(
+                              "archive",
+                              getUnitActionTargets(member.id)
+                            )
+                          }
+                        >
+                          <ArchiveIcon className="size-5 shrink-0" />
+                          <span>Archive</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      {canDelete ? (
+                        <DropdownMenuItem
+                          className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-red-700"
+                          onSelect={() =>
+                            openAction("trash", getUnitActionTargets(member.id))
+                          }
+                        >
+                          <Trash2Icon className="size-5 shrink-0" />
+                          <span>Delete</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {formError ? (
+        <p className="text-sm text-error-600" role="alert">
+          {formError}
+        </p>
+      ) : null}
+
+      {actionRequest && actionRequest.action !== "print" ? (
+        <ExpandedUnitActionDialog
+          action={actionRequest.action}
+          assetIds={actionRequest.targetIds}
+          categories={categories}
+          locations={ioioLocations}
+          selectedUnits={actionTargets}
+          fetcher={fetcher}
+          busy={busy}
+          onClose={() => {
+            if (!busy) onActionRequestChange(null);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ExpandedUnitActionDialog({
+  action,
+  assetIds,
+  categories,
+  locations,
+  selectedUnits,
+  fetcher,
+  busy,
+  onClose,
+}: {
+  action: ExpandedUnitAction;
+  assetIds: string[];
+  categories: Array<{ id: string; name: string }>;
+  locations: Array<{ id: string; name: string; parentId: string | null }>;
+  selectedUnits: StaffInventoryItem["members"];
+  fetcher: ReturnType<typeof useFetcher>;
+  busy: boolean;
+  onClose: () => void;
+}) {
+  const title =
+    action === "location"
+      ? `Change location for ${assetIds.length} physical unit${
+          assetIds.length === 1 ? "" : "s"
+        }`
+      : action === "category"
+      ? `Change category for ${assetIds.length} physical unit${
+          assetIds.length === 1 ? "" : "s"
+        }`
+      : action === "archive"
+      ? `Archive ${assetIds.length} physical unit${
+          assetIds.length === 1 ? "" : "s"
+        }`
+      : `Delete ${assetIds.length} physical unit${
+          assetIds.length === 1 ? "" : "s"
+        }?`;
+  const [searchParams] = useSearchParams();
+  const currentCategory =
+    selectedUnits.length === 1 ? selectedUnits[0].category?.id ?? "" : "";
+
+  const submitAction = (
+    event: FormEvent<HTMLFormElement>,
+    actionUrl: string,
+    intent?: string
+  ) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    // Keep the expanded-unit selection independent from the main inventory
+    // selection atom. The payload is assembled once from the actual Asset IDs
+    // captured by the row, so the browser never submits one request per unit.
+    assetIds.forEach((assetId, index) => {
+      formData.set(`assetIds[${index}]`, assetId);
+    });
+    formData.set("currentSearchParams", searchParams.toString());
+    if (intent) formData.set("intent", intent);
+
+    void fetcher.submit(formData, { method: "post", action: actionUrl });
+  };
+
+  return (
+    <DialogPortal>
+      <Dialog
+        title={title}
+        open={true}
+        onClose={onClose}
+        className="lg:w-[440px]"
+      >
+        {action === "location" ? (
+          <fetcher.Form
+            method="post"
+            action="/api/assets/bulk-update-location"
+            onSubmit={(event) =>
+              submitAction(event, "/api/assets/bulk-update-location")
+            }
+            className="space-y-4 px-6 pb-6"
+          >
+            <ExpandedUnitIds searchParams={searchParams.toString()} />
+            <IoioLocationCascadeSelect
+              locations={locations}
+              fieldName="newLocationId"
+              required
+              disabled={busy}
+            />
+            <ExpandedUnitDialogButtons busy={busy} onClose={onClose} />
+          </fetcher.Form>
+        ) : action === "category" ? (
+          <fetcher.Form
+            method="post"
+            action="/api/assets/bulk-update-category"
+            onSubmit={(event) =>
+              submitAction(event, "/api/assets/bulk-update-category")
+            }
+            className="space-y-4 px-6 pb-6"
+          >
+            <ExpandedUnitIds searchParams={searchParams.toString()} />
+            <label className="block text-sm font-medium text-gray-800">
+              Category
+              <select
+                name="category"
+                defaultValue={currentCategory}
+                disabled={busy}
+                className="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-red-600 focus:outline-none focus:ring-2 focus:ring-red-600"
+              >
+                <option value="">Uncategorized</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <ExpandedUnitDialogButtons busy={busy} onClose={onClose} />
+          </fetcher.Form>
+        ) : (
+          <fetcher.Form
+            method="post"
+            action="/assets?index"
+            onSubmit={(event) =>
+              submitAction(
+                event,
+                "/assets?index",
+                action === "archive" ? "bulk-archive" : "bulk-trash"
+              )
+            }
+            className="space-y-4 px-6 pb-6"
+          >
+            <ExpandedUnitIds searchParams={searchParams.toString()} />
+            <input
+              type="hidden"
+              name="intent"
+              defaultValue={
+                action === "archive" ? "bulk-archive" : "bulk-trash"
+              }
+            />
+            <p className="text-sm text-gray-600">
+              {action === "archive"
+                ? "These physical units will be hidden from active Inventory and can be restored later."
+                : "These physical units will be removed from Inventory and moved to Trash, where they can be restored later."}
+            </p>
+            <ExpandedUnitDialogButtons
+              busy={busy}
+              onClose={onClose}
+              submitLabel={action === "archive" ? "Archive" : "Delete"}
+              danger
+            />
+          </fetcher.Form>
+        )}
+      </Dialog>
+    </DialogPortal>
+  );
+}
+
+function ExpandedUnitIds({ searchParams }: { searchParams: string }) {
+  return (
+    <input
+      type="hidden"
+      name="currentSearchParams"
+      defaultValue={searchParams}
+    />
+  );
+}
+
+function ExpandedUnitDialogButtons({
+  busy,
+  onClose,
+  submitLabel = "Confirm",
+  danger = false,
+}: {
+  busy: boolean;
+  onClose: () => void;
+  submitLabel?: string;
+  danger?: boolean;
+}) {
+  return (
+    <div className="flex gap-3">
+      <Button
+        type="button"
+        variant="secondary"
+        width="full"
+        disabled={busy}
+        onClick={onClose}
+      >
+        Cancel
+      </Button>
+      <Button
+        type="submit"
+        variant={danger ? "danger" : "primary"}
+        width="full"
+        disabled={busy}
+      >
+        {submitLabel}
+      </Button>
+    </div>
+  );
+}
+
+function getUnitLabel(title: string): string {
+  return getIoioPhysicalUnitDisplayName({
+    logicalProductName: getIoioKitDisplayName({ name: title }),
+    unitNumber: getPhysicalUnitLabelFromTitle(title),
+    missingUnitLabel: "Unit number missing",
+  });
+}
+
+function StaffInventoryMobileRow({
+  item,
+  selected,
+  onToggle,
+}: {
+  item: StaffInventoryItem;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const { roles } = useUserRoleHelper();
+  const [searchParams] = useSearchParams();
+  const location = getPrimaryLocation(item);
+  const { availableQuantity, totalQuantity } =
+    getStaffInventoryQuantities(item);
+  const imageItem = findStaffInventoryImageCandidate(item.members) ?? item;
+  const isHidden = isStaffInventoryItemHidden(item);
+  const [expanded, setExpanded] = useState(false);
+  const [selectedPhysicalUnitIds, setSelectedPhysicalUnitIds] = useState<
+    string[]
+  >([]);
+  const [physicalUnitAction, setPhysicalUnitAction] =
+    useState<ExpandedUnitActionRequest | null>(null);
+  useEffect(() => {
+    const memberIds = new Set(item.members.map((member) => member.id));
+    setSelectedPhysicalUnitIds((ids) => ids.filter((id) => memberIds.has(id)));
+  }, [item.members]);
+
+  return (
+    <StaffInventoryMobileCard
+      selectionControl={
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          aria-label={`Select ${item.logicalTitle}`}
+          className="size-5 shrink-0 rounded border-gray-300 text-red-600 focus:ring-red-600"
+        />
+      }
+      image={
+        <AssetImage
+          asset={{
+            id: imageItem.id,
+            mainImage: imageItem.mainImage,
+            thumbnailImage: imageItem.thumbnailImage,
+            mainImageExpiration: imageItem.mainImageExpiration,
+            assetModel: imageItem.assetModel ?? null,
+            kitImage: imageItem.assetKits?.[0]?.kit?.image ?? null,
+          }}
+          alt={`Image of ${item.logicalTitle}`}
+          useThumbnail={false}
+          className="size-full rounded-lg border object-cover"
+        />
+      }
+      title={
+        <Button
+          to={`/assets/${item.id}`}
+          state={{
+            inventoryReturnTo: `/assets${
+              searchParams.size ? `?${searchParams}` : ""
+            }`,
+          }}
+          variant="link"
+          className="block max-w-full whitespace-normal break-words p-0 text-left text-base font-semibold leading-snug text-gray-950 hover:text-gray-700"
+          title={item.logicalTitle}
+        >
+          {item.logicalTitle}
+        </Button>
+      }
+      status={
+        isHidden ? (
+          <Badge
+            color="#E5E7EB"
+            textColor="#374151"
+            withDot={false}
+            className="text-[11px]"
+          >
+            Hidden
+          </Badge>
+        ) : undefined
+      }
+      expandControl={
+        item.isExpandable ? (
+          <button
+            type="button"
+            className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-700 focus:outline-none focus:ring-2 focus:ring-red-600"
+            aria-label={
+              (expanded ? "Collapse " : "Expand ") + item.logicalTitle
+            }
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <ChevronDownIcon
+              className={
+                "size-4 transition-transform" + (expanded ? " rotate-180" : "")
+              }
+            />
+          </button>
+        ) : null
+      }
+      actions={
+        <StaffInventoryActions
+          item={item}
+          roles={roles}
+          compact
+          physicalUnitIds={selectedPhysicalUnitIds}
+          onPhysicalUnitAction={(action) =>
+            setPhysicalUnitAction({
+              action,
+              targetIds: uniqueAssetIds(selectedPhysicalUnitIds),
+            })
+          }
+        />
+      }
+      category={
+        <CategoryBadge
+          className="max-w-full whitespace-normal break-words text-left"
+          category={
+            item.category
+              ? {
+                  ...item.category,
+                }
+              : null
+          }
+        />
+      }
+      location={
+        location ? (
+          <LocationBadge
+            location={{
+              id: location.id,
+              name: formatStaffLocationName(location.name),
+              parentId: location.parentId ?? undefined,
+              childCount: location._count?.children ?? 0,
+            }}
+            className="ml-0 max-w-full whitespace-normal break-words text-left"
+          />
+        ) : (
+          <EmptyTableValue />
+        )
+      }
+      availability={
+        <span aria-label={`${availableQuantity} of ${totalQuantity} available`}>
+          <QuantityPill
+            available={availableQuantity}
+            total={totalQuantity}
+            includeAvailableLabel
+          />
+        </span>
+      }
+      expandedContent={
+        item.isExpandable && expanded ? (
+          <StaffInventoryExpandedUnitsContent
+            item={item}
+            roles={roles}
+            selectedUnitIds={selectedPhysicalUnitIds}
+            onSelectedUnitIdsChange={setSelectedPhysicalUnitIds}
+            actionRequest={physicalUnitAction}
+            onActionRequestChange={setPhysicalUnitAction}
+          />
+        ) : null
+      }
+    />
+  );
+}
+
+function formatStaffLocationName(name: string): string {
+  const roomCodeFirst = name.match(/^([A-Z]\d{3})\s+\u2014\s+(.+)$/u);
+  if (roomCodeFirst) {
+    return `${roomCodeFirst[2]} / ${roomCodeFirst[1]}`;
+  }
+
+  return name.replace(/\s*\u2014\s*/gu, " / ");
+}
+
+function QuantityPill({
+  available,
+  total,
+  includeAvailableLabel = false,
+}: {
+  available: number;
+  total: number;
+  includeAvailableLabel?: boolean;
+}) {
+  const hasAvailability = available > 0;
+  return (
+    <Badge
+      color={hasAvailability ? "#dcfce7" : "#fee2e2"}
+      textColor={hasAvailability ? "#166534" : "#b91c1c"}
+      withDot={false}
+      className={tw(
+        "inline-flex min-w-14 shrink-0 justify-center whitespace-nowrap px-2 py-1 text-sm font-semibold tabular-nums",
+        includeAvailableLabel &&
+          "min-w-0 max-w-full shrink whitespace-normal break-words text-xs"
+      )}
+    >
+      {available}/{total}
+      {includeAvailableLabel ? " available" : ""}
+    </Badge>
+  );
+}
+
+function StaffInventoryActions({
+  item,
+  roles,
+  compact = false,
+  physicalUnitIds = [],
+  onPhysicalUnitAction,
+}: {
+  item: StaffInventoryItem;
+  roles: OrganizationRoles[] | undefined;
+  compact?: boolean;
+  physicalUnitIds?: string[];
+  onPhysicalUnitAction?: (action: ExpandedUnitAction) => void;
+}) {
+  const canUpdate = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.update,
+  });
+  const canUpdateAssetModel = userHasPermission({
+    roles,
+    entity: PermissionEntity.assetModel,
+    action: PermissionAction.update,
+  });
+  const canDelete = userHasPermission({
+    roles,
+    entity: PermissionEntity.asset,
+    action: PermissionAction.delete,
+  });
+  const canReadQr = userHasPermission({
+    roles,
+    entity: PermissionEntity.qr,
+    action: PermissionAction.read,
+  });
+  const navigate = useNavigate();
+  const selectedItems = useAtomValue(selectedBulkItemsAtom);
+  const setSelectedItems = useSetAtom(selectedBulkItemsAtom);
+  const removeSelectedItems = useSetAtom(removeSelectedBulkItemsAtom);
+  const openBulkDialog = useSetAtom(openBulkDialogAtom);
+  const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
+  const visibilityFetcher = useFetcher();
+  const lastHandledVisibilityResponseRef = useRef<unknown>(null);
+  const isRowSelected = selectedItems.some(
+    (selectedItem) => bulkSelectionKey(selectedItem) === bulkSelectionKey(item)
+  );
+  const hasPhysicalUnitSelection =
+    item.isExpandable && physicalUnitIds.length > 0 && onPhysicalUnitAction;
+  const assetModelId = item.assetModelId ?? item.assetModel?.id;
+  const canEditGeneralItem = assetModelId ? canUpdateAssetModel : canUpdate;
+  const isHidden = isStaffInventoryItemHidden(item);
+
+  useEffect(() => {
+    const response = visibilityFetcher.data as
+      | { success?: boolean }
+      | undefined;
+    if (
+      visibilityFetcher.state !== "idle" ||
+      !response?.success ||
+      response === lastHandledVisibilityResponseRef.current
+    ) {
+      return;
+    }
+    lastHandledVisibilityResponseRef.current = response;
+    removeSelectedItems(getStaffInventoryActionTargets(item));
+  }, [
+    item,
+    removeSelectedItems,
+    visibilityFetcher.data,
+    visibilityFetcher.state,
+  ]);
+
+  const toggleStudentVisibility = () => {
+    void visibilityFetcher.submit(
+      {
+        intent: isHidden ? "unhide-asset" : "hide-asset",
+        assetId: item.id,
+      },
+      { method: "post" }
+    );
+  };
+
+  const selectActionTargets = () => {
+    if (!isRowSelected) {
+      setSelectedItems(item.isExpandable ? item.members : [item]);
+      return;
+    }
+
+    const expandedSelection = selectedItems.flatMap((selectedItem) =>
+      bulkSelectionKey(selectedItem) === bulkSelectionKey(item) &&
+      item.isExpandable
+        ? item.members
+        : [selectedItem]
+    );
+    const uniqueSelection = Array.from(
+      new Map(expandedSelection.map((entry) => [entry.id, entry])).values()
+    );
+    setSelectedItems(uniqueSelection);
+  };
+
+  const openCategoryDialog = () => {
+    if (hasPhysicalUnitSelection) {
+      onPhysicalUnitAction("category");
+      return;
+    }
+    selectActionTargets();
+    openBulkDialog("category");
+  };
+
+  const openLocationDialog = () => {
+    if (hasPhysicalUnitSelection) {
+      onPhysicalUnitAction("location");
+      return;
+    }
+    selectActionTargets();
+    openBulkDialog("location");
+  };
+
+  const printLabelsOrQr = () => {
+    if (hasPhysicalUnitSelection) {
+      onPhysicalUnitAction("print");
+      return;
+    }
+    if (item.isExpandable && (!isRowSelected || selectedItems.length === 1)) {
+      const assetIds = item.members
+        .map((member) => member.id)
+        .map((assetId) => encodeURIComponent(assetId))
+        .join(",");
+      void navigate(`/labels?assetIds=${assetIds}`);
+      return;
+    }
+
+    if (isRowSelected && selectedItems.length > 1) {
+      setIsBulkQrOpen(true);
+      return;
+    }
+
+    void navigate(`/labels?assetId=${encodeURIComponent(item.id)}`);
+  };
+
+  const openLifecycleDialog = (type: "archive" | "trash") => {
+    if (hasPhysicalUnitSelection) {
+      onPhysicalUnitAction(type);
+      return;
+    }
+    selectActionTargets();
+    openBulkDialog(type);
+  };
+
+  return (
+    <>
+      <div className="flex items-center gap-1.5 whitespace-nowrap">
+        {canEditGeneralItem && !compact ? (
+          <Button
+            to={getStaffInventoryEditTarget({
+              assetId: item.id,
+              assetModelId,
+            })}
+            size="sm"
+            variant="secondary"
+            className="size-8 shrink-0 rounded-lg p-1.5"
+            aria-label={assetModelId ? "Edit general item" : "Edit item"}
+            tooltip={assetModelId ? "Edit general item" : "Edit item"}
+          >
+            <PencilIcon className="size-4" />
+          </Button>
+        ) : null}
+        {canEditGeneralItem || canUpdate || canReadQr || canDelete ? (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className={tw(
+                  "size-8 shrink-0 rounded-lg p-1.5",
+                  compact && "size-11"
+                )}
+                aria-label="More actions"
+                tooltip="More actions"
+              >
+                <MoreHorizontalIcon className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-52 max-w-60">
+              {canEditGeneralItem ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={() =>
+                    void navigate(
+                      getStaffInventoryEditTarget({
+                        assetId: item.id,
+                        assetModelId,
+                      })
+                    )
+                  }
+                >
+                  <PencilIcon className="size-5 shrink-0" />
+                  <span>
+                    {assetModelId ? "Edit general item" : "Edit item"}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+              {canEditGeneralItem ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  disabled={visibilityFetcher.state !== "idle"}
+                  onSelect={toggleStudentVisibility}
+                >
+                  <span>{isHidden ? "Unhide asset" : "Hide asset"}</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canUpdate && (canReadQr || canDelete) ? (
+                <DropdownMenuSeparator />
+              ) : null}
+              {canUpdate ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={openCategoryDialog}
+                >
+                  <FolderInputIcon className="size-5 shrink-0" />
+                  <span>Change category</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canUpdate ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={openLocationDialog}
+                >
+                  <FolderInputIcon className="size-5 shrink-0" />
+                  <span>Change location</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canReadQr ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={printLabelsOrQr}
+                >
+                  <PrinterIcon className="size-5 shrink-0" />
+                  <span>Print label / QR</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canDelete ? <DropdownMenuSeparator /> : null}
+              {canDelete ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-gray-700 hover:text-gray-900"
+                  onSelect={() => openLifecycleDialog("archive")}
+                >
+                  <ArchiveIcon className="size-5 shrink-0" />
+                  <span>Archive</span>
+                </DropdownMenuItem>
+              ) : null}
+              {canDelete ? (
+                <DropdownMenuItem
+                  className="flex min-h-10 flex-row items-center gap-3 whitespace-nowrap px-3 py-2 text-red-700 hover:text-red-800"
+                  onSelect={() => openLifecycleDialog("trash")}
+                >
+                  <Trash2Icon className="size-5 shrink-0" />
+                  <span>Delete</span>
+                </DropdownMenuItem>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
+      <BulkDownloadQrDialog
+        isDialogOpen={isBulkQrOpen}
+        onClose={() => setIsBulkQrOpen(false)}
+      />
+    </>
+  );
+}

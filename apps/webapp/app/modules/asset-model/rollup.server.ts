@@ -27,7 +27,9 @@ import { Prisma } from "@prisma/client";
 import { withPrismaRetry } from "@shelf/database";
 import type { Filter } from "~/components/assets/assets-index/advanced-filters/schema";
 import { db } from "~/database/db.server";
+import { PUBLIC_BUCKET } from "~/utils/constants";
 import { ShelfError } from "~/utils/error";
+import { resolveStorageImageUrl } from "~/utils/storage.server";
 import { CUSTODY_AGG_JOIN, generateWhereClause } from "../asset/query.server";
 
 /** Sort keys the model view offers. Deliberately separate from the asset
@@ -65,6 +67,8 @@ export type AssetModelRollupRow = {
   name: string | null;
   description: string | null;
   image: string | null;
+  imageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
   thumbnailImage: string | null;
   defaultCategoryId: string | null;
   defaultCategoryName: string | null;
@@ -169,7 +173,7 @@ function buildRollupFrom({
       ) a
       FULL OUTER JOIN (
         SELECT am.id, am.name, am.description, am.image, am."thumbnailImage",
-               am."defaultCategoryId"
+               am."defaultCategoryId", am."imageStoragePath", am."thumbnailImageStoragePath"
         FROM public."AssetModel" am
         WHERE am."organizationId" = ${organizationId}
       ) am ON a."assetModelId" = am.id`;
@@ -331,6 +335,8 @@ export async function getAssetModelRollup({
         am.name                                              AS "name",
         am.description                                       AS "description",
         am.image                                             AS "image",
+        am."imageStoragePath"                                 AS "imageStoragePath",
+        am."thumbnailImageStoragePath"                        AS "thumbnailImageStoragePath",
         am."thumbnailImage"                                  AS "thumbnailImage",
         am."defaultCategoryId"                               AS "defaultCategoryId",
         cat.name                                             AS "defaultCategoryName",
@@ -370,7 +376,7 @@ export async function getAssetModelRollup({
       -- since am.id determines all of them, and NULLs group together so the
       -- bucket stays one row.
       GROUP BY am.id, am.name, am.description, am.image, am."thumbnailImage",
-               am."defaultCategoryId", cat.id
+               am."defaultCategoryId", cat.id, am."imageStoragePath", am."thumbnailImageStoragePath"
       ${orderBy}
       LIMIT ${take} OFFSET ${skip}
     `;
@@ -402,9 +408,29 @@ export async function getAssetModelRollup({
           };
 
     return {
-      rows: result.map(
-        ({ totalModels: _m, totalGroups: _g, totalRollupAssets: _a, ...row }) =>
-          row
+      rows: await Promise.all(
+        result.map(
+          async ({
+            totalModels: _m,
+            totalGroups: _g,
+            totalRollupAssets: _a,
+            ...row
+          }) => ({
+            ...row,
+            image: await resolveStorageImageUrl({
+              bucketName: PUBLIC_BUCKET,
+              objectPath: row.imageStoragePath,
+              legacyUrl: row.image,
+              isPublic: true,
+            }),
+            thumbnailImage: await resolveStorageImageUrl({
+              bucketName: PUBLIC_BUCKET,
+              objectPath: row.thumbnailImageStoragePath,
+              legacyUrl: row.thumbnailImage,
+              isPublic: true,
+            }),
+          })
+        )
       ),
       ...totals,
     };

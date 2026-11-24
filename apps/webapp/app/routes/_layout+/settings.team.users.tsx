@@ -1,11 +1,12 @@
 import { useMemo } from "react";
-import type { InviteStatuses } from "@prisma/client";
+import { OrganizationRoles, type InviteStatuses } from "@prisma/client";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { data, redirect, Link, Outlet, useMatches } from "react-router";
+import { data, redirect, Link, Outlet, useMatches, Form } from "react-router";
+import { ioioRoleLabel } from "~/components/ioio-staff/role-label";
 import ContextualModal from "~/components/layout/contextual-modal";
 import type { HeaderData } from "~/components/layout/header/types";
 import { List } from "~/components/list";
@@ -13,21 +14,29 @@ import { ListContentWrapper } from "~/components/list/content-wrapper";
 import { Filters } from "~/components/list/filters";
 import ImportUsersDialog from "~/components/settings/import-users-dialog/import-users-dialog";
 import InviteUserDialog from "~/components/settings/invite-user-dialog";
-import TransferOwnershipButton from "~/components/settings/transfer-ownership-button";
 import { Button } from "~/components/shared/button";
 import { InfoTooltip } from "~/components/shared/info-tooltip";
 
 import { Td, Th } from "~/components/table";
 import { SSOUserBadge } from "~/components/user/sso-user-badge";
 import { TeamUsersActionsDropdown } from "~/components/workspace/users-actions-dropdown";
-import type { TeamMembersWithUserOrInvite } from "~/modules/settings/service.server";
+import { db } from "~/database/db.server";
+import { useSearchParams } from "~/hooks/search-params";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
+import {
+  getStaffAnnualAccessApprovals,
+  grantAnnualAccessToStudent,
+  revokeAnnualAccessApproval,
+} from "~/modules/ioio-student/annual-access.server";
 import { getPaginatedAndFilterableSettingUsers } from "~/modules/settings/service.server";
+import type { TeamMembersWithUserOrInvite } from "~/modules/settings/service.server";
 import type { RouteHandleWithName } from "~/modules/types";
 import { resolveUserAction } from "~/modules/user/utils.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { makeShelfError } from "~/utils/error";
 import { computeHasActiveFilters } from "~/utils/filter-params";
 import { error, getCurrentSearchParams } from "~/utils/http.server";
+import { Logger } from "~/utils/logger";
 import {
   PermissionAction,
   PermissionEntity,
@@ -64,11 +73,97 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     const searchParams = getCurrentSearchParams(request);
     const hasActiveFilters = computeHasActiveFilters(searchParams);
 
-    const { page, perPage, search, items, totalItems, totalPages } =
-      await getPaginatedAndFilterableSettingUsers({
+    const {
+      page,
+      perPage,
+      search,
+      items: userItems,
+      totalItems: memberTotalItems,
+    } = await getPaginatedAndFilterableSettingUsers({
+      organizationId,
+      request,
+    });
+    let annualAccessApprovals: Awaited<
+      ReturnType<typeof getStaffAnnualAccessApprovals>
+    > | null = null;
+    let taUserIds = new Set<string>();
+    try {
+      const [accessApprovals, taMemberships] = await Promise.all([
+        getStaffAnnualAccessApprovals({ organizationId }),
+        db.ioioLabTA.findMany({
+          where: {
+            organizationId,
+            userId: { in: userItems.flatMap((item) => item.userId ?? []) },
+          },
+          select: { userId: true },
+        }),
+      ]);
+      annualAccessApprovals = accessApprovals;
+      taUserIds = new Set(taMemberships.map((membership) => membership.userId));
+    } catch (cause) {
+      // The registered user directory is authoritative independently of the
+      // optional borrowing-approval status column/table. Keep the directory
+      // available if that supplementary lookup is temporarily unavailable.
+      Logger.warn({
+        event: "ioio_user_directory_access_status_unavailable",
         organizationId,
-        request,
+        cause,
       });
+    }
+    const accessByUserId = new Map(
+      (annualAccessApprovals?.access ?? []).map((approval) => [
+        approval.student.id,
+        approval,
+      ])
+    );
+    const pendingByUserId = new Map(
+      (annualAccessApprovals?.pending ?? []).map((approval) => [
+        approval.student.id,
+        approval,
+      ])
+    );
+    const items: UserWithBorrowingAccess[] = userItems.map((item) => {
+      if (
+        item.roleEnum !== OrganizationRoles.SELF_SERVICE ||
+        !item.userId ||
+        taUserIds.has(item.userId)
+      ) {
+        return { ...item, borrowingAccess: null };
+      }
+
+      if (!annualAccessApprovals) {
+        return {
+          ...item,
+          borrowingAccess: { state: "UNAVAILABLE" as const, approvalId: null },
+        };
+      }
+
+      const currentAccess = accessByUserId.get(item.userId);
+      const pendingApproval = pendingByUserId.get(item.userId);
+      const borrowingState =
+        currentAccess?.accessState === "ACTIVE"
+          ? ("ACTIVE" as const)
+          : pendingApproval
+          ? ("PENDING" as const)
+          : currentAccess?.accessState ?? ("NONE" as const);
+      return {
+        ...item,
+        borrowingAccess: {
+          required: annualAccessApprovals.required,
+          state: !annualAccessApprovals.required
+            ? ("NOT_REQUIRED" as const)
+            : borrowingState,
+          approvalId:
+            (borrowingState === "ACTIVE" ? currentAccess?.id : null) ??
+            pendingApproval?.id ??
+            currentAccess?.id ??
+            null,
+        },
+      };
+    });
+
+    const totalItems = memberTotalItems;
+    const totalPages = Math.ceil(memberTotalItems / perPage);
 
     const header: HeaderData = {
       title: `Settings - ${organization.name}`,
@@ -111,6 +206,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const { userId } = authSession;
 
   try {
+    await requireIoioStaffAccess({ context, request });
     const { organizationId, role } = await requirePermission({
       userId,
       request,
@@ -118,6 +214,28 @@ export async function action({ context, request }: ActionFunctionArgs) {
       action: PermissionAction.update,
     });
 
+    const formData = await request.clone().formData();
+    const intent = String(formData.get("intent") ?? "");
+    if (intent === "grant-borrowing-access") {
+      return data({
+        ok: true as const,
+        result: await grantAnnualAccessToStudent({
+          organizationId,
+          staffUserId: userId,
+          studentUserId: String(formData.get("studentUserId") ?? ""),
+        }),
+      });
+    }
+    if (intent === "revoke-borrowing-access") {
+      return data({
+        ok: true as const,
+        result: await revokeAnnualAccessApproval({
+          organizationId,
+          staffUserId: userId,
+          requestId: String(formData.get("approvalId") ?? ""),
+        }),
+      });
+    }
     return await resolveUserAction(request, organizationId, userId, role);
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -127,7 +245,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
 export const handle = {
   name: "settings.team.users",
-  breadcrumb: () => <Link to="/settings/team">Team</Link>,
+  breadcrumb: () => <Link to="/settings/team">IOIO Users</Link>,
 };
 
 export default function UserTeamSetting() {
@@ -169,12 +287,12 @@ export default function UserTeamSetting() {
         squeezes the actions slot to leftovers. Content-size it on md+ so the
         three action buttons get the actual free space. */}
         <Filters innerWrapperClassName="md:w-auto">
+          <UserRoleFilter />
           {/* Three buttons don't always fit one row: stack them full-width on
           mobile, and let the row wrap on tighter md screens. The container owns
           the spacing and the stretch — children must NOT add their own `mt-*`
           or `w-full`, or the gaps stop being uniform. */}
           <div className="flex w-full flex-col gap-2 md:w-auto md:flex-row md:flex-wrap md:items-center md:justify-end">
-            <TransferOwnershipButton />
             <ImportUsersDialog />
             <InviteUserDialog
               trigger={
@@ -203,6 +321,12 @@ export default function UserTeamSetting() {
               </Th>
               <Th>Role</Th>
               <Th>Status</Th>
+              <Th>
+                <div className="flex items-center gap-1 [&_svg]:size-[15px]">
+                  Lab access{" "}
+                  <InfoTooltip content="This controls new borrowing only. It does not remove the Student from IOIO Users or block browsing and reports." />
+                </div>
+              </Th>
               <Th>Actions</Th>
             </>
           }
@@ -214,7 +338,51 @@ export default function UserTeamSetting() {
   );
 }
 
-function UserRow({ item }: { item: TeamMembersWithUserOrInvite }) {
+function UserRoleFilter() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedRole = searchParams.get("role") ?? "all";
+
+  return (
+    <label className="flex shrink-0 items-center gap-2 text-sm text-gray-600">
+      <span className="whitespace-nowrap">Account type</span>
+      <select
+        aria-label="Filter users by account type"
+        className="border-gray-300 text-sm"
+        value={selectedRole}
+        onChange={(event) => {
+          const value = event.currentTarget.value;
+          setSearchParams((previous) => {
+            const next = new URLSearchParams(previous);
+            if (value === "all") next.delete("role");
+            else next.set("role", value);
+            next.delete("page");
+            return next;
+          });
+        }}
+      >
+        <option value="all">All users</option>
+        <option value="staff">Staff</option>
+        <option value="student">Students</option>
+      </select>
+    </label>
+  );
+}
+
+type UserWithBorrowingAccess = TeamMembersWithUserOrInvite & {
+  borrowingAccess: {
+    state:
+      | "ACTIVE"
+      | "REVOKED"
+      | "EXPIRED"
+      | "PENDING"
+      | "NONE"
+      | "NOT_REQUIRED"
+      | "UNAVAILABLE";
+    approvalId: string | null;
+  } | null;
+};
+
+function UserRow({ item }: { item: UserWithBorrowingAccess }) {
   return (
     <>
       <Td className="w-full whitespace-normal p-0 md:p-0">
@@ -227,9 +395,83 @@ function UserRow({ item }: { item: TeamMembersWithUserOrInvite }) {
         )}
       </Td>
       <Td>{item.custodies || 0}</Td>
-      <Td>{item.role}</Td>
+      <Td>{ioioRoleLabel(item.roleEnum)}</Td>
       <Td>
         <InviteStatusBadge status={item.status} />
+      </Td>
+      <Td>
+        {item.borrowingAccess ? (
+          item.borrowingAccess.state === "UNAVAILABLE" ? (
+            <span className="text-xs text-gray-500">
+              Approval status unavailable
+            </span>
+          ) : item.borrowingAccess.state === "NOT_REQUIRED" ? (
+            <span className="text-xs text-gray-500">Not required</span>
+          ) : (
+            <div className="flex min-w-36 flex-col items-start gap-1.5">
+              <span
+                className={tw(
+                  "inline-flex rounded-full px-2 py-0.5 text-xs font-semibold",
+                  item.borrowingAccess.state === "ACTIVE"
+                    ? "bg-success-50 text-success-700"
+                    : item.borrowingAccess.state === "PENDING"
+                    ? "bg-amber-50 text-amber-800"
+                    : "bg-gray-100 text-gray-700"
+                )}
+              >
+                {item.borrowingAccess.state === "ACTIVE"
+                  ? "Active"
+                  : item.borrowingAccess.state === "PENDING"
+                  ? "Pending"
+                  : item.borrowingAccess.state === "EXPIRED"
+                  ? "Expired"
+                  : "No access"}
+              </span>
+              {item.borrowingAccess.state === "ACTIVE" &&
+              item.borrowingAccess.approvalId ? (
+                <Form method="post">
+                  <input
+                    type="hidden"
+                    name="intent"
+                    value="revoke-borrowing-access"
+                  />
+                  <input
+                    type="hidden"
+                    name="approvalId"
+                    value={item.borrowingAccess.approvalId}
+                  />
+                  <button
+                    type="submit"
+                    className="text-xs font-semibold text-red-800 underline underline-offset-2 hover:text-red-950"
+                  >
+                    Revoke access
+                  </button>
+                </Form>
+              ) : (
+                <Form method="post">
+                  <input
+                    type="hidden"
+                    name="intent"
+                    value="grant-borrowing-access"
+                  />
+                  <input
+                    type="hidden"
+                    name="studentUserId"
+                    value={item.userId ?? ""}
+                  />
+                  <button
+                    type="submit"
+                    className="text-xs font-semibold text-red-800 underline underline-offset-2 hover:text-red-950"
+                  >
+                    Grant access
+                  </button>
+                </Form>
+              )}
+            </div>
+          )
+        ) : (
+          <span className="text-xs text-gray-400">—</span>
+        )}
       </Td>
       <Td className="text-right">
         {item.role !== "Owner" ? (

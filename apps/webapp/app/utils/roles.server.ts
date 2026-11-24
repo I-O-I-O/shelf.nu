@@ -2,7 +2,12 @@ import type { SsoDetails } from "@prisma/client";
 import { OrganizationRoles, Roles } from "@prisma/client";
 import * as Sentry from "@sentry/react-router";
 import { db } from "~/database/db.server";
+import { ensureIoioTeamOrganizationForRequest } from "~/modules/ioio/organization-access.server";
 import { getSelectedOrganization } from "~/modules/organization/context.server";
+import {
+  isIoioStaffRoute,
+  isIoioStudentRoute,
+} from "~/utils/ioio-role-routing";
 import {
   isSelfServiceOrBaseRole,
   resolveCanSeeAllBookings,
@@ -176,6 +181,18 @@ export async function requirePermission({
     (o) => o.organization.id === organizationId
   )?.roles;
 
+  if (!organizationId || !currentOrganization || !roles?.length) {
+    throw new ShelfError({
+      cause: null,
+      title: "Organization access required",
+      message: "You do not have access to this organization.",
+      additionalData: { userId, organizationId },
+      status: 403,
+      label: "Permission",
+      shouldBeCaptured: false,
+    });
+  }
+
   await validatePermission({
     roles,
     action,
@@ -183,6 +200,16 @@ export async function requirePermission({
     organizationId,
     userId,
   });
+
+  const pathname = new URL(request.url).pathname;
+  if (isIoioStaffRoute(pathname) || isIoioStudentRoute(pathname)) {
+    await ensureIoioTeamOrganizationForRequest({
+      request,
+      organizationId,
+      currentOrganizationType: currentOrganization.type,
+      userOrganizations,
+    });
+  }
 
   // Tag the current Sentry scope with the resolved user + organization so
   // every span / error emitted later in this request is filterable in

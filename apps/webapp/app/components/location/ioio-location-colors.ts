@@ -1,0 +1,381 @@
+export type IoioLocationColorInput = {
+  name: string;
+  parentName?: string | null;
+  ancestorNames?: string[];
+  isRoom?: boolean;
+  /** Persisted location color, when the location has an explicit choice. */
+  color?: string | null;
+};
+
+export type IoioLocationNode = {
+  id: string;
+  name: string;
+  parentId: string | null;
+  color?: string | null;
+};
+
+export type IoioLocationType = "room" | "section" | "shelf" | "container";
+
+export type IoioLocationColor = {
+  color: string;
+  name: string;
+  softBackground: string;
+  softBorder: string;
+  text: string;
+};
+
+const ROOM_COLOR: IoioLocationColor = {
+  color: "#455A64",
+  name: "Room neutral",
+  softBackground: "#F1F4F5",
+  softBorder: "#B0BEC5",
+  text: "#263238",
+};
+
+export const IOIO_LOCATION_COLORS: IoioLocationColor[] = [
+  {
+    color: "#1565C0",
+    name: "Blue",
+    softBackground: "#EAF2FB",
+    softBorder: "#90CAF9",
+    text: "#0D47A1",
+  },
+  {
+    color: "#2E7D32",
+    name: "Green",
+    softBackground: "#ECF7EF",
+    softBorder: "#A5D6A7",
+    text: "#1B5E20",
+  },
+  {
+    color: "#C62828",
+    name: "Red",
+    softBackground: "#FDF0F0",
+    softBorder: "#EF9A9A",
+    text: "#8E0000",
+  },
+  {
+    color: "#6A1B9A",
+    name: "Purple",
+    softBackground: "#F6EFFB",
+    softBorder: "#CE93D8",
+    text: "#4A148C",
+  },
+  {
+    color: "#E65100",
+    name: "Orange",
+    softBackground: "#FFF4E8",
+    softBorder: "#FFB74D",
+    text: "#8D3A00",
+  },
+  {
+    color: "#00796B",
+    name: "Teal",
+    softBackground: "#EAF8F7",
+    softBorder: "#80CBC4",
+    text: "#004D40",
+  },
+  {
+    color: "#AD1457",
+    name: "Magenta",
+    softBackground: "#FBEDF4",
+    softBorder: "#F48FB1",
+    text: "#880E4F",
+  },
+  {
+    color: "#455A64",
+    name: "Slate",
+    softBackground: "#F1F4F5",
+    softBorder: "#B0BEC5",
+    text: "#263238",
+  },
+  {
+    color: "#827717",
+    name: "Olive",
+    softBackground: "#F6F7E8",
+    softBorder: "#C5CA73",
+    text: "#5F6210",
+  },
+  {
+    color: "#5D4037",
+    name: "Brown",
+    softBackground: "#F5EFED",
+    softBorder: "#BCAAA4",
+    text: "#3E2723",
+  },
+];
+
+export const IOIO_LOCATION_COLOR_VALUES = IOIO_LOCATION_COLORS.map(
+  (entry) => entry.color
+);
+
+export function getUsedIoioRoomColors({
+  locations,
+  currentLocationId,
+}: {
+  locations: IoioLocationNode[];
+  currentLocationId?: string;
+}) {
+  return new Set(
+    locations
+      .filter(
+        (location) =>
+          !location.parentId &&
+          location.id !== currentLocationId &&
+          location.color
+      )
+      .map((location) => location.color!.toLowerCase())
+  );
+}
+
+export function getFirstAvailableIoioColor(usedColors: Set<string>) {
+  return (
+    IOIO_LOCATION_COLORS.find(
+      (entry) => !usedColors.has(entry.color.toLowerCase())
+    )?.color ?? null
+  );
+}
+
+export function getIoioRoomColorError({
+  color,
+  locations,
+  currentLocationId,
+}: {
+  color: string | null | undefined;
+  locations: IoioLocationNode[];
+  currentLocationId?: string;
+}) {
+  if (
+    !color &&
+    !getFirstAvailableIoioColor(
+      getUsedIoioRoomColors({ locations, currentLocationId })
+    )
+  ) {
+    return "No room colors are available. Reassign a room color first.";
+  }
+  if (!color || !IOIO_LOCATION_COLOR_VALUES.includes(color)) {
+    return "Choose an available room color.";
+  }
+  const owner = locations.find(
+    (location) =>
+      !location.parentId &&
+      location.id !== currentLocationId &&
+      location.color?.toLowerCase() === color.toLowerCase()
+  );
+  return owner ? `This color is already used by ${owner.name}.` : null;
+}
+
+export function getUsedIoioSectionColors({
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  if (!parentId) return new Set<string>();
+  const fallbackColor =
+    locations.find((location) => location.id === parentId)?.color ??
+    ROOM_COLOR.color;
+  return new Set(
+    locations
+      .filter(
+        (location) =>
+          location.parentId === parentId && location.id !== currentLocationId
+      )
+      .map((location) => (location.color ?? fallbackColor).toLowerCase())
+  );
+}
+
+export function isIoioSectionColorAvailable({
+  color,
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  color: string;
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  return !getUsedIoioSectionColors({
+    locations,
+    parentId,
+    currentLocationId,
+  }).has(color.toLowerCase());
+}
+
+export function getIoioSectionColorError({
+  color,
+  locations,
+  parentId,
+  currentLocationId,
+}: {
+  color: string | null | undefined;
+  locations: IoioLocationNode[];
+  parentId: string | null | undefined;
+  currentLocationId?: string;
+}) {
+  if (
+    !color &&
+    !getFirstAvailableIoioColor(
+      getUsedIoioSectionColors({ locations, parentId, currentLocationId })
+    )
+  ) {
+    return "No section colors are available in this room.";
+  }
+  if (!color || !IOIO_LOCATION_COLOR_VALUES.includes(color)) {
+    return "Choose a supported section color.";
+  }
+  const fallbackColor =
+    locations.find((location) => location.id === parentId)?.color ??
+    ROOM_COLOR.color;
+  const owner = locations.find(
+    (location) =>
+      location.parentId === parentId &&
+      location.id !== currentLocationId &&
+      (location.color ?? fallbackColor).toLowerCase() === color.toLowerCase()
+  );
+  return owner
+    ? `This color is already used by ${owner.name} in this room.`
+    : null;
+}
+
+function normalized(value: string | null | undefined) {
+  return value?.trim().toLocaleLowerCase() ?? "";
+}
+
+function locationLetter(value: string | null | undefined) {
+  const match =
+    value?.match(/(?:section\s+|shelf\s+|container\s+|box\s+)([a-z])/iu) ??
+    value?.match(/^([a-z])(?=\d)/iu);
+  return match?.[1]?.toLocaleUpperCase() ?? null;
+}
+
+function isSectionName(value: string) {
+  return /^section\s+[a-z]/iu.test(value.trim());
+}
+
+function colorForLetter(letter: string | null) {
+  if (!letter) return ROOM_COLOR;
+  return IOIO_LOCATION_COLORS[
+    (letter.charCodeAt(0) - "A".charCodeAt(0)) % IOIO_LOCATION_COLORS.length
+  ];
+}
+
+function colorForName(value: string) {
+  const hash = [...value].reduce(
+    (result, character) => result + character.charCodeAt(0),
+    0
+  );
+  return IOIO_LOCATION_COLORS[hash % IOIO_LOCATION_COLORS.length];
+}
+
+/** Resolve the nearest Section color from parent IDs, then fall back to the room. */
+export function getEffectiveIoioLocationColor({
+  location,
+  locations,
+  parentId,
+}: {
+  location?: IoioLocationNode;
+  locations: IoioLocationNode[];
+  parentId?: string | null;
+}) {
+  const locationsById = new Map(locations.map((entry) => [entry.id, entry]));
+  const resolvedLocation =
+    location ?? (parentId ? locationsById.get(parentId) : undefined);
+  if (!resolvedLocation) return ROOM_COLOR;
+
+  let current = resolvedLocation;
+  let room = resolvedLocation;
+  let section: IoioLocationNode | undefined;
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    const parent = current.parentId
+      ? locationsById.get(current.parentId)
+      : undefined;
+    if (parent && !parent.parentId) {
+      section = current;
+    }
+    if (!parent) break;
+    room = parent;
+    current = parent;
+  }
+
+  if (section?.color) return getIoioLocationColorByHex(section.color);
+  return room.parentId
+    ? ROOM_COLOR
+    : getIoioLocationColorByHex(room.color ?? ROOM_COLOR.color);
+}
+
+/** Resolve a new location's Section color through its chosen parent. */
+export function getDerivedIoioLocationColor({
+  locations,
+  parentId,
+  locationType,
+}: {
+  name: string;
+  locations: IoioLocationNode[];
+  parentId?: string | null;
+  locationType: IoioLocationType;
+}) {
+  if (locationType === "room") {
+    return ROOM_COLOR;
+  }
+
+  return getEffectiveIoioLocationColor({ locations, parentId });
+}
+
+/**
+ * Resolves the presentation color for a physical location. The resolver is
+ * intentionally deterministic and uses only location names and hierarchy.
+ * It does not persist or mutate location data.
+ */
+export function getIoioLocationColor(
+  input: IoioLocationColorInput
+): IoioLocationColor {
+  const persistedColor = input.color?.trim();
+  if (persistedColor) {
+    const matchingColor = getIoioLocationColorByHex(persistedColor);
+    if (
+      matchingColor.color.toLocaleLowerCase() ===
+      persistedColor.toLocaleLowerCase()
+    ) {
+      return matchingColor;
+    }
+  }
+
+  const hasParentContext = Boolean(
+    input.parentName || input.ancestorNames?.length
+  );
+  const hasChildLevelName =
+    /^(?:section\s+|shelf\s+|container\s+|box\s+)[a-z]/iu.test(
+      input.name.trim()
+    ) || /^[a-z]\d/iu.test(input.name.trim());
+
+  if (input.isRoom === true || (!hasParentContext && !hasChildLevelName)) {
+    return ROOM_COLOR;
+  }
+
+  const hierarchy = [
+    ...(input.ancestorNames ?? []),
+    input.parentName ?? "",
+    input.name,
+  ].filter(Boolean);
+  const section = [...hierarchy].reverse().find(isSectionName);
+  const letter =
+    locationLetter(section) ??
+    [...hierarchy].reverse().map(locationLetter).find(Boolean) ??
+    null;
+  return letter ? colorForLetter(letter) : colorForName(input.name);
+}
+
+export function getIoioLocationColorByHex(value: string) {
+  return (
+    IOIO_LOCATION_COLORS.find(
+      (entry) => entry.color.toLocaleLowerCase() === normalized(value)
+    ) ?? ROOM_COLOR
+  );
+}

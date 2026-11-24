@@ -60,6 +60,8 @@ export interface UpdateAssetPayload {
   mainImage?: Asset["mainImage"];
   thumbnailImage?: string | null;
   mainImageExpiration?: Asset["mainImageExpiration"];
+  mainImageStoragePath?: Asset["mainImageStoragePath"];
+  thumbnailImageStoragePath?: Asset["thumbnailImageStoragePath"];
   tags?: { set: { id: string }[] };
   userId: User["id"];
   customFieldsValues?: ShelfAssetCustomFieldValueType[];
@@ -74,6 +76,15 @@ export interface UpdateAssetPayload {
   valuation?: Asset["valuation"];
   organizationId: Organization["id"];
   request: Request;
+  /** Optional tracking-method transition from the asset edit form. */
+  type?: Asset["type"];
+  availableToBook?: Asset["availableToBook"];
+  requiresBorrowApproval?: Asset["requiresBorrowApproval"];
+  requiresStaffPreparation?: Asset["requiresStaffPreparation"];
+  requiresReturnPhoto?: Asset["requiresReturnPhoto"];
+  maxBorrowDays?: Asset["maxBorrowDays"];
+  extensionBorrowDays?: Asset["extensionBorrowDays"];
+  returnHandling?: Asset["returnHandling"];
   quantity?: Asset["quantity"];
   minQuantity?: Asset["minQuantity"];
   consumptionType?: Asset["consumptionType"];
@@ -227,7 +238,16 @@ export type AdvancedIndexAsset = Pick<
   /** The model's cover image, used when the asset has none of its own.
    * Shaped as the nested relation the Prisma selects return so
    * `resolveAssetImage` takes the same input on both index modes. */
-  assetModel: { image: string | null; thumbnailImage: string | null } | null;
+  mainImageStoragePath?: string | null;
+  thumbnailImageStoragePath?: string | null;
+  assetModel: {
+    image: string | null;
+    thumbnailImage: string | null;
+    imageStoragePath?: string | null;
+    thumbnailImageStoragePath?: string | null;
+  } | null;
+  /** Native Kit cover for an asset that belongs to a Kit. */
+  kitImage?: string | null;
   /** Primary kit (oldest pivot row) — mirrors the LATERAL primary-pick
    * used by ORDER BY and filters. Kept alongside `kits` for back-compat
    * with consumers that only need the primary. */

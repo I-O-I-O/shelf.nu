@@ -48,6 +48,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         id: true,
         mainImage: true,
         thumbnailImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
         organizationId: true,
       },
     });
@@ -73,9 +75,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // If thumbnail already exists, refresh its URL
-    if (asset.thumbnailImage) {
-      // Extract the path from the existing thumbnail URL
-      const thumbnailPath = extractStoragePath(asset.thumbnailImage, "assets");
+    const existingThumbnailPath =
+      asset.thumbnailImageStoragePath ??
+      extractStoragePath(asset.thumbnailImage ?? "", "assets");
+    if (existingThumbnailPath) {
+      const thumbnailPath = existingThumbnailPath;
 
       if (thumbnailPath) {
         try {
@@ -123,7 +127,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // If there's no main image, we can't generate a thumbnail
-    if (!asset.mainImage) {
+    const originalPath =
+      asset.mainImageStoragePath ??
+      extractStoragePath(asset.mainImage ?? "", "assets");
+    if (!originalPath) {
       return data(
         payload({
           asset: {
@@ -135,20 +142,6 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // Extract the original filename from the mainImage URL using the consistent function
-    const originalPath = extractStoragePath(asset.mainImage, "assets");
-
-    if (!originalPath) {
-      // If we can't extract the path, return existing values
-      return data(
-        payload({
-          asset: {
-            id: asset.id,
-            thumbnailImage: asset.thumbnailImage,
-          },
-        })
-      );
-    }
-
     // Download the original image from Supabase
     const { data: originalFile, error: downloadError } =
       await getSupabaseAdmin().storage.from("assets").download(originalPath);
@@ -193,11 +186,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     });
 
     // Create signed URL for the thumbnail
+    const thumbnailStoragePath =
+      typeof uploadedPath === "string"
+        ? uploadedPath
+        : uploadedPath.originalPath;
     const thumbnailSignedUrl = await createSignedUrl({
-      filename:
-        typeof uploadedPath === "string"
-          ? uploadedPath
-          : uploadedPath.originalPath,
+      filename: thumbnailStoragePath,
       bucketName: "assets",
     });
 
@@ -230,6 +224,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       where: { id: assetId, organizationId },
       data: {
         thumbnailImage: thumbnailSignedUrl,
+        thumbnailImageStoragePath: thumbnailStoragePath,
         mainImageExpiration: oneDayFromNow(),
       },
       select: {

@@ -1,7 +1,9 @@
 import type { ReactElement, ReactNode } from "react";
 import React from "react";
+import { useAtomValue } from "jotai";
 import { useLoaderData } from "react-router";
 
+import { selectedBulkItemsCountAtom } from "~/atoms/list";
 import { useAssetIndexView } from "~/hooks/use-asset-index-view";
 import { useAssetIndexViewState } from "~/hooks/use-asset-index-view-state";
 import { useIsUserAssetsPage } from "~/hooks/use-is-user-assets-page";
@@ -54,6 +56,12 @@ export interface IndexResponse {
 export type ListProps = {
   title?: string;
   ItemComponent: any;
+  /** Optional compact card renderer for narrow screens. */
+  MobileItemComponent?: React.ComponentType<{
+    item: ListItemData;
+    extraProps?: Record<string, unknown>;
+    hasBulkActions?: boolean;
+  }>;
   headerChildren?: ReactNode;
   hideFirstHeaderColumn?: boolean;
   /** Function to be passed if the rows of the table should navigate */
@@ -71,9 +79,15 @@ export type ListProps = {
    * Allow bulk actions on List by providing Bulk actions dropdown
    */
   bulkActions?: ReactElement;
+  /** Render bulkActions as a compact full-row toolbar only while selected. */
+  selectionToolbar?: boolean;
 
   /** Optionally recieve an element for custom pagination */
   customPagination?: ReactElement;
+  /** Hide the generic list title/count when the page already has its own heading. */
+  hideListTitle?: boolean;
+  /** Optional fixed table layout for a purpose-built row design. */
+  tableClassName?: string;
   /** Any extra content to the right in Header */
   headerExtraContent?: ReactNode;
   /** Any extra props directly passed to ItemComponent */
@@ -119,10 +133,14 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     hideFirstHeaderColumn = false,
     navigate,
     className,
+    MobileItemComponent,
     customEmptyStateContent,
     emptyStateClassName,
     bulkActions,
+    selectionToolbar = false,
     customPagination,
+    hideListTitle = false,
+    tableClassName,
     headerExtraContent,
     extraItemComponentProps,
     disableSelectAllItems,
@@ -136,6 +154,9 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
   const items = itemsProp ?? loaderItems;
   const totalIncomingItems = items?.length;
   const hasItems = totalIncomingItems > 0;
+  const selectedItemsCount = useAtomValue(selectedBulkItemsCountAtom);
+  const showSelectionToolbar =
+    selectionToolbar && Boolean(bulkActions) && selectedItemsCount > 0;
 
   const { modeIsAdvanced } = useAssetIndexViewState();
   // The export button ships ASSET rows. The model view lists models, so it
@@ -148,8 +169,8 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
     <div
       ref={ref}
       className={tw(
-        "-mx-4 border border-gray-200 bg-white md:mx-0 md:rounded",
-        modeIsAdvanced ? "flex h-full flex-col" : "overflow-auto",
+        "w-full min-w-0 max-w-full border-0 bg-white md:mx-0 md:rounded md:border",
+        modeIsAdvanced ? "flex h-full flex-col" : "overflow-x-clip",
         className
       )}
     >
@@ -161,54 +182,88 @@ export const List = React.forwardRef<HTMLDivElement, ListProps>(function List(
       ) : (
         <>
           {/* The title and the total number of items. This basically acts like a fake table row */}
-          <div
-            className={tw(
-              modeIsAdvanced ? "p-3 pb-[5px]" : "flex-col p-4 pb-2 md:flex-row",
-              "flex justify-between border-b md:items-center "
-            )}
-          >
-            <div>
-              <ListTitle
-                title={title}
-                disableSelectAllItems={disableSelectAllItems}
-                hasBulkActions={!!bulkActions}
-                items={items}
-                countLabel={countLabel}
-                countLabelIsTotal={countLabelIsTotal}
-              />
-            </div>
-            <div className="flex items-center justify-end gap-2">
-              <When truthy={!!headerExtraContent}>{headerExtraContent}</When>
-              <When truthy={modeIsAdvanced && !isModelView}>
-                <ExportAssetsButton />
-              </When>
-              <When truthy={!!bulkActions}>{bulkActions}</When>
-            </div>
-          </div>
-          <Table
-            className={tw("list", bulkActions && "list-with-bulk-actions")}
-          >
-            <ListHeader
-              bulkActions={bulkActions}
-              items={items}
-              hideFirstColumn={hideFirstHeaderColumn}
+          {!hideListTitle ? (
+            <div
+              className={tw(
+                showSelectionToolbar
+                  ? "flex items-center justify-between gap-3 py-2 md:px-4 md:py-3"
+                  : modeIsAdvanced
+                  ? "py-3 md:p-3 md:pb-[5px]"
+                  : "flex-col px-0 py-3 md:flex-row md:p-4 md:pb-2",
+                "flex justify-between border-b md:items-center"
+              )}
             >
-              {headerChildren}
-            </ListHeader>
-            <tbody>
+              {showSelectionToolbar ? (
+                bulkActions
+              ) : (
+                <>
+                  <div>
+                    <ListTitle
+                      title={title}
+                      disableSelectAllItems={disableSelectAllItems}
+                      hasBulkActions={!!bulkActions}
+                      items={items}
+                      countLabel={countLabel}
+                      countLabelIsTotal={countLabelIsTotal}
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <When truthy={!!headerExtraContent}>
+                      {headerExtraContent}
+                    </When>
+                    <When truthy={modeIsAdvanced && !isModelView}>
+                      <ExportAssetsButton />
+                    </When>
+                    <When truthy={!!bulkActions && !selectionToolbar}>
+                      {bulkActions}
+                    </When>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
+          {MobileItemComponent ? (
+            <div className="w-full min-w-0 space-y-3 py-3 md:hidden">
               {items.map((item) => (
-                <ListItem item={item} key={item.id} navigate={navigate}>
-                  {bulkActions ? <BulkListItemCheckbox item={item} /> : null}
-                  <ItemComponent
-                    item={item}
-                    extraProps={extraItemComponentProps}
-                    bulkActions={bulkActions}
-                    isUserPage={isUserPage}
-                  />
-                </ListItem>
+                <MobileItemComponent
+                  item={item}
+                  extraProps={extraItemComponentProps}
+                  hasBulkActions={Boolean(bulkActions)}
+                  key={item.id}
+                />
               ))}
-            </tbody>
-          </Table>
+            </div>
+          ) : null}
+          <div className={tw(MobileItemComponent && "hidden md:block")}>
+            <Table
+              className={tw(
+                "list",
+                bulkActions && "list-with-bulk-actions",
+                tableClassName
+              )}
+            >
+              <ListHeader
+                bulkActions={bulkActions}
+                items={items}
+                hideFirstColumn={hideFirstHeaderColumn}
+              >
+                {headerChildren}
+              </ListHeader>
+              <tbody>
+                {items.map((item) => (
+                  <ListItem item={item} key={item.id} navigate={navigate}>
+                    {bulkActions ? <BulkListItemCheckbox item={item} /> : null}
+                    <ItemComponent
+                      item={item}
+                      extraProps={extraItemComponentProps}
+                      bulkActions={bulkActions}
+                      isUserPage={isUserPage}
+                    />
+                  </ListItem>
+                ))}
+              </tbody>
+            </Table>
+          </div>
           {!customPagination && <Pagination />}
         </>
       )}

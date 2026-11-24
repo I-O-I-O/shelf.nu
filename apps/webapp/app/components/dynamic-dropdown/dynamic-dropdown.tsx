@@ -1,4 +1,4 @@
-import { cloneElement, useCallback, useState } from "react";
+import { cloneElement, Fragment, useCallback, useState } from "react";
 import type { CSSProperties, ReactElement, ReactNode } from "react";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import {
@@ -43,6 +43,8 @@ type Props = ModelFilterProps & {
   searchIcon?: IconType;
   showSearch?: boolean;
   renderItem?: (item: ModelFilterItem) => ReactNode;
+  getItemGroup?: (item: ModelFilterItem) => string;
+  sortItems?: (items: ModelFilterItem[]) => ModelFilterItem[];
   /**
    * A a new item will be added to the list in dropdown, this item can be used to filter items
    * like "uncategorized" or "untagged" etc.
@@ -51,6 +53,7 @@ type Props = ModelFilterProps & {
     id: string;
     name: string;
   };
+  allValueItem?: { name: string };
 
   /**
    * A special item that will be added to the list in dropdown, this item can be used to filter items
@@ -95,7 +98,10 @@ export default function DynamicDropdown({
   model,
   showSearch = true,
   renderItem,
+  getItemGroup,
+  sortItems,
   withoutValueItem,
+  allValueItem,
   withValueItem,
   allowSelectAll,
   filterSelection,
@@ -125,6 +131,7 @@ export default function DynamicDropdown({
     getAllEntries,
     handleSelectAll,
   } = useModelFilters({ model, ...hookProps });
+  const displayItems = sortItems ? sortItems(items) : items;
 
   /**
    * Wraps the base selection handler to apply filterSelection if provided.
@@ -263,14 +270,17 @@ export default function DynamicDropdown({
             </When>
 
             <div className="max-h-[320px] divide-y overflow-y-auto">
-              {searchQuery !== "" && items.length === 0 && (
+              {searchQuery !== "" && displayItems.length === 0 && (
                 <EmptyState searchQuery={searchQuery} modelName={model.name} />
               )}
 
               {/* Top Divider */}
               <When
                 truthy={Boolean(
-                  allowSelectAll || withValueItem || withoutValueItem
+                  allowSelectAll ||
+                    withValueItem ||
+                    withoutValueItem ||
+                    allValueItem
                 )}
               >
                 <div className="h-2 w-full  bg-gray-50" />
@@ -287,6 +297,23 @@ export default function DynamicDropdown({
                 >
                   <span className="pr-2">Select all</span>
                 </div>
+              </When>
+
+              <When truthy={Boolean(allValueItem)}>
+                <label
+                  className={tw(
+                    "flex cursor-pointer touch-manipulation select-none items-center justify-between px-6 py-3 text-sm outline-none hover:bg-gray-100",
+                    selectedItems.length === 0 && "bg-gray-50"
+                  )}
+                  onClick={clearFilters}
+                >
+                  <span className="pr-2">{allValueItem?.name}</span>
+                  <When truthy={selectedItems.length === 0}>
+                    <span className="h-auto w-[18px] text-primary">
+                      <CheckIcon />
+                    </span>
+                  </When>
+                </label>
               </When>
 
               <When truthy={Boolean(withValueItem)}>
@@ -368,40 +395,49 @@ export default function DynamicDropdown({
                 <div className="h-2 w-full  bg-gray-50" />
               </When>
 
-              {items.map((item) => {
+              {displayItems.map((item, index) => {
                 const checked = selectedItems.includes(item.id);
+                const group = getItemGroup?.(item);
+                const previousGroup =
+                  index > 0 ? getItemGroup?.(displayItems[index - 1]!) : null;
                 return (
-                  <label
-                    key={item.id}
-                    htmlFor={item.id}
-                    className={tw(
-                      "flex cursor-pointer touch-manipulation select-none items-center justify-between px-6 py-4 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 hover:bg-gray-100 focus:bg-gray-100",
-                      checked && "bg-gray-50"
-                    )}
-                  >
-                    <span className="max-w-[350px] truncate whitespace-nowrap pr-2">
-                      {typeof renderItem === "function"
-                        ? renderItem({ ...item, metadata: item })
-                        : item.name}
-                      <input
-                        id={item.id}
-                        type="checkbox"
-                        value={item.id}
-                        name={name}
-                        className="hidden"
-                        checked={checked}
-                        onChange={(e) => {
-                          handleSelectItemChange(e.currentTarget.value);
-                        }}
-                      />
-                    </span>
-
-                    <When truthy={checked}>
-                      <span className="h-auto w-[18px] text-primary">
-                        <CheckIcon />
+                  <Fragment key={item.id}>
+                    {group && group !== previousGroup ? (
+                      <div className="sticky top-0 z-10 bg-gray-50 px-6 py-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                        {group}
+                      </div>
+                    ) : null}
+                    <label
+                      htmlFor={item.id}
+                      className={tw(
+                        "flex cursor-pointer touch-manipulation select-none items-center justify-between px-6 py-3 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 hover:bg-gray-100 focus:bg-gray-100",
+                        checked && "bg-gray-50"
+                      )}
+                    >
+                      <span className="max-w-[350px] truncate whitespace-nowrap pr-2">
+                        {typeof renderItem === "function"
+                          ? renderItem({ ...item, metadata: item })
+                          : item.name}
+                        <input
+                          id={item.id}
+                          type="checkbox"
+                          value={item.id}
+                          name={name}
+                          className="hidden"
+                          checked={checked}
+                          onChange={(e) => {
+                            handleSelectItemChange(e.currentTarget.value);
+                          }}
+                        />
                       </span>
-                    </When>
-                  </label>
+
+                      <When truthy={checked}>
+                        <span className="h-auto w-[18px] text-primary">
+                          <CheckIcon />
+                        </span>
+                      </When>
+                    </label>
+                  </Fragment>
                 );
               })}
 

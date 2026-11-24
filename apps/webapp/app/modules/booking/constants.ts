@@ -222,6 +222,8 @@ export const BOOKINGS_LIST_ASSETS_INCLUDE = {
           availableToBook: true,
           status: true,
           mainImage: true,
+          mainImageStoragePath: true,
+          thumbnailImageStoragePath: true,
           thumbnailImage: true,
           // Model cover image for assets with no image of their own
           ...ASSET_MODEL_IMAGE_SELECT,
@@ -299,6 +301,7 @@ export const BOOKING_WITH_ASSETS_INCLUDE = {
           consumptionType: true,
           unitOfMeasure: true,
           availableToBook: true,
+          requiresReturnPhoto: true,
           status: true,
           valuation: true,
           // `Asset.quantity` is the workspace stock pool — surfaced for QT
@@ -322,6 +325,8 @@ export const BOOKING_WITH_ASSETS_INCLUDE = {
           // flows on the existing booking query rather than issuing a
           // second round-trip for images.
           mainImage: true,
+          mainImageStoragePath: true,
+          thumbnailImageStoragePath: true,
           thumbnailImage: true,
           // Model cover image for assets with no image of their own
           ...ASSET_MODEL_IMAGE_SELECT,
@@ -432,9 +437,11 @@ export type BookingAsset = BookingWithAssets["bookingAssets"][number];
 export enum BOOKING_SCHEDULER_EVENTS_ENUM {
   checkoutReminder = `booking-checkout-reminder`,
   checkinReminder = `booking-checkin-reminder`,
+  returnReminder = `booking-return-reminder`,
   overdueHandler = `booking-overdue-handler`,
   autoArchiveHandler = `booking-auto-archive-handler`,
   autoArchiveExpiredHandler = `booking-auto-archive-expired-handler`,
+  preparationPickupExpiryHandler = `ioio-preparation-pickup-expiry-handler`,
 }
 
 /**

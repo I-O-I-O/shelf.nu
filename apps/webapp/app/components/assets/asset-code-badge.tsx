@@ -186,7 +186,7 @@ export function AssetCodeBadge({
         <span
           className={tw(
             // Layout: inline pill, tight padding, rounded corners.
-            "inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-xs",
+            "ioio-identifier inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-xs",
             // Two visual states distinguish "is this the workspace-preferred code, or a fallback?":
             //   - canonical: filled gray chip — reads as confident metadata.
             //   - fallback (asset is missing its workspace-preferred code; we're

@@ -34,7 +34,7 @@ import { Logger } from "~/utils/logger";
 import { getOrCreateCustomerId } from "~/utils/stripe.server";
 
 export const meta: MetaFunction = () => [
-  { title: appendToMetaTitle("Welcome to shelf.nu") },
+  { title: appendToMetaTitle("Welcome to IOIO Lab") },
 ];
 
 export async function loader({ context }: LoaderFunctionArgs) {

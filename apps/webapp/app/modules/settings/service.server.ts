@@ -4,6 +4,7 @@ import type {
   Organization,
   OrganizationRoles,
 } from "@prisma/client";
+import { OrganizationRoles as OrganizationRole } from "@prisma/client";
 
 import type { LoaderFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";
@@ -44,6 +45,7 @@ export async function getPaginatedAndFilterableSettingUsers({
   const paramsValues = getParamsValues(searchParams);
 
   const { page, perPageParam, search } = paramsValues;
+  const roleFilter = searchParams.get("role");
 
   const cookie = await updateCookieWithPerPage(request, perPageParam);
   const { perPage } = cookie;
@@ -55,6 +57,18 @@ export async function getPaginatedAndFilterableSettingUsers({
     const userOrganizationWhere: Prisma.UserOrganizationWhereInput = {
       organizationId,
     };
+
+    if (roleFilter === "staff") {
+      userOrganizationWhere.roles = {
+        hasSome: [
+          OrganizationRole.ADMIN,
+          OrganizationRole.OWNER,
+          OrganizationRole.BASE,
+        ],
+      };
+    } else if (roleFilter === "student") {
+      userOrganizationWhere.roles = { has: OrganizationRole.SELF_SERVICE };
+    }
 
     if (search) {
       /** Either search the input against organization's user */

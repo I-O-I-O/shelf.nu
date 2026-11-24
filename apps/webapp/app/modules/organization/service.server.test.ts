@@ -23,6 +23,7 @@ import {
   isSsoUser,
   transferOwnership,
 } from "./service.server";
+import { IOIO_INITIAL_CATEGORY_DEFAULTS } from "../category/ioio-categories";
 
 // @vitest-environment node
 
@@ -409,5 +410,37 @@ describe("createOrganization logo validation", () => {
 
     expect(dbMock.organization.create).toHaveBeenCalledOnce();
     expect(dbMock.image.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps owner and membership creation inside the supplied Shelf transaction", async () => {
+    await createOrganization({
+      ...args(null),
+      tx: dbMock as never,
+    });
+
+    expect(dbMock.user.findFirstOrThrow).toHaveBeenCalledOnce();
+    expect(dbMock.organization.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: OrganizationType.TEAM,
+          owner: { connect: { id: OWNER_ID } },
+          userOrganizations: {
+            create: {
+              userId: OWNER_ID,
+              roles: [OrganizationRoles.OWNER],
+            },
+          },
+        }),
+      })
+    );
+    const createArgs = dbMock.organization.create.mock.calls[0]![0];
+    expect(createArgs.data.categories.create).toEqual(
+      IOIO_INITIAL_CATEGORY_DEFAULTS.map(({ name, description, color }) => ({
+        name,
+        description,
+        color,
+        userId: OWNER_ID,
+      }))
+    );
   });
 });

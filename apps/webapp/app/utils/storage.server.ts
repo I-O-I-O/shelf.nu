@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 
 import { parseFormData } from "@remix-run/form-data-parser";
-import type { LRUCache } from "lru-cache";
+import { LRUCache } from "lru-cache";
 import type { ResizeOptions } from "sharp";
 
 import { getSupabaseAdmin } from "~/integrations/supabase/client";
@@ -28,6 +29,142 @@ import { BlockedAddressError, safeFetch } from "./ssrf.server";
 import type { SafeFetchResult } from "./ssrf.server";
 
 const label: ErrorLabel = "File storage";
+
+export type StorageImageBucket = "assets" | "kits" | "files";
+
+// Reuse signatures across loaders/SSE revalidation and coalesce concurrent
+// requests for the same object. Uploads use a new object path on replacement.
+// Keep well inside the signature's 72-hour lifetime; never cache failures.
+const presentationImageUrls = new LRUCache<string, Promise<string>>({
+  max: 5000,
+  ttl: 60 * 60 * 1000,
+});
+
+/**
+ * Resolve an image's current presentation URL without making that URL its
+ * persisted identity. Legacy Supabase URLs are parsed only when they
+ * unambiguously identify an object in the expected bucket. Other external
+ * URLs are passed through unchanged for compatibility.
+ */
+export async function resolveStorageImageUrl({
+  bucketName,
+  objectPath,
+  legacyUrl,
+  isPublic,
+}: {
+  bucketName: StorageImageBucket;
+  objectPath?: string | null;
+  legacyUrl?: string | null;
+  isPublic: boolean;
+}): Promise<string | null> {
+  // Stored references may be bucket-qualified paths or legacy Storage URLs.
+  // Signing requires the object key, not a second bucket prefix or URL.
+  const reference = objectPath?.trim();
+  const normalizedPath = reference
+    ? extractLegacySupabaseObjectPath(reference, bucketName)
+    : null;
+  const legacyPath = legacyUrl
+    ? extractLegacySupabaseObjectPath(legacyUrl, bucketName)
+    : null;
+  const path = normalizedPath ?? legacyPath;
+
+  if (!path) return legacyUrl ?? null;
+  if (isPublic) {
+    try {
+      return getPublicFileURL({ filename: path, bucketName });
+    } catch {
+      // Never log the original URL: it can contain a signed token.
+      Logger.warn(
+        new ShelfError({
+          cause: null,
+          message: "Failed to resolve public storage image for presentation",
+          additionalData: {
+            bucketName,
+            objectKeyHash: createHash("sha256")
+              .update(path)
+              .digest("hex")
+              .slice(0, 16),
+          },
+          label,
+          shouldBeCaptured: false,
+        })
+      );
+      throw new ShelfError({
+        cause: null,
+        message: "Failed to resolve public storage image",
+        label,
+      });
+    }
+  }
+  const key = `${bucketName}:${path}`;
+  const cached = presentationImageUrls.get(key);
+  if (cached) return cached;
+  const pending = createSignedUrl({ filename: path, bucketName });
+  presentationImageUrls.set(key, pending);
+  try {
+    return await pending;
+  } catch (cause) {
+    if (presentationImageUrls.get(key) === pending) {
+      presentationImageUrls.delete(key);
+    }
+    Logger.warn(
+      new ShelfError({
+        cause: null,
+        message: "Failed to resolve storage image for presentation",
+        additionalData: {
+          bucketName,
+          objectKeyHash: createHash("sha256")
+            .update(path)
+            .digest("hex")
+            .slice(0, 16),
+        },
+        label,
+        shouldBeCaptured: false,
+      })
+    );
+    throw cause;
+  }
+}
+
+/** Only interpret legacy URLs as Storage objects when their URL path explicitly
+ * matches Supabase's object endpoint for the expected bucket. This avoids
+ * converting unrelated CDN URLs into accidental object keys. */
+export function extractLegacySupabaseObjectPath(
+  value: string,
+  bucketName: StorageImageBucket
+): string | null {
+  if (!value.includes("://") && !value.startsWith("/storage/")) {
+    const path = value.replace(/^\/+/, "");
+    return path.startsWith(`${bucketName}/`)
+      ? path.slice(bucketName.length + 1)
+      : path || null;
+  }
+  try {
+    const pathname = new URL(value, "https://storage.invalid").pathname;
+    const match = pathname.match(
+      new RegExp(
+        `/storage/v1/object/(?:public|sign|authenticated)/${bucketName}/(.+)$`
+      )
+    );
+    return match?.[1] ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove one explicitly owned object after its database reference is cleared. */
+export async function removeStorageImageObject({
+  bucketName,
+  objectPath,
+}: {
+  bucketName: StorageImageBucket;
+  objectPath: string;
+}) {
+  const { error } = await getSupabaseAdmin()
+    .storage.from(bucketName)
+    .remove([objectPath]);
+  if (error) throw error;
+}
 
 export function getPublicFileURL({
   filename,
@@ -283,24 +420,38 @@ export async function uploadFile(
     generateThumbnail = false,
     thumbnailSize = 108, // Default thumbnail size
     upsert = false,
+    maxProcessedBytes,
   }: UploadOptions & {
     generateThumbnail?: boolean;
     thumbnailSize?: number;
     upsert?: boolean;
+    maxProcessedBytes?: number;
   }
 ): Promise<string | { originalPath: string; thumbnailPath: string }> {
+  const uploadedObjectPaths: string[] = [];
+  // cropImage always encodes its result as WebP. Keep Storage metadata aligned
+  // with the bytes regardless of the source file's MIME type.
+  const storedContentType = "image/webp";
+  const storedFilename = `${filename.replace(/\.[^/.]+$/, "")}.webp`;
+
   try {
     // Process original image
     const file = await cropImage(fileData, resizeOptions);
+    if (maxProcessedBytes !== undefined && file.byteLength > maxProcessedBytes)
+      throw new Error("Processed image exceeds the final image size limit.");
 
     // Upload original file
     const { data, error } = await getSupabaseAdmin()
       .storage.from(bucketName)
-      .upload(filename, file, { contentType, upsert });
+      .upload(storedFilename, file, {
+        contentType: storedContentType,
+        upsert,
+      });
 
     if (error) {
       throw error;
     }
+    uploadedObjectPaths.push(data.path);
 
     // If thumbnail generation is requested
     if (generateThumbnail) {
@@ -321,13 +472,33 @@ export async function uploadFile(
         }
       );
 
+      if (
+        maxProcessedBytes !== undefined &&
+        thumbnailFile.byteLength > maxProcessedBytes
+      )
+        throw new Error(
+          "Processed thumbnail exceeds the final image size limit."
+        );
       // Upload thumbnail
+      // Include the path before the request: if Storage accepts the object but
+      // the response is lost, cleanup should still attempt to remove it.
+      const storedThumbnailFilename = `${thumbFilename.replace(
+        /\.[^/.]+$/,
+        ""
+      )}.webp`;
+      uploadedObjectPaths.push(storedThumbnailFilename);
       const { data: thumbData, error: thumbError } = await getSupabaseAdmin()
         .storage.from(bucketName)
-        .upload(thumbFilename, thumbnailFile, { contentType, upsert: true });
+        .upload(storedThumbnailFilename, thumbnailFile, {
+          contentType: storedContentType,
+          upsert: true,
+        });
 
       if (thumbError) {
         throw thumbError;
+      }
+      if (!uploadedObjectPaths.includes(thumbData.path)) {
+        uploadedObjectPaths.push(thumbData.path);
       }
 
       return {
@@ -339,6 +510,27 @@ export async function uploadFile(
     // Return just the path string for backward compatibility
     return data.path;
   } catch (cause) {
+    if (uploadedObjectPaths.length > 0) {
+      try {
+        const { error: cleanupError } = await getSupabaseAdmin()
+          .storage.from(bucketName)
+          .remove(uploadedObjectPaths);
+        if (cleanupError) {
+          Logger.dev("[IMAGE UPLOAD] partial upload cleanup failed", {
+            bucketName,
+            uploadedObjectPaths,
+            cleanupError,
+          });
+        }
+      } catch (cleanupCause) {
+        Logger.dev("[IMAGE UPLOAD] partial upload cleanup failed", {
+          bucketName,
+          uploadedObjectPaths,
+          cleanupCause,
+        });
+      }
+    }
+
     const isShelfError = isLikeShelfError(cause);
 
     throw new ShelfError({
@@ -369,6 +561,8 @@ export async function parseFileFormData({
   generateThumbnail = false,
   thumbnailSize = 108,
   maxFileSize = DEFAULT_MAX_IMAGE_UPLOAD_SIZE,
+  allowEmptyFile = false,
+  maxProcessedBytes,
 }: {
   request: Request;
   newFileName: string;
@@ -377,25 +571,58 @@ export async function parseFileFormData({
   generateThumbnail?: boolean;
   thumbnailSize?: number;
   maxFileSize?: number;
+  maxProcessedBytes?: number;
+  /** Treat the multipart parser's zero-byte no-selection placeholder as absent. */
+  allowEmptyFile?: boolean;
 }) {
   try {
     const uploadHandler = async (upload: any) => {
       const file = upload?.file ?? upload;
       const mimeType =
         upload?.type ?? upload?.contentType ?? file?.type ?? undefined;
-      const originalName =
-        upload?.name ?? upload?.filename ?? file?.name ?? undefined;
+
+      if (!file) {
+        return undefined;
+      }
+
+      // The browser submits an unselected file input as a zero-byte part with
+      // no filename and application/octet-stream. The multipart parser
+      // normalizes a missing filename to "file-upload", so recognize that
+      // exact placeholder before MIME validation. Named zero-byte uploads
+      // remain invalid image files.
+      const fileName =
+        typeof file?.name === "string"
+          ? file.name
+          : typeof upload?.filename === "string"
+          ? upload.filename
+          : undefined;
+      const isEmptyFileInput =
+        allowEmptyFile &&
+        file?.size === 0 &&
+        (fileName === "" ||
+          (fileName === "file-upload" &&
+            mimeType === "application/octet-stream"));
+
+      if (isEmptyFileInput) {
+        return undefined;
+      }
 
       // Only process image files. Matched as a prefix rather than a substring:
       // `.includes("image")` also accepts a parameterised type such as
       // `text/html; x=image`, which would then be handed to `uploadFile` as the
-      // content type the object is stored and served with.
+      // content type the object is stored and served with. A provided file
+      // with a non-image type is a validation error, not an empty upload; the
+      // latter made invalid file submissions look like successful saves.
       if (mimeType && !String(mimeType).startsWith("image/")) {
-        return undefined;
-      }
-
-      if (!file) {
-        return undefined;
+        throw new ShelfError({
+          cause: null,
+          title: "Unsupported image format",
+          message:
+            "Please upload a supported image file (JPEG, PNG, GIF, WebP, or BMP).",
+          label,
+          status: 400,
+          shouldBeCaptured: false,
+        });
       }
 
       const fileStream = await normalizeToAsyncIterable(file);
@@ -404,12 +631,10 @@ export async function parseFileFormData({
         return undefined;
       }
 
-      const extension = originalName?.includes(".")
-        ? originalName.split(".").pop()
-        : undefined;
-      const targetFilename = extension
-        ? `${newFileName}.${extension}`
-        : newFileName;
+      // cropImage converts all accepted source formats to WebP, so persisted
+      // object names must not retain a source extension such as .png or .jpg.
+      const baseFilename = newFileName.replace(/\.[^/.]+$/, "");
+      const targetFilename = `${baseFilename}.webp`;
 
       const uploadedFilePaths = await uploadFile(fileStream, {
         filename: targetFilename,
@@ -418,6 +643,7 @@ export async function parseFileFormData({
         resizeOptions,
         generateThumbnail,
         thumbnailSize,
+        maxProcessedBytes,
       });
 
       // For profile pictures and other cases that don't need thumbnails,
@@ -839,7 +1065,12 @@ export function getFileUploadPath({
   typeId,
 }: {
   organizationId: string;
-  type: "locations" | "audits" | "asset-models";
+  type:
+    | "locations"
+    | "audits"
+    | "asset-models"
+    | "booking-returns"
+    | "lab-info";
   typeId: string;
 }) {
   return `${organizationId}/${type}/${typeId}/${id()}`;

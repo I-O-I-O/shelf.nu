@@ -23,11 +23,11 @@ const THUMBNAIL_SIZE = 108;
  */
 async function generateThumbnailIfMissing(asset: {
   id: string;
-  mainImage: string | null;
+  mainImage: string;
   thumbnailImage: string | null;
   userId: string;
 }): Promise<string | null> {
-  if (asset.thumbnailImage || !asset.mainImage) {
+  if (asset.thumbnailImage) {
     return asset.thumbnailImage;
   }
 
@@ -182,6 +182,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         id: true,
         mainImage: true,
         thumbnailImage: true,
+        mainImageStoragePath: true,
+        thumbnailImageStoragePath: true,
       },
     });
 
@@ -192,7 +194,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // Extract the path from the URL using the consistent function
-    const mainImagePath = extractStoragePath(mainImage, "assets");
+    const mainImagePath =
+      asset.mainImageStoragePath ??
+      extractStoragePath(mainImage, "assets") ??
+      extractStoragePath(asset.mainImage ?? "", "assets");
 
     let newMainImageUrl = asset.mainImage; // Default to existing URL
 
@@ -236,8 +241,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     // Check if thumbnail exists and refresh it
     let thumbnailUrl = asset.thumbnailImage; // Default to existing URL
 
-    if (asset.thumbnailImage) {
-      const thumbnailPath = extractStoragePath(asset.thumbnailImage, "assets");
+    const storedThumbnailPath =
+      asset.thumbnailImageStoragePath ??
+      extractStoragePath(asset.thumbnailImage ?? "", "assets");
+    if (storedThumbnailPath) {
+      const thumbnailPath = storedThumbnailPath;
 
       if (thumbnailPath) {
         try {
@@ -273,11 +281,11 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           }
         }
       }
-    } else if (asset.mainImage && !asset.thumbnailImage) {
+    } else if (mainImagePath && !asset.thumbnailImage) {
       // If we have a main image but no thumbnail, try to generate one
       thumbnailUrl = await generateThumbnailIfMissing({
         id: asset.id,
-        mainImage: asset.mainImage,
+        mainImage: mainImagePath,
         thumbnailImage: asset.thumbnailImage,
         userId,
       });

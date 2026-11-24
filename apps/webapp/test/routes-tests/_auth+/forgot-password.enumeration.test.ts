@@ -17,7 +17,6 @@
  *
  * @see {@link file://./../../../app/routes/_auth+/forgot-password.tsx}
  */
-
 const { mockSendResetPasswordLink } = vi.hoisted(() => ({
   mockSendResetPasswordLink: vi.fn().mockResolvedValue(undefined),
 }));
@@ -26,7 +25,7 @@ const { mockSendResetPasswordLink } = vi.hoisted(() => ({
 // refuseAuthenticatedLegacySession and revokeSession stay, because which
 // failures end the recovery session is what the confirm tests pin.
 vi.mock("~/modules/auth/service.server", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("~/modules/auth/service.server")>()),
+  ...(await importOriginal<typeof AuthService>()),
   sendResetPasswordLink: mockSendResetPasswordLink,
   updateAccountPassword: vi.fn(),
   signInWithEmail: vi.fn(),
@@ -40,10 +39,7 @@ const { mockGetLegacyLoginDecision, mockGetLegacyLoginDecisionForUser } =
 // why: the decision has its own tests (sso-enforcement.server.test.ts); here
 // only what the confirm step does with its answer matters.
 vi.mock("~/modules/auth/sso-enforcement.server", async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import("~/modules/auth/sso-enforcement.server")
-    >();
+  const actual = await importOriginal<typeof SsoEnforcement>();
   return {
     createSsoRequiredError: actual.createSsoRequiredError,
     getLegacyLoginDecision: mockGetLegacyLoginDecision,
@@ -72,7 +68,9 @@ vi.mock("~/database/db.server", () => ({
 }));
 
 import { updateAccountPassword } from "~/modules/auth/service.server";
-import { action } from "~/routes/_auth+/forgot-password";
+import type * as AuthService from "~/modules/auth/service.server";
+import type * as SsoEnforcement from "~/modules/auth/sso-enforcement.server";
+import { action, loader } from "~/routes/_auth+/forgot-password";
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
 
@@ -271,6 +269,24 @@ function confirmReset(email: string, destroySession = vi.fn()) {
   } as unknown as Parameters<typeof action>[0]);
 }
 
+/** POSTs the form opened by a Supabase recovery link. */
+function confirmResetByLink(tokenHash: string, destroySession = vi.fn()) {
+  return action({
+    request: new Request("https://app.shelf.nu/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        intent: "confirm-otp",
+        token_hash: tokenHash,
+        password: "new-password-1",
+        confirmPassword: "new-password-1",
+      }).toString(),
+    }),
+    params: {},
+    context: { destroySession },
+  } as unknown as Parameters<typeof action>[0]);
+}
+
 describe("forgot-password confirm step", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -381,5 +397,55 @@ describe("forgot-password confirm step", () => {
     );
     expect(res.location).toBe("/login?password_reset=true");
     expect(mockSignOut).not.toHaveBeenCalled();
+  });
+
+  it("allows a signed-in user to open the Supabase recovery link page", () => {
+    const response = loader({
+      request: new Request(
+        "https://app.shelf.nu/forgot-password?type=recovery&token_hash=hashed-token"
+      ),
+      params: {},
+      context: { isAuthenticated: true },
+    } as unknown as Parameters<typeof loader>[0]);
+
+    expect(response).not.toBeInstanceOf(Response);
+    expect(response).toMatchObject({ data: { hasRecoveryLink: true } });
+  });
+
+  it("verifies the Supabase recovery link hash before updating the verified user", async () => {
+    mockGetLegacyLoginDecisionForUser.mockResolvedValue({ allowed: true });
+    mockVerifyOtp.mockResolvedValueOnce({
+      data: {
+        user: { id: "user-1", email: "verified@example.com" },
+        session: { access_token: "link-recovery-token" },
+      },
+      error: null,
+    });
+
+    const res = observable(await confirmResetByLink("hashed-token"));
+
+    expect(mockVerifyOtp).toHaveBeenCalledWith({
+      token_hash: "hashed-token",
+      type: "recovery",
+    });
+    expect(updateAccountPassword).toHaveBeenCalledWith(
+      "user-1",
+      "new-password-1",
+      "link-recovery-token"
+    );
+    expect(res.location).toBe("/login?password_reset=true");
+  });
+
+  it("does not update a password when the recovery link is invalid or expired", async () => {
+    mockVerifyOtp.mockResolvedValueOnce({
+      data: { user: null, session: null },
+      error: new Error("expired"),
+    });
+
+    const res = observable(await confirmResetByLink("expired-token"));
+
+    expect(res.errorMessage).toBe("Invalid or expired verification code");
+    expect(mockGetLegacyLoginDecisionForUser).not.toHaveBeenCalled();
+    expect(updateAccountPassword).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
-import { Form, useLoaderData } from "react-router";
+import { Form, useRouteLoaderData } from "react-router";
 import invariant from "tiny-invariant";
 import { Button } from "~/components/shared/button";
 import {
@@ -28,9 +28,16 @@ export default function OrganizationSelector() {
   const [isSwitchingOrg, setIsSwitchingOrg] = useState(false);
 
   const { open, openMobile, isMobile } = useSidebar();
+  const showOrganizationName = open || openMobile;
 
-  const { organizations, currentOrganizationId } =
-    useLoaderData<typeof loader>();
+  const layoutData = useRouteLoaderData<typeof loader>(
+    "routes/_layout+/_layout"
+  );
+  invariant(
+    layoutData,
+    "Organization selector requires the authenticated layout."
+  );
+  const { organizations, currentOrganizationId } = layoutData;
 
   const formRef = useRef<HTMLFormElement>(null);
   const organizationIdRef = useRef<HTMLInputElement>(null);
@@ -96,19 +103,21 @@ export default function OrganizationSelector() {
                 "size-full truncate !p-1 data-[state=open]:bg-gray-50 data-[state=open]:text-sidebar-accent-foreground hover:bg-gray-50",
                 open || openMobile ? "border" : ""
               )}
+              aria-label={`Current workspace: ${currentOrganization.name}. Switch workspace`}
+              title={currentOrganization.name}
             >
               {currentOrganization.type === "PERSONAL" ? (
                 <ProfilePicture width="w-6" height="h-6" />
               ) : (
                 <Image
                   imageId={currentOrganization.imageId}
-                  alt="img"
+                  alt=""
                   className="size-8 rounded-sm border object-cover"
                   updatedAt={currentOrganization.updatedAt}
                 />
               )}
 
-              <When truthy={open || openMobile}>
+              <When truthy={showOrganizationName}>
                 <>
                   <div
                     className="max-w-[calc(100%-36px)] flex-1 text-left text-sm leading-tight"
@@ -155,7 +164,7 @@ export default function OrganizationSelector() {
                 ) : (
                   <Image
                     imageId={organization.imageId}
-                    alt="img"
+                    alt=""
                     className="size-6 rounded-sm border object-cover"
                     updatedAt={organization.updatedAt}
                   />

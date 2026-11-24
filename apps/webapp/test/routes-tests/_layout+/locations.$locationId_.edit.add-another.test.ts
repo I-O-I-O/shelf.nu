@@ -31,9 +31,11 @@ vi.mock("~/utils/emitter/send-notification.server", () => ({
 }));
 
 import {
+  getLocation,
   updateLocation,
   updateLocationImage,
 } from "~/modules/location/service.server";
+import { getLocationsForCreateAndEdit } from "~/modules/asset/service.server";
 import { requirePermission } from "~/utils/roles.server";
 
 /**
@@ -47,6 +49,7 @@ function buildArgs(overrides: Record<string, string> = {}) {
     name: "Shelf B2",
     description: "",
     address: "",
+    parentId: "room-1",
     ...overrides,
   });
 
@@ -72,6 +75,22 @@ describe("locations.$locationId_.edit: addAnother", () => {
     vi.mocked(updateLocation).mockResolvedValue({
       id: "location-1",
       name: "Shelf B2",
+      imageUrl: null,
+      thumbnailUrl: null,
+    } as never);
+    vi.mocked(getLocation).mockResolvedValue({
+      location: {
+        id: "location-1",
+        name: "Shelf B2",
+        parentId: "room-1",
+      },
+    } as never);
+    vi.mocked(getLocationsForCreateAndEdit).mockResolvedValue({
+      locations: [
+        { id: "room-1", name: "Room", parentId: null },
+        { id: "location-1", name: "Shelf B2", parentId: "room-1" },
+      ],
+      totalLocations: 2,
     } as never);
     vi.mocked(updateLocationImage).mockResolvedValue(undefined as never);
   });

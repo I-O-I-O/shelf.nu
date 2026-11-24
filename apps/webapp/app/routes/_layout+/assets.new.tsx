@@ -1,13 +1,21 @@
-import { TagUseFor } from "@prisma/client";
+import type { CustomField } from "@prisma/client";
+import { AssetType, TagUseFor } from "@prisma/client";
 import { useAtomValue } from "jotai";
 import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data, redirect, redirectDocument, useLoaderData } from "react-router";
+import {
+  data,
+  redirect,
+  redirectDocument,
+  useLoaderData,
+  useRouteLoaderData,
+} from "react-router";
 import { dynamicTitleAtom } from "~/atoms/dynamic-title-atom";
 import {
-  AssetForm,
+  IoioAssetCreateForm,
   NewAssetBulkFormSchema,
   NewAssetFormSchema,
-} from "~/components/assets/form";
+} from "~/components/assets/ioio-asset-create-form";
+import { IoioAssetCreationQueue } from "~/components/assets/ioio-asset-creation-queue";
 import Header from "~/components/layout/header";
 import { useSearchParams } from "~/hooks/search-params";
 import { estimateNextSequentialId } from "~/modules/asset/sequential-id.server";
@@ -19,19 +27,24 @@ import {
 } from "~/modules/asset/service.server";
 import { getInitialPlacementNoteContent } from "~/modules/asset/utils.server";
 import {
+  createAssetModel,
   getAssetModel,
   getAssetModels,
 } from "~/modules/asset-model/service.server";
 import { getActiveCustomFields } from "~/modules/custom-field/service.server";
+import { getAcademicYear } from "~/modules/ioio-lab-information/service.server";
+import { linkPurchaseItemToAsset } from "~/modules/ioio-staff/purchasing.server";
 import { createNote } from "~/modules/note/service.server";
 import { assertWhetherQrBelongsToCurrentOrganization } from "~/modules/qr/service.server";
 import { buildTagsSet } from "~/modules/tag/service.server";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { extractBarcodesFromFormData } from "~/utils/barcode-form-data.server";
 import {
   extractCustomFieldValuesFromPayload,
   mergedSchema,
 } from "~/utils/custom-fields";
+import type { CustomFieldZodSchema } from "~/utils/custom-fields";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { makeShelfError } from "~/utils/error";
 import {
@@ -55,6 +68,54 @@ const header = {
   title,
 };
 
+function customFieldType(
+  type: CustomField["type"]
+): CustomFieldZodSchema["type"] {
+  switch (type) {
+    case "TEXT":
+      return "text";
+    case "OPTION":
+      return "option";
+    case "BOOLEAN":
+      return "boolean";
+    case "DATE":
+      return "date";
+    case "MULTILINE_TEXT":
+      return "multiline_text";
+    case "AMOUNT":
+      return "amount";
+    case "NUMBER":
+      return "number";
+    default:
+      throw new Error(`Unsupported custom field type: ${type}`);
+  }
+}
+
+type NewAssetPageLoaderData = {
+  nextSequentialId: string;
+  referer: string | null;
+  prefillTitle: string;
+  prefillQuantity: number | null;
+};
+
+function isNewAssetPageLoaderData(
+  value: unknown
+): value is NewAssetPageLoaderData {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "nextSequentialId" in value &&
+    typeof value.nextSequentialId === "string" &&
+    "referer" in value &&
+    (typeof value.referer === "string" || value.referer === null) &&
+    "prefillTitle" in value &&
+    typeof value.prefillTitle === "string" &&
+    "prefillQuantity" in value &&
+    (typeof value.prefillQuantity === "number" ||
+      value.prefillQuantity === null)
+  );
+}
+
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
@@ -76,6 +137,24 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
     });
 
     const searchParams = getCurrentSearchParams(request);
+    if (searchParams.get("assetQueueFields") === "1") {
+      const customFields = await getActiveCustomFields({
+        organizationId,
+        category: searchParams.get("category"),
+      });
+      return payload({ header, customFields });
+    }
+
+    const prefillTitle = (searchParams.get("prefillTitle") ?? "")
+      .trim()
+      .slice(0, 240);
+    const rawPrefillQuantity = Number(searchParams.get("prefillQuantity"));
+    const prefillQuantity =
+      Number.isSafeInteger(rawPrefillQuantity) &&
+      rawPrefillQuantity > 0 &&
+      rawPrefillQuantity <= 100000
+        ? rawPrefillQuantity
+        : null;
 
     const [
       { categories, totalCategories, tags, locations, totalLocations },
@@ -87,6 +166,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
         organizationId,
         request,
         tagUseFor: TagUseFor.ASSET,
+        includeAllLocations: false,
       }),
       getActiveCustomFields({
         organizationId,
@@ -109,6 +189,8 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       currency: currentOrganization?.currency,
       customFields,
       nextSequentialId,
+      prefillTitle,
+      prefillQuantity,
       /** Lets Cancel return the user to wherever they opened the form from
        * (assets index, a location, a kit, …). Best-effort: `null` when the
        * Referer header is absent, which the form resolves to its own
@@ -152,10 +234,12 @@ export async function action({ context, request }: LoaderFunctionArgs) {
     const clonedRequest = request.clone();
 
     const formData = await clonedRequest.formData();
+    const assetQueueIntent = formData.get("assetQueueIntent");
 
+    const categoryValue = formData.get("category");
     const customFields = await getActiveCustomFields({
       organizationId,
-      category: formData.get("category") as string | null,
+      category: typeof categoryValue === "string" ? categoryValue : null,
     });
 
     // Pick the same base schema the client used (NewAssetBulkFormSchema
@@ -176,12 +260,35 @@ export async function action({ context, request }: LoaderFunctionArgs) {
         name: slugify(cf.name),
         helpText: cf?.helpText || "",
         required: cf.required,
-        type: cf.type.toLowerCase() as "text" | "number" | "date" | "boolean",
+        type: customFieldType(cf.type),
         options: cf.options,
       })),
     });
 
     const payload = parseData(formData, FormSchema);
+
+    // The Staff creation queue validates every in-memory form before it asks
+    // this same route to create any of them. This keeps the existing form
+    // schema and route validation as the source of truth.
+    if (assetQueueIntent === "validate") {
+      return data({ assetQueueValidated: true });
+    }
+    const purchaseItemId =
+      new URL(request.url).searchParams.get("purchaseItemId") ?? "";
+    const purchaseReturnYear =
+      new URL(request.url).searchParams.get("returnToPurchasing") ?? "";
+    const redirectToPurchasing = async (assetId: string) => {
+      await linkPurchaseItemToAsset({
+        organizationId,
+        itemId: purchaseItemId,
+        assetId,
+      });
+      return redirect(
+        `/purchasing?year=${encodeURIComponent(
+          purchaseReturnYear || getAcademicYear()
+        )}&notice=item-linked`
+      );
+    };
 
     const customFieldsValues = extractCustomFieldValuesFromPayload({
       payload,
@@ -202,6 +309,12 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       minQuantity,
       consumptionType,
       unitOfMeasure,
+      requiresBorrowApproval,
+      requiresStaffPreparation,
+      requiresReturnPhoto,
+      maxBorrowDays,
+      extensionBorrowDays,
+      returnHandling,
     } = payload;
 
     /** This checks if tags are passed and build the  */
@@ -220,7 +333,8 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       // non-empty / non-NaN by the time we reach here. TS can't narrow
       // through the schema union, so assert locally with a single
       // typed binding rather than `!`-ing each call site.
-      const validatedModelId = assetModelId as string;
+      const validatedModelId =
+        NewAssetBulkFormSchema.shape.assetModelId.parse(assetModelId);
       const count =
         typeof payload.count === "number"
           ? payload.count
@@ -244,11 +358,49 @@ export async function action({ context, request }: LoaderFunctionArgs) {
         locationId: newLocationId || undefined,
         tags,
         customFieldsValues,
+        requiresBorrowApproval,
+        requiresStaffPreparation,
+        requiresReturnPhoto,
+        maxBorrowDays,
+        extensionBorrowDays,
+        returnHandling,
       });
 
       // Mid-loop failure: surface the partial-success info to the user.
       if (result.failedAt !== undefined && result.error) {
+        if (
+          assetQueueIntent === "create" &&
+          result.createdAssetIds.length > 0
+        ) {
+          return data({
+            assetQueueCreated: true,
+            createdCount: result.createdAssetIds.length,
+            warning: `Created ${result.createdAssetIds.length} of ${count} physical units. The remaining units were not created.`,
+          });
+        }
         return data(error(result.error), { status: result.error.status });
+      }
+
+      if (purchaseItemId && result.createdAssetIds[0]) {
+        return await redirectToPurchasing(result.createdAssetIds[0]);
+      }
+
+      if (assetQueueIntent === "create") {
+        try {
+          sendNotification({
+            title: "Assets created",
+            message: `${result.createdAssetIds.length} assets created.`,
+            icon: { name: "success", variant: "success" },
+            senderId: authSession.userId,
+          });
+        } catch {
+          // Creation has succeeded; a notification failure must not make the
+          // client retry this already-created queue draft.
+        }
+        return data({
+          assetQueueCreated: true,
+          createdCount: result.createdAssetIds.length,
+        });
       }
 
       // Resolve the model name once so the success modal can render
@@ -274,10 +426,119 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       });
     }
 
+    // An individual product with more than one physical unit is represented
+    // by one native AssetModel and one native INDIVIDUAL asset per unit. This
+    // keeps the logical product count visible without turning it into a
+    // quantity-tracked pool or a native Shelf Kit.
+    if (type === AssetType.INDIVIDUAL && quantity && quantity > 1) {
+      const modelCategoryId =
+        category && category !== "uncategorized" ? category : undefined;
+      const model = await createAssetModel({
+        name: title,
+        description: description || null,
+        defaultCategoryId: modelCategoryId,
+        defaultValuation: valuation,
+        userId: authSession.userId,
+        organizationId,
+      });
+      const result = await bulkCreateAssetsFromModel({
+        assetModelId: model.id,
+        count: quantity,
+        nameTemplate: `${title} #{i}`,
+        organizationId,
+        userId: authSession.userId,
+        categoryId: modelCategoryId,
+        valuation,
+        description,
+        locationId: newLocationId || undefined,
+        tags,
+        customFieldsValues,
+        requiresBorrowApproval,
+        requiresStaffPreparation,
+        requiresReturnPhoto,
+        maxBorrowDays,
+        extensionBorrowDays,
+        returnHandling,
+      });
+
+      if (result.failedAt !== undefined && result.error) {
+        if (assetQueueIntent === "create") {
+          return data({
+            assetQueueCreated: true,
+            createdCount: result.createdAssetIds.length,
+            warning:
+              result.createdAssetIds.length > 0
+                ? `Created ${result.createdAssetIds.length} of ${quantity} physical units. The remaining units were not created.`
+                : "An asset model was created, but its physical units could not be created. The draft was removed to prevent a duplicate model on retry.",
+          });
+        }
+        return data(error(result.error), { status: result.error.status });
+      }
+
+      if (purchaseItemId && result.createdAssetIds[0]) {
+        return await redirectToPurchasing(result.createdAssetIds[0]);
+      }
+
+      if (assetQueueIntent === "create") {
+        try {
+          sendNotification({
+            title: "Physical units created",
+            message: `${result.createdAssetIds.length} physical units were created with individual QR identities.`,
+            icon: { name: "success", variant: "success" },
+            senderId: authSession.userId,
+          });
+        } catch {
+          // Do not turn a successful physical-unit creation into a retryable
+          // error just because its optional notification could not be sent.
+        }
+        return data({
+          assetQueueCreated: true,
+          createdCount: result.createdAssetIds.length,
+        });
+      }
+
+      sendNotification({
+        title: "Physical units created",
+        message: `${result.createdAssetIds.length} physical units were created with individual QR identities.`,
+        icon: { name: "success", variant: "success" },
+        senderId: authSession.userId,
+      });
+
+      const returnTo = new URL(request.url).searchParams.get("returnTo");
+      if (returnTo === "/labels") {
+        return redirect(
+          `/labels?assetIds=${encodeURIComponent(
+            result.createdAssetIds.join(",")
+          )}`
+        );
+      }
+
+      if (addAnother) {
+        return redirectDocument(`/assets/new?`);
+      }
+
+      return redirect(`/assets`);
+    }
+
     /** Extract barcode data from form only if barcodes are enabled */
     const barcodes = canUseBarcodes
       ? extractBarcodesFromFormData(formData)
       : [];
+
+    let resolvedAssetModelId = assetModelId || undefined;
+    if (type === AssetType.INDIVIDUAL && !resolvedAssetModelId) {
+      const modelCategoryId =
+        category && category !== "uncategorized" ? category : undefined;
+      const model = await createAssetModel({
+        name: title,
+        description: description || null,
+        defaultCategoryId: modelCategoryId,
+        defaultValuation: valuation,
+        userId: authSession.userId,
+        organizationId,
+      });
+      resolvedAssetModelId = model.id;
+    }
 
     const asset = await createAsset({
       organizationId,
@@ -285,7 +546,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       description,
       userId: authSession.userId,
       categoryId: category,
-      assetModelId: assetModelId || undefined,
+      assetModelId: resolvedAssetModelId,
       locationId: newLocationId,
       qrId,
       tags,
@@ -293,10 +554,19 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       customFieldsValues,
       barcodes,
       type,
-      quantity,
-      minQuantity,
-      consumptionType,
-      unitOfMeasure,
+      quantity: type === AssetType.QUANTITY_TRACKED ? quantity : undefined,
+      minQuantity:
+        type === AssetType.QUANTITY_TRACKED ? minQuantity : undefined,
+      consumptionType:
+        type === AssetType.QUANTITY_TRACKED ? consumptionType : undefined,
+      unitOfMeasure:
+        type === AssetType.QUANTITY_TRACKED ? unitOfMeasure : undefined,
+      requiresBorrowApproval,
+      requiresStaffPreparation,
+      requiresReturnPhoto,
+      maxBorrowDays,
+      extensionBorrowDays,
+      returnHandling,
     });
 
     // `asset.user` is the full User row (createAsset includes `user: true`), so
@@ -312,6 +582,7 @@ export async function action({ context, request }: LoaderFunctionArgs) {
         userId: authSession.userId,
         organizationId,
         isNewAsset: true,
+        allowEmptyFile: true,
       }),
       createNote({
         content: `Asset was created by ${actor}.`,
@@ -338,7 +609,42 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       );
     }
 
+    if (assetQueueIntent === "create") {
+      // Asset creation has succeeded at this point. A failure in a follow-up
+      // image upload or note must not make the client retry and create a
+      // duplicate asset, so return the created state with a warning instead.
+      const results = await Promise.allSettled(postCreationTasks);
+      const failedTaskCount = results.filter(
+        (task) => task.status === "rejected"
+      ).length;
+
+      try {
+        sendNotification({
+          title: "Asset created",
+          message: "Your asset has been created successfully",
+          icon: { name: "success", variant: "success" },
+          senderId: authSession.userId,
+        });
+      } catch {
+        // Asset creation and follow-up writes already completed; notification
+        // failure must not make the queue retry and duplicate the asset.
+      }
+
+      return data({
+        assetQueueCreated: true,
+        createdCount: 1,
+        warning:
+          failedTaskCount > 0
+            ? "The asset was created, but some follow-up details could not be saved."
+            : undefined,
+      });
+    }
+
     await Promise.all(postCreationTasks);
+
+    if (purchaseItemId) {
+      return await redirectToPurchasing(asset.id);
+    }
 
     sendNotification({
       title: "Asset created",
@@ -346,6 +652,11 @@ export async function action({ context, request }: LoaderFunctionArgs) {
       icon: { name: "success", variant: "success" },
       senderId: authSession.userId,
     });
+
+    const returnTo = new URL(request.url).searchParams.get("returnTo");
+    if (returnTo === "/labels") {
+      return redirect(`/labels?assetId=${encodeURIComponent(asset.id)}`);
+    }
 
     /** If the user used the add-another button, we reload the document to reset the form */
     if (addAnother) {
@@ -361,7 +672,18 @@ export async function action({ context, request }: LoaderFunctionArgs) {
 
 export default function NewAssetPage() {
   const title = useAtomValue(dynamicTitleAtom);
-  const { nextSequentialId, referer } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
+  const fullPageData = isNewAssetPageLoaderData(loaderData)
+    ? loaderData
+    : undefined;
+  const nextSequentialId = fullPageData?.nextSequentialId;
+  const referer = fullPageData?.referer;
+  const prefillTitle = fullPageData?.prefillTitle;
+  const prefillQuantity = fullPageData?.prefillQuantity;
+  const { customFields } = loaderData;
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
   const [searchParams] = useSearchParams();
   const qrId = searchParams.get("qrId");
 
@@ -373,6 +695,13 @@ export default function NewAssetPage() {
   // when the user enables bulk-create after selecting a model. The
   // page header label and the form's field layout both branch on this.
   const bulkMode = searchParams.get("bulk") === "1";
+  const queueEligible =
+    Boolean(layoutData?.isIoioStaff) &&
+    !bulkMode &&
+    !qrId &&
+    !searchParams.has("purchaseItemId") &&
+    !searchParams.has("returnTo") &&
+    !searchParams.has("returnToPurchasing");
 
   return (
     <div className="relative">
@@ -382,13 +711,32 @@ export default function NewAssetPage() {
         }
       />
       <div>
-        <AssetForm
-          qrId={qrId}
-          categoryId={categoryFromUrl}
-          sequentialId={nextSequentialId}
-          bulkMode={bulkMode}
-          referer={referer}
-        />
+        {queueEligible ? (
+          <IoioAssetCreationQueue
+            initialValues={{
+              title: prefillTitle || undefined,
+              quantity: prefillQuantity ?? undefined,
+              qrId,
+              categoryId: categoryFromUrl,
+              locationId: searchParams.get("location"),
+              sequentialId: nextSequentialId,
+              referer,
+              customFields,
+            }}
+          />
+        ) : (
+          <IoioAssetCreateForm
+            title={prefillTitle || undefined}
+            quantity={prefillQuantity ?? undefined}
+            qrId={qrId}
+            categoryId={categoryFromUrl}
+            locationId={searchParams.get("location")}
+            sequentialId={nextSequentialId}
+            bulkMode={bulkMode}
+            showAssetModel={false}
+            referer={referer}
+          />
+        )}
       </div>
     </div>
   );

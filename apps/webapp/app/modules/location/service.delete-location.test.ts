@@ -8,8 +8,11 @@ const dbMocks = vi.hoisted(() => ({
   location: {
     delete: vi.fn(),
     findMany: vi.fn(),
+    findFirst: vi.fn(),
     deleteMany: vi.fn(),
   },
+  assetLocation: { findFirst: vi.fn() },
+  kit: { findFirst: vi.fn() },
   image: {
     delete: vi.fn(),
     deleteMany: vi.fn(),
@@ -17,6 +20,7 @@ const dbMocks = vi.hoisted(() => ({
   // why: route the transaction callback to the same stubs so call order
   // between the DB delete and storage cleanup can be asserted
   $transaction: vi.fn(),
+  $queryRaw: vi.fn(),
 }));
 
 vi.mock("~/database/db.server", () => ({
@@ -50,6 +54,7 @@ const thumbnailUrlFor = (locationId: string) =>
 function makeLocation(
   id: string,
   overrides: Partial<{
+    parentId: string | null;
     imageId: string | null;
     imageUrl: string | null;
     thumbnailUrl: string | null;
@@ -58,6 +63,7 @@ function makeLocation(
   return {
     id,
     organizationId: "org-1",
+    parentId: null,
     imageId: null,
     imageUrl: imageUrlFor(id),
     thumbnailUrl: thumbnailUrlFor(id),
@@ -73,6 +79,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   loggerErrorSpy = vi.spyOn(Logger, "error").mockImplementation(() => {});
   removePublicFilesMock.mockResolvedValue({ invalidUrlCount: 0 });
+  dbMocks.$queryRaw.mockResolvedValue([]);
   dbMocks.$transaction.mockImplementation(
     (cb: (tx: typeof dbMocks) => Promise<unknown>) => cb(dbMocks)
   );
@@ -98,6 +105,23 @@ describe("deleteLocation", () => {
     expect(dbMocks.location.delete.mock.invocationCallOrder[0]).toBeLessThan(
       removePublicFilesMock.mock.invocationCallOrder[0]
     );
+  });
+
+  it("deletes an empty child location without changing its parent", async () => {
+    dbMocks.location.delete.mockResolvedValue({
+      ...makeLocation("section-d"),
+      parentId: "room-b477",
+    });
+
+    const deleted = await deleteLocation({
+      id: "section-d",
+      organizationId: "org-1",
+    });
+
+    expect(deleted.parentId).toBe("room-b477");
+    expect(dbMocks.location.delete).toHaveBeenCalledWith({
+      where: { id: "section-d", organizationId: "org-1" },
+    });
   });
 
   it("deletes the legacy Image row and still removes the stored files", async () => {
@@ -134,6 +158,54 @@ describe("deleteLocation", () => {
 
     await deleteLocation({ id: "loc-1", organizationId: "org-1" });
 
+    expect(removePublicFilesMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks deleting a location that has child locations", async () => {
+    dbMocks.location.findFirst.mockResolvedValueOnce({ id: "child-1" });
+
+    await expect(
+      deleteLocation({ id: "loc-1", organizationId: "org-1" })
+    ).rejects.toMatchObject({
+      message:
+        "This location contains child locations. Move or delete them first.",
+      status: 409,
+    });
+
+    expect(dbMocks.location.delete).not.toHaveBeenCalled();
+    expect(removePublicFilesMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Section A", "Shelf A1"],
+    ["Shelf A1", "Container A1-13"],
+  ])("blocks deleting %s while it contains %s", async (name, childName) => {
+    dbMocks.location.findFirst.mockResolvedValueOnce({
+      id: `child-${childName}`,
+      name: childName,
+    });
+
+    await expect(
+      deleteLocation({ id: `location-${name}`, organizationId: "org-1" })
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(dbMocks.location.delete).not.toHaveBeenCalled();
+  });
+
+  it("blocks deleting a location that has assigned assets", async () => {
+    dbMocks.assetLocation.findFirst.mockResolvedValueOnce({
+      id: "placement-1",
+    });
+
+    await expect(
+      deleteLocation({ id: "loc-1", organizationId: "org-1" })
+    ).rejects.toMatchObject({
+      message:
+        "This location contains assigned assets. Move them before deleting the location.",
+      status: 409,
+    });
+
+    expect(dbMocks.location.delete).not.toHaveBeenCalled();
     expect(removePublicFilesMock).not.toHaveBeenCalled();
   });
 
@@ -221,10 +293,19 @@ describe("bulkDeleteLocations", () => {
         id: { in: ["loc-1", "loc-2", "loc-3"] },
         organizationId: "org-1",
       },
-      select: { id: true, imageId: true, imageUrl: true, thumbnailUrl: true },
+      select: {
+        id: true,
+        parentId: true,
+        imageId: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+      },
     });
     expect(dbMocks.location.deleteMany).toHaveBeenCalledWith({
-      where: { id: { in: ["loc-1", "loc-2", "loc-3"] } },
+      where: {
+        id: { in: ["loc-1", "loc-2", "loc-3"] },
+        organizationId: "org-1",
+      },
     });
     // Every file of the selection goes in one storage request.
     await vi.waitFor(() =>
@@ -243,6 +324,27 @@ describe("bulkDeleteLocations", () => {
     expect(
       dbMocks.location.deleteMany.mock.invocationCallOrder[0]
     ).toBeLessThan(removePublicFilesMock.mock.invocationCallOrder[0]);
+  });
+
+  it("deletes selected descendants before their selected parents", async () => {
+    dbMocks.location.findMany.mockResolvedValue([
+      makeLocation("section-1", { parentId: "room-1" }),
+      makeLocation("shelf-1", { parentId: "section-1" }),
+      makeLocation("room-1"),
+    ]);
+
+    await bulkDeleteLocations({
+      locationIds: ["room-1", "section-1", "shelf-1"],
+      organizationId: "org-1",
+    });
+
+    expect(
+      dbMocks.location.deleteMany.mock.calls.map(([args]) => args)
+    ).toEqual([
+      { where: { id: { in: ["shelf-1"] }, organizationId: "org-1" } },
+      { where: { id: { in: ["section-1"] }, organizationId: "org-1" } },
+      { where: { id: { in: ["room-1"] }, organizationId: "org-1" } },
+    ]);
   });
 
   it("resolves without waiting for the storage cleanup to finish", async () => {
@@ -293,6 +395,43 @@ describe("bulkDeleteLocations", () => {
         location.thumbnailUrl,
       ])
     );
+  });
+
+  it("blocks deleting selected locations when they have non-selected children", async () => {
+    dbMocks.location.findMany.mockResolvedValue([makeLocation("parent-1")]);
+    dbMocks.location.findFirst.mockResolvedValueOnce({ id: "child-1" });
+
+    await expect(
+      bulkDeleteLocations({
+        locationIds: ["parent-1"],
+        organizationId: "org-1",
+      })
+    ).rejects.toMatchObject({
+      message:
+        "Some selected locations contain child locations that are not selected. Move or delete them first.",
+      status: 409,
+    });
+
+    expect(dbMocks.location.deleteMany).not.toHaveBeenCalled();
+    expect(removePublicFilesMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks bulk deletion of locations with assigned assets", async () => {
+    dbMocks.location.findMany.mockResolvedValue([makeLocation("loc-1")]);
+    dbMocks.assetLocation.findFirst.mockResolvedValueOnce({
+      id: "placement-1",
+    });
+
+    await expect(
+      bulkDeleteLocations({ locationIds: ["loc-1"], organizationId: "org-1" })
+    ).rejects.toMatchObject({
+      message:
+        "Some selected locations contain assigned assets. Move them before deleting the locations.",
+      status: 409,
+    });
+
+    expect(dbMocks.location.deleteMany).not.toHaveBeenCalled();
+    expect(removePublicFilesMock).not.toHaveBeenCalled();
   });
 
   it("logs a failed request and still sends the next one", async () => {

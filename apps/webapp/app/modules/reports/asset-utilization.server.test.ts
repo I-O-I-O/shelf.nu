@@ -1,11 +1,8 @@
 /**
  * Asset Utilization Report — Predicate & In-Use Time Tests
  *
- * Covers the public `assetUtilizationReport` function: that only bookings
- * representing real usage feed utilization (DRAFT/CANCELLED excluded at the
- * query layer), and that per-asset in-use time is the merged coverage of the
- * asset's booking intervals clamped to the window — counted once per
- * distinct booking, overlaps merged, so utilization can never exceed 100%.
+ * Covers actual checkout/check-in intervals and excludes IOIO archived/trash
+ * assets from the current inventory report.
  *
  * @see {@link file://./helpers.server.ts}
  */
@@ -22,6 +19,7 @@ vi.mock("~/database/db.server", () => ({
     asset: {
       findMany: vi.fn(),
     },
+    ioioArchivedItem: { findMany: vi.fn() },
   },
 }));
 
@@ -39,7 +37,11 @@ const TIMEFRAME: ResolvedTimeframe = {
 
 /** A booking slice as projected by the asset query's `bookingAssets` select. */
 function slice(id: string, from: string, to: string) {
-  return { booking: { id, from: new Date(from), to: new Date(to) } };
+  return {
+    checkedOutAt: new Date(from),
+    checkedInAt: new Date(to),
+    booking: { id },
+  };
 }
 
 /**
@@ -69,13 +71,14 @@ describe("assetUtilizationReport", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(db.asset.findMany).mockResolvedValue([] as any);
+    vi.mocked(db.ioioArchivedItem.findMany).mockResolvedValue([] as any);
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("excludes DRAFT and CANCELLED bookings from the usage query", async () => {
+  it("uses actual checkout times and excludes planned or canceled reservations", async () => {
     await assetUtilizationReport({
       organizationId: "org-1",
       timeframe: TIMEFRAME,
@@ -85,10 +88,12 @@ describe("assetUtilizationReport", () => {
     // A DRAFT booking is a plan and a CANCELLED one never happened — neither
     // is usage, so the slice filter excludes them exactly like the
     // top-booked reports do.
-    expect(args.select.bookingAssets.where.booking).toEqual({
-      from: { lte: TIMEFRAME.to },
-      to: { gte: TIMEFRAME.from },
-      status: { notIn: ["DRAFT", "CANCELLED"] },
+    expect(args.select.bookingAssets.where.checkedOutAt).toEqual({
+      gte: TIMEFRAME.from,
+      lte: TIMEFRAME.to,
+    });
+    expect(args.select.bookingAssets.where.booking.status).toEqual({
+      notIn: ["DRAFT", "CANCELLED"],
     });
   });
 
@@ -131,6 +136,64 @@ describe("assetUtilizationReport", () => {
     expect(result.rows[0].daysInUse).toBe(15);
     expect(result.rows[0].bookingCount).toBe(2);
     expect(result.rows[0].utilizationRate).toBe(50);
+  });
+
+  it("counts distinct loans once across multiple borrowed assets", async () => {
+    vi.mocked(db.asset.findMany).mockResolvedValue([
+      asset("asset-1", [
+        slice("loan-1", "2026-04-10T00:00:00Z", "2026-04-11T00:00:00Z"),
+      ]),
+      asset("asset-2", [
+        slice("loan-1", "2026-04-10T00:00:00Z", "2026-04-11T00:00:00Z"),
+      ]),
+    ] as any);
+
+    const result = await assetUtilizationReport({
+      organizationId: "org-1",
+      timeframe: TIMEFRAME,
+    });
+
+    expect(result.rows.map((row) => row.bookingCount)).toEqual([1, 1]);
+    expect(result.kpis.find((kpi) => kpi.id === "loans")?.rawValue).toBe(1);
+    expect(
+      result.kpis.find((kpi) => kpi.id === "assets_borrowed")?.rawValue
+    ).toBe(2);
+  });
+
+  it("keeps archived loan history but excludes it from current inventory totals", async () => {
+    vi.mocked(db.ioioArchivedItem.findMany).mockResolvedValue([
+      { itemId: "archived-asset" },
+    ] as any);
+    vi.mocked(db.asset.findMany)
+      .mockResolvedValueOnce([
+        {
+          id: "archived-asset",
+          title: "Old camera",
+          type: "INDIVIDUAL",
+        },
+      ] as any)
+      .mockResolvedValueOnce([
+        asset("archived-asset", [
+          slice(
+            "historical-loan",
+            "2026-04-10T00:00:00Z",
+            "2026-04-11T00:00:00Z"
+          ),
+        ]),
+      ] as any);
+
+    const result = await assetUtilizationReport({
+      organizationId: "org-1",
+      timeframe: TIMEFRAME,
+    });
+
+    expect(result.kpis.find((kpi) => kpi.id === "total_assets")?.rawValue).toBe(
+      0
+    );
+    expect(
+      result.kpis.find((kpi) => kpi.id === "assets_borrowed")?.rawValue
+    ).toBe(1);
+    expect(result.kpis.find((kpi) => kpi.id === "loans")?.rawValue).toBe(1);
   });
 
   it("sums exact milliseconds and converts to days once at the end", async () => {

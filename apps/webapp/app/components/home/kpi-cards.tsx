@@ -1,5 +1,4 @@
-import { Link, useLoaderData } from "react-router";
-import type { loader } from "~/routes/_layout+/home";
+import { Link } from "react-router";
 
 function KpiCard({
   label,
@@ -21,10 +20,17 @@ function KpiCard({
   );
 }
 
-export default function KpiCards() {
-  const { totalAssets, teamMembersCount, locationsCount, categoriesCount } =
-    useLoaderData<typeof loader>();
-
+export default function KpiCards({
+  totalAssets,
+  teamMembersCount,
+  locationsCount,
+  categoriesCount,
+}: {
+  totalAssets: number;
+  teamMembersCount: number;
+  locationsCount: number;
+  categoriesCount: number;
+}) {
   return (
     <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
       <KpiCard

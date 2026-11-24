@@ -38,6 +38,9 @@ vi.mock("~/database/db.server", () => ({
     location: {
       count: vi.fn(),
     },
+    ioioArchivedItem: {
+      findMany: vi.fn(),
+    },
     // why: `bookingStatusTransitionCounts` issues `db.$queryRaw` for the
     // chart series. We stub it to a resolved empty array so the hero-data
     // path is not coupled to chart math.
@@ -124,9 +127,10 @@ describe("bookingComplianceReport — complianceData hero", () => {
     vi.mocked(db.activityEvent.findMany).mockResolvedValue([] as any);
     // Default: no chart rows from the raw query.
     vi.mocked(db.$queryRaw).mockResolvedValue([] as any);
+    vi.mocked(db.ioioArchivedItem.findMany).mockResolvedValue([] as any);
   });
 
-  it("counts OVERDUE bookings as late", async () => {
+  it("keeps active overdue loans separate from completed return compliance", async () => {
     const dueDate = new Date("2026-04-15T12:00:00Z");
 
     const completeBooking = makeComplianceBooking({
@@ -168,16 +172,21 @@ describe("bookingComplianceReport — complianceData hero", () => {
 
     expect(result.complianceData).toBeDefined();
     expect(result.complianceData!.onTime).toBe(1);
-    expect(result.complianceData!.late).toBe(1);
-    expect(result.complianceData!.rate).toBe(50);
+    expect(result.complianceData!.late).toBe(0);
+    expect(result.complianceData!.rate).toBe(100);
+    const returnedQuery = vi
+      .mocked(db.booking.findMany)
+      .mock.calls.find(([args]) => Boolean((args as any).where.AND));
+    expect(returnedQuery).toBeDefined();
+    expect((returnedQuery![0] as any).where.AND[0].OR).toEqual([
+      { status: "COMPLETE" },
+      { status: "ARCHIVED", archivedWithoutCheckin: false },
+    ]);
   });
 
-  it("excludes never-returned archives (archivedWithoutCheckin) from every booking query", async () => {
+  it("excludes never-returned archived reservations from returned-loan queries", async () => {
     // why: A booking archived straight from RESERVED was never checked in, so
     // it must not be measured for on-time-return compliance. The exclusion is
-    // enforced at the query layer — every booking read in the compliance flow
-    // filters on `archivedWithoutCheckin: false`, so archived-from-reserved
-    // rows never reach the count, rows, rate, trend, or custodian breakdown.
     await bookingComplianceReport({
       organizationId: "org-1",
       timeframe: TIMEFRAME,
@@ -186,24 +195,22 @@ describe("bookingComplianceReport — complianceData hero", () => {
     const findManyCalls = vi.mocked(db.booking.findMany).mock.calls;
     expect(findManyCalls.length).toBeGreaterThan(0);
     for (const [args] of findManyCalls) {
-      expect((args as any).where.archivedWithoutCheckin).toBe(false);
+      const conditions = (args as any).where.AND;
+      if (!conditions) continue;
+      expect(conditions[0].OR).toEqual([
+        { status: "COMPLETE" },
+        { status: "ARCHIVED", archivedWithoutCheckin: false },
+      ]);
     }
 
     const countCalls = vi.mocked(db.booking.count).mock.calls;
     expect(countCalls.length).toBeGreaterThan(0);
-    for (const [args] of countCalls) {
-      expect((args as any).where.archivedWithoutCheckin).toBe(false);
-    }
+    expect(
+      countCalls.some(([args]) => (args as any).where.status === "OVERDUE")
+    ).toBe(true);
   });
 
-  it("falls back to updatedAt for COMPLETE bookings missing a check-in event", async () => {
-    // why: The partial-check-in completion path historically wrote a custom
-    // system note instead of calling `createStatusTransitionNote`, so no
-    // `BOOKING_STATUS_CHANGED → COMPLETE` event was recorded for those
-    // bookings. Without a fallback, every such booking would be counted as
-    // on-time regardless of when it was actually returned. With the fallback,
-    // a COMPLETE booking returned 1h late (well past the 15m grace window) is
-    // correctly counted as late via `Booking.updatedAt`.
+  it("does not guess a return time from updatedAt when no check-in event exists", async () => {
     const dueDate = new Date("2026-04-15T12:00:00Z");
     const updatedAt = new Date(dueDate.getTime() + 60 * 60 * 1000); // 1h late
 
@@ -216,7 +223,7 @@ describe("bookingComplianceReport — complianceData hero", () => {
       }),
     ] as any);
     // No activity event for this booking — the resolver returns an empty map
-    // and `resolveCheckInAt` must fall back to `updatedAt`.
+    // updatedAt can change after a return, so it is not a reliable check-in.
     vi.mocked(db.activityEvent.findMany).mockResolvedValue([] as any);
 
     const result = await bookingComplianceReport({
@@ -225,16 +232,16 @@ describe("bookingComplianceReport — complianceData hero", () => {
     });
 
     expect(result.complianceData!.onTime).toBe(0);
-    expect(result.complianceData!.late).toBe(1);
-    expect(result.complianceData!.rate).toBe(0);
+    expect(result.complianceData!.late).toBe(0);
+    expect(result.complianceData!.unavailable).toBe(1);
+    expect(result.complianceData!.rate).toBeNull();
   });
 
   it("does NOT fall back to updatedAt for ARCHIVED without an event", async () => {
     // why: For ARCHIVED bookings `Booking.updatedAt` is unreliable — the
     // auto-archive job shifts it long after the actual check-in. Falling back
-    // to `updatedAt` here would systematically misreport archived bookings as
-    // very late. With no event, the booking carries no measurable signal and
-    // is treated as on-time per `isOnTime`'s null-data semantics.
+    // to `updatedAt` here would systematically misreport archived bookings.
+    // With no event, return timing is unknown and no rate is shown.
     const dueDate = new Date("2026-04-15T12:00:00Z");
 
     vi.mocked(db.booking.findMany).mockResolvedValue([
@@ -254,8 +261,11 @@ describe("bookingComplianceReport — complianceData hero", () => {
       timeframe: TIMEFRAME,
     });
 
-    expect(result.complianceData!.onTime).toBe(1);
+    expect(result.complianceData!.completed).toBe(1);
+    expect(result.complianceData!.onTime).toBe(0);
     expect(result.complianceData!.late).toBe(0);
+    expect(result.complianceData!.unavailable).toBe(1);
+    expect(result.complianceData!.rate).toBeNull();
   });
 
   it("counts ARCHIVED bookings using their check-in event timestamp", async () => {
@@ -503,6 +513,7 @@ describe("assetDistributionReport — quantity-aware bucket values", () => {
     vi.mocked(db.category.findMany).mockResolvedValue([
       { id: "cat-1", name: "Cameras" },
     ] as any);
+    vi.mocked(db.ioioArchivedItem.findMany).mockResolvedValue([] as any);
   });
 
   it("sums category buckets as valuation × stock, matching the headline", async () => {
@@ -596,6 +607,44 @@ describe("assetDistributionReport — quantity-aware bucket values", () => {
 
     expect(vi.mocked(db.asset.findMany)).toHaveBeenCalledTimes(1);
   });
+
+  it("excludes archived and trashed parent assets from the current distribution", async () => {
+    vi.mocked(db.ioioArchivedItem.findMany).mockResolvedValue([
+      { itemId: "archived-asset" },
+    ] as any);
+    vi.mocked(db.asset.findMany)
+      .mockResolvedValueOnce([
+        {
+          id: "archived-asset",
+          title: "Archived item",
+          type: "INDIVIDUAL",
+        },
+      ] as any)
+      .mockResolvedValueOnce([
+        {
+          id: "active-asset",
+          categoryId: null,
+          status: "AVAILABLE",
+          valuation: null,
+          quantity: null,
+          assetLocations: [],
+        },
+      ] as any);
+
+    const result = await assetDistributionReport({
+      organizationId: "org-1",
+      currency: "USD",
+    });
+
+    expect(
+      (vi.mocked(db.asset.findMany).mock.calls[1][0] as any).where.id
+    ).toEqual({
+      notIn: ["archived-asset"],
+    });
+    expect(result.kpis.find((kpi) => kpi.id === "total_assets")?.rawValue).toBe(
+      1
+    );
+  });
 });
 
 describe("bookingComplianceReport — rewritten `to` (overdue check-in)", () => {
@@ -684,7 +733,7 @@ describe("bookingComplianceReport — rewritten `to` (overdue check-in)", () => 
     for (const [args] of findManyCalls) {
       const where = (args as any).where;
       expect(where.to).toBeUndefined();
-      expect(where.OR).toEqual([
+      expect(where.AND[1].OR).toEqual([
         { originalTo: { gte: expect.any(Date), lte: expect.any(Date) } },
         {
           originalTo: null,
@@ -692,7 +741,7 @@ describe("bookingComplianceReport — rewritten `to` (overdue check-in)", () => 
         },
       ]);
     }
-    expect((findManyCalls[0][0] as any).where.OR).toEqual([
+    expect((findManyCalls[0][0] as any).where.AND[1].OR).toEqual([
       { originalTo: { gte: TIMEFRAME.from, lte: TIMEFRAME.to } },
       { originalTo: null, to: { gte: TIMEFRAME.from, lte: TIMEFRAME.to } },
     ]);

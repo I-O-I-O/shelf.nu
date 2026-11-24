@@ -151,6 +151,9 @@ function getExcludedPresets(reportId: string): TimeframePreset[] {
     // Asset Utilization: Utilization rates need sufficient time to be meaningful
     // falls through
     case "asset-utilization":
+    // Combined usage/distribution has the same usage timeframe.
+    // falls through
+    case "asset-usage-distribution":
       return ["today"];
     default:
       return [];

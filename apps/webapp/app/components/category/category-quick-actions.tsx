@@ -1,7 +1,6 @@
-import type { CSSProperties } from "react";
 import type { Category } from "@prisma/client";
-import { PencilIcon, Trash2Icon } from "lucide-react";
 import { Button } from "~/components/shared/button";
+import { Td } from "~/components/table";
 import When from "~/components/when/when";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
 import {
@@ -9,24 +8,72 @@ import {
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { userHasPermission } from "~/utils/permissions/permission.validator.client";
-import { tw } from "~/utils/tw";
 import { DeleteCategory } from "./delete-category";
 
 type CategoryQuickActionsProps = {
-  className?: string;
-  style?: CSSProperties;
   category: Pick<Category, "id" | "name">;
 };
 
 export default function CategoryQuickActions({
-  className,
-  style,
   category,
 }: CategoryQuickActionsProps) {
   const { roles } = useUserRoleHelper();
 
   return (
-    <div className={tw("flex items-center gap-2", className)} style={style}>
+    <>
+      <Td>
+        <When
+          truthy={userHasPermission({
+            roles,
+            entity: PermissionEntity.category,
+            action: PermissionAction.update,
+          })}
+        >
+          <Button
+            size="sm"
+            variant="secondary"
+            to={`${category.id}/edit`}
+            aria-label="Edit category"
+          >
+            Edit
+          </Button>
+        </When>
+      </Td>
+
+      <Td>
+        <When
+          truthy={userHasPermission({
+            roles,
+            entity: PermissionEntity.category,
+            action: PermissionAction.delete,
+          })}
+        >
+          <DeleteCategory
+            category={category}
+            trigger={
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                aria-label="Delete category"
+              >
+                Delete
+              </Button>
+            }
+          />
+        </When>
+      </Td>
+    </>
+  );
+}
+
+export function CategoryMobileQuickActions({
+  category,
+}: CategoryQuickActionsProps) {
+  const { roles } = useUserRoleHelper();
+
+  return (
+    <div className="flex flex-wrap gap-2">
       <When
         truthy={userHasPermission({
           roles,
@@ -37,15 +84,12 @@ export default function CategoryQuickActions({
         <Button
           size="sm"
           variant="secondary"
-          className={"p-2"}
           to={`${category.id}/edit`}
-          aria-label="Edit category"
-          tooltip="Edit category"
+          aria-label={`Edit ${category.name}`}
         >
-          <PencilIcon className="size-4" />
+          Edit
         </Button>
       </When>
-
       <When
         truthy={userHasPermission({
           roles,
@@ -60,11 +104,9 @@ export default function CategoryQuickActions({
               type="button"
               size="sm"
               variant="secondary"
-              className={"p-2"}
-              aria-label="Delete category"
-              tooltip="Delete category"
+              aria-label={`Delete ${category.name}`}
             >
-              <Trash2Icon className="size-4" />
+              Delete
             </Button>
           }
         />

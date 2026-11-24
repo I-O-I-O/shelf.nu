@@ -1,28 +1,40 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
-import type { TextareaHTMLAttributes } from "react";
+import type { ChangeEvent, TextareaHTMLAttributes } from "react";
 import "prosemirror-view/style/prosemirror.css";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toggleMark, wrapIn } from "prosemirror-commands";
 import { redo, undo } from "prosemirror-history";
 import { wrapInList } from "prosemirror-schema-list";
+import { Selection } from "prosemirror-state";
 import type { EditorState } from "prosemirror-state";
+import type { SelectionBookmark } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 
 import { createEditorSchema } from "~/modules/editor-v2/markdoc-utils";
-import { handleActivationKeyPress } from "~/utils/keyboard";
 import { tw } from "~/utils/tw";
 
 import { BubbleMenu } from "./components/bubble-menu";
 import { LinkDialog, RawBlockDialog } from "./components/dialogs";
 import { SlashCommandMenu } from "./components/slash-command-menu";
 import { EditorToolbar } from "./components/toolbar";
-import { createHorizontalRuleCommand, createSlashCommands } from "./helpers";
+import {
+  createHorizontalRuleCommand,
+  createSlashCommands,
+  deleteHandbookHeadingCommand,
+  insertHandbookHeadingCommand,
+  insertImageAtSelection,
+  moveHandbookHeadingCommand,
+  renameHandbookHeadingCommand,
+} from "./helpers";
 import { useBubbleMenu } from "./hooks/use-bubble-menu";
 import { useEditorCommands } from "./hooks/use-editor-commands";
 import { useEditorView } from "./hooks/use-editor-view";
@@ -30,6 +42,7 @@ import { useLinkDialog } from "./hooks/use-link-dialog";
 import { useRawBlockDialog } from "./hooks/use-raw-block-dialog";
 import { useSlashCommands } from "./hooks/use-slash-commands";
 import { useToolbarState } from "./hooks/use-toolbar-state";
+import type { HandbookArticleLinkTarget } from "./types";
 
 interface EditorV2Props
   extends Omit<
@@ -40,9 +53,17 @@ interface EditorV2Props
   name: string;
   defaultValue: string;
   onChange?: (value: string) => void;
+  headingLevels?: number[];
+  enableHandbookBlocks?: boolean;
+  allowRawBlockEditing?: boolean;
+  helpText?: string;
+  onUploadImage?: (file: File) => Promise<{ src: string; alt?: string }>;
+  allowClipboardImagePaste?: boolean;
+  handbookArticles?: HandbookArticleLinkTarget[];
 }
 
 const HINT_TEXT = "Use / to access commands.";
+const MAX_EDITOR_IMAGE_SIZE = 2 * 1024 * 1024;
 
 export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
   function EditorV2(
@@ -54,6 +75,13 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       disabled,
       className,
       maxLength,
+      headingLevels,
+      enableHandbookBlocks = false,
+      allowRawBlockEditing = true,
+      helpText,
+      onUploadImage,
+      allowClipboardImagePaste = false,
+      handbookArticles,
       onBlur,
       onFocus,
       onChange,
@@ -67,9 +95,50 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
     const schema = useMemo(() => createEditorSchema(), []);
     const editorContainerRef = useRef<HTMLDivElement | null>(null);
     const hiddenTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const imageInputRef = useRef<HTMLInputElement | null>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const imageSelectionBookmarkRef = useRef<SelectionBookmark | null>(null);
+    const [toolsCollapsed, setToolsCollapsed] = useState(false);
+    useEffect(() => {
+      if (!enableHandbookBlocks) return;
+      try {
+        setToolsCollapsed(
+          localStorage.getItem("handbook.editor.tools.collapsed") === "true"
+        );
+      } catch {
+        // Editing remains available when browser storage is disabled.
+      }
+    }, [enableHandbookBlocks]);
+    function toggleTools() {
+      const next = !toolsCollapsed;
+      setToolsCollapsed(next);
+      try {
+        localStorage.setItem("handbook.editor.tools.collapsed", String(next));
+      } catch {
+        // Keep the in-memory preference when storage is unavailable.
+      }
+    }
+    const [imageBusy, setImageBusy] = useState(false);
+    const [imageError, setImageError] = useState("");
 
-    const commands = useMemo(() => createSlashCommands(schema), [schema]);
+    const requestImage = useCallback(() => {
+      setImageError("");
+      if (viewRef.current) {
+        imageSelectionBookmarkRef.current =
+          viewRef.current.state.selection.getBookmark();
+      }
+      imageInputRef.current?.click();
+    }, []);
+
+    const commands = useMemo(
+      () =>
+        createSlashCommands(schema, {
+          headingLevels,
+          enableHandbookBlocks,
+          onRequestImage: onUploadImage ? requestImage : undefined,
+        }),
+      [enableHandbookBlocks, headingLevels, onUploadImage, requestImage, schema]
+    );
 
     // Initialize hooks (all hooks share the same viewRef)
     const { toolbarState, applyToolbarState } = useToolbarState();
@@ -107,6 +176,73 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       viewRef
     );
 
+    const uploadAndInsertImage = async (
+      file: File,
+      sourceView = viewRef.current,
+      altOverride?: string
+    ) => {
+      if (!onUploadImage || !sourceView) return;
+      if (file.size > MAX_EDITOR_IMAGE_SIZE) {
+        setImageError("Images must be 2 MB or smaller.");
+        imageSelectionBookmarkRef.current = null;
+        return;
+      }
+
+      imageSelectionBookmarkRef.current ??=
+        sourceView.state.selection.getBookmark();
+      setImageBusy(true);
+      setImageError("");
+      try {
+        const uploaded = await onUploadImage(file);
+        const alt =
+          altOverride ??
+          uploaded.alt ??
+          file.name.replace(/\.[^.]+$/u, "").trim();
+        const view = viewRef.current;
+        if (!view) throw new Error("The editor is no longer available.");
+        const bookmark = imageSelectionBookmarkRef.current;
+        imageSelectionBookmarkRef.current = null;
+        let selection = view.state.selection;
+        if (bookmark) {
+          try {
+            selection = bookmark.resolve(view.state.doc);
+          } catch {
+            // Use the current selection if an intervening edit invalidated it.
+          }
+        }
+        insertImageAtSelection(view, uploaded.src, alt, selection);
+      } catch (cause) {
+        setImageError(
+          cause instanceof Error
+            ? cause.message
+            : "The image could not be uploaded."
+        );
+      } finally {
+        imageSelectionBookmarkRef.current = null;
+        setImageBusy(false);
+      }
+    };
+
+    const handleImageFile = (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (file) void uploadAndInsertImage(file);
+      else imageSelectionBookmarkRef.current = null;
+    };
+
+    const handlePasteImage = (file: File, view: EditorView) => {
+      if (!allowClipboardImagePaste) {
+        setImageError("Use Insert image to upload an image in this editor.");
+        return;
+      }
+      if (imageBusy) {
+        setImageError("Wait for the current image upload to finish.");
+        return;
+      }
+      imageSelectionBookmarkRef.current = view.state.selection.getBookmark();
+      void uploadAndInsertImage(file, view, "Pasted image");
+    };
+
     // Extract onKeyDown from restTextareaProps if it exists
     const parentOnKeyDown = restTextareaProps.onKeyDown as
       | ((event: KeyboardEvent) => boolean)
@@ -118,6 +254,10 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       disabled,
       placeholder,
       maxLength,
+      allowRawBlockEditing,
+      ariaLabel: label,
+      enableImageBlockDrop: enableHandbookBlocks,
+      fillAvailableSpace: enableHandbookBlocks,
       shouldAutoFocus,
       onBlur: (event) => {
         // The slash menu is portaled to the body and positioned against the
@@ -129,6 +269,13 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
       },
       onFocus,
       onChange,
+      onTransaction: (transaction) => {
+        if (imageSelectionBookmarkRef.current) {
+          imageSelectionBookmarkRef.current =
+            imageSelectionBookmarkRef.current.map(transaction.mapping);
+        }
+      },
+      onPasteImage: onUploadImage ? handlePasteImage : undefined,
       onStateUpdate: (state: EditorState, view: EditorView) => {
         applyToolbarState(state);
         updateBubble(state, view);
@@ -176,50 +323,121 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
 
     return (
       <div className={tw("flex flex-col gap-2", className)}>
-        <div className="isolate overflow-hidden rounded-lg border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 bg-white px-3 py-2">
-            <EditorToolbar
-              state={toolbarState}
-              onUndo={() => runCommand(undo)}
-              onRedo={() => runCommand(redo)}
-              onParagraphChange={handleParagraphChange}
-              onBold={() => runCommand(toggleMark(schema.marks.strong))}
-              onItalic={() => runCommand(toggleMark(schema.marks.em))}
-              onToggleLink={openLinkDialog}
-              onBulletList={() =>
-                runCommand(wrapInList(schema.nodes.bullet_list))
+        <div
+          className={tw(
+            "isolate rounded-lg border border-gray-200 bg-white",
+            enableHandbookBlocks
+              ? tw(
+                  "flex max-h-[75vh] flex-col xl:grid xl:max-h-none xl:items-stretch xl:gap-4",
+                  toolsCollapsed
+                    ? "xl:grid-cols-[minmax(0,1fr)_2.5rem]"
+                    : "xl:grid-cols-[minmax(0,1fr)_13rem]"
+                )
+              : "overflow-hidden"
+          )}
+        >
+          <div
+            className={tw(
+              "border-b border-gray-100 bg-white px-3 py-2",
+              enableHandbookBlocks
+                ? "sticky top-0 z-20 shrink-0 shadow-sm xl:top-24 xl:order-2 xl:max-h-[calc(100dvh-7rem)] xl:overflow-y-auto xl:border-b-0 xl:border-l xl:shadow-none"
+                : ""
+            )}
+          >
+            {enableHandbookBlocks ? (
+              <div className="mb-1 hidden items-center justify-between gap-1 xl:flex">
+                {!toolsCollapsed ? (
+                  <span className="text-xs font-semibold text-gray-600">
+                    Editor tools
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={
+                    toolsCollapsed ? "Show editor tools" : "Hide editor tools"
+                  }
+                  title={
+                    toolsCollapsed ? "Show editor tools" : "Hide editor tools"
+                  }
+                  aria-expanded={!toolsCollapsed}
+                  onClick={toggleTools}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded text-gray-600 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-300"
+                >
+                  {toolsCollapsed ? (
+                    <ChevronRight size={16} />
+                  ) : (
+                    <ChevronLeft size={16} />
+                  )}
+                </button>
+              </div>
+            ) : null}
+            <div
+              className={
+                enableHandbookBlocks && toolsCollapsed ? "xl:hidden" : undefined
               }
-              onOrderedList={() =>
-                runCommand(wrapInList(schema.nodes.ordered_list))
-              }
-              onQuote={() => runCommand(wrapIn(schema.nodes.blockquote))}
-              onDivider={
-                schema.nodes.horizontal_rule
-                  ? () => runCommand(createHorizontalRuleCommand(schema))
-                  : undefined
-              }
-              hasDivider={Boolean(schema.nodes.horizontal_rule)}
-            />
+            >
+              <EditorToolbar
+                state={toolbarState}
+                onUndo={() => runCommand(undo)}
+                onRedo={() => runCommand(redo)}
+                onParagraphChange={handleParagraphChange}
+                onBold={() => runCommand(toggleMark(schema.marks.strong))}
+                onItalic={() => runCommand(toggleMark(schema.marks.em))}
+                onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
+                onToggleLink={openLinkDialog}
+                onBulletList={() =>
+                  runCommand(wrapInList(schema.nodes.bullet_list))
+                }
+                onOrderedList={() =>
+                  runCommand(wrapInList(schema.nodes.ordered_list))
+                }
+                onQuote={() => runCommand(wrapIn(schema.nodes.blockquote))}
+                onDivider={
+                  schema.nodes.horizontal_rule
+                    ? () => runCommand(createHorizontalRuleCommand(schema))
+                    : undefined
+                }
+                hasDivider={Boolean(schema.nodes.horizontal_rule)}
+                headingLevels={headingLevels}
+                enableHandbookBlocks={enableHandbookBlocks}
+                codeActive={toolbarState.code}
+                onRequestImage={onUploadImage ? requestImage : undefined}
+                imageBusy={imageBusy}
+                onAddSection={() =>
+                  runCommand(insertHandbookHeadingCommand(schema, 2))
+                }
+                onAddSubsection={() =>
+                  runCommand(insertHandbookHeadingCommand(schema, 3))
+                }
+                onRenameHeading={(title) =>
+                  runCommand(renameHandbookHeadingCommand(schema, title))
+                }
+                onMoveHeadingUp={() =>
+                  runCommand(moveHandbookHeadingCommand("up"))
+                }
+                onMoveHeadingDown={() =>
+                  runCommand(moveHandbookHeadingCommand("down"))
+                }
+                onDeleteHeading={() =>
+                  runCommand(deleteHandbookHeadingCommand())
+                }
+              />
+            </div>
           </div>
           <div
-            className="relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300"
-            role="textbox"
-            tabIndex={0}
-            onMouseDown={(event) => {
-              if (!(event.target instanceof HTMLElement)) {
-                return;
-              }
-              if (event.target.closest('[contenteditable="true"]')) {
-                return;
-              }
-              event.preventDefault();
-              viewRef.current?.focus();
-            }}
-            onKeyDown={handleActivationKeyPress(() => viewRef.current?.focus())}
+            className={tw(
+              "relative bg-gray-50 px-3 py-4 focus-within:ring-2 focus-within:ring-gray-300",
+              enableHandbookBlocks
+                ? "min-h-0 overflow-auto xl:order-1 xl:flex xl:min-w-0 xl:flex-col xl:overflow-visible"
+                : ""
+            )}
           >
             <div
               ref={editorContainerRef}
-              className="min-h-[200px]"
+              className={tw(
+                "min-h-[200px]",
+                enableHandbookBlocks ? "xl:flex xl:flex-1 xl:flex-col" : ""
+              )}
               data-testid="editor-v2-content"
               role="document"
               tabIndex={-1}
@@ -231,16 +449,29 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
                   return;
                 }
                 event.preventDefault();
-                viewRef.current?.focus();
+                const view = viewRef.current;
+                if (view) {
+                  view.dispatch(
+                    view.state.tr.setSelection(
+                      Selection.near(
+                        view.state.doc.resolve(view.state.doc.content.size),
+                        -1
+                      )
+                    )
+                  );
+                  view.focus();
+                }
               }}
             />
             <BubbleMenu
               state={bubbleState}
               onBold={() => runCommand(toggleMark(schema.marks.strong))}
               onItalic={() => runCommand(toggleMark(schema.marks.em))}
+              onInlineCode={() => runCommand(toggleMark(schema.marks.code))}
               onLink={openLinkDialog}
               boldActive={toolbarState.bold}
               italicActive={toolbarState.italic}
+              codeActive={toolbarState.code}
               linkActive={toolbarState.link}
             />
             <SlashCommandMenu
@@ -263,10 +494,23 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           data-testid="editor-v2-input"
           {...restTextareaProps}
         />
+        {onUploadImage ? (
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            aria-label="Choose an article image"
+            onChange={handleImageFile}
+            disabled={disabled || imageBusy}
+          />
+        ) : null}
         <div className="flex flex-col gap-1 text-xs text-gray-500">
           <span>
-            {label} supports Markdown and Markdoc. {HINT_TEXT}
+            {helpText ?? `${label} supports Markdown and Markdoc. ${HINT_TEXT}`}
           </span>
+          {imageBusy ? <span role="status">Uploading image…</span> : null}
+          {imageError ? <span role="alert">{imageError}</span> : null}
           {maxLength ? (
             <span
               className={
@@ -282,13 +526,16 @@ export const EditorV2 = forwardRef<HTMLTextAreaElement, EditorV2Props>(
           onClose={closeLinkDialog}
           onHrefChange={setLinkHref}
           onApply={applyLink}
+          handbookArticles={handbookArticles}
         />
-        <RawBlockDialog
-          state={rawBlockDialog}
-          onClose={closeRawBlockEditor}
-          onChange={setRawBlockContent}
-          onSave={applyRawBlockEdit}
-        />
+        {allowRawBlockEditing ? (
+          <RawBlockDialog
+            state={rawBlockDialog}
+            onClose={closeRawBlockEditor}
+            onChange={setRawBlockContent}
+            onSave={applyRawBlockEdit}
+          />
+        ) : null}
       </div>
     );
   }

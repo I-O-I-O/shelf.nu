@@ -97,9 +97,14 @@ vitest.mock("~/database/db.server", () => {
         findUnique: vitest
           .fn()
           .mockResolvedValue({ status: BookingStatus.RESERVED }),
+        // why: checkout side effects re-read description when a fixture does
+        // not include it, so reminder scheduling can complete without a DB.
+        findFirst: vitest.fn().mockResolvedValue({ description: null }),
         update: vitest.fn().mockResolvedValue({}),
       },
       asset: {
+        // why: these checkout fixtures model every requested asset as allowed.
+        findFirst: vitest.fn().mockResolvedValue(null),
         // why: scanned-batch conflict/custody lookup + the in-tx kit-info read both
         // call db.asset.findMany. Default to echoing the requested ids with no
         // conflicts/custody so the happy path passes; individual tests override.

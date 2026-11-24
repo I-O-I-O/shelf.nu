@@ -1,7 +1,7 @@
 /** In this file you can find the different ways of fetching data for the asset index. They are either for the simple or advanced mode */
 
 import type { AssetIndexSettings, Kit } from "@prisma/client";
-import { OrganizationRoles } from "@prisma/client";
+import { AssetType, OrganizationRoles } from "@prisma/client";
 import { data, redirect } from "react-router";
 import type { Filter } from "~/components/assets/assets-index/advanced-filters/schema";
 import type { HeaderData } from "~/components/layout/header/types";
@@ -34,6 +34,12 @@ import { hasPermission } from "~/utils/permissions/permission.validator.server";
 import { canImportAssets } from "~/utils/subscription.server";
 import type { UserNameFields } from "~/utils/user";
 import { resolveUserDisplayName } from "~/utils/user";
+import { getAssetAvailabilityBatch } from "./availability.server";
+import {
+  getIndividualUnitAvailability,
+  getIndividualUnitPreparationStates,
+  getPreparedPickupHeldUnitIds,
+} from "./individual-product-quantity.server";
 import { parseFiltersWithHierarchy } from "./query.server";
 import {
   getAdvancedPaginatedAndFilterableAssets,
@@ -55,6 +61,9 @@ import {
   getAssetModelRollup,
 } from "../asset-model/rollup.server";
 import { getActiveCustomFields } from "../custom-field/service.server";
+import { IOIO_STAFF_RESERVATION_DESCRIPTION } from "../ioio-student/availability.server";
+import { getImmediateBorrowingWindow } from "../ioio-student/date-range";
+import { IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES } from "../ioio-student/report-problem.shared";
 import type { OrganizationFromUser } from "../organization/service.server";
 import { TAG_WITH_COLOR_SELECT } from "../tag/constants";
 import { getTagsForBookingTagsFilter } from "../tag/service.server";
@@ -81,6 +90,10 @@ interface Props {
    * and an optional field would let a caller silently restore that.
    */
   canSeeAllCustody: boolean;
+  /** Optional IOIO Inventory lifecycle filter and availability projection. */
+  excludeAssetIds?: string[];
+  /** Staff Inventory only: limit the list to assets/products hidden from students. */
+  ioioHiddenOnly?: boolean;
 }
 
 const searchFieldTooltipText = `
@@ -167,6 +180,8 @@ export async function simpleModeLoader({
   user,
   settings,
   canSeeAllCustody,
+  excludeAssetIds,
+  ioioHiddenOnly,
 }: Props) {
   // Threaded into the asset query so the custodian FILTER seed is scoped —
   // it used a role-only check that let BASE through unscoped. See
@@ -219,6 +234,7 @@ export async function simpleModeLoader({
     {
       search,
       totalAssets,
+      totalInventoryQuantity,
       perPage,
       page,
       categories,
@@ -305,6 +321,9 @@ export async function simpleModeLoader({
           : undefined,
       isSelfService,
       userId,
+      excludeAssetIds,
+      ioioHiddenOnly,
+      includeTotalInventoryQuantity: excludeAssetIds !== undefined,
     }),
     getTagsForBookingTagsFilter({
       organizationId,
@@ -344,6 +363,157 @@ export async function simpleModeLoader({
   // in the initial asset query (via assetIndexFields), so this just reshapes
   // it into the `custody.custodian` structure the UI expects.
   assets = updateAssetsWithBookingCustodians(assets);
+
+  // The IOIO Inventory list needs the same immediate borrowable availability
+  // and prepared-pickup state as the student catalog. Keep the generic Shelf
+  // payload unchanged unless this caller opts into the archive-aware view.
+  let ioioAvailabilityByAssetId: Awaited<
+    ReturnType<typeof getAssetAvailabilityBatch>
+  > | null = null;
+  let preparedPickupHeldUnitIds = new Set<string>();
+  let individualAvailableUnitIds = new Set<string>();
+  let individualPreparationStates = new Map<string, string[]>();
+  let individualBookingStates = new Map<
+    string,
+    { status: string; isSoftStaffReservation: boolean }[]
+  >();
+  let blockingReportAssetIds = new Set<string>();
+  if (excludeAssetIds !== undefined) {
+    const individualAssetIds = assets
+      .filter((asset) => asset.type === AssetType.INDIVIDUAL)
+      .map((asset) => asset.id);
+    const assetIds = assets.map((asset) => asset.id);
+    // The inventory payload preserves AssetKit pivots but not their nested Kit
+    // policy in its declared type. Read the canonical borrow window directly,
+    // scoped to this organization and ordered for a stable first membership.
+    const kitBorrowPolicies = assetIds.length
+      ? await db.assetKit.findMany({
+          where: { organizationId, assetId: { in: assetIds } },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: {
+            assetId: true,
+            kit: { select: { maxBorrowDays: true } },
+          },
+        })
+      : [];
+    const kitBorrowDaysByAssetId = new Map<string, number>();
+    for (const { assetId, kit } of kitBorrowPolicies) {
+      if (!kitBorrowDaysByAssetId.has(assetId)) {
+        kitBorrowDaysByAssetId.set(assetId, kit.maxBorrowDays);
+      }
+    }
+    const now = new Date();
+    const individualByBorrowWindow = new Map<number, string[]>();
+    for (const asset of assets) {
+      if (asset.type !== AssetType.INDIVIDUAL) continue;
+      const maxBorrowDays =
+        kitBorrowDaysByAssetId.get(asset.id) ?? asset.maxBorrowDays ?? 45;
+      individualByBorrowWindow.set(maxBorrowDays, [
+        ...(individualByBorrowWindow.get(maxBorrowDays) ?? []),
+        asset.id,
+      ]);
+    }
+    const [individualAvailability, preparationStates, bookingStates] =
+      await Promise.all([
+        Promise.all(
+          [...individualByBorrowWindow].map(([days, assetIds]) =>
+            getIndividualUnitAvailability({
+              organizationId,
+              assetIds,
+              window: getImmediateBorrowingWindow(days, now),
+            })
+          )
+        ),
+        getIndividualUnitPreparationStates({
+          organizationId,
+          assetIds: individualAssetIds,
+        }),
+        individualAssetIds.length
+          ? db.bookingAsset.findMany({
+              where: {
+                assetId: { in: individualAssetIds },
+                checkedInAt: null,
+                booking: {
+                  organizationId,
+                  status: { in: ["RESERVED", "ONGOING", "OVERDUE"] },
+                },
+              },
+              select: {
+                assetId: true,
+                booking: { select: { status: true, description: true } },
+              },
+            })
+          : Promise.resolve([]),
+      ]);
+    individualAvailableUnitIds = new Set(
+      individualAvailability.flatMap((result) => result.availableUnitIds)
+    );
+    individualPreparationStates = preparationStates;
+    for (const row of bookingStates) {
+      individualBookingStates.set(row.assetId, [
+        ...(individualBookingStates.get(row.assetId) ?? []),
+        {
+          status: row.booking.status,
+          isSoftStaffReservation:
+            row.booking.description === IOIO_STAFF_RESERVATION_DESCRIPTION,
+        },
+      ]);
+    }
+    const [heldPickupUnitIds, blockingReports] = await Promise.all([
+      getPreparedPickupHeldUnitIds({
+        organizationId,
+        assetIds: individualAssetIds,
+      }),
+      db.ioioWriteOperation.findMany({
+        where: {
+          organizationId,
+          operationType: "REPORT_PROBLEM",
+          status: { in: ["SUCCEEDED", "PROCESSING"] },
+          reportType: { in: [...IOIO_PHYSICAL_UNIT_BLOCKING_REPORT_TYPES] },
+          assetId: { in: individualAssetIds },
+        },
+        select: { assetId: true },
+      }),
+    ]);
+    preparedPickupHeldUnitIds = heldPickupUnitIds;
+    blockingReportAssetIds = new Set(
+      blockingReports
+        .map(({ assetId }) => assetId)
+        .filter((assetId): assetId is string => Boolean(assetId))
+    );
+    try {
+      const now = new Date();
+      const assetsByBorrowWindow = new Map<number, string[]>();
+      for (const asset of assets) {
+        if (asset.type !== AssetType.QUANTITY_TRACKED) continue;
+        const maxBorrowDays =
+          kitBorrowDaysByAssetId.get(asset.id) ?? asset.maxBorrowDays ?? 45;
+        const assetIds = assetsByBorrowWindow.get(maxBorrowDays) ?? [];
+        assetIds.push(asset.id);
+        assetsByBorrowWindow.set(maxBorrowDays, assetIds);
+      }
+      const availabilityByWindow = await Promise.all(
+        [...assetsByBorrowWindow].map(([maxBorrowDays, assetIds]) =>
+          getAssetAvailabilityBatch(assetIds, {
+            organizationId,
+            window: getImmediateBorrowingWindow(maxBorrowDays, now),
+          })
+        )
+      );
+      ioioAvailabilityByAssetId = new Map(
+        availabilityByWindow.flatMap((result) => [...result.entries()])
+      );
+    } catch (cause) {
+      Logger.error(
+        new ShelfError({
+          cause,
+          message: "Failed to load IOIO physical inventory availability",
+          additionalData: { organizationId, assetCount: assets.length },
+          label: "Assets",
+        })
+      );
+    }
+  }
 
   // Refresh expired signed URLs before returning so users never see broken images.
   // Runs after the main query completes but is awaited to ensure fresh URLs.
@@ -430,7 +600,35 @@ export async function simpleModeLoader({
        * present at runtime.
        */
       items: redactCustodianForViewer(
-        assets as unknown as Array<(typeof assets)[number] & RowWithCustody>,
+        assets.map((asset) => ({
+          ...asset,
+          ...(ioioAvailabilityByAssetId
+            ? {
+                ioioAvailable: Math.max(
+                  0,
+                  Math.min(
+                    ioioAvailabilityByAssetId.get(asset.id)?.bookable ?? 0,
+                    ioioAvailabilityByAssetId.get(asset.id)
+                      ?.physicalAvailable ?? 0
+                  )
+                ),
+              }
+            : {}),
+          ...(asset.type === AssetType.INDIVIDUAL
+            ? {
+                ioioAvailable: individualAvailableUnitIds.has(asset.id) ? 1 : 0,
+                ioioPreparationStates:
+                  individualPreparationStates.get(asset.id) ?? [],
+                ioioBookingStates: individualBookingStates.get(asset.id) ?? [],
+              }
+            : {}),
+          ...(preparedPickupHeldUnitIds.has(asset.id)
+            ? { preparedPickupHeld: true }
+            : {}),
+          ...(blockingReportAssetIds.has(asset.id)
+            ? { blockingIssueReported: true }
+            : {}),
+        })) as unknown as Array<(typeof assets)[number] & RowWithCustody>,
         { canSeeAllCustody, userId }
       ),
       /* The model view is advanced-only, but both loaders must offer the same
@@ -449,6 +647,7 @@ export async function simpleModeLoader({
       search,
       page,
       totalItems: totalAssets,
+      totalInventoryQuantity,
       perPage,
       totalPages,
       modelName,

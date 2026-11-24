@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FocusEvent, MutableRefObject, RefObject } from "react";
 import type { Schema } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
+import type { Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 
 import {
@@ -9,6 +10,7 @@ import {
   parseMarkdoc,
   serializeMarkdoc,
 } from "~/modules/editor-v2/markdoc-utils";
+import { getClipboardImage } from "~/utils/clipboard-image";
 import { Logger } from "~/utils/logger";
 import { tw } from "~/utils/tw";
 
@@ -18,6 +20,7 @@ import {
   EDITOR_DISABLED_CLASS,
   placeholderPluginKey,
 } from "../helpers";
+import { imageBlockDropPlugin } from "../image-drop";
 
 interface UseEditorViewOptions {
   schema: Schema;
@@ -25,10 +28,16 @@ interface UseEditorViewOptions {
   disabled?: boolean;
   placeholder?: string;
   maxLength?: number;
+  allowRawBlockEditing?: boolean;
+  enableImageBlockDrop?: boolean;
+  ariaLabel?: string;
   shouldAutoFocus?: boolean;
+  fillAvailableSpace?: boolean;
   onBlur?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onFocus?: (event: FocusEvent<HTMLTextAreaElement>) => void;
   onChange?: (value: string) => void;
+  onTransaction?: (transaction: Transaction) => void;
+  onPasteImage?: (file: File, view: EditorView) => void;
   onStateUpdate?: (state: EditorState, view: EditorView) => void;
   onKeyDown?: (event: KeyboardEvent) => boolean;
   openLinkDialog: () => void;
@@ -46,10 +55,16 @@ export function useEditorView(
     disabled,
     placeholder,
     maxLength,
+    allowRawBlockEditing = true,
+    enableImageBlockDrop = false,
+    ariaLabel,
     shouldAutoFocus,
+    fillAvailableSpace = false,
     onBlur,
     onFocus,
     onChange,
+    onTransaction,
+    onPasteImage,
     onStateUpdate,
     onKeyDown,
     openLinkDialog,
@@ -69,6 +84,8 @@ export function useEditorView(
   const onBlurRef = useRef(onBlur);
   const onFocusRef = useRef(onFocus);
   const onChangeRef = useRef(onChange);
+  const onTransactionRef = useRef(onTransaction);
+  const onPasteImageRef = useRef(onPasteImage);
 
   disabledRef.current = disabled;
   onStateUpdateRef.current = onStateUpdate;
@@ -78,6 +95,8 @@ export function useEditorView(
   onBlurRef.current = onBlur;
   onFocusRef.current = onFocus;
   onChangeRef.current = onChange;
+  onTransactionRef.current = onTransaction;
+  onPasteImageRef.current = onPasteImage;
 
   // Initialize editor view
   useEffect(() => {
@@ -94,18 +113,24 @@ export function useEditorView(
         doc: initialDoc,
         plugins: [
           ...createInputPlugins(schema, () => openLinkDialogRef.current()),
+          ...(enableImageBlockDrop ? [imageBlockDropPlugin()] : []),
           placeholderPluginKey,
         ],
       }) as EditorState & { placeholder?: string },
       attributes: {
         class: tw(
           EDITOR_BASE_CLASS,
+          fillAvailableSpace ? "xl:flex-1" : "",
           isDisabled ? EDITOR_DISABLED_CLASS : "",
           "cursor-text"
         ),
+        role: "textbox",
+        "aria-label": ariaLabel ?? "Text editor",
+        "aria-multiline": "true",
       },
       editable: () => !disabledRef.current,
       dispatchTransaction: (tr) => {
+        onTransactionRef.current?.(tr);
         const currentView = (viewRef.current ?? view) as EditorView;
         const nextState = currentView.state.apply(tr);
         let nextMarkdoc = markdocValueRef.current;
@@ -138,22 +163,27 @@ export function useEditorView(
             "overflow-x-auto whitespace-pre-wrap p-3 text-xs font-mono text-gray-700";
           pre.textContent = node.attrs.raw ?? "";
           dom.appendChild(pre);
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className =
-            "absolute right-3 top-3 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-100";
-          button.textContent = "Edit source";
-          button.addEventListener("mousedown", (event) =>
-            event.preventDefault()
-          );
-          button.addEventListener("click", () => {
-            const resolvedPos =
-              typeof getPos === "function" ? getPos() : getPos;
-            if (typeof resolvedPos === "number") {
-              openRawBlockEditorRef.current(resolvedPos, node.attrs.raw ?? "");
-            }
-          });
-          dom.appendChild(button);
+          if (allowRawBlockEditing) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className =
+              "absolute right-3 top-3 rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-gray-100";
+            button.textContent = "Edit source";
+            button.addEventListener("mousedown", (event) =>
+              event.preventDefault()
+            );
+            button.addEventListener("click", () => {
+              const resolvedPos =
+                typeof getPos === "function" ? getPos() : getPos;
+              if (typeof resolvedPos === "number") {
+                openRawBlockEditorRef.current(
+                  resolvedPos,
+                  node.attrs.raw ?? ""
+                );
+              }
+            });
+            dom.appendChild(button);
+          }
           return {
             dom,
             update(updatedNode) {
@@ -167,6 +197,13 @@ export function useEditorView(
         },
       },
       handlePaste: (view, event) => {
+        const imageFile = getClipboardImage(event.clipboardData);
+        if (imageFile && onPasteImageRef.current) {
+          event.preventDefault();
+          onPasteImageRef.current(imageFile, view);
+          return true;
+        }
+
         const text = event.clipboardData?.getData("text/plain");
         if (!text) return false;
 
@@ -235,7 +272,15 @@ export function useEditorView(
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultValue, maxLength, placeholder, schema, shouldAutoFocus]);
+  }, [
+    defaultValue,
+    enableImageBlockDrop,
+    maxLength,
+    placeholder,
+    schema,
+    shouldAutoFocus,
+    fillAvailableSpace,
+  ]);
 
   // Update disabled state
   useEffect(() => {
@@ -245,12 +290,18 @@ export function useEditorView(
     }
     const nextClass = tw(
       EDITOR_BASE_CLASS,
+      fillAvailableSpace ? "xl:flex-1" : "",
       disabled ? EDITOR_DISABLED_CLASS : "",
       "cursor-text"
     );
     view.setProps({
       editable: () => !disabled,
-      attributes: { class: nextClass },
+      attributes: {
+        class: nextClass,
+        role: "textbox",
+        "aria-label": ariaLabel ?? "Text editor",
+        "aria-multiline": "true",
+      },
     });
     const dom = view.dom as HTMLElement;
     dom.className = nextClass;
@@ -259,7 +310,7 @@ export function useEditorView(
     } else {
       dom.removeAttribute("aria-disabled");
     }
-  }, [disabled, viewRef]);
+  }, [ariaLabel, disabled, fillAvailableSpace, viewRef]);
 
   // Update content when defaultValue changes
   useEffect(() => {

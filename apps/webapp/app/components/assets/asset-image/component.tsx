@@ -1,9 +1,19 @@
-import { useEffect, useReducer, useState, useCallback, useRef } from "react";
+import {
+  useEffect,
+  useReducer,
+  useState,
+  useCallback,
+  useRef,
+  type SyntheticEvent,
+} from "react";
 
 import { Dialog, DialogPortal } from "~/components/layout/dialog";
 import { Button } from "~/components/shared/button";
 import { Spinner } from "~/components/shared/spinner";
-import { resolveAssetImage } from "~/modules/asset/image-resolution";
+import {
+  ASSET_IMAGE_PLACEHOLDER,
+  resolveAssetImage,
+} from "~/modules/asset/image-resolution";
 import { DIALOG_CLOSE_SHORTCUT } from "~/utils/constants";
 import { tw } from "~/utils/tw";
 import type { AssetImageProps } from "./types";
@@ -47,11 +57,13 @@ type AssetImageState = {
   refreshedMainImage: string | null;
   /** Fresh thumbnail URL returned by the refresh or generate endpoint, if any. */
   refreshedThumbnailImage: string | null;
+  /** URLs already rejected by the browser, so the image cascade can advance. */
+  failedImageUrls: string[];
 };
 
 type AssetImageAction =
   | { type: "load_success" }
-  | { type: "load_error" }
+  | { type: "load_error"; imageUrl: string }
   | { type: "clear_error" }
   | { type: "asset_changed" }
   | { type: "mark_refresh_attempted" }
@@ -74,6 +86,7 @@ const INITIAL_ASSET_IMAGE_STATE: AssetImageState = {
   isFetchingImage: false,
   refreshedMainImage: null,
   refreshedThumbnailImage: null,
+  failedImageUrls: [],
 };
 
 function assetImageReducer(
@@ -84,7 +97,14 @@ function assetImageReducer(
     case "load_success":
       return { ...state, isLoading: false, isImageError: false };
     case "load_error":
-      return { ...state, isLoading: false, isImageError: true };
+      return {
+        ...state,
+        isLoading: false,
+        isImageError: true,
+        failedImageUrls: state.failedImageUrls.includes(action.imageUrl)
+          ? state.failedImageUrls
+          : [...state.failedImageUrls, action.imageUrl],
+      };
     case "clear_error":
       return { ...state, isImageError: false };
     case "asset_changed":
@@ -99,6 +119,7 @@ function assetImageReducer(
         hasAttemptedRefresh: false,
         refreshedMainImage: null,
         refreshedThumbnailImage: null,
+        failedImageUrls: [],
       };
     case "mark_refresh_attempted":
       return { ...state, hasAttemptedRefresh: true };
@@ -124,6 +145,10 @@ function assetImageReducer(
         refreshedMainImage: action.mainImage ?? state.refreshedMainImage,
         refreshedThumbnailImage:
           action.thumbnailImage ?? state.refreshedThumbnailImage,
+        failedImageUrls:
+          action.mainImage != null || action.thumbnailImage != null
+            ? []
+            : state.failedImageUrls,
       };
     case "thumbnail_generated":
       return {
@@ -142,6 +167,8 @@ export const AssetImage = ({
   className,
   withPreview = false,
   useThumbnail = true,
+  imageFit = "cover",
+  imageSizing = "fill",
   alt,
   ...rest
 }: AssetImageProps) => {
@@ -149,19 +176,17 @@ export const AssetImage = ({
     assetImageReducer,
     INITIAL_ASSET_IMAGE_STATE
   );
+  const [loadedImageNaturalWidth, setLoadedImageNaturalWidth] = useState(0);
   const {
     isLoading,
-    isImageError,
     isDialogOpen,
-    hasAttemptedRefresh,
-    isFetchingImage,
     refreshedMainImage,
     refreshedThumbnailImage,
+    failedImageUrls,
   } = state;
 
   // Track if we've already tried refreshing to prevent loops.
-  // The ref is the authoritative guard (readable from stale closures);
-  // the `hasAttemptedRefresh` state drives the cache-buster in render.
+  // The ref is the authoritative guard, including in stale closures.
   const hasAttemptedRefreshRef = useRef(false);
 
   const { id: assetId, thumbnailImage } = asset;
@@ -169,6 +194,22 @@ export const AssetImage = ({
   // Tracks which asset this instance last rendered, so the mount/refresh effect
   // can detect an asset swap (instance reuse) and reset its per-asset guards.
   const previousAssetIdRef = useRef(assetId);
+  // A new signature for the same object is not a replacement. A new object
+  // (or a removed image) must discard repaired URLs from the old upload.
+  const imageIdentity = JSON.stringify([
+    assetId,
+    asset.mainImage?.replace(
+      /(\/storage\/v1\/object\/sign\/[^?]+)\?.*$/u,
+      "$1"
+    ),
+    asset.thumbnailImage?.replace(
+      /(\/storage\/v1\/object\/sign\/[^?]+)\?.*$/u,
+      "$1"
+    ),
+    asset.assetModel?.image,
+    asset.assetModel?.thumbnailImage,
+  ]);
+  const previousImageIdentityRef = useRef(imageIdentity);
 
   const isPreviewAsset = isAssetForPreview(asset);
   const mainImageExpiration = isPreviewAsset ? asset.mainImageExpiration : null;
@@ -190,11 +231,12 @@ export const AssetImage = ({
    * wrong row. Without this gate, a list of N assets sharing one model fires N
    * requests at the two endpoints that already rate-limit after large imports.
    */
-  const canRepairImage = resolved.source === "asset";
+  // The authenticated proxy reads the current canonical object on every request;
+  // legacy repair endpoints would replace its usable URL with a storage URL.
+  const canRepairImage =
+    resolved.source === "asset" &&
+    !resolved.fullUrl.startsWith("/api/asset-image?");
   const mainImage = canRepairImage ? resolved.fullUrl : null;
-
-  // Create a stable cache-busting key that won't change on re-renders
-  const [cacheBuster] = useState(isImageError ? `?t=${Date.now()}` : "");
 
   /**
    * Prefer a freshly-refreshed URL, falling back to the resolved value. Use
@@ -216,14 +258,45 @@ export const AssetImage = ({
     ? refreshedMainImage ?? resolved.fullUrl
     : resolved.fullUrl;
 
-  // Only add cache-buster if we've had an error and attempted refresh
-  const imageUrl =
-    (useThumbnail ? currentThumbnail : currentMainImage) +
-    (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+  const modelImageUrl = useThumbnail
+    ? asset.assetModel?.thumbnailImage ?? asset.assetModel?.image ?? null
+    : asset.assetModel?.image ?? asset.assetModel?.thumbnailImage ?? null;
+  const imageCandidates = [
+    useThumbnail ? currentThumbnail : currentMainImage,
+    useThumbnail ? currentMainImage : currentThumbnail,
+    ...(resolved.source === "asset" ? [modelImageUrl] : []),
+    ...(resolved.source === "model"
+      ? [
+          useThumbnail
+            ? asset.assetModel?.image
+            : asset.assetModel?.thumbnailImage,
+        ]
+      : []),
+    ASSET_IMAGE_PLACEHOLDER,
+  ].filter(
+    (url, index, urls): url is string =>
+      Boolean(url) && urls.indexOf(url) === index
+  );
+  const activeImageUrl =
+    imageCandidates.find((url) => !failedImageUrls.includes(url)) ??
+    ASSET_IMAGE_PLACEHOLDER;
+  const imageUrl = activeImageUrl;
 
-  // For preview dialog, always use the full-size image
-  const previewImageUrl =
-    currentMainImage + (hasAttemptedRefresh && isImageError ? cacheBuster : "");
+  // For preview dialog, always use the full-size image before its fallbacks.
+  const previewCandidates = [
+    currentMainImage,
+    ...(resolved.source === "asset"
+      ? [asset.assetModel?.image, asset.assetModel?.thumbnailImage]
+      : []),
+    ASSET_IMAGE_PLACEHOLDER,
+  ].filter(
+    (url, index, urls): url is string =>
+      Boolean(url) && urls.indexOf(url) === index
+  );
+  const activePreviewUrl =
+    previewCandidates.find((url) => !failedImageUrls.includes(url)) ??
+    ASSET_IMAGE_PLACEHOLDER;
+  const previewImageUrl = activePreviewUrl;
 
   /**
    * Refreshes the asset's signed main-image (and thumbnail) URLs.
@@ -342,19 +415,24 @@ export const AssetImage = ({
     [assetId]
   );
 
-  const handleImageLoad = () => {
+  const handleImageLoad = (event: SyntheticEvent<HTMLImageElement>) => {
     // Successfully loaded, clear both loading and error states
+    setLoadedImageNaturalWidth(event.currentTarget.naturalWidth);
     dispatch({ type: "load_success" });
   };
 
-  const handleImageError = () => {
-    // Only set error state and trigger refresh once — and only for an image the
-    // asset owns; an inherited or placeholder image has nothing to refresh.
-    if (canRepairImage && !isImageError && !hasAttemptedRefreshRef.current) {
-      dispatch({ type: "load_error" });
+  const handleImageError = (failedUrl: string) => {
+    // Only the asset-owned URL can be repaired. The rendered source advances
+    // to the model image and then Shelf's placeholder after a load failure.
+    if (
+      canRepairImage &&
+      [currentThumbnail, currentMainImage].includes(failedUrl) &&
+      !hasAttemptedRefreshRef.current
+    ) {
+      dispatch({ type: "load_error", imageUrl: failedUrl });
       void refreshImage();
     } else {
-      dispatch({ type: "load_error" });
+      dispatch({ type: "load_error", imageUrl: failedUrl });
     }
   };
 
@@ -374,9 +452,14 @@ export const AssetImage = ({
   useEffect(() => {
     // When the asset actually changes (not the initial mount), clear the
     // one-shot guard and the previously-refreshed URLs before scheduling work.
-    if (previousAssetIdRef.current !== assetId) {
+    if (
+      previousAssetIdRef.current !== assetId ||
+      previousImageIdentityRef.current !== imageIdentity
+    ) {
+      previousImageIdentityRef.current = imageIdentity;
       previousAssetIdRef.current = assetId;
       hasAttemptedRefreshRef.current = false;
+      setLoadedImageNaturalWidth(0);
       dispatch({ type: "asset_changed" });
     }
 
@@ -432,7 +515,7 @@ export const AssetImage = ({
       timerIds.forEach((id) => clearTimeout(id));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assetId]); // Re-run when the rendered asset changes
+  }, [assetId, imageIdentity]); // Re-run only when the asset or image object changes
 
   // Debug the image URLs - uncomment during debugging
   // useEffect(() => {
@@ -468,9 +551,14 @@ export const AssetImage = ({
 
   return (
     <>
-      <div className={tw("relative overflow-hidden", className)}>
-        {(isLoading ||
-          (useThumbnail && isFetchingImage && !thumbnailImage)) && (
+      <div
+        className={tw(
+          "relative",
+          imageSizing === "fill" && "overflow-hidden",
+          className
+        )}
+      >
+        {isLoading && resolved.source !== "placeholder" && (
           <div
             className={tw(
               "absolute inset-0 flex items-center justify-center bg-gray-100",
@@ -499,15 +587,27 @@ export const AssetImage = ({
           tabIndex={withPreview ? 0 : undefined}
           aria-label={withPreview ? `Open preview for ${alt}` : undefined}
           src={imageUrl}
-          width={108}
-          height={108}
+          width={imageSizing === "fill" ? 108 : undefined}
+          height={imageSizing === "fill" ? 108 : undefined}
           className={tw(
-            "size-full object-cover",
+            imageSizing === "detail"
+              ? "block h-auto max-h-[min(68dvh,calc(100dvh-20rem))] w-full object-contain"
+              : imageSizing === "natural"
+              ? "block size-auto max-h-full max-w-full"
+              : "size-full",
+            imageFit === "contain" ? "object-contain" : "object-cover",
             withPreview && "cursor-pointer"
           )}
+          style={
+            imageSizing === "detail" &&
+            loadedImageNaturalWidth > 0 &&
+            loadedImageNaturalWidth < 640
+              ? { maxWidth: `${loadedImageNaturalWidth * 1.5}px` }
+              : undefined
+          }
           alt={alt}
           onLoad={handleImageLoad}
-          onError={handleImageError}
+          onError={() => handleImageError(activeImageUrl)}
           loading="lazy"
           decoding="async"
           {...rest}
@@ -535,7 +635,12 @@ export const AssetImage = ({
             >
               <div className="flex max-h-[calc(100%-4rem)] grow items-center justify-center border-y border-gray-200 bg-gray-50">
                 {/* Always use full-size image in the preview dialog */}
-                <img src={previewImageUrl} className={"max-h-full"} alt={alt} />
+                <img
+                  src={previewImageUrl}
+                  className="max-h-full max-w-full object-contain"
+                  alt={alt}
+                  onError={() => handleImageError(activePreviewUrl)}
+                />
               </div>
               <div className="flex w-full justify-center gap-3 px-6 py-3 md:justify-end">
                 <Button to={`/assets/${assetId}/edit`} variant="secondary">

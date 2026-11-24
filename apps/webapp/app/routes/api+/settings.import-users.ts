@@ -1,6 +1,7 @@
 import { data, type ActionFunctionArgs } from "react-router";
 import { bulkInviteUsers } from "~/modules/invite/service.server";
 import { IMPORT_USERS_CSV_HEADERS } from "~/modules/invite/utils.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { csvDataFromRequest } from "~/utils/csv.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { assertIsPost, payload, error } from "~/utils/http.server";
@@ -18,6 +19,8 @@ export async function action({ context, request }: ActionFunctionArgs) {
 
   try {
     assertIsPost(request);
+
+    await requireIoioStaffAccess({ context, request });
 
     const { organizationId } = await requirePermission({
       userId,

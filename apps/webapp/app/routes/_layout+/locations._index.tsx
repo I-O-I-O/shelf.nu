@@ -1,39 +1,73 @@
-import type { Prisma } from "@prisma/client";
-import type { LoaderFunctionArgs, MetaFunction } from "react-router";
-import { data } from "react-router";
-import ImageWithPreview from "~/components/image-with-preview/image-with-preview";
-
+import type {
+  ActionFunctionArgs,
+  LoaderFunctionArgs,
+  MetaFunction,
+} from "react-router";
+import { data, useLoaderData } from "react-router";
+import { z } from "zod";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
-import { List } from "~/components/list";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
-import { Filters } from "~/components/list/filters";
-import { SortBy } from "~/components/list/filters/sort-by";
-import BulkActionsDropdown from "~/components/location/bulk-actions-dropdown";
-import { LocationBadge } from "~/components/location/location-badge";
-import { LocationDescriptionColumn } from "~/components/location/location-description-column";
-import LocationQuickActions from "~/components/location/location-quick-actions";
-import { Button } from "~/components/shared/button";
-import { Td, Th } from "~/components/table";
-import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
-import type { LOCATION_LIST_INCLUDE } from "~/modules/location/service.server";
-import { getLocations } from "~/modules/location/service.server";
-import { LOCATION_SORTING_OPTIONS } from "~/modules/location/utils";
+import {
+  getFirstAvailableIoioColor,
+  getIoioRoomColorError,
+  getIoioSectionColorError,
+  getUsedIoioRoomColors,
+  getUsedIoioSectionColors,
+} from "~/components/location/ioio-location-colors";
+import { IoioLocationHierarchy } from "~/components/location/ioio-location-hierarchy";
+import { db } from "~/database/db.server";
+import { getIoioArchivedItemIds } from "~/modules/ioio-staff/archive.server";
+import {
+  findDuplicateIoioSiblingName,
+  getIoioLocationParentError,
+  summarizeIoioLocationInventory,
+} from "~/modules/location/ioio-hierarchy";
+import { validateIoioLocationMove } from "~/modules/location/ioio-location-move";
+import {
+  createLocation,
+  getLocations,
+  updateLocation,
+} from "~/modules/location/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
   setCookie,
   updateCookieWithPerPage,
   userPrefs,
 } from "~/utils/cookies.server";
-import { makeShelfError } from "~/utils/error";
-import { computeHasActiveFilters } from "~/utils/filter-params";
-import { payload, error, getCurrentSearchParams } from "~/utils/http.server";
-import { getParamsValues } from "~/utils/list";
+import { makeShelfError, ShelfError } from "~/utils/error";
+import {
+  payload,
+  error,
+  getCurrentSearchParams,
+  parseData,
+} from "~/utils/http.server";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
+
+const inlineCreateSchema = z.object({
+  intent: z.literal("inline-create"),
+  locationType: z.enum(["room", "section", "shelf", "container"]),
+  parentId: z
+    .string()
+    .optional()
+    .transform((value) => (value ? value : null)),
+  name: z.string().trim().min(1, "A name is required."),
+  color: z.string().optional(),
+});
+
+const moveLocationSchema = z.object({
+  intent: z.literal("move-location"),
+  locationId: z.string().min(1),
+  locationType: z.enum(["room", "section", "shelf", "container"]),
+  parentId: z
+    .string()
+    .optional()
+    .transform((value) => (value ? value : null)),
+});
 
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
@@ -47,41 +81,58 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       action: PermissionAction.read,
     });
     const searchParams = getCurrentSearchParams(request);
-    const { page, perPageParam, search, orderBy, orderDirection } =
-      getParamsValues(searchParams);
-    const hasActiveFilters = computeHasActiveFilters(searchParams);
+    const perPageParam = Number(searchParams.get("perPage")) || 0;
     const cookie = await updateCookieWithPerPage(request, perPageParam);
     const { perPage } = cookie;
 
-    const { locations, totalLocations } = await getLocations({
-      organizationId,
-      page,
-      perPage,
-      search,
-      orderBy,
-      orderDirection,
+    const [firstPage, archivedAssetIds] = await Promise.all([
+      getLocations({ organizationId, page: 1, perPage }),
+      getIoioArchivedItemIds({ organizationId, itemType: "ASSET" }),
+    ]);
+    const { locations, totalLocations } =
+      firstPage.totalLocations > firstPage.locations.length
+        ? await getLocations({
+            organizationId,
+            page: 1,
+            perPage: firstPage.totalLocations,
+          })
+        : firstPage;
+
+    const [activeAssignments, unassignedAssetCount] = await Promise.all([
+      db.assetLocation.findMany({
+        where: {
+          organizationId,
+          asset: {
+            organizationId,
+            id: { notIn: archivedAssetIds },
+          },
+        },
+        select: { assetId: true, locationId: true },
+        distinct: ["assetId", "locationId"],
+      }),
+      db.asset.count({
+        where: {
+          organizationId,
+          id: { notIn: archivedAssetIds },
+          assetLocations: { none: {} },
+        },
+      }),
+    ]);
+    const inventorySummary = summarizeIoioLocationInventory({
+      locations,
+      assignments: activeAssignments,
+      unassignedAssetCount,
     });
-    const totalPages = Math.ceil(totalLocations / perPage);
 
     const header: HeaderData = {
       title: "Locations",
     };
-    const modelName = {
-      singular: "location",
-      plural: "locations",
-    };
-
     return data(
       payload({
         header,
         items: locations,
-        search,
-        page,
-        totalItems: totalLocations,
-        totalPages,
-        perPage,
-        modelName,
-        hasActiveFilters,
+        totalLocations,
+        inventorySummary,
       }),
       {
         headers: [setCookie(await userPrefs.serialize(cookie))],
@@ -93,124 +144,254 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
+export async function action({ context, request }: ActionFunctionArgs) {
+  const authSession = context.getSession();
+  const { userId } = authSession;
+
+  try {
+    const formData = await request.formData();
+    if (formData.get("intent") === "move-location") {
+      const { organizationId } = await requirePermission({
+        userId,
+        request,
+        entity: PermissionEntity.location,
+        action: PermissionAction.update,
+      });
+      const { locationId, locationType, parentId } = parseData(
+        formData,
+        moveLocationSchema,
+        { additionalData: { userId, organizationId } }
+      );
+      const locations = await db.location.findMany({
+        where: { organizationId },
+        select: { id: true, name: true, parentId: true, color: true },
+      });
+      const moveError = validateIoioLocationMove({
+        locationId,
+        locationType,
+        parentId,
+        locations,
+      });
+      if (moveError) {
+        throw new ShelfError({
+          cause: null,
+          message: moveError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      const location = locations.find((entry) => entry.id === locationId);
+      const siblings = await db.location.findMany({
+        where: { organizationId, parentId },
+        select: { id: true, name: true, parentId: true, color: true },
+      });
+      const duplicateName = findDuplicateIoioSiblingName(
+        siblings
+          .filter((sibling) => sibling.id !== locationId)
+          .map(({ name: siblingName }) => siblingName),
+        location?.name ?? ""
+      );
+      if (duplicateName) {
+        throw new ShelfError({
+          cause: null,
+          message: `A location named ${duplicateName} already exists here.`,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+
+      if (locationType === "section" && location?.color) {
+        const colorError = getIoioSectionColorError({
+          color: location.color,
+          locations: [
+            ...siblings,
+            ...locations.filter((entry) => entry.id === parentId),
+          ],
+          parentId,
+          currentLocationId: locationId,
+        });
+        if (colorError) {
+          throw new ShelfError({
+            cause: null,
+            message: `${colorError} Edit the section to choose another color before moving it.`,
+            label: "Location",
+            status: 400,
+            shouldBeCaptured: false,
+          });
+        }
+      }
+
+      const movedLocation = await updateLocation({
+        id: locationId,
+        userId,
+        organizationId,
+        parentId,
+        ioioColorType:
+          locationType === "room" || locationType === "section"
+            ? locationType
+            : undefined,
+      });
+
+      return data(
+        payload({
+          success: true,
+          location: {
+            id: movedLocation.id,
+            name: movedLocation.name,
+            parentId: movedLocation.parentId,
+          },
+        })
+      );
+    }
+
+    const { organizationId } = await requirePermission({
+      userId,
+      request,
+      entity: PermissionEntity.location,
+      action: PermissionAction.create,
+    });
+    const { locationType, parentId, name, color } = parseData(
+      formData,
+      inlineCreateSchema,
+      { additionalData: { userId, organizationId } }
+    );
+
+    const parent = parentId
+      ? await db.location.findFirst({
+          where: { id: parentId, organizationId },
+          select: {
+            id: true,
+            name: true,
+            parentId: true,
+            color: true,
+            parent: { select: { parentId: true } },
+          },
+        })
+      : null;
+    const parentError = getIoioLocationParentError({
+      locationType,
+      parentId,
+      parent: parent
+        ? {
+            name: parent.name,
+            parentId: parent.parentId,
+            grandparentId: parent.parent?.parentId ?? null,
+          }
+        : null,
+    });
+    if (parentError) {
+      throw new ShelfError({
+        cause: null,
+        message: parentError,
+        label: "Location",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const siblings = await db.location.findMany({
+      where: { organizationId, parentId },
+      select: { id: true, name: true, parentId: true, color: true },
+    });
+    const colorLocations = parent ? [...siblings, parent] : siblings;
+    const duplicateName = findDuplicateIoioSiblingName(
+      siblings.map(({ name: siblingName }) => siblingName),
+      name
+    );
+    if (duplicateName) {
+      throw new ShelfError({
+        cause: null,
+        message: `A location named ${duplicateName} already exists under this parent.`,
+        label: "Location",
+        status: 400,
+        shouldBeCaptured: false,
+      });
+    }
+
+    const selectedColor =
+      locationType === "room"
+        ? color ??
+          getFirstAvailableIoioColor(
+            getUsedIoioRoomColors({ locations: siblings })
+          )
+        : locationType === "section"
+        ? color ??
+          getFirstAvailableIoioColor(
+            getUsedIoioSectionColors({ locations: colorLocations, parentId })
+          )
+        : null;
+    if (locationType === "room") {
+      const colorError = getIoioRoomColorError({
+        color: selectedColor,
+        locations: colorLocations,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+    if (locationType === "section") {
+      const colorError = getIoioSectionColorError({
+        color: selectedColor,
+        locations: colorLocations,
+        parentId,
+      });
+      if (colorError) {
+        throw new ShelfError({
+          cause: null,
+          message: colorError,
+          label: "Location",
+          status: 400,
+          shouldBeCaptured: false,
+        });
+      }
+    }
+
+    const location = await createLocation({
+      name,
+      description: "",
+      address: "",
+      userId,
+      organizationId,
+      parentId,
+      color: selectedColor,
+      ioioColorType:
+        locationType === "room" || locationType === "section"
+          ? locationType
+          : undefined,
+    });
+
+    return data(payload({ success: true, location }));
+  } catch (cause) {
+    const reason = makeShelfError(cause, { userId });
+    return data(error(reason), { status: reason.status });
+  }
+}
+
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? appendToMetaTitle(data.header.title) : "" },
 ];
 
 export default function LocationsIndexPage() {
-  const { isBaseOrSelfService } = useUserRoleHelper();
+  const { items, inventorySummary } = useLoaderData<typeof loader>();
 
   return (
     <>
-      <Header>
-        <Button
-          to="new"
-          role="link"
-          aria-label={`new location`}
-          data-test-id="createNewLocation"
-        >
-          New location
-        </Button>
-      </Header>
+      <Header hideQuickFind />
       <ListContentWrapper>
-        <Filters
-          slots={{
-            "right-of-search": (
-              <SortBy
-                sortingOptions={LOCATION_SORTING_OPTIONS}
-                defaultSortingBy="createdAt"
-                defaultSortingDirection="desc"
-              />
-            ),
-          }}
-        />
-        <List
-          bulkActions={
-            isBaseOrSelfService ? undefined : <BulkActionsDropdown />
-          }
-          customEmptyStateContent={{
-            title: "No locations yet",
-            text: "Locations help you track where your assets are. Create locations to organize assets by room, building, or site.",
-            newButtonRoute: "/locations/new",
-            newButtonContent: "Create your first location",
-          }}
-          ItemComponent={ListItemContent}
-          headerChildren={
-            <>
-              <Th>Description</Th>
-              <Th>Parent location</Th>
-              <Th className="whitespace-nowrap">Child locations</Th>
-              <Th>Assets</Th>
-              <Th>Kits</Th>
-              <Th>Actions</Th>
-            </>
-          }
+        <IoioLocationHierarchy
+          locations={items}
+          inventorySummary={inventorySummary}
         />
       </ListContentWrapper>
     </>
   );
 }
-
-const ListItemContent = ({
-  item,
-}: {
-  item: Prisma.LocationGetPayload<{ include: typeof LOCATION_LIST_INCLUDE }>;
-}) => (
-  <>
-    <Td className="w-full p-0 md:p-0">
-      <div className="flex justify-between gap-3 p-4 md:justify-normal md:px-6">
-        <div className="flex items-center gap-3">
-          <div className="flex size-12 items-center justify-center">
-            <ImageWithPreview
-              thumbnailUrl={item.thumbnailUrl}
-              alt={`${item.name} main image`}
-              className="size-full"
-            />
-          </div>
-          <div className="flex flex-row items-center gap-2 md:flex-col md:items-start md:gap-0">
-            <Button
-              to={`${item.id}/assets`}
-              variant="link"
-              className="text-left font-medium text-gray-900 hover:text-gray-700"
-            >
-              {item.name}
-            </Button>
-            <div className="hidden text-gray-600 md:block">{item.address}</div>
-          </div>
-        </div>
-      </div>
-    </Td>
-    {item.description ? (
-      <LocationDescriptionColumn value={item.description} />
-    ) : (
-      <Td>-</Td>
-    )}
-    <Td>
-      {item.parent ? (
-        <LocationBadge
-          location={{
-            id: item.parent.id,
-            name: item.parent.name,
-            parentId: item.parent.parentId ?? undefined,
-            childCount: item.parent._count?.children ?? 0,
-          }}
-          className="m-0"
-        />
-      ) : (
-        "-"
-      )}
-    </Td>
-    <Td>{item._count.children}</Td>
-    <Td>{item._count.assetLocations}</Td>
-    <Td>{item._count.kits}</Td>
-    <Td>
-      <LocationQuickActions
-        location={{
-          id: item.id,
-          name: item.name,
-          childCount: item._count.children,
-        }}
-      />
-    </Td>
-  </>
-);

@@ -493,6 +493,8 @@ export const MOBILE_ASSET_SELECT = {
   // that names an asset needs to be able to show WHICH id it is.
   sequentialId: true,
   mainImage: true,
+  mainImageStoragePath: true,
+  thumbnailImageStoragePath: true,
   thumbnailImage: true,
   // Lets `resignAndShapeMobileAsset` tell a lapsed photo URL; the shaper drops
   // it from the response.

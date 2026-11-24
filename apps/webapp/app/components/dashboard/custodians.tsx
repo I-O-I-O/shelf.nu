@@ -1,7 +1,6 @@
-import { useLoaderData } from "react-router";
 import { useCurrentOrganization } from "~/hooks/use-current-organization";
 import { useUserRoleHelper } from "~/hooks/user-user-role-helper";
-import type { loader } from "~/routes/_layout+/home";
+import type { getCustodiansOrderedByTotalCustodies } from "~/utils/dashboard.server";
 import { isPersonalOrg } from "~/utils/organization";
 import {
   PermissionAction,
@@ -29,8 +28,11 @@ const PLACEHOLDER_ROW_KEYS = [
   "placeholder-4",
 ] as const;
 
-export default function CustodiansList() {
-  const { custodiansData } = useLoaderData<typeof loader>();
+export default function CustodiansList({
+  custodiansData,
+}: {
+  custodiansData: ReturnType<typeof getCustodiansOrderedByTotalCustodies>;
+}) {
   const { roles } = useUserRoleHelper();
   const currentOrganization = useCurrentOrganization();
   const isPersonal = isPersonalOrg(currentOrganization);

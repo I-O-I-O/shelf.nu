@@ -12,8 +12,26 @@
  * @see {@link file://./../../../app/routes/_layout+/assets.$assetId_.edit.tsx}
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import {
+  getAllEntriesForCreateAndEdit,
+  getAsset,
+  updateAsset,
+  updateAssetMainImage,
+} from "~/modules/asset/service.server";
+import {
+  getAssetModel,
+  getAssetModels,
+} from "~/modules/asset-model/service.server";
 
-import { action } from "~/routes/_layout+/assets.$assetId_.edit";
+const dbMock = vi.hoisted(() => ({
+  asset: { findFirst: vi.fn(), findMany: vi.fn() },
+}));
+
+// why: the product-group branch performs scoped Prisma reads directly before
+// delegating each unit update to the asset service.
+vi.mock("~/database/db.server", () => ({ db: dbMock }));
+
+import { action, loader } from "~/routes/_layout+/assets.$assetId_.edit";
 
 // why: the route pulls the whole asset service graph (Prisma client, Supabase
 // storage, permissions); stubbing at the module boundary keeps this a unit test
@@ -21,6 +39,8 @@ import { action } from "~/routes/_layout+/assets.$assetId_.edit";
 vi.mock("~/modules/asset/service.server", () => ({
   getAllEntriesForCreateAndEdit: vi.fn(),
   getAsset: vi.fn(),
+  bulkUpdateAssetCategory: vi.fn(),
+  bulkUpdateAssetLocation: vi.fn(),
   updateAsset: vi.fn().mockResolvedValue({ id: "asset-1", title: "A" }),
   updateAssetMainImage: vi.fn().mockResolvedValue(false),
 }));
@@ -31,9 +51,26 @@ vi.mock("~/modules/tag/service.server", () => ({
   buildTagsSet: vi.fn().mockReturnValue({ set: [] }),
 }));
 vi.mock("~/modules/asset-model/service.server", () => ({
+  clearAssetModelImage: vi.fn(),
+  getAssetModel: vi.fn().mockResolvedValue({
+    id: "model-1",
+    name: "Makey Kit",
+  }),
   getAssetModels: vi
     .fn()
     .mockResolvedValue({ assetModels: [], totalAssetModels: 0 }),
+  updateAssetModel: vi.fn(),
+  updateAssetModelImage: vi.fn().mockResolvedValue(false),
+}));
+// why: the product-group action needs only the resolved setting values; no
+// external inventory-index configuration is part of this persistence test.
+vi.mock("~/modules/asset-index-settings/service.server", () => ({
+  getAssetIndexSettings: vi.fn().mockResolvedValue({}),
+}));
+// why: archive filtering is an independent lifecycle service; this test uses
+// five active units and needs no archived-item behavior.
+vi.mock("~/modules/ioio-staff/archive.server", () => ({
+  getIoioArchivedItemIds: vi.fn().mockResolvedValue([]),
 }));
 // why: permission resolution is an auth/network boundary, not the unit here.
 vi.mock("~/utils/roles.server", () => ({
@@ -44,11 +81,6 @@ vi.mock("~/utils/roles.server", () => ({
 vi.mock("~/utils/emitter/send-notification.server", () => ({
   sendNotification: vi.fn(),
 }));
-
-import {
-  updateAsset,
-  updateAssetMainImage,
-} from "~/modules/asset/service.server";
 
 /**
  * Builds the action args for a save that requests an image clear.
@@ -81,11 +113,22 @@ function buildArgs(overrides: Record<string, string> = {}) {
 describe("assets.$assetId_.edit — clearMainImage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getAsset).mockResolvedValue({ assetKits: [] } as never);
     vi.mocked(updateAssetMainImage).mockResolvedValue(false);
     vi.mocked(updateAsset).mockResolvedValue({
       id: "asset-1",
       title: "An asset",
     } as never);
+    dbMock.asset.findFirst.mockResolvedValue({
+      assetModelId: "model-1",
+      type: "INDIVIDUAL",
+    });
+    dbMock.asset.findMany.mockResolvedValue(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: `unit-${index + 1}`,
+        title: `Makey Kit #00${index + 1}`,
+      }))
+    );
   });
 
   it("nulls the image fields inside the updateAsset payload, not separately", async () => {
@@ -99,6 +142,103 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
         thumbnailImage: null,
       })
     );
+  });
+
+  it("persists an edit and returns to Inventory when no return path is supplied", async () => {
+    const response = await action(
+      buildArgs({ title: "Updated Makey Kit", clearMainImage: "false" })
+    );
+
+    expect(updateAsset).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Updated Makey Kit" })
+    );
+    expect(updateAssetMainImage).toHaveBeenCalledWith(
+      expect.objectContaining({ assetId: "asset-1", allowEmptyFile: true })
+    );
+    expect(updateAsset).toHaveBeenCalledWith(
+      expect.not.objectContaining({ mainImage: expect.anything() })
+    );
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).headers.get("Location")).toBe("/assets");
+  });
+
+  it.each(["false", "true"])(
+    "persists staff-reviewed borrowability %s without changing visibility or status",
+    async (value) => {
+      await action(
+        buildArgs({ clearMainImage: "false", availableToBook: value })
+      );
+      expect(updateAsset).toHaveBeenCalledWith(
+        expect.objectContaining({ availableToBook: value === "true" })
+      );
+      const payload = vi.mocked(updateAsset).mock.calls[0][0];
+      expect(payload).not.toHaveProperty("status");
+      expect(payload).not.toHaveProperty("ioioHidden");
+    }
+  );
+
+  it("preserves Unit of measure when the staff edit UI omits it", async () => {
+    await action(buildArgs({ clearMainImage: "false" }));
+    expect(
+      vi.mocked(updateAsset).mock.calls[0][0].unitOfMeasure
+    ).toBeUndefined();
+  });
+
+  it("preserves borrowability when an older form does not submit it", async () => {
+    await action(buildArgs({ clearMainImage: "false" }));
+    expect(
+      vi.mocked(updateAsset).mock.calls[0][0].availableToBook
+    ).toBeUndefined();
+  });
+
+  it("applies reviewed borrowability to every active unit in a grouped product", async () => {
+    await action(
+      buildArgs({
+        clearMainImage: "false",
+        productGroup: "1",
+        availableToBook: "false",
+      })
+    );
+    expect(updateAsset).toHaveBeenCalledTimes(5);
+    for (const [payload] of vi.mocked(updateAsset).mock.calls)
+      expect(payload.availableToBook).toBe(false);
+  });
+
+  it("persists the Return section choice on the edited physical asset", async () => {
+    const response = await action(
+      buildArgs({
+        clearMainImage: "false",
+        returnHandling: "RETURN_TO_RETURN_ZONE",
+      })
+    );
+
+    expect(updateAsset).toHaveBeenCalledWith(
+      expect.objectContaining({
+        returnHandling: "RETURN_TO_RETURN_ZONE",
+      })
+    );
+    expect((response as Response).headers.get("Location")).toBe("/assets");
+  });
+
+  it("applies the Return section choice to every unit in an individual product", async () => {
+    const response = await action(
+      buildArgs({
+        clearMainImage: "false",
+        productGroup: "1",
+        returnHandling: "RETURN_TO_RETURN_ZONE",
+      })
+    );
+
+    expect(updateAsset).toHaveBeenCalledTimes(5);
+    for (let index = 1; index <= 5; index += 1) {
+      expect(updateAsset).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: `unit-${index}`,
+          returnHandling: "RETURN_TO_RETURN_ZONE",
+        })
+      );
+    }
+    expect((response as Response).headers.get("Location")).toBe("/assets");
   });
 
   it("does not clear when updateAsset rejects — the whole edit fails together", async () => {
@@ -123,5 +263,62 @@ describe("assets.$assetId_.edit — clearMainImage", () => {
     expect(updateAsset).toHaveBeenCalledWith(
       expect.not.objectContaining({ mainImage: null })
     );
+  });
+
+  it("returns the reloaded canonical product image in the edit loader", async () => {
+    const replacementImage =
+      "https://xyz.supabase.co/storage/v1/object/public/files/org-1/asset-models/model-1/replacement.webp";
+    vi.mocked(getAsset).mockResolvedValue({
+      id: "asset-1",
+      title: "Makey Kit #001",
+      type: "INDIVIDUAL",
+      assetModelId: "model-1",
+      categoryId: "category-1",
+      assetLocations: [],
+      qrCodes: [],
+      tags: [],
+      customFields: [],
+      assetKits: [],
+    } as never);
+    vi.mocked(getAssetModel).mockResolvedValue({
+      id: "model-1",
+      name: "Makey Kit",
+      image: replacementImage,
+      thumbnailImage: `${replacementImage}?thumb=1`,
+      description: "Kit",
+    } as never);
+    vi.mocked(getAllEntriesForCreateAndEdit).mockResolvedValue({
+      categories: [],
+      totalCategories: 0,
+      tags: [],
+      locations: [],
+      totalLocations: 0,
+    } as never);
+    vi.mocked(getAssetModels).mockResolvedValue({
+      assetModels: [],
+      totalAssetModels: 0,
+    } as never);
+    dbMock.asset.findMany.mockResolvedValue([
+      {
+        id: "asset-1",
+        title: "Makey Kit #001",
+        status: "AVAILABLE",
+        assetLocations: [],
+        qrCodes: [],
+      },
+    ] as never);
+
+    const result = await loader({
+      request: new Request(
+        "http://localhost/assets/asset-1/edit?productGroup=1"
+      ),
+      params: { assetId: "asset-1" },
+      context: { getSession: () => ({ userId: "user-1" }) },
+    } as never);
+
+    if (result instanceof Response) {
+      throw new Error("Expected the edit loader to return its product data");
+    }
+    expect(result.productGroup?.image).toBe(replacementImage);
   });
 });

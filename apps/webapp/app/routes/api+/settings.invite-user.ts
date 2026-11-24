@@ -12,6 +12,7 @@ import { InviteUserFormSchema } from "~/components/settings/invite-user-dialog";
 import { db } from "~/database/db.server";
 import { caseInsensitiveEmailFilter } from "~/modules/invite/helpers";
 import { createInvite } from "~/modules/invite/service.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
 import { makeShelfError, ShelfError } from "~/utils/error";
 import { payload, error, parseData } from "~/utils/http.server";
@@ -37,6 +38,7 @@ export async function action({ context, request }: ActionFunctionArgs) {
   const { userId } = authSession;
 
   try {
+    await requireIoioStaffAccess({ context, request });
     const { organizationId } = await requirePermission({
       userId,
       request,

@@ -2,6 +2,7 @@ import { data, type LoaderFunctionArgs } from "react-router";
 import { db } from "~/database/db.server";
 import { serializeAssetImage } from "~/modules/asset/image-resolution";
 import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import { makeShelfError } from "~/utils/error";
 import { payload, error } from "~/utils/http.server";
 import {
@@ -55,6 +56,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
                 id: true,
                 title: true,
                 mainImage: true,
+                mainImageStoragePath: true,
+                thumbnailImageStoragePath: true,
                 mainImageExpiration: true,
                 thumbnailImage: true,
                 // Model cover image for assets with no image of their own
@@ -84,12 +87,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      */
     return data(
       payload({
-        kits: kits.map(({ assetKits, ...kit }) => ({
-          ...kit,
-          assets: assetKits.map((assetKit) =>
-            serializeAssetImage(assetKit.asset)
-          ),
-        })),
+        kits: await Promise.all(
+          kits.map(async ({ assetKits, ...kit }) => ({
+            ...kit,
+            assets: (
+              await resolveAssetImagesForPresentation(
+                assetKits.map((assetKit) => assetKit.asset)
+              )
+            ).map(serializeAssetImage),
+          }))
+        ),
       })
     );
   } catch (cause) {

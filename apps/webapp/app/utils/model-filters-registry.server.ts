@@ -1,3 +1,5 @@
+import { LOCATION_PICKER_SELECT } from "~/modules/location/picker-select.server";
+
 /**
  * Field registry for `/api/model-filters`.
  *
@@ -65,7 +67,7 @@ export const MODEL_FILTER_REGISTRY: Record<
   },
   location: {
     searchable: ["name"],
-    select: { id: true, name: true, thumbnailUrl: true },
+    select: LOCATION_PICKER_SELECT,
   },
   kit: {
     searchable: ["name"],

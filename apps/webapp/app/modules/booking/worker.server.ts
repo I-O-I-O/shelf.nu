@@ -4,8 +4,14 @@ import type PgBoss from "pg-boss";
 import { db } from "~/database/db.server";
 import { bookingUpdatesTemplateString } from "~/emails/bookings-updates-template";
 import { sendEmail } from "~/emails/mail.server";
+import {
+  getResolvedEmailTemplate,
+  renderEmailTemplate,
+} from "~/modules/email-templates/service.server";
+import { expireReadyPreparationPickup } from "~/modules/ioio-staff/preparation.server";
 import { getTimeRemainingMessage } from "~/utils/date-fns";
 import { resolveFormatPrefs } from "~/utils/date-format";
+import { SERVER_URL } from "~/utils/env";
 import { isNotFoundError, ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
 import { wrapBookingStatusForNote } from "~/utils/markdoc-wrappers";
@@ -58,6 +64,12 @@ const checkoutReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
     });
 
     if (recipients.length > 0) {
+      const customTemplate = await getResolvedEmailTemplate(
+        booking.organizationId,
+        "booking_checkout_reminder"
+      );
+      if (customTemplate?.enabled === false) return;
+      const activeTemplate = customTemplate?.enabled ? customTemplate : null;
       const custodian =
         resolveUserDisplayName(booking.custodianUser) ||
         (booking.custodianTeamMember?.name as string);
@@ -91,12 +103,30 @@ const checkoutReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
           recipientReason: recipient.reason,
           recipientEmail: recipient.email,
         });
+        const rendered = activeTemplate
+          ? renderEmailTemplate(activeTemplate, {
+              displayName:
+                [recipient.firstName, recipient.lastName]
+                  .filter(Boolean)
+                  .join(" ") || recipient.email,
+              bookingName: booking.name,
+              assetCount: booking._count.bookingAssets,
+              startDate: booking.from.toLocaleDateString(),
+              endDate: booking.to.toLocaleDateString(),
+              bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+              organizationName: booking.organization.name,
+            })
+          : null;
 
         sendEmail({
           to: recipient.email,
-          subject,
-          text,
-          html,
+          subject: rendered?.subject || subject,
+          text: rendered?.body || text,
+          html: rendered
+            ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+                rendered.body
+              )}</div>`
+            : html,
         });
       }
     }
@@ -144,6 +174,44 @@ const checkinReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
         eventType: BOOKING_SCHEDULER_EVENTS_ENUM.overdueHandler,
       },
       when,
+    });
+  }
+};
+
+const returnReminder = async ({ data }: PgBoss.Job<SchedulerData>) => {
+  const booking = await db.booking
+    .findFirstOrThrow({
+      // eslint-disable-next-line local-rules/require-org-scope-on-id-queries -- idor-safe: background pg-boss scheduler job keyed by bookingId; the booking supplies the organization used for recipient resolution
+      where: { id: data.id },
+      include: BOOKING_INCLUDE_FOR_EMAIL,
+    })
+    .catch((cause) => {
+      throw new ShelfError({
+        cause,
+        message: "Booking not found",
+        additionalData: { data, work: data.eventType },
+        label: "Booking",
+        shouldBeCaptured: !isNotFoundError(cause),
+      });
+    });
+
+  if (booking.from && booking.to && booking.status === BookingStatus.ONGOING) {
+    await sendCheckinReminder(
+      booking,
+      booking._count.bookingAssets,
+      data.hints,
+      booking.organizationId,
+      { ioioReturnReminder: true }
+    );
+  }
+
+  if (booking.to && booking.status === BookingStatus.ONGOING) {
+    await scheduleNextBookingJob({
+      data: {
+        ...data,
+        eventType: BOOKING_SCHEDULER_EVENTS_ENUM.overdueHandler,
+      },
+      when: new Date(booking.to),
     });
   }
 };
@@ -199,6 +267,12 @@ const overdueHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
   });
 
   if (recipients.length > 0) {
+    const customTemplate = await getResolvedEmailTemplate(
+      booking.organizationId,
+      "booking_overdue"
+    );
+    if (customTemplate?.enabled === false) return;
+    const activeTemplate = customTemplate?.enabled ? customTemplate : null;
     const custodian =
       resolveUserDisplayName(booking.custodianUser) ||
       (booking.custodianTeamMember?.name as string);
@@ -229,16 +303,67 @@ const overdueHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
         recipientReason: recipient.reason,
         recipientEmail: recipient.email,
       });
+      const rendered = activeTemplate
+        ? renderEmailTemplate(activeTemplate, {
+            displayName:
+              [recipient.firstName, recipient.lastName]
+                .filter(Boolean)
+                .join(" ") || recipient.email,
+            bookingName: booking.name,
+            assetCount: booking._count.bookingAssets,
+            startDate: booking.from?.toLocaleDateString() ?? "",
+            endDate: booking.to?.toLocaleDateString() ?? "",
+            bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+            organizationName: booking.organization.name,
+          })
+        : null;
 
       sendEmail({
         to: recipient.email,
-        subject,
-        text,
-        html,
+        subject: rendered?.subject || subject,
+        text: rendered?.body || text,
+        html: rendered
+          ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+              rendered.body
+            )}</div>`
+          : html,
       });
     }
   }
 };
+
+const preparationPickupExpiryHandler = async ({
+  data,
+}: PgBoss.Job<SchedulerData>) => {
+  if (!data.organizationId || !data.readyAt) {
+    Logger.error(
+      new ShelfError({
+        cause: null,
+        message:
+          "Preparation pickup expiry job is missing its scope or ready timestamp.",
+        additionalData: { operationId: data.id },
+        label: "Booking",
+        shouldBeCaptured: false,
+      })
+    );
+    return;
+  }
+
+  await expireReadyPreparationPickup({
+    organizationId: data.organizationId,
+    operationId: data.id,
+    readyAt: new Date(data.readyAt),
+  });
+};
+
+function escapeEmailHtml(value: string) {
+  return value.replace(
+    /[&<>"]/g,
+    (character) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character] ??
+      character
+  );
+}
 
 const autoArchiveHandler = async ({ data }: PgBoss.Job<SchedulerData>) => {
   try {
@@ -498,10 +623,13 @@ const event2HandlerMap: Record<
 > = {
   [BOOKING_SCHEDULER_EVENTS_ENUM.checkoutReminder]: checkoutReminder,
   [BOOKING_SCHEDULER_EVENTS_ENUM.checkinReminder]: checkinReminder,
+  [BOOKING_SCHEDULER_EVENTS_ENUM.returnReminder]: returnReminder,
   [BOOKING_SCHEDULER_EVENTS_ENUM.overdueHandler]: overdueHandler,
   [BOOKING_SCHEDULER_EVENTS_ENUM.autoArchiveHandler]: autoArchiveHandler,
   [BOOKING_SCHEDULER_EVENTS_ENUM.autoArchiveExpiredHandler]:
     autoArchiveExpiredHandler,
+  [BOOKING_SCHEDULER_EVENTS_ENUM.preparationPickupExpiryHandler]:
+    preparationPickupExpiryHandler,
 };
 
 /** ===== start: listens and creates chain of jobs for a given booking ===== */

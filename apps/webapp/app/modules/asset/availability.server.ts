@@ -102,6 +102,30 @@ import type {
 
 const label: ErrorLabel = "Assets";
 
+/**
+ * Preparation operations only provide an availability hold while they are
+ * active and have not yet been linked to a native Shelf booking. Once linked,
+ * the booking's `BookingAsset.quantity` is the sole source of the hold.
+ */
+const ACTIVE_UNLINKED_PREPARATION_STATUSES = [
+  "ASSIGNING",
+  "PENDING_PREPARATION",
+  "ASSIGNED",
+  "PREPARING",
+  "READY_FOR_PICKUP",
+] as const;
+
+function preparationIntervalForWindow(
+  row: { from: Date | null; to: Date | null },
+  window: { from: Date; to: Date },
+  quantity: number
+): AvailabilityInterval | null {
+  const from = row.from ?? window.from;
+  const to = row.to ?? window.to;
+  if (from >= window.to || to <= window.from) return null;
+  return { from, to, qty: quantity };
+}
+
 // These symbols physically live in the dependency-free
 // `./availability-primitives.server` leaf (see that file's header for the
 // import-cycle rationale). Re-exported here so this module remains the single
@@ -210,6 +234,30 @@ export type PrismaClientOrTx = {
       Array<{ bookingId: string | null; _sum: { quantity: number | null } }>
     >;
   };
+  ioioWriteOperation?: {
+    findMany: (args: {
+      where: Prisma.IoioWriteOperationWhereInput;
+      select: {
+        id: true;
+        status: true;
+        quantity: true;
+        from: true;
+        to: true;
+        bookingId: true;
+        bookingAssetId: true;
+      };
+    }) => Promise<
+      Array<{
+        id: string;
+        status: string;
+        quantity: number | null;
+        from: Date | null;
+        to: Date | null;
+        bookingId: string | null;
+        bookingAssetId: string | null;
+      }>
+    >;
+  };
 };
 
 /**
@@ -235,14 +283,16 @@ export type AssetAvailability = {
    */
   checkedOut: number;
   /**
-   * Standalone (non-kit-driven) reserved units competing for this pool.
+   * Standalone booking units plus active unlinked preparation requests
+   * competing for this pool.
    * With a `window`, this is the peak-concurrent quantity across
    * overlapping RESERVED/ONGOING reservations plus any OVERDUE reservation
    * (sentinel-extended — see {@link resolveIntervalTo}), computed by
    * {@link peakConcurrent}. A booking that already ended before the window
    * starts does NOT contribute. Without a window, it's the CONSERVATIVE Σ of
-   * every active commitment's remaining (checked-out units included), so a
-   * dateless `bookable` never over-promises.
+   * every active booking and unlinked preparation commitment's remaining
+   * quantity (checked-out units included), so a dateless `bookable` never
+   * over-promises.
    */
   reserved: number;
   /**
@@ -280,6 +330,8 @@ type GetAssetAvailabilityArgs = {
   window?: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the computed sums. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the computed sums. */
+  excludeBookingIds?: string[];
   /** Prisma client or active transaction; defaults to the global `db`. */
   db?: PrismaClientOrTx;
 };
@@ -316,7 +368,9 @@ type GetAssetAvailabilityArgs = {
  * subtracts already-logged RETURN/CONSUME/LOSS/DAMAGE dispositions exactly as
  * `computeBookingAvailableQuantity` does (partial check-in writes
  * `ConsumptionLog` rows without decrementing `BookingAsset.quantity`), and is
- * clamped at 0 per row as defence-in-depth.
+ * clamped at 0 per row as defence-in-depth. Active preparation operations
+ * without a linked booking are included in the same window sweep. Once linked,
+ * their native Shelf booking is the only counted hold.
  *
  * @param args.assetId - The asset to compute availability for.
  * @param args.organizationId - Caller's organization (scopes every query).
@@ -331,6 +385,7 @@ export async function getAssetAvailability({
   organizationId,
   window = null,
   excludeBookingId,
+  excludeBookingIds = [],
   db: dbOrTx,
 }: GetAssetAvailabilityArgs): Promise<AssetAvailability> {
   // Cast through `unknown`: the real extended Prisma client's delegate
@@ -377,8 +432,17 @@ export async function getAssetAvailability({
       assetKitId: null,
       booking: buildActiveBookingWhere(organizationId, window),
     };
-    if (excludeBookingId) {
-      bookingAssetWhere.bookingId = { not: excludeBookingId };
+    const excludedBookingIds = [
+      ...new Set(
+        [excludeBookingId, ...excludeBookingIds].filter((id): id is string =>
+          Boolean(id)
+        )
+      ),
+    ];
+    if (excludedBookingIds.length === 1) {
+      bookingAssetWhere.bookingId = { not: excludedBookingIds[0] };
+    } else if (excludedBookingIds.length > 1) {
+      bookingAssetWhere.bookingId = { notIn: excludedBookingIds };
     }
 
     const reservedRows = await client.bookingAsset.findMany({
@@ -390,10 +454,59 @@ export async function getAssetAvailability({
       },
     });
 
+    // A preparation request can exist briefly (or as legacy data) before it
+    // has a native Shelf booking. Keep that quantity in the same availability
+    // sweep during this stage. Linked operations are deliberately excluded:
+    // their active BookingAsset row already holds the same units.
+    const preparationRows = client.ioioWriteOperation
+      ? await client.ioioWriteOperation.findMany({
+          where: {
+            organizationId,
+            operationType: "IOIO_PREPARATION",
+            status: { in: [...ACTIVE_UNLINKED_PREPARATION_STATUSES] },
+            assetId,
+            bookingId: null,
+            bookingAssetId: null,
+            quantity: { gt: 0 },
+          },
+          select: {
+            id: true,
+            status: true,
+            quantity: true,
+            from: true,
+            to: true,
+            bookingId: true,
+            bookingAssetId: true,
+          },
+        })
+      : [];
+
     let reservedTotal = 0;
     let allActiveRemaining = 0;
     const reservingBookingIds = new Set<string>();
     const intervals: AvailabilityInterval[] = [];
+
+    for (const row of preparationRows) {
+      // Recheck the lifecycle and links in memory as well as in the query.
+      // Besides guarding test/client adapters that return broader rows, this
+      // makes the no-double-count rule explicit at the point of aggregation.
+      if (
+        row.bookingId !== null ||
+        row.bookingAssetId !== null ||
+        !ACTIVE_UNLINKED_PREPARATION_STATUSES.includes(
+          row.status as (typeof ACTIVE_UNLINKED_PREPARATION_STATUSES)[number]
+        )
+      ) {
+        continue;
+      }
+      const remaining = Math.max(0, row.quantity ?? 0);
+      if (!remaining) continue;
+      allActiveRemaining += remaining;
+      if (window) {
+        const interval = preparationIntervalForWindow(row, window, remaining);
+        if (interval) intervals.push(interval);
+      }
+    }
 
     if (reservedRows.length > 0) {
       const bookingIds = reservedRows.map((r) => r.bookingId);
@@ -640,6 +753,32 @@ export type AvailabilityBatchClient = {
       }>
     >;
   };
+  ioioWriteOperation?: {
+    findMany: (args: {
+      where: Prisma.IoioWriteOperationWhereInput;
+      select: {
+        id: true;
+        assetId: true;
+        status: true;
+        quantity: true;
+        from: true;
+        to: true;
+        bookingId: true;
+        bookingAssetId: true;
+      };
+    }) => Promise<
+      Array<{
+        id: string;
+        assetId: string | null;
+        status: string;
+        quantity: number | null;
+        from: Date | null;
+        to: Date | null;
+        bookingId: string | null;
+        bookingAssetId: string | null;
+      }>
+    >;
+  };
 };
 
 /** Arguments shared by every asset in a {@link getAssetAvailabilityBatch} call. */
@@ -650,6 +789,8 @@ type GetAssetAvailabilityBatchCommonArgs = {
   window: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the computed `reserved` sums. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the computed sums. */
+  excludeBookingIds?: string[];
   /** Prisma client or active transaction; defaults to the global `db`. */
   db?: AvailabilityBatchClient;
 };
@@ -659,8 +800,9 @@ type GetAssetAvailabilityBatchCommonArgs = {
  * `AssetAvailability` breakdown for MANY assets in a FIXED small number of
  * queries, regardless of how many assets are requested.
  *
- * The singular primitive fires ~4 round-trips per call (total+custody,
- * inKits, checkedOut, reserved [+ an optional logged-dispositions read]).
+ * The singular primitive fires a fixed number of round-trips per call
+ * (total+custody, inKits, checkedOut, reserved, active unlinked preparation
+ * holds [+ an optional logged-dispositions read]).
  * Calling it once per candidate asset — e.g. every QUANTITY_TRACKED asset
  * listed in the booking "manage assets" picker — would turn a loader with N
  * assets into `O(4·N)` reads, the exact fan-out this batch primitive exists
@@ -676,6 +818,9 @@ type GetAssetAvailabilityBatchCommonArgs = {
  *   kit-driven slices are already counted via `inKits`, so summing them here
  *   too would double-count the same units (the bug this primitive exists to
  *   fix in the booking picker, which previously had no such filter).
+ * - Active preparation operations with no linked Shelf booking are added to
+ *   the same sweep. A linked operation is skipped so its booking quantity is
+ *   counted once.
  * - Logged RETURN/CONSUME/LOSS/DAMAGE dispositions reduce each booking's
  *   remaining reserved quantity before the peak-concurrent sweep, clamped at
  *   0 per (booking, asset) row.
@@ -700,6 +845,7 @@ export async function getAssetAvailabilityBatch(
     organizationId,
     window,
     excludeBookingId,
+    excludeBookingIds = [],
     db: dbOrTx,
   }: GetAssetAvailabilityBatchCommonArgs
 ): Promise<Map<string, AssetAvailability>> {
@@ -714,37 +860,65 @@ export async function getAssetAvailabilityBatch(
   const client = (dbOrTx ?? db) as unknown as AvailabilityBatchClient;
 
   try {
-    const [assetRows, custodyGroups, inKitsGroups, checkedOutBreakdownByAsset] =
-      await Promise.all([
-        client.asset.findMany({
-          where: { id: { in: uniqueAssetIds }, organizationId },
-          select: { id: true, quantity: true },
-        }),
-        client.custody.groupBy({
-          by: ["assetId"],
-          // Custody has no `organizationId` column of its own — scope
-          // through the asset relation so a custody row on another
-          // workspace's asset (which should never happen for an id we
-          // resolved ourselves, but this primitive is a reusable export
-          // that any caller can hand arbitrary ids to) can never leak into
-          // `inCustody`. Mirrors the org-scope-user-supplied-ids rule.
-          // `kitCustodyId: null` = OPERATOR custody only — kit-inherited
-          // custody rows are already counted via `AssetKit.quantity`
-          // (`inKits`), so including them here would double-deduct.
-          where: {
-            assetId: { in: uniqueAssetIds },
-            asset: { organizationId },
-            kitCustodyId: null,
-          },
-          _sum: { quantity: true },
-        }),
-        client.assetKit.groupBy({
-          by: ["assetId"],
-          where: { assetId: { in: uniqueAssetIds }, organizationId },
-          _sum: { quantity: true },
-        }),
-        computeCheckedOutBreakdownBatch(client, uniqueAssetIds, organizationId),
-      ]);
+    const [
+      assetRows,
+      custodyGroups,
+      inKitsGroups,
+      checkedOutBreakdownByAsset,
+      preparationRows,
+    ] = await Promise.all([
+      client.asset.findMany({
+        where: { id: { in: uniqueAssetIds }, organizationId },
+        select: { id: true, quantity: true },
+      }),
+      client.custody.groupBy({
+        by: ["assetId"],
+        // Custody has no `organizationId` column of its own — scope
+        // through the asset relation so a custody row on another
+        // workspace's asset (which should never happen for an id we
+        // resolved ourselves, but this primitive is a reusable export
+        // that any caller can hand arbitrary ids to) can never leak into
+        // `inCustody`. Mirrors the org-scope-user-supplied-ids rule.
+        // `kitCustodyId: null` = OPERATOR custody only — kit-inherited
+        // custody rows are already counted via `AssetKit.quantity`
+        // (`inKits`), so including them here would double-deduct.
+        where: {
+          assetId: { in: uniqueAssetIds },
+          asset: { organizationId },
+          kitCustodyId: null,
+        },
+        _sum: { quantity: true },
+      }),
+      client.assetKit.groupBy({
+        by: ["assetId"],
+        where: { assetId: { in: uniqueAssetIds }, organizationId },
+        _sum: { quantity: true },
+      }),
+      computeCheckedOutBreakdownBatch(client, uniqueAssetIds, organizationId),
+      client.ioioWriteOperation
+        ? client.ioioWriteOperation.findMany({
+            where: {
+              organizationId,
+              operationType: "IOIO_PREPARATION",
+              status: { in: [...ACTIVE_UNLINKED_PREPARATION_STATUSES] },
+              assetId: { in: uniqueAssetIds },
+              bookingId: null,
+              bookingAssetId: null,
+              quantity: { gt: 0 },
+            },
+            select: {
+              id: true,
+              assetId: true,
+              status: true,
+              quantity: true,
+              from: true,
+              to: true,
+              bookingId: true,
+              bookingAssetId: true,
+            },
+          })
+        : Promise.resolve([]),
+    ]);
 
     const totalByAsset = new Map(assetRows.map((a) => [a.id, a.quantity ?? 0]));
     const inCustodyByAsset = new Map(
@@ -761,8 +935,17 @@ export async function getAssetAvailabilityBatch(
       assetKitId: null,
       booking: buildActiveBookingWhere(organizationId, window),
     };
-    if (excludeBookingId) {
-      bookingAssetWhere.bookingId = { not: excludeBookingId };
+    const excludedBookingIds = [
+      ...new Set(
+        [excludeBookingId, ...excludeBookingIds].filter((id): id is string =>
+          Boolean(id)
+        )
+      ),
+    ];
+    if (excludedBookingIds.length === 1) {
+      bookingAssetWhere.bookingId = { not: excludedBookingIds[0] };
+    } else if (excludedBookingIds.length > 1) {
+      bookingAssetWhere.bookingId = { notIn: excludedBookingIds };
     }
 
     const reservedRows = await client.bookingAsset.findMany({
@@ -779,6 +962,33 @@ export async function getAssetAvailabilityBatch(
     const allActiveRemainingByAsset = new Map<string, number>();
     const reservingBookingIdsByAsset = new Map<string, Set<string>>();
     const intervalsByAsset = new Map<string, AvailabilityInterval[]>();
+
+    for (const row of preparationRows) {
+      if (
+        !row.assetId ||
+        row.bookingId !== null ||
+        row.bookingAssetId !== null ||
+        !ACTIVE_UNLINKED_PREPARATION_STATUSES.includes(
+          row.status as (typeof ACTIVE_UNLINKED_PREPARATION_STATUSES)[number]
+        )
+      ) {
+        continue;
+      }
+      const remaining = Math.max(0, row.quantity ?? 0);
+      if (!remaining) continue;
+      allActiveRemainingByAsset.set(
+        row.assetId,
+        (allActiveRemainingByAsset.get(row.assetId) ?? 0) + remaining
+      );
+      if (window) {
+        const interval = preparationIntervalForWindow(row, window, remaining);
+        if (interval) {
+          const intervals = intervalsByAsset.get(row.assetId) ?? [];
+          intervals.push(interval);
+          intervalsByAsset.set(row.assetId, intervals);
+        }
+      }
+    }
 
     if (reservedRows.length > 0) {
       const reservedBookingIds = [
@@ -918,6 +1128,7 @@ export async function getAssetAvailabilityBatch(
         assetIds: uniqueAssetIds,
         organizationId,
         excludeBookingId,
+        excludeBookingIds,
       },
       label,
     });
@@ -1303,6 +1514,8 @@ type AssertAssetQuantitiesAvailableCommonArgs = {
   window: AssetAvailabilityWindow;
   /** Exclude this booking's own reservation from the availability read. */
   excludeBookingId?: string;
+  /** Exclude known soft-planning reservations from the availability read. */
+  excludeBookingIds?: string[];
 };
 
 /** One asset's shortfall detail, collected for the aggregated error's `additionalData`. */
@@ -1355,6 +1568,7 @@ export async function assertAssetQuantitiesAvailable(
     tx,
     window,
     excludeBookingId,
+    excludeBookingIds = [],
   }: AssertAssetQuantitiesAvailableCommonArgs
 ): Promise<void> {
   // Nothing to check → nothing to read. Mirrors `getAssetAvailabilityBatch`'s
@@ -1366,7 +1580,7 @@ export async function assertAssetQuantitiesAvailable(
   // the exact N+1 fan-out this sibling exists to avoid).
   const availabilityByAsset = await getAssetAvailabilityBatch(
     items.map((item) => item.assetId),
-    { organizationId, window, excludeBookingId, db: tx }
+    { organizationId, window, excludeBookingId, excludeBookingIds, db: tx }
   );
 
   const shortfalls: AssetQuantityShortfall[] = [];

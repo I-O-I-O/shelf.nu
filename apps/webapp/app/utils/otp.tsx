@@ -14,44 +14,44 @@ export type OtpPageData = Record<
 
 export const OTP_PAGE_MAP: OtpPageData = {
   login: {
-    title: "Fill your code",
+    title: "Check your email",
     SubHeading: ({ email }) => (
       <SubHeading className="-mt-4 text-center">
-        We have sent a code to{" "}
+        We sent a sign-in code to{" "}
         <span className="font-bold text-gray-900">{email}</span>. Fill the code
         below to log in.
       </SubHeading>
     ),
-    buttonTitle: "Log In",
+    buttonTitle: "Log in",
   },
   signup: {
-    title: "Create an account",
+    title: "Check your email",
     SubHeading: () => (
       <SubHeading className="-mt-4 text-center">
-        Start your journey with Shelf.
+        Follow the verification instructions in your email to continue.
       </SubHeading>
     ),
-    buttonTitle: "Create Account",
+    buttonTitle: "Verify email",
   },
   confirm_signup: {
-    title: "Confirm your email",
+    title: "Check your email",
     SubHeading: ({ email }) => (
       <SubHeading className="-mt-4 text-center">
-        We have sent a code to{" "}
-        <span className="font-bold text-gray-900">{email}</span>. Fill the code
-        below to confirm you email.
+        We sent a verification code to{" "}
+        <span className="font-bold text-gray-900">{email}</span>. Enter it below
+        to verify your email and continue.
       </SubHeading>
     ),
-    buttonTitle: "Confirm",
+    buttonTitle: "Verify email",
   },
 };
 
 export const DEFAULT_PAGE_DATA: OtpPageData["login"] = {
-  title: "One Time Password",
+  title: "Check your email",
   buttonTitle: "Continue",
   SubHeading: () => (
     <SubHeading className="-mt-4 text-center">
-      Please confirm your OTP to continue
+      Follow the instructions in your email to continue.
     </SubHeading>
   ),
 };

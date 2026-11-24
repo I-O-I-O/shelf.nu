@@ -52,6 +52,16 @@ describe("MarkdownViewer", () => {
       );
     });
 
+    it("renders canonical Handbook article links as normal in-app links", () => {
+      const { container } = renderNote(
+        "For more details, see [this guide](/handbook/how-to-change-filament)."
+      );
+
+      const link = container.querySelector("a");
+      expect(link).toHaveTextContent("this guide");
+      expect(link).toHaveAttribute("href", "/handbook/how-to-change-filament");
+    });
+
     it("neutralizes the custom link tag with an off-origin target", () => {
       const { container, getByText } = renderNote(
         '{% link to="https://evil.example" text="Verify" /%}'

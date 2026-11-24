@@ -26,13 +26,14 @@
  * @see {@link file://../../atoms/file.ts} Validation atoms
  */
 import type { ChangeEvent, ReactNode } from "react";
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { WritableAtom } from "jotai";
 import { useSetAtom } from "jotai";
 import { defaultValidateFileAtom } from "~/atoms/file";
 import { ACCEPT_SUPPORTED_IMAGES } from "~/utils/constants";
 import { tw } from "~/utils/tw";
 import Input from "./input";
+import { useImagePaste } from "./use-image-paste";
 
 /** Hint for the default 4 MB limit of {@link defaultValidateFileAtom}. */
 export const IMAGE_HINT_4MB = "Accepts PNG, JPG, JPEG, or WebP (max.4 MB)";
@@ -54,6 +55,10 @@ type ValidateFileAtom = WritableAtom<
 type ImageFileFieldProps = {
   /** Form field name the action reads the file from. */
   name: string;
+  /** Enable clipboard images within this field's owning form. */
+  pasteImages?: boolean;
+  /** Existing entities can persist pasted images immediately. */
+  pasteUploadUrl?: string;
   /** Accessible label of the file input (visually hidden). */
   label: string;
   /**
@@ -94,6 +99,8 @@ type ImageFileFieldProps = {
  */
 export function ImageFileField({
   name,
+  pasteImages = false,
+  pasteUploadUrl,
   label,
   currentImage,
   previewAlt,
@@ -108,14 +115,38 @@ export function ImageFileField({
 }: ImageFileFieldProps) {
   const validateFile = useSetAtom(validateFileAtom);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const activePreviewUrl = useRef<string | null>(null);
   const hintId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const replacePreviewUrl = useCallback((nextUrl: string | null) => {
+    if (activePreviewUrl.current && activePreviewUrl.current !== nextUrl) {
+      URL.revokeObjectURL(activePreviewUrl.current);
+    }
+    activePreviewUrl.current = nextUrl;
+    setPreviewUrl(nextUrl);
+  }, []);
+  const { uploading, pasteError, clearPasteError } = useImagePaste({
+    inputRef,
+    name,
+    pasteImages,
+    pasteUploadUrl,
+    disabled,
+    validateFile,
+    setPreviewUrl: replacePreviewUrl,
+    onFileChange,
+  });
 
-  // Each object URL pins its file in memory until revoked: release the old
-  // one when the preview changes, and the last one on unmount.
-  useEffect(() => {
-    if (!previewUrl) return;
-    return () => URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
+  // Each object URL pins its file in memory until revoked. Replacement is
+  // synchronous; unmount cleanup releases the last preview.
+  useEffect(
+    () => () => {
+      if (activePreviewUrl.current) {
+        URL.revokeObjectURL(activePreviewUrl.current);
+        activePreviewUrl.current = null;
+      }
+    },
+    []
+  );
 
   /**
    * Validates the picked file, then previews it, or falls back to the saved
@@ -124,12 +155,13 @@ export function ImageFileField({
    * @param event - Change event of the file input
    */
   function handleChange(event: ChangeEvent<HTMLInputElement>) {
+    clearPasteError();
     validateFile(event);
     // Read the file after validation: a rejected file has been cleared from
     // the input, and an accepted one may have been swapped for a copy with a
     // sanitised name.
     const file = event.target.files?.[0] ?? null;
-    setPreviewUrl(file ? URL.createObjectURL(file) : null);
+    replacePreviewUrl(file ? URL.createObjectURL(file) : null);
     onFileChange?.(file);
   }
 
@@ -150,6 +182,7 @@ export function ImageFileField({
           {hint}
         </div>
         <Input
+          ref={inputRef}
           accept={ACCEPT_SUPPORTED_IMAGES}
           name={name}
           type="file"
@@ -157,11 +190,20 @@ export function ImageFileField({
           label={label}
           hideLabel
           aria-describedby={hintId}
-          error={error}
-          disabled={disabled}
+          error={pasteError ?? error}
+          disabled={disabled || uploading}
           className="mt-2"
           inputClassName="border-0 shadow-none p-0 rounded-none"
         />
+        {pasteImages ? (
+          <p className="mt-2 text-xs text-gray-500" role="status">
+            {uploading
+              ? "Uploading image…"
+              : pasteUploadUrl
+              ? "Paste an image anywhere in this form to upload it immediately."
+              : "Paste an image anywhere in this form; Save uploads it."}
+          </p>
+        ) : null}
         {belowInput ? <div className="order-last">{belowInput}</div> : null}
       </div>
     </div>

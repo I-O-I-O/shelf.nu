@@ -51,4 +51,24 @@ function getSupabaseAdmin() {
   return getSupabaseClient(SUPABASE_SERVICE_ROLE);
 }
 
-export { getSupabaseAdmin, supabaseClient };
+/**
+ * Creates an isolated, non-persistent Auth client for operations performed as
+ * a specific signed-in user. Callers must establish the supplied Shelf
+ * session with `auth.setSession` before using authenticated Auth methods.
+ *
+ * A fresh client avoids putting one request's user session on a module-level
+ * singleton in the server process.
+ */
+function getSupabaseAuthClient() {
+  if (isBrowser)
+    throw new ShelfError({
+      cause: null,
+      message:
+        "getSupabaseAuthClient is server-only and should NOT be used in insecure environments",
+      label: "Dev error",
+    });
+
+  return getSupabaseClient(SUPABASE_ANON_PUBLIC);
+}
+
+export { getSupabaseAdmin, getSupabaseAuthClient, supabaseClient };

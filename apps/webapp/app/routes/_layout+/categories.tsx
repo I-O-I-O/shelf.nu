@@ -6,15 +6,19 @@ import type {
 } from "react-router";
 import { data, Link, Outlet } from "react-router";
 import { z } from "zod";
-import BulkActionsDropdown from "~/components/category/bulk-actions-dropdown";
-import CategoryQuickActions from "~/components/category/category-quick-actions";
+import CategoryQuickActions, {
+  CategoryMobileQuickActions,
+} from "~/components/category/category-quick-actions";
+import { CategorySelectionToolbar } from "~/components/category/category-selection-toolbar";
 import { ErrorContent } from "~/components/errors";
 import Header from "~/components/layout/header";
 import type { HeaderData } from "~/components/layout/header/types";
 import LineBreakText from "~/components/layout/line-break-text";
 import { List } from "~/components/list";
+import { BulkListCardCheckbox } from "~/components/list/bulk-actions/bulk-list-card-checkbox";
 import { ListContentWrapper } from "~/components/list/content-wrapper";
 import { Filters } from "~/components/list/filters";
+import type { ListItemData } from "~/components/list/list-item";
 import { Badge } from "~/components/shared/badge";
 import { Button } from "~/components/shared/button";
 import { Th, Td } from "~/components/table";
@@ -153,23 +157,31 @@ export default function CategoriesPage() {
 
   return (
     <>
-      <Header>
-        <Button
-          to="new"
-          role="link"
-          aria-label={`new category`}
-          data-test-id="createNewCategory"
-        >
-          New category
-        </Button>
-      </Header>
+      <Header />
       <ListContentWrapper>
-        <Filters />
+        <Filters
+          searchClassName="md:flex-1"
+          innerWrapperClassName="md:flex-1"
+          slots={{
+            "right-of-search": (
+              <Button
+                to="new"
+                role="link"
+                aria-label="new category"
+                data-test-id="createNewCategory"
+                className="shrink-0 self-start md:self-auto"
+              >
+                New category
+              </Button>
+            ),
+          }}
+        />
         <Outlet />
         <List
           bulkActions={
-            isBaseOrSelfService ? undefined : <BulkActionsDropdown />
+            isBaseOrSelfService ? undefined : <CategorySelectionToolbar />
           }
+          selectionToolbar={!isBaseOrSelfService}
           customEmptyStateContent={{
             title: "No categories yet",
             text: "Categories help you organize assets by type. Create categories to group and filter your inventory.",
@@ -177,11 +189,13 @@ export default function CategoriesPage() {
             newButtonContent: "Create your first category",
           }}
           ItemComponent={CategoryItem}
+          MobileItemComponent={MobileCategoryItem}
           headerChildren={
             <>
               <Th>Description</Th>
               <Th>Assets</Th>
-              <Th>Actions</Th>
+              <Th>Edit</Th>
+              <Th>Delete</Th>
             </>
           }
         />
@@ -216,8 +230,50 @@ const CategoryItem = ({
       ) : null}
     </Td>
     <Td>{item._count.assets}</Td>
-    <Td>
-      <CategoryQuickActions category={item} />
-    </Td>
+    <CategoryQuickActions category={item} />
   </>
 );
+
+function MobileCategoryItem({
+  item: listItem,
+  hasBulkActions = false,
+}: {
+  item: ListItemData;
+  hasBulkActions?: boolean;
+}) {
+  const item = listItem as Pick<
+    Category,
+    "id" | "description" | "name" | "color"
+  > & { _count: { assets: number } };
+  return (
+    <article className="min-w-0 rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="flex min-w-0 items-start gap-3">
+        {hasBulkActions ? <BulkListCardCheckbox item={item} /> : null}
+        <div className="min-w-0 flex-1">
+          <Badge
+            color={item.color}
+            withDot={false}
+            className="max-w-full whitespace-normal break-words [overflow-wrap:anywhere]"
+          >
+            {item.name}
+          </Badge>
+          <p className="mt-2 text-sm text-gray-600">
+            {item._count.assets} {item._count.assets === 1 ? "asset" : "assets"}
+          </p>
+          {item.description ? (
+            <div className="mt-2 break-words text-sm text-gray-700">
+              <LineBreakText
+                text={item.description}
+                numberOfLines={3}
+                charactersPerLine={60}
+              />
+            </div>
+          ) : null}
+          <div className="mt-3 border-t border-gray-100 pt-3">
+            <CategoryMobileQuickActions category={item} />
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}

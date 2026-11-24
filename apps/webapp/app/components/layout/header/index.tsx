@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
-import { useLoaderData } from "react-router";
+import { useLoaderData, useRouteLoaderData } from "react-router";
 import Heading from "~/components/shared/heading";
 import SubHeading from "~/components/shared/sub-heading";
+import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
 import { tw } from "~/utils/tw";
 import { Breadcrumbs } from "../breadcrumbs";
 import { CommandPaletteButton } from "../command-palette";
@@ -16,6 +17,7 @@ export default function Header({
   preHeading,
   hidePageDescription = false,
   hideBreadcrumbs = false,
+  hideQuickFind = false,
   classNames,
   slots,
 }: {
@@ -28,6 +30,8 @@ export default function Header({
   preHeading?: ReactNode;
   hidePageDescription?: boolean;
   hideBreadcrumbs?: boolean;
+  /** Hide the command-palette Quick Find control on focused surfaces. */
+  hideQuickFind?: boolean;
   classNames?: string;
   slots?: {
     [key in SlotKeys]?: ReactNode;
@@ -35,15 +39,22 @@ export default function Header({
 }) {
   const data = useLoaderData<{ header?: HeaderData }>();
   const header = data?.header;
+  const layoutData = useRouteLoaderData<typeof layoutLoader>(
+    "routes/_layout+/_layout"
+  );
+  const isIoioStaff = Boolean(layoutData?.isIoioStaff);
+  const shouldHideQuickFind = hideQuickFind || isIoioStaff;
 
   return header ? (
-    <header className={tw("-mx-4 bg-white", classNames)}>
-      {!hideBreadcrumbs && (
+    <header className={tw("-mx-4 min-w-0 max-w-full bg-white", classNames)}>
+      {!hideBreadcrumbs && !isIoioStaff && (
         <>
           <div className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 md:min-h-[67px] md:py-3">
             <Breadcrumbs />
             <div className="hidden items-center gap-3 md:flex">
-              <CommandPaletteButton className="w-auto md:w-auto" />
+              {!shouldHideQuickFind ? (
+                <CommandPaletteButton className="w-auto md:w-auto" />
+              ) : null}
               {children ? (
                 <div className="flex shrink-0 items-center gap-3">
                   {children}
@@ -61,11 +72,16 @@ export default function Header({
         </>
       )}
       {!hidePageDescription && (
-        <div className="relative flex items-center border-b border-gray-200 px-4 py-3">
+        <div
+          className={tw(
+            "relative flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 px-4 py-3",
+            isIoioStaff && "border-b-0 py-1"
+          )}
+        >
           {slots?.["left-of-title"] ? (
             <div className="relative">{slots["left-of-title"]}</div>
           ) : null}
-          <div>
+          <div className="min-w-0 flex-1">
             {preHeading ? (
               <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
                 {preHeading}
@@ -78,7 +94,10 @@ export default function Header({
               )
             )}
             <div className="flex items-center gap-2">
-              <Heading as="h2" className="break-all text-[20px] font-semibold">
+              <Heading
+                as="h2"
+                className="break-words text-[20px] font-semibold"
+              >
                 {title || header?.title}
               </Heading>
               {slots?.["append-to-title"] || null}
@@ -90,8 +109,16 @@ export default function Header({
             )}
           </div>
           {slots?.["right-of-title"] || null}
+          {isIoioStaff && children ? (
+            <div className="ml-auto flex shrink-0 items-center gap-3">
+              {children}
+            </div>
+          ) : null}
         </div>
       )}
+      {isIoioStaff && hidePageDescription && children ? (
+        <div className="flex justify-end px-4 py-1">{children}</div>
+      ) : null}
     </header>
   ) : null;
 }

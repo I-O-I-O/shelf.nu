@@ -1,44 +1,47 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { OrganizationType } from "@prisma/client";
 import type {
   ActionFunctionArgs,
   LoaderFunctionArgs,
   MetaFunction,
 } from "react-router";
-import { data, Form, useActionData, useLoaderData } from "react-router";
-import { useZorm } from "react-zorm";
-import { z } from "zod";
-import { ViewButtonGroup } from "~/components/calendar/view-button-group";
+import { data, Form, useLoaderData } from "react-router";
 import { ErrorContent } from "~/components/errors";
 import type { HeaderData } from "~/components/layout/header/types";
 import { Button } from "~/components/shared/button";
-import { useDisabled } from "~/hooks/use-disabled";
 import { EMAIL_FOOTER_MAX_LENGTH } from "~/modules/email-footer/constants";
 import { processEmailFooter } from "~/modules/email-footer/email-footer-validator.server";
+import {
+  EMAIL_TEMPLATE_CATEGORY_ORDER,
+  EMAIL_TEMPLATE_DEFINITIONS,
+  PASSWORD_RESET_NOTE,
+  type EmailTemplateCategory,
+} from "~/modules/email-templates/definitions";
+import {
+  getEmailTemplatesForOrganization,
+  restoreEmailTemplate,
+  saveEmailTemplate,
+} from "~/modules/email-templates/service.server";
+import { requireIoioStaffAccess } from "~/modules/ioio-staff/access.server";
 import { updateOrganization } from "~/modules/organization/service.server";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
+import { getEnv } from "~/utils/env";
 import { ShelfError, makeShelfError } from "~/utils/error";
-import { getValidationErrors } from "~/utils/http";
-import { payload, error, parseData } from "~/utils/http.server";
-import type { DataOrErrorResponse } from "~/utils/http.server";
+import { payload, error } from "~/utils/http.server";
 import {
   PermissionAction,
   PermissionEntity,
 } from "~/utils/permissions/permission.data";
 import { requirePermission } from "~/utils/roles.server";
 
-export const emailFooterSchema = z.object({
-  customEmailFooter: z.string().max(500).optional().default(""),
-});
-
 export async function loader({ context, request }: LoaderFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
 
   try {
-    const { currentOrganization } = await requirePermission({
-      userId: authSession.userId,
+    const { currentOrganization, organizationId } = await requirePermission({
+      userId,
       request,
       entity: PermissionEntity.emailSettings,
       action: PermissionAction.read,
@@ -55,13 +58,25 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
       });
     }
 
-    const header: HeaderData = {
-      title: "Email settings",
-    };
+    const header: HeaderData = { title: "Emails" };
+    const templates = await getEmailTemplatesForOrganization(organizationId);
+    const smtpHost = getEnv("SMTP_HOST", { isRequired: false }) || "";
+    const smtpFrom = getEnv("SMTP_FROM", { isRequired: false }) || "";
+    const sender = parseSender(smtpFrom);
 
     return payload({
       header,
-      organization: currentOrganization,
+      organization: {
+        name: currentOrganization.name,
+        customEmailFooter: currentOrganization.customEmailFooter,
+      },
+      delivery: {
+        senderName: sender.name || "Provider default",
+        senderAddress: sender.address || "Provider default",
+        provider: smtpHost ? "SMTP" : "Not configured",
+        configured: Boolean(smtpHost && smtpFrom),
+      },
+      templates,
     });
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
@@ -69,9 +84,7 @@ export async function loader({ context, request }: LoaderFunctionArgs) {
   }
 }
 
-export const handle = {
-  breadcrumb: () => "Emails",
-};
+export const handle = { breadcrumb: () => "Emails" };
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => [
   { title: data ? appendToMetaTitle(data.header.title) : "" },
@@ -79,392 +92,553 @@ export const meta: MetaFunction<typeof loader> = ({ data }) => [
 
 export const ErrorBoundary = () => <ErrorContent />;
 
+function getText(formData: FormData, name: string) {
+  const value = formData.get(name);
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseSender(value: string) {
+  const match = value.match(/^\s*"?([^"<]*)"?\s*<([^>]+)>\s*$/);
+  if (match) {
+    return { name: match[1].trim(), address: match[2].trim() };
+  }
+
+  return { name: "", address: value.trim() };
+}
+
 export async function action({ context, request }: ActionFunctionArgs) {
   const authSession = context.getSession();
   const { userId } = authSession;
 
   try {
+    await requireIoioStaffAccess({ context, request });
     const { organizationId } = await requirePermission({
-      userId: authSession.userId,
+      userId,
       request,
       entity: PermissionEntity.emailSettings,
       action: PermissionAction.update,
     });
-
     const formData = await request.formData();
+    const intent = getText(formData, "intent");
 
-    const { customEmailFooter } = parseData(formData, emailFooterSchema, {
-      additionalData: { organizationId },
-    });
+    if (intent === "save-footer") {
+      const footer = getText(formData, "customEmailFooter");
+      const result = processEmailFooter(footer);
+      if (!result.success) {
+        return data(
+          error(
+            new ShelfError({
+              cause: null,
+              message: result.error || "Invalid email footer",
+              label: "Settings",
+              shouldBeCaptured: false,
+              status: 400,
+            })
+          ),
+          { status: 400 }
+        );
+      }
 
-    const result = processEmailFooter(customEmailFooter);
+      await updateOrganization({
+        id: organizationId,
+        userId,
+        customEmailFooter: result.message,
+      });
+      sendNotification({
+        title: "Settings updated",
+        message: "Email footer has been updated successfully",
+        icon: { name: "success", variant: "success" },
+        senderId: userId,
+      });
+      return payload({ success: true, updated: "footer" });
+    }
 
-    if (!result.success) {
+    const key = getText(formData, "templateKey");
+    const definition = EMAIL_TEMPLATE_DEFINITIONS.find(
+      (item) => item.key === key
+    );
+    if (!definition || !definition.editable) {
       return data(
         error(
           new ShelfError({
             cause: null,
-            message: result.error || "Invalid email footer",
+            message: "This email template cannot be edited.",
             label: "Settings",
             shouldBeCaptured: false,
-            additionalData: {
-              validationErrors: {
-                customEmailFooter: { message: result.error },
-              },
-            },
+            status: 400,
           })
         ),
         { status: 400 }
       );
     }
 
-    await updateOrganization({
-      id: organizationId,
-      userId,
-      customEmailFooter: result.message,
-    });
+    if (intent === "restore-template") {
+      await restoreEmailTemplate(organizationId, key);
+      return payload({ success: true, updated: key });
+    }
 
-    sendNotification({
-      title: "Settings updated",
-      message: "Email footer has been updated successfully",
-      icon: { name: "success", variant: "success" },
-      senderId: authSession.userId,
-    });
+    if (intent === "save-template" || intent === "toggle-template") {
+      const subject = getText(formData, "subject");
+      const body = getText(formData, "body");
+      const enabled = definition.canDisable
+        ? formData.get("enabled") === "on"
+        : true;
+      if (!subject || !body) {
+        return data(
+          error(
+            new ShelfError({
+              cause: null,
+              message: "Subject and body are required.",
+              label: "Settings",
+              shouldBeCaptured: false,
+              status: 400,
+            })
+          ),
+          { status: 400 }
+        );
+      }
 
-    return data(payload({ success: true }), { status: 200 });
+      await saveEmailTemplate({
+        organizationId,
+        key,
+        name: definition.name,
+        subject,
+        body,
+        enabled,
+      });
+      return payload({ success: true, updated: key });
+    }
+
+    return data(
+      error(
+        new ShelfError({
+          cause: null,
+          message: "Unsupported email settings action.",
+          label: "Settings",
+          shouldBeCaptured: false,
+          status: 400,
+        })
+      ),
+      { status: 400 }
+    );
   } catch (cause) {
     const reason = makeShelfError(cause, { userId });
     return data(error(reason), { status: reason.status });
   }
 }
 
-export default function EmailSettingsPage() {
-  const { organization } = useLoaderData<typeof loader>();
-  const zo = useZorm("emailFooter", emailFooterSchema);
-  const disabled = useDisabled();
+type Template = Awaited<
+  ReturnType<typeof getEmailTemplatesForOrganization>
+>[number];
 
-  const actionData = useActionData<DataOrErrorResponse>();
-  const validationErrors = getValidationErrors<typeof emailFooterSchema>(
-    actionData?.error
-  );
-
-  const currentFooter = organization.customEmailFooter || "";
-  const [charCount, setCharCount] = useState(currentFooter.length);
-  const [footerPreview, setFooterPreview] = useState(currentFooter);
-  const [previewMode, setPreviewMode] = useState<"desktop" | "mobile">(
-    "desktop"
-  );
-
+function DeliveryValue({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex flex-col gap-8 xl:flex-row">
-      {/* Left column: Form */}
-      <div className="flex flex-1 flex-col gap-4">
-        <div>
-          <h3 className="text-text-lg font-semibold">Custom email footer</h3>
-          <p className="text-sm text-gray-600">
-            Add a custom message that appears at the bottom of all workspace
-            emails sent to team members.
-          </p>
-        </div>
-
-        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-          <p className="mb-2 text-sm font-medium text-gray-700">
-            This footer will appear on the following emails:
-          </p>
-          <ul className="space-y-1 text-sm text-gray-600">
-            <li>
-              <span className="font-medium">Bookings:</span> Reserved, checkout
-              reminder, check-in reminder, overdue, completed, extended,
-              cancelled, updated, deleted
-            </li>
-            <li>
-              <span className="font-medium">Asset reminders:</span> Reminder
-              notifications
-            </li>
-            <li>
-              <span className="font-medium">Invitations:</span> Workspace invite
-              emails
-            </li>
-            <li>
-              <span className="font-medium">Access:</span> Access revocation
-              notices
-            </li>
-            <li>
-              <span className="font-medium">Audits:</span> Assignment,
-              cancelled, completed, reminder, overdue notifications
-            </li>
-            <li>
-              <span className="font-medium">Role changes:</span> Role change
-              notifications
-            </li>
-          </ul>
-        </div>
-
-        <Form method="POST" ref={zo.ref} className="flex flex-col gap-4">
-          <div>
-            <label
-              htmlFor={zo.fields.customEmailFooter()}
-              className="mb-1.5 block text-sm font-medium text-gray-700"
-            >
-              Footer message
-            </label>
-            <textarea
-              id={zo.fields.customEmailFooter()}
-              name={zo.fields.customEmailFooter()}
-              defaultValue={currentFooter}
-              disabled={disabled}
-              maxLength={EMAIL_FOOTER_MAX_LENGTH}
-              rows={10}
-              className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-500 focus:border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-25 disabled:opacity-50"
-              placeholder="e.g., ACME Corp - support@acme.com - (555) 123-4567"
-              onChange={(e) => {
-                setCharCount(e.target.value.length);
-                setFooterPreview(e.target.value);
-              }}
-            />
-            {(validationErrors?.customEmailFooter?.message ||
-              zo.errors.customEmailFooter()?.message) && (
-              <p className="mt-1 text-sm text-error-500">
-                {validationErrors?.customEmailFooter?.message ||
-                  zo.errors.customEmailFooter()?.message}
-              </p>
-            )}
-            <div className="mt-1 flex items-center justify-between">
-              <p className="text-xs text-gray-500">
-                Links are not allowed. Email addresses and phone numbers are
-                permitted.
-              </p>
-              <span className="text-xs text-gray-500">
-                {charCount} / {EMAIL_FOOTER_MAX_LENGTH} characters
-              </span>
-            </div>
-          </div>
-
-          <p className="text-xs text-gray-500">
-            Note: Custom footers with certain content may affect email
-            deliverability and spam scores.
-          </p>
-
-          <div>
-            <Button type="submit" disabled={disabled}>
-              {disabled ? "Saving..." : "Save"}
-            </Button>
-          </div>
-        </Form>
-      </div>
-
-      {/* Right column: Email preview */}
-      <div className="flex-1">
-        <div className="mb-2 flex items-center justify-between">
-          <p className="text-sm font-medium text-gray-700">Preview</p>
-          <ViewButtonGroup
-            views={[
-              { label: "Desktop", value: "desktop" },
-              { label: "Mobile", value: "mobile" },
-            ]}
-            currentView={previewMode}
-            onViewChange={(v) => setPreviewMode(v as "desktop" | "mobile")}
-            size="xs"
-          />
-        </div>
-        <EmailPreview
-          footerText={footerPreview}
-          organizationName={organization.name}
-          previewMode={previewMode}
-        />
-      </div>
+    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+      <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+        {label}
+      </p>
+      <p className="mt-1 break-words text-sm text-gray-900">{value}</p>
     </div>
   );
 }
 
-/**
- * Hoisted preview-button styles. Extracted from the JSX to avoid an
- * inline `style={{ ... }}` object that allocates on every render and
- * trips react-doctor's `no-inline-exhaustive-style` check.
- *
- * Kept as CSS-in-JS (not Tailwind) because the preview intentionally
- * mirrors the transactional email template, which uses raw hex colours.
- */
-const EMAIL_PREVIEW_VIEW_BUTTON_STYLE = {
-  display: "inline-block",
-  backgroundColor: "#EF6820",
-  color: "white",
-  fontSize: "14px",
-  fontWeight: "700",
-  padding: "10px 18px",
-  borderRadius: "4px",
-  marginBottom: "32px",
-} as const;
+export default function EmailSettingsPage() {
+  const { delivery, organization, templates } = useLoaderData<typeof loader>();
+  const [category, setCategory] = useState<EmailTemplateCategory>("Borrowing");
+  const [selectedKey, setSelectedKey] = useState(templates[0]?.key ?? "");
+  const [footer, setFooter] = useState(organization.customEmailFooter ?? "");
 
-/** Static email preview mimicking the booking email template */
-function EmailPreview({
-  footerText,
-  organizationName,
-  previewMode,
-}: {
-  footerText: string;
-  organizationName: string;
-  previewMode: "desktop" | "mobile";
-}) {
-  const isMobile = previewMode === "mobile";
+  const categories = useMemo(
+    () =>
+      EMAIL_TEMPLATE_CATEGORY_ORDER.filter((item) =>
+        templates.some((template) => template.category === item)
+      ),
+    [templates]
+  );
+  const visibleTemplates = templates.filter(
+    (template) => template.category === category
+  );
+  const selected =
+    templates.find((template) => template.key === selectedKey) ??
+    visibleTemplates[0];
+
+  useEffect(() => {
+    if (!visibleTemplates.some((template) => template.key === selectedKey)) {
+      setSelectedKey(visibleTemplates[0]?.key ?? "");
+    }
+  }, [selectedKey, visibleTemplates]);
 
   return (
-    <div
-      className="overflow-hidden rounded-xl border border-gray-300 shadow-lg"
-      style={isMobile ? { maxWidth: "375px", margin: "0 auto" } : undefined}
-    >
-      {/* Title bar — macOS-style window chrome */}
-      <div className="flex items-center gap-2 bg-[#3B3B3B] px-4 py-3">
-        <span className="size-3 rounded-full bg-[#FF5F57]" />
-        <span className="size-3 rounded-full bg-[#FEBC2E]" />
-        <span className="size-3 rounded-full bg-[#28C840]" />
-      </div>
-
-      {/* Email header — From / To / Subject */}
-      <div className="border-b border-gray-200 bg-gray-100 px-5 py-3 text-[13px] leading-relaxed text-gray-600">
-        <p>
-          <span className="text-gray-400">From:</span>{" "}
-          <span className="text-gray-700">
-            Shelf &lt;notifications@shelf.nu&gt;
-          </span>
-        </p>
-        <p>
-          <span className="text-gray-400">To:</span>{" "}
-          <span className="text-gray-700">jane@example.com</span>
-        </p>
-        <p>
-          <span className="text-gray-400">Subject:</span>{" "}
-          <span className="text-gray-700">
-            ✅ Booking reserved (Office Equipment Booking) - shelf.nu
-          </span>
-        </p>
-      </div>
-
-      {/* Email body viewport — scrollable gray area with white card */}
-      <div
-        className="overflow-y-auto bg-gray-200 p-6"
-        style={{ maxHeight: "600px" }}
-      >
-        <div
-          className="mx-auto rounded-lg bg-white shadow-sm"
-          style={{
-            maxWidth: "600px",
-            fontFamily: "Arial, Helvetica, sans-serif",
-          }}
-        >
-          {/* Matches Container from bookings-updates-template.tsx */}
-          <div
-            style={{
-              padding: "32px 16px",
-              textAlign: "center",
-            }}
-          >
-            {/* Logo */}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                marginBottom: "32px",
-              }}
-            >
-              <img
-                src="/static/images/logo-full-color(x2).png"
-                alt="Shelf logo"
-                style={{ height: "32px", width: "auto" }}
-              />
-            </div>
-
-            {/* Email heading */}
-            <div style={{ margin: "32px" }}>
-              <h1
-                style={{
-                  fontSize: "20px",
-                  color: "#101828",
-                  fontWeight: "600",
-                  marginBottom: "16px",
-                }}
-              >
-                Booking reservation for Jane Doe
-              </h1>
-              <h2
-                style={{
-                  fontSize: "16px",
-                  color: "#101828",
-                  fontWeight: "600",
-                  marginBottom: "16px",
-                }}
-              >
-                Office Equipment Booking | 3 assets
-              </h2>
-              <p style={{ fontSize: "16px", color: "#344054" }}>
-                <span style={{ color: "#101828", fontWeight: "600" }}>
-                  Custodian:
-                </span>{" "}
-                Jane Doe
-              </p>
-              <p style={{ fontSize: "16px", color: "#344054" }}>
-                <span style={{ color: "#101828", fontWeight: "600" }}>
-                  From:
-                </span>{" "}
-                01/15/26, 9:00 AM
-              </p>
-              <p style={{ fontSize: "16px", color: "#344054" }}>
-                <span style={{ color: "#101828", fontWeight: "600" }}>To:</span>{" "}
-                01/17/26, 5:00 PM
-              </p>
-            </div>
-
-            {/* View button */}
-            <div style={EMAIL_PREVIEW_VIEW_BUTTON_STYLE}>
-              View booking in app
-            </div>
-
-            {/* Custom footer - live preview */}
-            {footerText ? (
-              <p
-                style={{
-                  fontSize: "13px",
-                  color: "#667085",
-                  borderTop: "1px solid #EAECF0",
-                  paddingTop: "16px",
-                  marginTop: "16px",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {footerText}
-              </p>
-            ) : null}
-
-            {/* Standard email footer */}
-            <p
-              style={{
-                marginTop: "32px",
-                fontSize: "14px",
-                color: "#344054",
-              }}
-            >
-              This email was sent to jane@example.com because it is part of the
-              workspace{" "}
-              <span style={{ color: "#101828", fontWeight: "600" }}>
-                &quot;{organizationName}&quot;
-              </span>
-              .
-              <br /> If you think you weren&apos;t supposed to have received
-              this email please contact the owner of the workspace.
-            </p>
-            <p
-              style={{
-                fontSize: "14px",
-                color: "#344054",
-                marginBottom: "32px",
-              }}
-            >
-              &copy; 2026 Shelf.nu
+    <div className="flex flex-col gap-8">
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">
+              Email delivery
+            </h2>
+            <p className="mt-1 text-sm text-gray-600">
+              Customize automatic emails sent by IOIO Lab.
             </p>
           </div>
         </div>
-      </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <DeliveryValue
+            label="Sender"
+            value={
+              delivery.configured
+                ? `${delivery.senderName} <${delivery.senderAddress}>`
+                : "Not configured"
+            }
+          />
+          <DeliveryValue label="Provider" value={delivery.provider} />
+          <DeliveryValue
+            label="Status"
+            value={delivery.configured ? "Configured" : "Not configured"}
+          />
+        </div>
+        <p className="mt-4 text-xs text-gray-500">
+          Authentication emails, including verification and password reset, are
+          managed by Supabase Auth.
+        </p>
+      </section>
+
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">
+            Automatic email templates
+          </h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Customize supported workspace notifications. Missing or restored
+            templates use the built-in default.
+          </p>
+        </div>
+
+        <div
+          className="mt-5 flex flex-wrap gap-2"
+          aria-label="Email categories"
+        >
+          {categories.map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setCategory(item)}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                category === item
+                  ? "border-red-700 bg-red-700 text-white"
+                  : "border-gray-200 bg-white text-gray-800 hover:bg-gray-50"
+              }`}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-5 grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
+          <div className="flex flex-col gap-2">
+            {visibleTemplates.map((template) => (
+              <button
+                key={template.key}
+                type="button"
+                onClick={() => setSelectedKey(template.key)}
+                className={`rounded-lg border p-3 text-left text-sm ${
+                  selected?.key === template.key
+                    ? "border-red-700 bg-red-700 text-white"
+                    : "border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                <span
+                  className={`block font-medium ${
+                    selected?.key === template.key
+                      ? "text-white"
+                      : "text-gray-900"
+                  }`}
+                >
+                  {template.name}
+                </span>
+                <span
+                  className={`mt-1 block text-xs leading-5 ${
+                    selected?.key === template.key
+                      ? "text-white/90"
+                      : "text-gray-500"
+                  }`}
+                >
+                  {template.description}
+                </span>
+                <span
+                  className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                    selected?.key === template.key
+                      ? "bg-white/20 text-white"
+                      : !template.enabled
+                      ? "bg-gray-100 text-gray-600"
+                      : template.customized
+                      ? "bg-blue-50 text-blue-700"
+                      : "bg-gray-100 text-gray-600"
+                  }`}
+                >
+                  {!template.enabled
+                    ? "Disabled"
+                    : template.customized
+                    ? "Customized"
+                    : "Default"}
+                </span>
+              </button>
+            ))}
+            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+              <p className="font-medium text-gray-900">Authentication emails</p>
+              <p className="mt-1">{PASSWORD_RESET_NOTE}</p>
+            </div>
+          </div>
+
+          {selected ? (
+            <TemplateEditor key={selected.key} template={selected} />
+          ) : null}
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">
+            Custom email footer
+          </h2>
+          <p className="mt-1 text-sm text-gray-600">
+            This message is appended to supported workspace emails.
+          </p>
+        </div>
+        <Form method="post" className="mt-4 max-w-2xl space-y-3">
+          <input type="hidden" name="intent" value="save-footer" />
+          <textarea
+            name="customEmailFooter"
+            value={footer}
+            maxLength={EMAIL_FOOTER_MAX_LENGTH}
+            rows={4}
+            onChange={(event) => setFooter(event.target.value)}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-100"
+            placeholder="Optional footer message"
+          />
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs text-gray-500">
+              {footer.length} / {EMAIL_FOOTER_MAX_LENGTH}
+            </span>
+            <Button type="submit">Save footer</Button>
+          </div>
+        </Form>
+      </section>
     </div>
+  );
+}
+
+function TemplateEditor({ template }: { template: Template }) {
+  if (!template.editable) {
+    return (
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+        <h3 className="font-semibold text-gray-900">{template.name}</h3>
+        <p className="mt-2">
+          This message uses the existing account service and is not editable
+          from workspace settings.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 rounded-xl border border-gray-200 bg-white p-5">
+      <EditableTemplateEditor template={template} />
+    </div>
+  );
+}
+
+function EditableTemplateEditor({ template }: { template: Template }) {
+  const [subject, setSubject] = useState(template.subject);
+  const [body, setBody] = useState(template.body);
+  const [enabled, setEnabled] = useState(template.enabled);
+  const [activeField, setActiveField] = useState<"subject" | "body">("body");
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+
+  function insertVariable(variable: string) {
+    const token = `{{${variable}}}`;
+    const target =
+      activeField === "subject" ? subjectRef.current : bodyRef.current;
+    const currentValue = activeField === "subject" ? subject : body;
+    const start = target?.selectionStart ?? currentValue.length;
+    const end = target?.selectionEnd ?? start;
+    const nextValue = `${currentValue.slice(
+      0,
+      start
+    )}${token}${currentValue.slice(end)}`;
+
+    if (activeField === "subject") {
+      setSubject(nextValue);
+    } else {
+      setBody(nextValue);
+    }
+
+    window.requestAnimationFrame(() => {
+      target?.focus();
+      target?.setSelectionRange(start + token.length, start + token.length);
+    });
+  }
+
+  return (
+    <div className="min-w-0">
+      <Form method="post" className="space-y-4">
+        <input type="hidden" name="templateKey" value={template.key} />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-gray-900">{template.name}</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              Customize this automatic IOIO Lab email.
+            </p>
+          </div>
+          {template.canDisable ? (
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                name="enabled"
+                checked={enabled}
+                onChange={(event) => setEnabled(event.target.checked)}
+                className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+              />
+              Enabled
+            </label>
+          ) : (
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600">
+              Required
+            </span>
+          )}
+        </div>
+        <label className="block text-sm font-medium text-gray-700">
+          Subject
+          <input
+            ref={subjectRef}
+            name="subject"
+            value={subject}
+            onFocus={() => setActiveField("subject")}
+            onChange={(event) => setSubject(event.target.value)}
+            maxLength={200}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-100"
+          />
+        </label>
+        <label className="block text-sm font-medium text-gray-700">
+          Message
+          <textarea
+            ref={bodyRef}
+            name="body"
+            value={body}
+            onFocus={() => setActiveField("body")}
+            onChange={(event) => setBody(event.target.value)}
+            rows={9}
+            className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 font-normal text-gray-900 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-100"
+          />
+        </label>
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-medium text-gray-800">
+              Available variables
+            </span>
+            <span className="text-xs text-gray-500">
+              Click to insert into{" "}
+              {activeField === "subject" ? "Subject" : "Body"}
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {template.variables.map((variable) => (
+              <button
+                key={variable}
+                type="button"
+                onClick={() => insertVariable(variable)}
+                className="rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs text-gray-700 hover:border-primary-400 hover:text-primary-700"
+              >
+                {`{{${variable}}}`}
+              </button>
+            ))}
+          </div>
+        </div>
+        <Preview subject={subject} body={body} />
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            name="intent"
+            value="restore-template"
+            onClick={(event) => {
+              if (
+                !window.confirm(
+                  "Restore this email template to its built-in default?"
+                )
+              ) {
+                event.preventDefault();
+              }
+            }}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700"
+          >
+            Restore default
+          </button>
+          <button
+            type="submit"
+            name="intent"
+            value="save-template"
+            className="rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-800"
+          >
+            Save changes
+          </button>
+        </div>
+      </Form>
+    </div>
+  );
+}
+
+function Preview({ subject, body }: { subject: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+        Preview
+      </p>
+      <p className="mt-3 text-xs font-medium uppercase tracking-wide text-gray-500">
+        Subject
+      </p>
+      <p className="mt-1 text-sm font-semibold text-gray-900">
+        {renderSample(subject)}
+      </p>
+      <p className="mt-3 text-xs font-medium uppercase tracking-wide text-gray-500">
+        Message
+      </p>
+      <p className="mt-1 whitespace-pre-wrap text-sm text-gray-700">
+        {renderSample(body)}
+      </p>
+    </div>
+  );
+}
+
+function renderSample(value: string) {
+  const samples: Record<string, string> = {
+    firstName: "Alex",
+    lastName: "Student",
+    displayName: "Alex Student",
+    itemName: "Makey Makey Kit",
+    unitNumber: " #003",
+    quantity: "2",
+    reservationTitle: "Interaction Design",
+    bookingName: "Interaction Design",
+    assetCount: "3",
+    borrowDate: "18 Sep 2026",
+    startDate: "20 Sep 2026",
+    endDate: "25 Sep 2026",
+    currentDueDate: "2 Oct 2026",
+    dueDate: "2 Oct 2026",
+    requestedDate: "9 Oct 2026",
+    pickupLocation: "Kit Return Zone",
+    pickupHours: "Mon-Fri, 09:00-16:00",
+    ioioOpeningHours: "Mon-Fri, 09:00-16:00",
+    staffComment: "",
+    actionReason: "Return check needed",
+    borrowerName: "Alex Student",
+    issueType: "Missing part",
+    returnLocation: "Kit Return Zone",
+    staffName: "IOIO Staff",
+    organizationName: "IOIO Lab",
+  };
+  return value.replace(
+    /{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}/g,
+    (_, key: string) => samples[key] ?? ""
   );
 }

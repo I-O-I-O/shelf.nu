@@ -1,16 +1,17 @@
 import { DonutChart } from "@tremor/react";
-import { useLoaderData } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
-import type { loader } from "~/routes/_layout+/home";
+import type { buildAssetsByStatusChart } from "~/utils/dashboard.server";
 import { DashboardEmptyState } from "./empty-state";
 import FallbackLoading from "./fallback-loading";
 
 import { Badge } from "../shared/badge";
 import { Button } from "../shared/button";
 
-export default function AssetsByStatusChart() {
-  const { assetsByStatus } = useLoaderData<typeof loader>();
-
+export default function AssetsByStatusChart({
+  assetsByStatus,
+}: {
+  assetsByStatus: ReturnType<typeof buildAssetsByStatusChart>;
+}) {
   const { chartData } = assetsByStatus;
 
   return (

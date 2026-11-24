@@ -1,3 +1,4 @@
+import { PrinterIcon } from "lucide-react";
 import {
   data,
   redirect,
@@ -169,7 +170,7 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       action: PermissionAction.delete,
     });
 
-    await deleteLocation({ id, organizationId });
+    const deletedLocation = await deleteLocation({ id, organizationId });
 
     sendNotification({
       title: "Location deleted",
@@ -178,7 +179,10 @@ export async function action({ context, request, params }: ActionFunctionArgs) {
       senderId: authSession.userId,
     });
 
-    return redirect(`/locations`);
+    const returnToParent = deletedLocation.parentId
+      ? `?selectedLocation=${encodeURIComponent(deletedLocation.parentId)}`
+      : "";
+    return redirect(`/locations${returnToParent}`);
   } catch (cause) {
     const reason = makeShelfError(cause, { userId, id });
     return data(error(reason), { status: reason.status });
@@ -236,6 +240,16 @@ export default function LocationPage() {
           ),
         }}
       >
+        <Button
+          to={`/labels?locationId=${encodeURIComponent(location.id)}`}
+          variant="secondary"
+          size="sm"
+          aria-label="Create location label"
+          tooltip="Create label"
+          className="size-9 shrink-0 rounded-lg p-2"
+        >
+          <PrinterIcon className="size-4" />
+        </Button>
         <ActionsDropdown
           location={{ ...location, childCount: childLocations?.length }}
           assetCount={totalAssetsWithinLocation}
@@ -268,6 +282,19 @@ export default function LocationPage() {
               <p className=" text-gray-600">{location.description}</p>
             </Card>
           ) : null}
+
+          <Card>
+            <p className="mb-3 text-sm font-semibold text-gray-900">
+              Location image
+            </p>
+            <ImageWithPreview
+              className="h-48 w-full rounded-lg"
+              imageUrl={location.imageUrl ?? undefined}
+              thumbnailUrl={location.thumbnailUrl}
+              alt={location.name}
+              withPreview
+            />
+          </Card>
 
           <TextualDivider text="Details" className="my-8 lg:hidden" />
 

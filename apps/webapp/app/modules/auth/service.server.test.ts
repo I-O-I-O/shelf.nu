@@ -1,6 +1,6 @@
 /**
  * Tests for the SSO guard on the legacy sign-in paths in the auth service:
- * password login, sending an email OTP, sending a password reset code, and
+ * password login, sending an email OTP, sending a password recovery link, and
  * verifying an email OTP.
  *
  * The decision is per-account, so no response given before authentication may
@@ -25,6 +25,7 @@ import {
   revokeAllSessions,
   sendOTP,
   sendResetPasswordLink,
+  signUpWithEmailPass,
   signInWithEmail,
   verifyOtpAndSignin,
 } from "./service.server";
@@ -53,14 +54,26 @@ vi.mock("~/database/db.server", () => ({ db: {} }));
 // why: every guarded path ends in a Supabase Auth network call; the spies let
 // the tests assert whether it was made, and whether a session was revoked.
 const supabaseMocks = vi.hoisted(() => ({
+  signUp: vi.fn(),
   signInWithPassword: vi.fn(),
   signInWithOtp: vi.fn(),
-  resetPasswordForEmail: vi.fn(),
   verifyOtp: vi.fn(),
-  admin: { signOut: vi.fn() },
+  admin: { signOut: vi.fn(), generateLink: vi.fn() },
 }));
 vi.mock("~/integrations/supabase/client", () => ({
   getSupabaseAdmin: vi.fn(() => ({ auth: supabaseMocks })),
+}));
+
+const { mockSendEmail } = vi.hoisted(() => ({ mockSendEmail: vi.fn() }));
+// why: the mail queue is an external side effect; the generated Supabase
+// recovery URL and code are asserted from the payload instead.
+vi.mock("~/emails/mail.server", () => ({ sendEmail: mockSendEmail }));
+
+// why: rendering an email template is unrelated to whether Supabase generated
+// and Shelf sent the recovery credentials correctly.
+vi.mock("~/emails/password-reset", () => ({
+  passwordResetTextEmail: vi.fn(({ resetUrl, otp }) => `${resetUrl} ${otp}`),
+  passwordResetHtmlEmail: vi.fn().mockResolvedValue("<html>reset</html>"),
 }));
 
 const EMAIL = "jane@acme.com";
@@ -96,6 +109,10 @@ async function rejectionOf(promise: Promise<unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  supabaseMocks.signUp.mockResolvedValue({
+    data: { user: { id: "user-1" } },
+    error: null,
+  });
   vi.mocked(getLegacyLoginDecision).mockResolvedValue({ allowed: true });
   vi.mocked(getLegacyLoginDecisionForUser).mockResolvedValue({ allowed: true });
   supabaseMocks.signInWithPassword.mockResolvedValue({
@@ -103,12 +120,38 @@ beforeEach(() => {
     error: null,
   });
   supabaseMocks.signInWithOtp.mockResolvedValue({ error: null });
-  supabaseMocks.resetPasswordForEmail.mockResolvedValue({ error: null });
+  supabaseMocks.admin.generateLink.mockResolvedValue({
+    data: {
+      properties: { hashed_token: "hashed-token", email_otp: "123456" },
+    },
+    error: null,
+  });
   supabaseMocks.verifyOtp.mockResolvedValue({
     data: { session: SUPABASE_SESSION },
     error: null,
   });
   supabaseMocks.admin.signOut.mockResolvedValue({ data: null, error: null });
+});
+
+describe("signUpWithEmailPass", () => {
+  it("uses Shelf Supabase signup and carries the IOIO signup names as auth metadata", async () => {
+    await signUpWithEmailPass(EMAIL, "password123", {
+      firstName: "Jane",
+      lastName: "Doe",
+    });
+
+    expect(supabaseMocks.signUp).toHaveBeenCalledWith({
+      email: EMAIL,
+      password: "password123",
+      options: {
+        data: {
+          signup_method: "email-password",
+          firstName: "Jane",
+          lastName: "Doe",
+        },
+      },
+    });
+  });
 });
 
 describe("signInWithEmail", () => {
@@ -213,14 +256,24 @@ describe("sendResetPasswordLink", () => {
     givenRefused();
 
     await expect(sendResetPasswordLink(EMAIL)).resolves.toBeUndefined();
-    expect(supabaseMocks.resetPasswordForEmail).not.toHaveBeenCalled();
+    expect(supabaseMocks.admin.generateLink).not.toHaveBeenCalled();
   });
 
-  it("sends a reset code to an allowed address", async () => {
+  it("sends a Supabase recovery link and code to an allowed address", async () => {
     await expect(sendResetPasswordLink(EMAIL)).resolves.toBeUndefined();
 
     expect(getLegacyLoginDecision).toHaveBeenCalledWith(EMAIL);
-    expect(supabaseMocks.resetPasswordForEmail).toHaveBeenCalledWith(EMAIL);
+    expect(supabaseMocks.admin.generateLink).toHaveBeenCalledWith({
+      type: "recovery",
+      email: EMAIL,
+    });
+    expect(mockSendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: EMAIL,
+        subject: "🔐 Reset your Shelf password",
+        text: expect.stringMatching(/token_hash=hashed-token.*123456/),
+      })
+    );
   });
 });
 
@@ -272,6 +325,30 @@ describe("verifyOtpAndSignin", () => {
     );
     expect(supabaseMocks.admin.signOut).not.toHaveBeenCalled();
     expect(session).toMatchObject({ userId: "user-1", email: EMAIL });
+  });
+
+  it("returns signup names from the verified Supabase session metadata", async () => {
+    supabaseMocks.verifyOtp.mockResolvedValueOnce({
+      data: {
+        session: {
+          ...SUPABASE_SESSION,
+          user: {
+            ...SUPABASE_SESSION.user,
+            user_metadata: { firstName: "Jane", lastName: "Doe" },
+          },
+        },
+      },
+      error: null,
+    } as never);
+
+    await expect(verifyOtpAndSignin(EMAIL, "123456")).resolves.toMatchObject({
+      signupProfile: { firstName: "Jane", lastName: "Doe" },
+    });
+    expect(supabaseMocks.verifyOtp).toHaveBeenCalledWith({
+      email: EMAIL,
+      token: "123456",
+      type: "email",
+    });
   });
 });
 

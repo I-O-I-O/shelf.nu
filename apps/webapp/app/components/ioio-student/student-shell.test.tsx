@@ -1,0 +1,249 @@
+import type { FormEventHandler, ReactNode } from "react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+// why: the shell only needs router primitives in this component test; a real
+// data router would add unrelated route loading and navigation behavior.
+vi.mock("react-router", () => ({
+  Link: ({
+    to,
+    children,
+    ...props
+  }: { to: string; children: ReactNode } & Record<string, unknown>) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
+  NavLink: ({
+    to,
+    children,
+    className,
+    onClick,
+  }: {
+    to: string;
+    children: ReactNode;
+    className?: string | ((args: { isActive: boolean }) => string);
+    onClick?: () => void;
+  }) => (
+    <a
+      href={to}
+      className={
+        typeof className === "function"
+          ? className({ isActive: false })
+          : className
+      }
+      onClick={onClick}
+    >
+      {children}
+    </a>
+  ),
+  Form: ({
+    action,
+    method,
+    onSubmit,
+    className,
+    children,
+  }: {
+    action?: string;
+    method?: string;
+    onSubmit?: FormEventHandler<HTMLFormElement>;
+    className?: string;
+    children: ReactNode;
+  }) => (
+    <form
+      action={action}
+      method={method}
+      onSubmit={onSubmit}
+      className={className}
+    >
+      {children}
+    </form>
+  ),
+  Outlet: () => null,
+  useFetcher: () => ({ data: null, submit: () => undefined }),
+  useLocation: () => ({ pathname: "/ioio" }),
+  useNavigate: () => () => undefined,
+  useMatches: () => [],
+  useRouteLoaderData: () => undefined,
+}));
+
+import type { StudentAsset } from "~/modules/ioio-student/service.server";
+import { StudentCheckoutProvider } from "./checkout-context";
+import StudentShell, {
+  getStudentMobileMoreItems,
+  STUDENT_NAVIGATION,
+  StudentBorrowListIndicator,
+} from "./student-shell";
+import { StudentCheckoutButton } from "./student-ui";
+
+function checkoutAsset(): StudentAsset {
+  return {
+    id: "arduino-nano",
+    title: "Arduino Nano",
+    description: null,
+    mainImage: null,
+    mainImageExpiration: null,
+    thumbnailImage: null,
+    assetModel: null,
+    status: "AVAILABLE",
+    type: "QUANTITY_TRACKED",
+    quantity: 8,
+    updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    assetModelId: null,
+    availableQuantity: 8,
+    availableToBook: true,
+    sequentialId: null,
+    category: null,
+    locations: [],
+    kits: [],
+    qrIds: [],
+  };
+}
+
+describe("StudentShell account controls", () => {
+  it("shows only the IOIO student destinations in its navigation", () => {
+    render(<StudentShell />);
+
+    expect(screen.getByText("Student desk")).toBeInTheDocument();
+    const mobileHeader = screen.getByTestId("ioio-mobile-header");
+    expect(mobileHeader).not.toHaveClass("border-b");
+    expect(
+      within(mobileHeader).getByRole("button", { name: "Open notifications" })
+    ).toBeInTheDocument();
+    expect(
+      within(mobileHeader).getByRole("link", { name: /Open borrowing list/ })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveClass(
+      "pt-4",
+      "md:pt-6",
+      "w-full",
+      "min-w-0",
+      "px-4"
+    );
+    expect(screen.getByRole("main")).not.toHaveClass("max-w-6xl");
+    expect(
+      screen.getAllByRole("button", { name: "Open notifications" })
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("link", { name: /Open borrowing list/ })
+    ).toHaveLength(2);
+
+    const expectedLinks = [
+      ["Home", "/ioio"],
+      ["My Loans", "/ioio/loans"],
+      ["About the IOIO Lab", "/ioio/lab"],
+      ["Handbook", "/handbook"],
+      ["Report", "/ioio/report"],
+      ["Settings", "/ioio/settings"],
+    ] as const;
+
+    for (const [label, href] of expectedLinks) {
+      expect(screen.getAllByRole("link", { name: label })[0]).toHaveAttribute(
+        "href",
+        href
+      );
+    }
+    expect(screen.queryByRole("link", { name: "Browse inventory" })).toBeNull();
+
+    const visibleDestinations = screen
+      .getAllByRole("link")
+      .map((link) => link.getAttribute("href"));
+    for (const href of [
+      "/home",
+      "/assets",
+      "/bookings",
+      "/calendar",
+      "/reports",
+      "/settings",
+      "/account-details/workspace",
+    ]) {
+      expect(visibleDestinations).not.toContain(href);
+    }
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
+  });
+
+  it("keeps logout available in the desktop sidebar and More sheet", async () => {
+    const user = userEvent.setup();
+
+    render(<StudentShell />);
+
+    expect(
+      screen.getAllByRole("region", { name: "Student account" })
+    ).toHaveLength(1);
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: /log out/i })).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: /log out/i }).closest("form")
+    ).toHaveAttribute("action", "/logout");
+    expect(
+      screen.getByRole("button", { name: /log out/i }).closest("form")
+    ).toHaveAttribute("method", "post");
+
+    await user.click(screen.getByRole("button", { name: "More destinations" }));
+
+    const moreSheet = screen.getByRole("dialog", { name: "More" });
+    expect(
+      within(moreSheet).getByRole("region", { name: "Student account" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("region", { name: "Student account" })
+    ).toHaveLength(1);
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /current workspace/i })
+    ).toBeNull();
+    expect(
+      within(moreSheet).getAllByRole("button", { name: /log out/i })
+    ).toHaveLength(1);
+  });
+});
+
+describe("Student borrowing list feedback", () => {
+  it("builds More from student desktop navigation destinations only", () => {
+    const primaryDestinations = new Set([
+      "/ioio",
+      "/ioio/loans",
+      "/ioio/report",
+    ]);
+    const desktopDestinations = STUDENT_NAVIGATION.filter(
+      (item) => !primaryDestinations.has(item.to)
+    );
+    const moreItems = getStudentMobileMoreItems();
+
+    expect(moreItems.map((item) => item.to)).toEqual(
+      desktopDestinations.map((item) => item.to)
+    );
+    expect(moreItems.map((item) => item.to)).not.toContain("/ioio/checkout");
+    expect(moreItems.map((item) => item.to)).not.toContain("/ioio/report");
+    expect(moreItems[0]?.label).toBe(desktopDestinations[0]?.label);
+    expect(moreItems[0]?.Icon).toBe(desktopDestinations[0]?.Icon);
+  });
+
+  it("updates its existing count and confirms the item beside the basket", async () => {
+    window.sessionStorage.clear();
+    const user = userEvent.setup();
+
+    render(
+      <StudentCheckoutProvider>
+        <StudentBorrowListIndicator />
+        <StudentCheckoutButton asset={checkoutAsset()} />
+      </StudentCheckoutProvider>
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Add to borrow list" })
+    );
+
+    expect(screen.getByRole("link", { name: /1 selected item/i })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Arduino Nano added to borrow list"
+    );
+    expect(screen.getByRole("button", { name: "In borrow list" })).toBeTruthy();
+  });
+});

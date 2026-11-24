@@ -1,21 +1,25 @@
 import { AreaChart } from "@tremor/react";
-import { useLoaderData } from "react-router";
 import { ClientOnly } from "remix-utils/client-only";
-import type { loader } from "~/routes/_layout+/home";
 import { DashboardEmptyState } from "../dashboard/empty-state";
 import FallbackLoading from "../dashboard/fallback-loading";
 import { Button } from "../shared/button";
 
-export default function AssetGrowthChart() {
-  const { assetGrowthData, totalAssets } = useLoaderData<typeof loader>();
-
+export default function AssetGrowthChart({
+  assetGrowthData,
+  totalAssets,
+}: {
+  assetGrowthData: Array<{
+    month: string;
+    year: number;
+    "Total assets": number;
+  }>;
+  totalAssets: number;
+}) {
   // Build short month labels: "Mar '25"
-  const chartData = assetGrowthData.map(
-    (d: { month: string; year: number; "Total assets": number }) => ({
-      date: `${d.month.slice(0, 3)} '${String(d.year).slice(2)}`,
-      "Total assets": d["Total assets"],
-    })
-  );
+  const chartData = assetGrowthData.map((d) => ({
+    date: `${d.month.slice(0, 3)} '${String(d.year).slice(2)}`,
+    "Total assets": d["Total assets"],
+  }));
 
   return (
     <div className="flex h-full flex-col rounded border border-gray-200 bg-white">

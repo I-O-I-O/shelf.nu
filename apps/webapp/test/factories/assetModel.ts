@@ -12,13 +12,17 @@ export function createAssetModel(
     name: "Dell Latitude 5550",
     description: "Standard issue laptop",
     image: null,
+    imageStoragePath: null,
     thumbnailImage: null,
+    thumbnailImageStoragePath: null,
     defaultCategoryId: null,
     defaultValuation: null,
     organizationId: "org-123",
     userId: "user-123",
     createdAt: new Date("2023-01-01"),
     updatedAt: new Date("2023-01-01"),
+    importIdentityKey: null,
     ...overrides,
+    ioioHidden: overrides.ioioHidden ?? false,
   };
 }

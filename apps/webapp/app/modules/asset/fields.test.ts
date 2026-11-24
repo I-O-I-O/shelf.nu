@@ -1,7 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { CURRENT_BOOKING_SLICE_FILTER, getAssetOverviewFields } from "./fields";
+import {
+  advancedAssetIndexFields,
+  assetIndexFields,
+  CURRENT_BOOKING_SLICE_FILTER,
+  getAssetOverviewFields,
+} from "./fields";
 
 describe("getAssetOverviewFields", () => {
+  it("selects the asset model image URLs and paths used by the detail resolver", () => {
+    expect(getAssetOverviewFields().assetModel).toMatchObject({
+      select: {
+        image: true,
+        thumbnailImage: true,
+        imageStoragePath: true,
+        thumbnailImageStoragePath: true,
+      },
+    });
+  });
+  it("selects the kit cover used as the detail image fallback", () => {
+    expect(getAssetOverviewFields().assetKits).toMatchObject({
+      select: {
+        kit: { select: { image: true } },
+      },
+    });
+  });
+  it("selects the kit cover used as the detail image fallback", () => {
+    expect(getAssetOverviewFields().assetKits).toMatchObject({
+      select: {
+        kit: { select: { image: true } },
+      },
+    });
+  });
   it("includes full barcodes relation when canUseBarcodes is true", () => {
     const result = getAssetOverviewFields(true);
 
@@ -48,6 +77,21 @@ describe("getAssetOverviewFields", () => {
     for (const key of baseKeys) {
       expect(withBarcodes).toHaveProperty(key);
       expect(withoutBarcodes).toHaveProperty(key);
+    }
+  });
+});
+
+describe("asset index image selection", () => {
+  it("loads model cover URLs and paths for simple and advanced inventory queries", () => {
+    for (const fields of [assetIndexFields(), advancedAssetIndexFields()]) {
+      expect(fields.assetModel).toMatchObject({
+        select: {
+          image: true,
+          thumbnailImage: true,
+          imageStoragePath: true,
+          thumbnailImageStoragePath: true,
+        },
+      });
     }
   });
 });

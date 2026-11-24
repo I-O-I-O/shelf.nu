@@ -342,6 +342,7 @@ const BarcodesInput = forwardRef<BarcodesInputRef, BarcodesInputProps>(
                     disabled={disabled}
                     name={valueName(i)}
                     value={barcode.value}
+                    inputClassName="ioio-identifier"
                     placeholder="Enter barcode value"
                     onChange={(e) => {
                       barcodes[i].value = normalizeBarcodeValue(

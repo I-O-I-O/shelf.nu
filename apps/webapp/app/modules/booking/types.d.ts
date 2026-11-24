@@ -28,6 +28,8 @@ export interface SchedulerData {
   id: string;
   hints: ClientHint;
   eventType: BOOKING_SCHEDULER_EVENTS_ENUM;
+  organizationId?: string;
+  readyAt?: string;
 }
 
 export type BookingUpdateIntent =

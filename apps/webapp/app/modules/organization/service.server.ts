@@ -5,9 +5,10 @@ import {
   Roles,
 } from "@prisma/client";
 import type { Organization, Prisma, TierId, User } from "@prisma/client";
+import type { ITXClientDenyList } from "@prisma/client/runtime/library";
 import type Stripe from "stripe";
 
-import { db } from "~/database/db.server";
+import { db, type ExtendedPrismaClient } from "~/database/db.server";
 import { sendEmail } from "~/emails/mail.server";
 import { DEFAULT_MAX_IMAGE_UPLOAD_SIZE } from "~/utils/constants";
 import { ADMIN_EMAIL } from "~/utils/env";
@@ -32,22 +33,30 @@ import { resolveUserDisplayName } from "~/utils/user";
 import { newOwnerEmailText, previousOwnerEmailText } from "./email";
 import { recordEvent } from "../activity-event/service.server";
 import { defaultFields } from "../asset-index-settings/helpers";
-import { defaultUserCategories } from "../category/default-categories";
+import { IOIO_INITIAL_CATEGORY_DEFAULTS } from "../category/ioio-categories";
 import { updateUserTierId } from "../tier/service.server";
 import { USER_NAME_SELECT } from "../user/fields";
 import { getDefaultWeeklySchedule } from "../working-hours/service.server";
 
 const label: ErrorLabel = "Organization";
 
+/** Transaction client type used by this app's extended Prisma client. */
+export type OrganizationTransactionClient = Omit<
+  ExtendedPrismaClient,
+  ITXClientDenyList
+>;
+
 export async function getOrganizationById<T extends Prisma.OrganizationInclude>(
   id: Organization["id"],
   extraIncludes?: T
 ) {
   try {
-    return (await db.organization.findUniqueOrThrow({
+    const queryOptions: Prisma.OrganizationFindUniqueOrThrowArgs = {
       where: { id },
       include: extraIncludes,
-    })) as Prisma.OrganizationGetPayload<{ include: T }>;
+    };
+    const organization = await db.organization.findUniqueOrThrow(queryOptions);
+    return organization as Prisma.OrganizationGetPayload<{ include: T }>;
   } catch (cause) {
     throw new ShelfError({
       cause,
@@ -183,12 +192,16 @@ export async function createOrganization({
   userId,
   image,
   currency,
+  tx,
 }: Pick<Organization, "name" | "currency"> & {
   userId: User["id"];
   image: File | null;
+  /** Existing Shelf organization creation can participate in a caller transaction. */
+  tx?: OrganizationTransactionClient;
 }) {
   try {
-    const owner = await db.user.findFirstOrThrow({
+    const client: OrganizationTransactionClient = tx ?? db;
+    const owner = await client.user.findFirstOrThrow({
       where: { id: userId },
       select: {
         id: true,
@@ -214,7 +227,14 @@ export async function createOrganization({
       type: OrganizationType.TEAM,
       hasSequentialIdsMigrated: true, // New organizations don't need migration
       categories: {
-        create: defaultUserCategories.map((c) => ({ ...c, userId })),
+        create: IOIO_INITIAL_CATEGORY_DEFAULTS.map(
+          ({ name, description, color }) => ({
+            name,
+            description,
+            color,
+            userId,
+          })
+        ),
       },
       userOrganizations: {
         create: {
@@ -264,10 +284,10 @@ export async function createOrganization({
       },
     } satisfies Prisma.OrganizationCreateInput;
 
-    const org = await db.organization.create({ data });
+    const org = await client.organization.create({ data });
 
     if (logo) {
-      await db.image.create({
+      await client.image.create({
         data: {
           blob: logo.blob,
           contentType: logo.contentType,

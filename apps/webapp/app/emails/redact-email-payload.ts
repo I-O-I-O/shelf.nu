@@ -14,8 +14,9 @@
 import { REDACTED_URL_PART } from "~/utils/redact";
 import type { EmailPayloadType } from "./types";
 
-/** A `token` query parameter's value, in a plain or HTML-escaped URL. */
-const TOKEN_QUERY_PARAM = /([?&](?:amp;)?token=)[^&\s"'<>]+/gi;
+/** A token query parameter's value, in a plain or HTML-escaped URL. */
+const TOKEN_QUERY_PARAM =
+  /([?&](?:amp;)?(?:token|token_hash|access_token|refresh_token)=)[^&\s"'<>]+/gi;
 
 /** A JSON Web Token anywhere in the text: three base64url segments. */
 const JSON_WEB_TOKEN = /\beyJ[\w-]+\.[\w-]+\.[\w-]+/g;

@@ -1,6 +1,6 @@
 /**
  * Unit tests for `buildQuantityData` — the mapping from the shared
- * `getAssetAvailability` primitive's current-state (unwindowed) result into
+ * `getAssetAvailability` primitive's immediate borrowing-window result into
  * the `QuantityData` shape the asset overview sidebar renders.
  *
  * This is the regression test for GitHub #2724: the asset overview's
@@ -15,10 +15,8 @@
  * were sitting on the shelf, physically untouched, right now.
  *
  * `buildQuantityData` is a pure function (no I/O, no mocks needed): it maps
- * `AssetAvailability.physicalAvailable` straight onto the headline
- * `available` field, so the fix is verified by construction — there is no
- * formula left in this module that can re-introduce the bug by summing
- * `reserved` back into `available`.
+ * the current-window `bookable` count, capped by `physicalAvailable`, onto the
+ * headline `available` field.
  *
  * @see {@link file://./quantity-overview.server.ts}
  * @see {@link file://./availability.server.ts} - Where `physicalAvailable`/`reservedTotal` are computed
@@ -47,13 +45,11 @@ function makeAvailability(
 }
 
 describe("buildQuantityData", () => {
-  it("maps physicalAvailable onto the headline `available` — never the old negative formula (#2724)", () => {
-    // bb1/bb2 fixture: asset total 10, custody 0, kits 0, checked-out 0,
-    // two non-overlapping standalone RESERVED rows of 7 units each. Called
-    // with NO window (current-state mode, as the overview loader does), so
-    // `getAssetAvailability` reports the plain informational sum for
-    // `reservedTotal` (14) while `physicalAvailable` stays 10 — the units
-    // are still sitting on the shelf, unaffected by future reservations.
+  it("uses current-window bookable stock and ignores non-overlapping future reservations", () => {
+    // bb1/bb2 fixture: two non-overlapping future reservations total 14,
+    // but neither overlaps the immediate borrowing window. The primitive
+    // reports bookable 10 for this window while keeping the global reserved
+    // figure available for its separate informational row.
     const availability = makeAvailability({
       total: 10,
       inCustody: 0,
@@ -63,7 +59,7 @@ describe("buildQuantityData", () => {
       reservedTotal: 14,
       reservingBookingCount: 2,
       physicalAvailable: 10,
-      bookable: -4,
+      bookable: 10,
     });
 
     const quantityData = buildQuantityData({
@@ -72,14 +68,28 @@ describe("buildQuantityData", () => {
       inLocationsManual: 0,
     });
 
-    // The old inline formula (`total - inKits - custody - reserved -
-    // checkedOut`) would have reported `10 - 0 - 0 - 14 - 0 = -4` here —
-    // negative, and the real #2724 report was `-11` on a differently
-    // shaped asset. Either way, "Available" must never go negative just
-    // because reservations exist for later dates.
     expect(quantityData.available).toBe(10);
     expect(quantityData.reserved).toBe(14);
     expect(quantityData.reservingBookingCount).toBe(2);
+  });
+
+  it("subtracts current Shelf holds from the free-to-borrow count", () => {
+    const availability = makeAvailability({
+      total: 5,
+      physicalAvailable: 5,
+      bookable: 3,
+      reservedTotal: 2,
+      reservingBookingCount: 1,
+    });
+
+    const quantityData = buildQuantityData({
+      availability,
+      inLocations: 5,
+      inLocationsManual: 5,
+    });
+
+    expect(quantityData.available).toBe(3);
+    expect(quantityData.custodyAvailable).toBe(3);
   });
 
   it("keeps `available` and `custodyAvailable` numerically converged (both source physicalAvailable)", () => {

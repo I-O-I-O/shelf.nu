@@ -26,8 +26,14 @@ import {
   createNote,
 } from "~/modules/note/service.server";
 import { getQr } from "~/modules/qr/service.server";
+import { createReport } from "~/modules/report-found/service.server";
 import { ShelfError } from "~/utils/error";
-import { createSignedUrl } from "~/utils/storage.server";
+import {
+  createSignedUrl,
+  parseFileFormData,
+  removeStorageImageObject,
+  resolveStorageImageUrl,
+} from "~/utils/storage.server";
 import { resolveAssetIdsForBulkOperation } from "./bulk-operations-helper.server";
 import {
   ASSET_SEARCH_CEILING_MESSAGE,
@@ -48,17 +54,22 @@ import {
   createAsset,
   duplicateAsset,
   setKitCustodyAfterAssetImport,
+  setIndividualAssetAvailability,
   getActiveCustomFieldsForAsset,
   moveAssetLocationUnits,
   getAssets,
+  getAssetsOrderBy,
   parseAssetValuation,
   placeUnplacedUnits,
   refreshExpiredAssetImages,
+  resolveAssetImagesForPresentation,
+  shouldUseDefaultAssetBrowseOrder,
   releaseQuantity,
   replaceAssetPlacements,
   relinkAssetQrCode,
   renderBulkAssetTitle,
   updateAsset,
+  updateAssetMainImage,
   uploadDuplicateAssetMainImage,
 } from "./service.server";
 
@@ -87,6 +98,9 @@ vitest.mock("~/database/db.server", () => ({
       findMany: vitest.fn().mockResolvedValue([]),
       findUnique: vitest.fn().mockResolvedValue(null),
       count: vitest.fn().mockResolvedValue(0),
+      // why: staff Inventory's page-wide quantity summary uses an unpaginated
+      // grouped aggregate rather than summing only the rows on the current page.
+      groupBy: vitest.fn().mockResolvedValue([]),
       update: vitest.fn().mockResolvedValue({}),
       updateMany: vitest.fn().mockResolvedValue({ count: 0 }),
       deleteMany: vitest.fn().mockResolvedValue({ count: 0 }),
@@ -164,6 +178,11 @@ vitest.mock("~/database/db.server", () => ({
     // why: availability math must subtract units tied to ONGOING/OVERDUE bookings
     bookingAsset: {
       aggregate: vitest.fn().mockResolvedValue({ _sum: { quantity: 0 } }),
+      findFirst: vitest.fn().mockResolvedValue(null),
+    },
+    ioioWriteOperation: {
+      findFirst: vitest.fn().mockResolvedValue(null),
+      create: vitest.fn().mockResolvedValue({ id: "broken-operation-1" }),
     },
     // why: moveAssetLocationUnits + placeUnplacedUnits read/write the
     // AssetLocation pivot for the manual placement rows. `findFirst` is
@@ -204,6 +223,9 @@ vitest.mock("~/database/db.server", () => ({
       findFirst: vitest
         .fn()
         .mockResolvedValue({ firstName: "John", lastName: "Doe" }),
+      findUniqueOrThrow: vitest
+        .fn()
+        .mockResolvedValue({ email: "staff@example.test" }),
     },
   },
 }));
@@ -280,6 +302,12 @@ vitest.mock("~/modules/qr/service.server", () => ({
   getQr: vitest.fn(),
 }));
 
+// why: the broken-unit test verifies the report operation created in the same
+// transaction without writing a real Shelf report row.
+vitest.mock("~/modules/report-found/service.server", () => ({
+  createReport: vitest.fn().mockResolvedValue({ id: "report-broken-1" }),
+}));
+
 // why: setKitCustodyAfterAssetImport delegates to the canonical bulkAssignKitCustody
 // flow (kit/service). Mock it so we can assert the delegation (grouping by
 // custodian) without running the full kit-custody transaction.
@@ -315,6 +343,13 @@ vitest.mock("~/utils/storage.server", async () => {
   return {
     ...actual,
     createSignedUrl: vitest.fn(),
+    // why: return deterministic URLs while testing the resolver's path/legacy
+    // field selection without making a Supabase Storage request.
+    resolveStorageImageUrl: vitest.fn(),
+    // why: exercise the asset image DB write and failure cleanup without
+    // sending this service unit test through the separate Storage HTTP tests.
+    parseFileFormData: vitest.fn(),
+    removeStorageImageObject: vitest.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -1201,6 +1236,118 @@ describe("refreshExpiredAssetImages", () => {
   });
 });
 
+describe("resolveAssetImagesForPresentation", () => {
+  const mockResolveStorageImageUrl = resolveStorageImageUrl as ReturnType<
+    typeof vitest.fn
+  >;
+
+  beforeEach(() => {
+    mockResolveStorageImageUrl.mockImplementation(
+      ({ bucketName, objectPath, legacyUrl }) =>
+        Promise.resolve(
+          objectPath ? `${bucketName}:${objectPath}` : legacyUrl ?? null
+        )
+    );
+  });
+
+  it("returns usable same-origin URLs without signing path-only rows", async () => {
+    mockResolveStorageImageUrl.mockRejectedValue(
+      new Error("Storage unavailable")
+    );
+    const result = await resolveAssetImagesForPresentation([
+      {
+        id: "one",
+        mainImage: null,
+        thumbnailImage: null,
+        mainImageStoragePath: "full-one",
+        thumbnailImageStoragePath: "broken-thumb",
+      },
+      {
+        id: "two",
+        mainImage: null,
+        thumbnailImage: null,
+        mainImageStoragePath: "full-two",
+      },
+    ]);
+    expect(result[0].mainImage).toContain(
+      "/api/asset-image?assetId=one&variant=main&v="
+    );
+    expect(result[0].thumbnailImage).toContain("variant=thumbnail");
+    expect(result[1].mainImage).toContain("assetId=two");
+  });
+
+  it("resolves asset and inherited model objects through the authenticated proxy", async () => {
+    const [asset] = await resolveAssetImagesForPresentation([
+      {
+        id: "asset-1",
+        mainImage: null,
+        thumbnailImage: null,
+        mainImageStoragePath: "org/assets/motor-small.jpg",
+        thumbnailImageStoragePath: "org/assets/motor-small-thumb.jpg",
+        assetModel: {
+          image: null,
+          thumbnailImage: null,
+          imageStoragePath: "org/models/motor-small.jpg",
+          thumbnailImageStoragePath: "org/models/motor-small-thumb.jpg",
+        },
+      },
+    ]);
+    for (const [variant, url] of Object.entries({
+      main: asset.mainImage,
+      thumbnail: asset.thumbnailImage,
+      model: asset.assetModel?.image,
+      "model-thumbnail": asset.assetModel?.thumbnailImage,
+    })) {
+      expect(url).toContain(
+        `/api/asset-image?assetId=asset-1&variant=${variant}&v=`
+      );
+      expect(url).not.toContain("http:");
+    }
+    expect(mockResolveStorageImageUrl).not.toHaveBeenCalledWith(
+      expect.objectContaining({ objectPath: "org/assets/motor-small.jpg" })
+    );
+  });
+
+  it("keeps external URLs and no-image rows, with stable URLs until replacement", async () => {
+    const row = {
+      id: "one",
+      mainImage: null,
+      mainImageStoragePath: "original.webp",
+    };
+    const [first] = await resolveAssetImagesForPresentation([row]);
+    const [reloaded] = await resolveAssetImagesForPresentation([row]);
+    const [replacement] = await resolveAssetImagesForPresentation([
+      { ...row, mainImageStoragePath: "replacement.webp" },
+    ]);
+    expect(first.mainImage).toBe(reloaded.mainImage);
+    expect(first.mainImage).not.toBe(replacement.mainImage);
+    const result = await resolveAssetImagesForPresentation([
+      { id: "external", mainImage: "https://images.example/motor.jpg" },
+      { id: "empty", mainImage: null },
+    ]);
+    expect(result[0].mainImage).toBe("https://images.example/motor.jpg");
+    expect(result[1].mainImage).toBeNull();
+  });
+
+  it("preserves native signing behavior and never replaces an existing web proxy URL during refresh", async () => {
+    const [native] = await resolveAssetImagesForPresentation(
+      [{ id: "one", mainImage: null, mainImageStoragePath: "native.webp" }],
+      { sameOrigin: false }
+    );
+    expect(native.mainImage).toBe("assets:native.webp");
+    const web = {
+      id: "one",
+      organizationId: "org-1",
+      mainImage: "/api/asset-image?assetId=one&variant=main&v=original",
+      mainImageStoragePath: "native.webp",
+      thumbnailImage: null,
+      mainImageExpiration: null,
+    };
+    const [refreshed] = await refreshExpiredAssetImages([web]);
+    expect(refreshed.mainImage).toBe(web.mainImage);
+  });
+});
+
 describe("createAsset quantity validation", () => {
   beforeEach(() => {
     vitest.clearAllMocks();
@@ -1255,6 +1402,32 @@ describe("createAsset quantity validation", () => {
       })
     ).resolves.toEqual({ id: "asset-new" });
   });
+
+  it("uses a reserved QR ID inside the atomic Asset create", async () => {
+    await createAsset({
+      title: "Arduino Nano #001",
+      description: null,
+      userId: "user-1",
+      categoryId: null,
+      valuation: null,
+      organizationId: "org-1",
+      id: "asset-reserved",
+      newQrId: "qr-reserved-1",
+      type: "INDIVIDUAL",
+    });
+
+    expect(db.asset.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          id: "asset-reserved",
+          qrCodes: {
+            create: [expect.objectContaining({ id: "qr-reserved-1" })],
+          },
+        }),
+      })
+    );
+    expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function));
+  });
 });
 
 describe("checkOutQuantity — availability accounting", () => {
@@ -1305,6 +1478,27 @@ describe("checkOutQuantity — availability accounting", () => {
     (db.asset.updateMany as ReturnType<typeof vitest.fn>).mockResolvedValue({
       count: 1,
     });
+  });
+
+  it("rejects direct quantity checkout of a non-borrowable multimeter without changing stock or custody", async () => {
+    mockLock.mockResolvedValueOnce({
+      ...lockedAsset,
+      title: "Multimeter",
+      availableToBook: false,
+    });
+    await expect(
+      checkOutQuantity({
+        assetId: lockedAsset.id,
+        organizationId: "org-1",
+        userId: "user-1",
+        teamMemberId: "team-1",
+        quantity: 1,
+        role: OrganizationRoles.ADMIN,
+      })
+    ).rejects.toMatchObject({ status: 409 });
+    expect(mockCustodyCreate).not.toHaveBeenCalled();
+    expect(mockCreateConsumptionLog).not.toHaveBeenCalled();
+    expect(db.asset.updateMany).not.toHaveBeenCalled();
   });
 
   it("refuses units that are allocated to a kit", async () => {
@@ -2443,6 +2637,23 @@ describe("createAsset cross-org guards", () => {
     // never reach the org-scope lookup.
     expect(db.category.findFirst).not.toHaveBeenCalled();
   });
+
+  it("persists the selected Location record ID on the AssetLocation placement", async () => {
+    const locationId = "container-d1-15-id";
+
+    await createAsset({
+      title: "Container test asset",
+      userId: "user-1",
+      organizationId: "org-A",
+      locationId,
+    } as any);
+
+    expect(db.assetLocation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ locationId }),
+      })
+    );
+  });
 });
 
 describe("createAsset reused barcodes", () => {
@@ -2556,6 +2767,44 @@ describe("updateAsset asset-model activity", () => {
     });
   });
 
+  it.each([false, true])(
+    "persists canonical borrowability %s without changing asset status or stock",
+    async (availableToBook) => {
+      if (availableToBook)
+        (
+          db.ioioWriteOperation.findFirst as ReturnType<typeof vitest.fn>
+        ).mockResolvedValueOnce(null);
+      await updateAsset({
+        id: "asset-1",
+        organizationId: "org-1",
+        userId: "user-1",
+        request: new Request("http://localhost"),
+        availableToBook,
+      });
+      const data = (db.asset.update as ReturnType<typeof vitest.fn>).mock
+        .calls[0][0].data;
+      expect(data.availableToBook).toBe(availableToBook);
+      expect(data).not.toHaveProperty("status");
+      expect(data.quantity).toBeUndefined();
+    }
+  );
+
+  it("cannot re-enable borrowing around an unresolved out-of-service issue", async () => {
+    (
+      db.ioioWriteOperation.findFirst as ReturnType<typeof vitest.fn>
+    ).mockResolvedValueOnce({ id: "report-1" });
+    await expect(
+      updateAsset({
+        id: "asset-1",
+        organizationId: "org-1",
+        userId: "user-1",
+        request: new Request("http://localhost"),
+        availableToBook: true,
+      })
+    ).rejects.toMatchObject({ status: 409 });
+    expect(db.asset.update).not.toHaveBeenCalled();
+  });
+
   it("does not claim the model was removed when the field is absent", async () => {
     // The invariant: an omitted `assetModelId` is not a removal. The inline
     // description, category and valuation edits and the companion asset update
@@ -2608,6 +2857,25 @@ describe("updateAsset asset-model activity", () => {
         expect.objectContaining({ action: "ASSET_MODEL_CHANGED" }),
       ]),
       expect.anything()
+    );
+  });
+
+  it("writes the selected IOIO Return section handling to the Asset row", async () => {
+    await updateAsset({
+      id: "asset-1",
+      organizationId: "org-1",
+      userId: "user-1",
+      returnHandling: "RETURN_TO_RETURN_ZONE",
+      request: new Request("http://localhost/assets/asset-1/edit"),
+    } as never);
+
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "asset-1", organizationId: "org-1" },
+        data: expect.objectContaining({
+          returnHandling: "RETURN_TO_RETURN_ZONE",
+        }),
+      })
     );
   });
 
@@ -5682,6 +5950,7 @@ describe("placeUnplacedUnits", () => {
 describe("getAssets search via UNION", () => {
   const findManyMock = vi.mocked(db.asset.findMany);
   const countMock = vi.mocked(db.asset.count);
+  const groupByMock = vi.mocked(db.asset.groupBy);
   // why: the UNION runs as a raw query; mock it to return a known id set so we
   // can assert getAssets threads those ids into the Prisma where.
   const queryRawMock = vi.mocked(db.$queryRaw);
@@ -5689,6 +5958,7 @@ describe("getAssets search via UNION", () => {
   beforeEach(() => {
     findManyMock.mockReset().mockResolvedValue([]);
     countMock.mockReset().mockResolvedValue(0);
+    groupByMock.mockReset().mockResolvedValue([]);
     queryRawMock.mockReset().mockResolvedValue([{ id: "a1" }, { id: "a2" }]);
   });
 
@@ -5699,6 +5969,57 @@ describe("getAssets search via UNION", () => {
     orderBy: "createdAt" as const,
     orderDirection: "desc" as const,
   };
+
+  it("uses the useful default priority order on an unfiltered first load", async () => {
+    const defaultBrowseOrder = shouldUseDefaultAssetBrowseOrder({
+      search: null,
+      hasActiveFilters: false,
+      hasExplicitSort: false,
+    });
+
+    expect(defaultBrowseOrder).toBe(true);
+    await getAssets({ ...base, defaultBrowseOrder });
+
+    expect(findManyMock.mock.calls[0][0]!.orderBy).toEqual([
+      { consumptionType: { sort: "desc", nulls: "first" } },
+      { bookingAssets: { _count: "desc" } },
+      { valuation: "desc" },
+      { createdAt: "desc" },
+      { id: "asc" },
+    ]);
+  });
+
+  it("keeps the existing ordering when search, filters, or a sort are active", () => {
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: "camera",
+        hasActiveFilters: false,
+        hasExplicitSort: false,
+      })
+    ).toBe(false);
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: null,
+        hasActiveFilters: true,
+        hasExplicitSort: false,
+      })
+    ).toBe(false);
+    expect(
+      shouldUseDefaultAssetBrowseOrder({
+        search: null,
+        hasActiveFilters: false,
+        hasExplicitSort: true,
+      })
+    ).toBe(false);
+
+    expect(
+      getAssetsOrderBy({
+        defaultBrowseOrder: false,
+        orderBy: "title",
+        orderDirection: "asc",
+      })
+    ).toEqual([{ title: "asc" }, { id: "asc" }]);
+  });
 
   it("runs the UNION and filters assets to the matching id set", async () => {
     await getAssets({ ...base, search: "chair" });
@@ -5716,6 +6037,96 @@ describe("getAssets search via UNION", () => {
     await getAssets({ ...base, search: null });
     expect(queryRawMock).not.toHaveBeenCalled();
     expect(findManyMock.mock.calls[0][0]!.where!.OR).toBeUndefined();
+  });
+
+  it("limits the staff Hidden view to hidden assets or hidden AssetModels", async () => {
+    await getAssets({ ...base, search: null, ioioHiddenOnly: true });
+
+    const where = findManyMock.mock.calls[0][0]!.where!;
+    expect(where.AND).toContainEqual({
+      OR: [{ ioioHidden: true }, { assetModel: { is: { ioioHidden: true } } }],
+    });
+    expect(where.availableToBook).toBeUndefined();
+  });
+
+  it("summarizes all filtered inventory instead of only the current page", async () => {
+    groupByMock.mockResolvedValue([
+      {
+        type: AssetType.QUANTITY_TRACKED,
+        _count: { _all: 127 },
+        _sum: { quantity: 3367 },
+      },
+      {
+        type: AssetType.INDIVIDUAL,
+        _count: { _all: 25 },
+        _sum: { quantity: null },
+      },
+    ]);
+
+    const result = await getAssets({
+      ...base,
+      perPage: 100,
+      excludeAssetIds: ["trashed-asset"],
+      locationIds: ["a3-location"],
+      includeTotalInventoryQuantity: true,
+    });
+
+    expect(result.totalInventoryQuantity).toBe(3392);
+    expect(groupByMock).toHaveBeenCalledWith({
+      by: ["type"],
+      where: {
+        organizationId: "org_1",
+        id: { notIn: ["trashed-asset"] },
+        assetLocations: { some: { locationId: { in: ["a3-location"] } } },
+      },
+      _count: { _all: true },
+      _sum: { quantity: true },
+    });
+  });
+
+  it("keeps the full inventory total increasing when a new page of imports displaces older rows", async () => {
+    groupByMock
+      .mockResolvedValueOnce([
+        {
+          type: AssetType.QUANTITY_TRACKED,
+          _count: { _all: 127 },
+          _sum: { quantity: 3367 },
+        },
+        {
+          type: AssetType.INDIVIDUAL,
+          _count: { _all: 25 },
+          _sum: { quantity: null },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          type: AssetType.QUANTITY_TRACKED,
+          _count: { _all: 177 },
+          _sum: { quantity: 3659 },
+        },
+        {
+          type: AssetType.INDIVIDUAL,
+          _count: { _all: 25 },
+          _sum: { quantity: null },
+        },
+      ]);
+
+    const before = await getAssets({
+      ...base,
+      perPage: 100,
+      includeTotalInventoryQuantity: true,
+    });
+    const after = await getAssets({
+      ...base,
+      perPage: 100,
+      includeTotalInventoryQuantity: true,
+    });
+
+    expect(before.totalInventoryQuantity).toBe(3392);
+    expect(after.totalInventoryQuantity).toBe(3684);
+    expect(after.totalInventoryQuantity).toBeGreaterThan(
+      before.totalInventoryQuantity!
+    );
   });
 
   it("fail-closed: whitespace-only search matches nothing, no UNION", async () => {
@@ -6206,14 +6617,11 @@ describe("bulkUpdateAssetLocation — location activity notes", () => {
     vitest.clearAllMocks();
   });
 
-  it("names only the assets the update actually moved", async () => {
-    // A QUANTITY_TRACKED asset is skipped by this path (placements need a
-    // per-location quantity), so the location's timeline must not claim it
-    // arrived. Asserted through the note, which is the only place a reader
-    // ever sees this list.
-    // why: the selection under test — one INDIVIDUAL and one
-    // QUANTITY_TRACKED asset is the only shape that separates "selected" from
-    // "actually moved", which is what the note is asserted on.
+  it("names individual and quantity-pool assets whose locations were moved", async () => {
+    // Quantity-pool moves update each placement with its per-location count;
+    // both tracking types should appear in the location activity notes.
+    // why: the mixed tracking fixture exercises the two canonical placement
+    // paths while keeping the note assertion focused on what actually moved.
     (db.asset.findMany as ReturnType<typeof vitest.fn>).mockResolvedValue([
       {
         id: "asset-individual",
@@ -6273,10 +6681,234 @@ describe("bulkUpdateAssetLocation — location activity notes", () => {
       createSystemLocationNote as ReturnType<typeof vitest.fn>
     ).mock.calls.map((c) => (c[0] as { content: string }).content);
 
-    expect(contents.length).toBeGreaterThan(0);
-    for (const content of contents) {
-      expect(content).toContain("asset-individual");
-      expect(content).not.toContain("asset-qty");
-    }
+    const allContents = contents.join(" ");
+    expect(allContents).toContain("asset-individual");
+    expect(allContents).toContain("asset-qty");
+  });
+});
+
+describe("setIndividualAssetAvailability", () => {
+  it("marks a physical unit broken and writes a report for the Broken items queue", async () => {
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue({
+      id: "unit-002",
+      organizationId: "org-1",
+      assetModelId: "makey-model",
+      title: "Makey Kit #002",
+      type: AssetType.INDIVIDUAL,
+      status: AssetStatus.AVAILABLE,
+      availableToBook: true,
+    });
+    //@ts-expect-error mock setup
+    db.custody.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.bookingAsset.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.ioioWriteOperation.findFirst.mockResolvedValue(null);
+    //@ts-expect-error mock setup
+    db.user.findUniqueOrThrow.mockResolvedValue({
+      email: "staff@example.test",
+    });
+
+    const result = await setIndividualAssetAvailability({
+      id: "unit-002",
+      detailAssetId: "unit-002",
+      organizationId: "org-1",
+      userId: "staff-1",
+      action: "broken",
+      note: "Broken connector",
+    });
+
+    expect(result).toMatchObject({
+      availableToBook: false,
+      status: "BROKEN",
+    });
+    expect(createReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "staff@example.test",
+        assetId: "unit-002",
+        content: expect.stringContaining("Issue: ITEM_DAMAGED"),
+      })
+    );
+    expect(db.ioioWriteOperation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          operationType: "REPORT_PROBLEM",
+          source: "IOIO_STAFF_INVENTORY",
+          status: "SUCCEEDED",
+          reportType: "ITEM_DAMAGED",
+          assetId: "unit-002",
+          description: "Broken connector",
+        }),
+      })
+    );
+  });
+});
+
+describe("updateAssetMainImage", () => {
+  const imagePaths = {
+    originalPath: "user-1/asset-1/main-image-new.webp",
+    thumbnailPath: "user-1/asset-1/main-image-new-thumbnail.webp",
+  };
+
+  function imageFormData() {
+    const formData = new FormData();
+    formData.set("mainImage", JSON.stringify(imagePaths));
+    return formData;
+  }
+
+  beforeEach(() => {
+    vitest.clearAllMocks();
+    vitest.mocked(parseFileFormData).mockResolvedValue(imageFormData());
+  });
+
+  it("persists Shelf storage paths with an organization-scoped asset update", async () => {
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/new", { method: "POST" }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      isNewAsset: true,
+    });
+
+    expect(result).toBe(true);
+    expect(parseFileFormData).toHaveBeenCalledWith(
+      expect.objectContaining({ bucketName: "assets" })
+    );
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "asset-1", organizationId: "org-1" },
+        data: expect.objectContaining({
+          mainImage: null,
+          thumbnailImage: null,
+          mainImageStoragePath: imagePaths.originalPath,
+          thumbnailImageStoragePath: imagePaths.thumbnailPath,
+        }),
+      })
+    );
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty optional upload as no image update", async () => {
+    vitest.mocked(parseFileFormData).mockResolvedValue(new FormData());
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/new", { method: "POST" }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      isNewAsset: true,
+      allowEmptyFile: true,
+    });
+
+    expect(result).toBe(false);
+    expect(db.asset.update).not.toHaveBeenCalled();
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
+  it("leaves an existing image untouched when an edit has no new file", async () => {
+    vitest.mocked(parseFileFormData).mockResolvedValue(new FormData());
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/asset-1/edit", {
+        method: "POST",
+      }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      allowEmptyFile: true,
+    });
+
+    expect(result).toBe(false);
+    expect(db.asset.findFirst).not.toHaveBeenCalled();
+    expect(db.asset.update).not.toHaveBeenCalled();
+    expect(removeStorageImageObject).not.toHaveBeenCalled();
+  });
+
+  it("replaces an image and removes previous objects only after the DB write", async () => {
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue({
+      mainImageStoragePath: "user-1/asset-1/main-image-old.webp",
+      thumbnailImageStoragePath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    });
+    //@ts-expect-error mock setup
+    getSupabaseAdmin.mockReturnValue({
+      storage: {
+        from: () => ({
+          list: vitest.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      },
+    });
+
+    const result = await updateAssetMainImage({
+      request: new Request("http://localhost/assets/asset-1/edit", {
+        method: "POST",
+      }),
+      assetId: "asset-1",
+      userId: "user-1",
+      organizationId: "org-1",
+    });
+
+    expect(result).toBe(true);
+    expect(db.asset.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mainImageStoragePath: imagePaths.originalPath,
+          thumbnailImageStoragePath: imagePaths.thumbnailPath,
+        }),
+      })
+    );
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: "user-1/asset-1/main-image-old.webp",
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    });
+  });
+
+  it("cleans new objects after a DB failure and keeps the old image objects", async () => {
+    const previousPaths = {
+      mainImageStoragePath: "user-1/asset-1/main-image-old.webp",
+      thumbnailImageStoragePath: "user-1/asset-1/main-image-old-thumbnail.webp",
+    };
+    //@ts-expect-error mock setup
+    db.asset.findFirst.mockResolvedValue(previousPaths);
+    //@ts-expect-error mock setup
+    db.$transaction.mockRejectedValueOnce(new Error("local DB write failed"));
+
+    await expect(
+      updateAssetMainImage({
+        request: new Request("http://localhost/assets/asset-1/edit", {
+          method: "POST",
+        }),
+        assetId: "asset-1",
+        userId: "user-1",
+        organizationId: "org-1",
+      })
+    ).rejects.toMatchObject({
+      message: expect.any(String),
+    });
+
+    expect(removeStorageImageObject).toHaveBeenCalledTimes(2);
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: imagePaths.originalPath,
+    });
+    expect(removeStorageImageObject).toHaveBeenCalledWith({
+      bucketName: "assets",
+      objectPath: imagePaths.thumbnailPath,
+    });
+    expect(removeStorageImageObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectPath: previousPaths.mainImageStoragePath,
+      })
+    );
+    expect(removeStorageImageObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectPath: previousPaths.thumbnailImageStoragePath,
+      })
+    );
   });
 });

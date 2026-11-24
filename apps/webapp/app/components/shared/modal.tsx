@@ -16,7 +16,7 @@ const AlertDialogPortal = ({
   ...props
 }: AlertDialogPrimitive.AlertDialogPortalProps) => (
   <AlertDialogPrimitive.Portal {...props}>
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div className="fixed inset-0 z-[100] flex items-end justify-center sm:items-center">
       {children}
     </div>
   </AlertDialogPrimitive.Portal>
@@ -55,7 +55,7 @@ const AlertDialogContent = React.forwardRef<
       <AlertDialogPrimitive.Content
         ref={ref}
         className={tw(
-          "fixed z-[100] flex max-h-[90vh] w-full max-w-md scale-100 flex-col gap-4 rounded bg-white p-6 opacity-100 animate-in fade-in-90 slide-in-from-bottom-10 sm:zoom-in-90 sm:slide-in-from-bottom-0 md:w-full",
+          "fixed inset-x-0 bottom-0 z-[100] flex max-h-[90dvh] w-full max-w-md scale-100 flex-col gap-4 rounded-t-2xl bg-white px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-5 opacity-100 animate-in fade-in-90 slide-in-from-bottom-10 sm:inset-auto sm:rounded sm:p-6 sm:zoom-in-90 sm:slide-in-from-bottom-0 md:w-full",
           className
         )}
         {...props}

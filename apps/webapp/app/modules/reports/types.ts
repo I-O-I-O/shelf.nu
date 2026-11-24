@@ -172,6 +172,11 @@ export interface ReportPayload<TRow = Record<string, unknown>> {
   // Top Booked Kits report specific fields
   /** The #1 most booked kit (independent of pagination) */
   topBookedKit?: TopBookedKitRow | null;
+
+  /** Distribution metrics included with the combined IOIO usage report. */
+  distributionKpis?: ReportKpi[];
+  /** Distribution breakdown included with the combined IOIO usage report. */
+  distributionBreakdown?: DistributionBreakdown;
 }
 
 // -----------------------------------------------------------------------------
@@ -180,10 +185,14 @@ export interface ReportPayload<TRow = Record<string, unknown>> {
 
 /** Compliance rate data with period comparison */
 export interface ComplianceData {
+  /** Number of returned loans due in the period. */
+  completed: number;
   /** Bookings completed on time */
   onTime: number;
   /** Bookings completed late */
   late: number;
+  /** Returned loans without a reliable check-in timestamp. */
+  unavailable: number;
   /** Compliance rate as percentage (0-100), null if no completed bookings */
   rate: number | null;
   /** Comparison to prior period */
@@ -414,10 +423,6 @@ export interface TopBookedAssetRow {
   location: string | null;
   /** Number of times booked in the timeframe */
   bookingCount: number;
-  /** Total days booked */
-  totalDaysBooked: number;
-  /** Time booked percentage (days booked / days in period) */
-  timeBookedRate: number;
 }
 
 /** KPI IDs for the Top Booked Assets report */
@@ -448,10 +453,6 @@ export interface TopBookedKitRow {
   location: string | null;
   /** Number of distinct bookings the kit appeared in during the timeframe */
   bookingCount: number;
-  /** Total days booked (summed booking durations, counted once per booking) */
-  totalDaysBooked: number;
-  /** Time booked percentage (days booked / days in period) */
-  timeBookedRate: number;
 }
 
 /** KPI IDs for the Top Booked Kits report */

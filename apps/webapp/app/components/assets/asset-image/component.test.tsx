@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssetImage } from "./component";
+import { AssetDetailImage } from "./detail-image";
 import type { AssetForPreview, AssetForThumbnail } from "./types";
 
 // why: the dialog/button/spinner children pull in Radix + router context that is
@@ -58,7 +59,50 @@ const createExpiredPreviewAsset = (): AssetForPreview =>
     assetModel: null,
   }) as unknown as AssetForPreview;
 
+const createAssetWithoutImage = (): AssetForThumbnail => ({
+  id: "asset-without-image",
+  thumbnailImage: null,
+  assetModel: null,
+});
+
 describe("AssetImage thumbnail resilience", () => {
+  it("keeps a same-origin image stable on revalidation, replaces it by object version, and skips legacy repairs", async () => {
+    // why: no legacy signing/thumbnail HTTP call may replace a proxy URL.
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImage: "/api/asset-image?assetId=one&variant=main&v=original",
+      thumbnailImage: null,
+    };
+    const { rerender } = render(<AssetImage asset={asset} alt="Motor" />);
+    await act(async () => {
+      vi.runAllTimers();
+      await Promise.resolve();
+    });
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      asset.mainImage
+    );
+    rerender(<AssetImage asset={{ ...asset }} alt="Motor" />);
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      asset.mainImage
+    );
+    rerender(
+      <AssetImage
+        asset={{
+          ...asset,
+          mainImage: "/api/asset-image?assetId=one&variant=main&v=replacement",
+        }}
+        alt="Motor"
+      />
+    );
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      expect.stringContaining("v=replacement")
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     // why: jitter delay is `Math.random() * 3000`; pin it to 0 for deterministic
@@ -93,6 +137,125 @@ describe("AssetImage thumbnail resilience", () => {
     // It must NOT use the single-fetch `.data` suffix (which is what the route
     // rate-limiter throttles and what crashes the UI on 429).
     expect(calledUrl).not.toContain(".data");
+  });
+
+  it("renders the resolved Shelf URL and falls back to the model image when it fails", async () => {
+    // why: fetch is the external refresh boundary; return an unavailable URL
+    // so the test can verify the shared display fallback without storage access.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(null, { status: 404 })
+    );
+    const asset = createAssetNeedingThumbnail({
+      assetModel: {
+        image: "https://storage.example/model.jpg",
+        thumbnailImage: "https://storage.example/model-thumb.jpg",
+      },
+    });
+
+    render(<AssetImage asset={asset} alt="Makey Kit" />);
+    const image = screen.getByAltText("Makey Kit");
+
+    expect(image).toHaveAttribute(
+      "src",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t"
+    );
+
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/model-thumb.jpg"
+    );
+  });
+
+  it("renders a replacement image after the same asset reloads with new URLs", () => {
+    const { rerender } = render(
+      <AssetImage
+        asset={createAssetNeedingThumbnail({
+          thumbnailImage: "https://storage.example/old-thumbnail.webp",
+          mainImage: "https://storage.example/old.webp",
+        })}
+        alt="Motor"
+      />
+    );
+
+    rerender(
+      <AssetImage
+        asset={createAssetNeedingThumbnail({
+          thumbnailImage: "https://storage.example/replacement-thumbnail.webp",
+          mainImage: "https://storage.example/replacement.webp",
+        })}
+        alt="Motor"
+      />
+    );
+
+    expect(screen.getByAltText("Motor")).toHaveAttribute(
+      "src",
+      "https://storage.example/replacement-thumbnail.webp"
+    );
+  });
+
+  it("uses Shelf's placeholder when the asset and its model have no image", () => {
+    render(<AssetImage asset={createAssetWithoutImage()} alt="Motor Small" />);
+
+    expect(screen.getByAltText("Motor Small")).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
+  });
+
+  it("renders the same resolved URL through the Shelf detail image frame", () => {
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImageExpiration: new Date("2099-01-01T00:00:00.000Z"),
+    };
+    render(<AssetDetailImage asset={asset} alt="Makey Kit" withPreview />);
+
+    expect(screen.getAllByAltText("Makey Kit")).toHaveLength(2);
+    expect(
+      screen
+        .getAllByAltText("Makey Kit")
+        .map((image) => image.getAttribute("src"))
+    ).toEqual([
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t",
+    ]);
+  });
+
+  it("falls back to Shelf's placeholder when both asset and model images fail", async () => {
+    // why: fetch is the external refresh boundary; simulate a missing asset
+    // object so the model and static placeholder fallback can be exercised.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(null, { status: 404 })
+    );
+    const asset = createAssetNeedingThumbnail({
+      assetModel: {
+        image: "https://storage.example/model.jpg",
+        thumbnailImage: "https://storage.example/model-thumb.jpg",
+      },
+    });
+
+    render(<AssetImage asset={asset} alt="Makey Kit" />);
+    const image = screen.getByAltText("Makey Kit");
+
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/model-thumb.jpg"
+    );
+    await act(async () => {
+      fireEvent.error(image);
+      await Promise.resolve();
+    });
+    expect(image).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
   });
 
   it("does not crash when thumbnail generation is rate-limited (429)", async () => {
@@ -374,6 +537,96 @@ describe("AssetImage model-image inheritance", () => {
   });
   // why: fetch is the external network boundary; a refresh response is stubbed
   // so the component stores a refreshed URL before the tier changes.
+  it("shows a replacement after a locally refreshed image on the same asset", async () => {
+    // why: fetch is the external storage repair boundary.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          asset: {
+            mainImage: "https://storage.example/repaired.webp",
+            thumbnailImage: "https://storage.example/repaired-thumb.webp",
+          },
+        }),
+        { status: 200 }
+      )
+    );
+    const asset = createExpiredPreviewAsset();
+    const { rerender } = render(
+      <AssetImage asset={asset} alt="Replace repaired" withPreview />
+    );
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    const image = screen.getAllByAltText("Replace repaired")[0];
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/repaired-thumb.webp"
+    );
+    rerender(
+      <AssetImage
+        asset={{
+          ...asset,
+          mainImage: "https://storage.example/new.webp",
+          thumbnailImage: "https://storage.example/new-thumb.webp",
+          mainImageExpiration: new Date("2099-01-01"),
+        }}
+        alt="Replace repaired"
+        withPreview
+      />
+    );
+    expect(screen.getAllByAltText("Replace repaired")[0]).toBe(image);
+    expect(image).toHaveAttribute(
+      "src",
+      "https://storage.example/new-thumb.webp"
+    );
+  });
+
+  it("does not cover a loaded full image while generating its thumbnail", async () => {
+    // why: hold the external repair request open to observe background loading.
+    vi.spyOn(global, "fetch").mockReturnValue(new Promise<Response>(() => {}));
+    render(
+      <AssetImage
+        asset={createAssetNeedingThumbnail()}
+        alt="Background thumbnail"
+      />
+    );
+    const image = screen.getByAltText("Background thumbnail");
+    fireEvent.load(image);
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+    expect(image).toHaveAttribute(
+      "src",
+      "https://x/storage/v1/object/sign/assets/foo.jpg?token=t"
+    );
+  });
+
+  it("keeps a no-image placeholder stable without a loading overlay", () => {
+    const asset = createAssetWithoutImage();
+    const { rerender } = render(
+      <AssetImage asset={asset} alt="Stable placeholder" />
+    );
+    const image = screen.getByAltText("Stable placeholder");
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+    rerender(<AssetImage asset={{ ...asset }} alt="Stable placeholder" />);
+    expect(screen.getByAltText("Stable placeholder")).toBe(image);
+    expect(image).toHaveAttribute(
+      "src",
+      "/static/images/asset-placeholder.jpg"
+    );
+  });
+
+  it("keeps the same loaded image element and source during normal revalidation", () => {
+    const asset = {
+      ...createExpiredPreviewAsset(),
+      mainImageExpiration: new Date("2099-01-01"),
+    };
+    const { rerender } = render(<AssetImage asset={asset} alt="Stable" />);
+    const image = screen.getByAltText("Stable");
+    fireEvent.load(image);
+    rerender(<AssetImage asset={{ ...asset }} alt="Stable" />);
+    expect(screen.getByAltText("Stable")).toBe(image);
+    expect(image).toHaveAttribute("src", asset.thumbnailImage);
+    expect(image.parentElement?.querySelector(".spinner")).toBeNull();
+  });
+
   it("drops a refreshed asset url once the asset falls back to its model", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(

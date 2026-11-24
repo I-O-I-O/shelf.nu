@@ -3,15 +3,15 @@ import type { ActionFunctionArgs } from "react-router";
 import { USER_EMAIL, USER_ID, ORGANIZATION_ID } from "@mocks/user";
 
 import { verifyOtpAndSignin } from "~/modules/auth/service.server";
+import { ensureInitialIoioTeamForUser } from "~/modules/ioio/initial-team.server";
 import {
   getSelectedOrganization,
   setSelectedOrganizationIdCookie,
 } from "~/modules/organization/context.server";
 import { createUser, findUserById } from "~/modules/user/service.server";
 import { generateUniqueUsername } from "~/modules/user/utils.server";
-import { detectFormatPrefsFromHints } from "~/utils/date-format";
-
 import { action } from "~/routes/_auth+/otp";
+import { detectFormatPrefsFromHints } from "~/utils/date-format";
 
 // @vitest-environment node
 // 👋 see https://vitest.dev/guide/environment.html#environments-for-specific-files
@@ -20,6 +20,11 @@ import { action } from "~/routes/_auth+/otp";
 // assert the format-pref detection is wired into the createUser call.
 vitest.mock("~/modules/auth/service.server", () => ({
   verifyOtpAndSignin: vitest.fn(),
+}));
+// why: the initialization policy and advisory lock have their own focused
+// tests; this route test only verifies OTP completion behavior.
+vitest.mock("~/modules/ioio/initial-team.server", () => ({
+  ensureInitialIoioTeamForUser: vitest.fn(),
 }));
 vitest.mock("~/modules/user/service.server", () => ({
   createUser: vitest.fn(),
@@ -76,6 +81,8 @@ describe("otp action — format pref detection", () => {
       userId: USER_ID,
       email: USER_EMAIL,
     });
+    // @ts-expect-error missing vitest type
+    ensureInitialIoioTeamForUser.mockResolvedValue(null);
     // @ts-expect-error missing vitest type — user does not exist yet → signup branch
     findUserById.mockResolvedValue(null);
     // @ts-expect-error missing vitest type

@@ -9,9 +9,60 @@ import {
 } from "~/utils/error";
 import { getRandomColor } from "~/utils/get-random-color";
 import { ALL_SELECTED_KEY } from "~/utils/list";
+import { orderUntouchedIoioDefaults } from "./ioio-categories";
 import type { CreateAssetFromContentImportPayload } from "../asset/types";
+import {
+  IOIO_ITEM_DISPOSITION,
+  getIoioArchivedCategoryIds,
+  moveIoioCategoryToDisposition,
+} from "../ioio-staff/archive.server";
 
 const label: ErrorLabel = "Category";
+
+export type ActiveCategoryRecord = Pick<
+  Category,
+  "id" | "name" | "color" | "description"
+>;
+
+/**
+ * The single source of current category records used by assignment and filter pickers.
+ *
+ * Shelf has no separate active flag for categories. IOIO keeps archive and
+ * Trash state in its lifecycle marker, and this query excludes those markers
+ * while existing asset references remain untouched. Keeping this query here
+ * prevents IOIO surfaces from maintaining their own category names or order.
+ */
+export async function getActiveCategoriesForOrganization({
+  organizationId,
+  search,
+}: {
+  organizationId: Organization["id"];
+  search?: string | null;
+}): Promise<ActiveCategoryRecord[]> {
+  const normalizedSearch = search?.trim();
+  const archivedCategoryIds = await getIoioArchivedCategoryIds({
+    organizationId,
+  });
+  const categories = await db.category.findMany({
+    where: {
+      organizationId,
+      ...(archivedCategoryIds.length
+        ? { id: { notIn: archivedCategoryIds } }
+        : {}),
+      ...(normalizedSearch
+        ? {
+            name: {
+              contains: normalizedSearch,
+              mode: "insensitive",
+            },
+          }
+        : {}),
+    },
+    select: { id: true, name: true, color: true, description: true },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+  });
+  return orderUntouchedIoioDefaults(categories);
+}
 
 export async function createCategory({
   name,
@@ -41,6 +92,7 @@ export async function createCategory({
       },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw maybeUniqueConstraintViolation(cause, "Category", {
       additionalData: { userId, organizationId },
     });
@@ -60,9 +112,17 @@ export async function getCategories(params: {
   try {
     const skip = page > 1 ? (page - 1) * perPage : 0;
     const take = perPage >= 1 ? perPage : 8; // min 1 and max 25 per page
+    const archivedCategoryIds = await getIoioArchivedCategoryIds({
+      organizationId,
+    });
 
     /** Default value of where. Takes the items belonging to current user */
-    const where: Prisma.CategoryWhereInput = { organizationId };
+    const where: Prisma.CategoryWhereInput = {
+      organizationId,
+      ...(archivedCategoryIds.length
+        ? { id: { notIn: archivedCategoryIds } }
+        : {}),
+    };
 
     /** If the search string exists, add it to the where object */
     if (search) {
@@ -72,13 +132,11 @@ export async function getCategories(params: {
       };
     }
 
-    const [categories, totalCategories] = await Promise.all([
+    const [allCategories, totalCategories] = await Promise.all([
       /** Get the items */
       db.category.findMany({
-        skip,
-        take,
         where,
-        orderBy: { updatedAt: "desc" },
+        orderBy: [{ name: "asc" }, { id: "asc" }],
         include: {
           _count: {
             select: { assets: true },
@@ -89,6 +147,11 @@ export async function getCategories(params: {
       /** Count them */
       db.category.count({ where }),
     ]);
+
+    const categories = orderUntouchedIoioDefaults(allCategories).slice(
+      skip,
+      skip + take
+    );
 
     return { categories, totalCategories };
   } catch (cause) {
@@ -101,6 +164,7 @@ export async function getCategories(params: {
   }
 }
 
+/** Permanently removes a category record. Assets and kits keep their rows. */
 export async function deleteCategory({
   id,
   organizationId,
@@ -110,6 +174,7 @@ export async function deleteCategory({
       where: { id, organizationId },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message:
@@ -229,6 +294,7 @@ export async function updateCategory({
       },
     });
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw maybeUniqueConstraintViolation(cause, "Category", {
       additionalData: { id, organizationId, name },
     });
@@ -238,21 +304,46 @@ export async function updateCategory({
 export async function bulkDeleteCategories({
   categoryIds,
   organizationId,
+  movedById,
 }: {
   categoryIds: Category["id"][];
   organizationId: Organization["id"];
+  movedById: User["id"];
 }) {
   try {
-    return await db.category.deleteMany({
-      where: categoryIds.includes(ALL_SELECTED_KEY)
-        ? { organizationId }
-        : { id: { in: categoryIds }, organizationId },
+    const archivedCategoryIds = await getIoioArchivedCategoryIds({
+      organizationId,
     });
+    const categories = await db.category.findMany({
+      where: categoryIds.includes(ALL_SELECTED_KEY)
+        ? {
+            organizationId,
+            ...(archivedCategoryIds.length
+              ? { id: { notIn: archivedCategoryIds } }
+              : {}),
+          }
+        : { id: { in: categoryIds }, organizationId },
+      select: {
+        id: true,
+      },
+    });
+
+    return await Promise.all(
+      categories.map((category) =>
+        moveIoioCategoryToDisposition({
+          organizationId,
+          categoryId: category.id,
+          movedById,
+          disposition: IOIO_ITEM_DISPOSITION.TRASH,
+        })
+      )
+    );
   } catch (cause) {
+    if (cause instanceof ShelfError) throw cause;
     throw new ShelfError({
       cause,
       message: "Something went wrong while bulk deleting categories.",
-      additionalData: { categoryIds, organizationId },
+      additionalData: { categoryIds, organizationId, movedById },
       label,
     });
   }

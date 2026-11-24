@@ -98,6 +98,7 @@ export default function InlineEntityCreationDialog({
               ? "md:!w-full md:!max-w-3xl"
               : "md:!w-full md:!max-w-lg"
           }
+          showCloseButton={type !== "category"}
         >
           {/*
             z-index is set to 9999 because this dialog is rendered inside a popover (z-index ~9998)

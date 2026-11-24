@@ -76,6 +76,17 @@ describe("buildAssetSearchUnion", () => {
     }
   });
 
+  it("matches assets below locations whose ancestor name matches the search", () => {
+    const text = sqlText(
+      buildAssetSearchUnion({ organizationId: orgId, terms: ["b477"] })
+    );
+
+    expect(text).toContain("WITH RECURSIVE location_descendants");
+    expect(text).toContain('child."parentId" = parent.id');
+    expect(text).toContain('ancestor."organizationId"');
+    expect(text).toContain('a."organizationId"');
+  });
+
   it("prefilters the custom-field branch with the indexed COALESCE concat + keeps the exact OR", () => {
     const text = sqlText(
       buildAssetSearchUnion({ organizationId: orgId, terms: ["chair"] })
@@ -110,6 +121,21 @@ describe("buildAssetSearchUnion", () => {
     const countBarcode = (s: string) => s.split('"Barcode"').length - 1;
     expect(countBarcode(two)).toBe(countBarcode(one) * 2);
   });
+
+  it.each(["battery", "batteries", "AA battery"])(
+    "binds plural alternatives for %s in the scoped name search",
+    (term) => {
+      const sql = buildAssetSearchUnion({
+        organizationId: orgId,
+        terms: [term],
+      });
+      expect(sql.values).toContain("%battery%");
+      expect(sql.values).toContain("%batteries%");
+      expect(sqlText(sql)).toContain('am."organizationId"');
+      expect(sqlText(sql)).toContain('am."name" ILIKE');
+      if (term.startsWith("AA")) expect(sql.values).toContain("%aa%");
+    }
+  );
 
   it("throws on empty terms (caller must guard)", () => {
     expect(() =>

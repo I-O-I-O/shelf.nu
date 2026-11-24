@@ -50,6 +50,9 @@ vitest.mock("~/database/db.server", () => ({
       findMany: vitest.fn().mockResolvedValue([]),
       groupBy: vitest.fn().mockResolvedValue([]),
     },
+    ioioWriteOperation: {
+      findMany: vitest.fn().mockResolvedValue([]),
+    },
   },
 }));
 
@@ -103,6 +106,7 @@ function createMockTx() {
       findMany: vitest.fn().mockResolvedValue([]),
       groupBy: vitest.fn().mockResolvedValue([]),
     },
+    ioioWriteOperation: { findMany: vitest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -294,6 +298,8 @@ describe("getAssetAvailability", () => {
     db.bookingAsset.findMany.mockResolvedValue([]);
     // @ts-expect-error mocked
     db.consumptionLog.groupBy.mockResolvedValue([]);
+    // @ts-expect-error mocked
+    db.ioioWriteOperation.findMany.mockResolvedValue([]);
   }
 
   it("does not go negative for non-overlapping reservations (bb1/bb2)", async () => {
@@ -336,6 +342,223 @@ describe("getAssetAvailability", () => {
     expect(a.physicalAvailable).toBe(10);
     expect(a.reservedTotal).toBe(14);
     expect(a.reservingBookingCount).toBe(2);
+  });
+
+  it("subtracts a quantity-two preparation booking from a five-unit pool", async () => {
+    resetMocks();
+    computeAvailableQuantityMock.mockResolvedValue({ total: 5, inCustody: 0 });
+    const window = {
+      from: new Date("2026-10-11T00:00:00Z"),
+      to: new Date("2026-11-22T23:59:59.999Z"),
+    };
+    // A preparation request is held through a normal RESERVED Shelf booking;
+    // the canonical availability reader only needs its BookingAsset quantity.
+    // @ts-expect-error mocked
+    db.bookingAsset.findMany.mockResolvedValue([
+      {
+        bookingId: "preparation-booking",
+        quantity: 2,
+        booking: { ...window, status: "RESERVED" },
+      },
+    ]);
+
+    const availability = await getAssetAvailability({
+      assetId: ASSET_ID,
+      organizationId: ORG_ID,
+      window,
+    });
+
+    expect(availability.reserved).toBe(2);
+    expect(availability.bookable).toBe(3);
+  });
+
+  it.each([
+    "ASSIGNING",
+    "PENDING_PREPARATION",
+    "ASSIGNED",
+    "PREPARING",
+    "READY_FOR_PICKUP",
+  ])(
+    "holds unlinked preparation quantity while status is %s",
+    async (status) => {
+      resetMocks();
+      computeAvailableQuantityMock.mockResolvedValue({
+        total: 5,
+        inCustody: 0,
+      });
+      const window = {
+        from: new Date("2026-10-11T00:00:00Z"),
+        to: new Date("2026-11-22T23:59:59.999Z"),
+      };
+      // This is the gap before a request has a native booking link. Once
+      // linked, the Shelf BookingAsset row takes over as the sole hold.
+      // @ts-expect-error mocked
+      db.ioioWriteOperation.findMany.mockResolvedValue([
+        {
+          id: "preparation-request",
+          status,
+          quantity: 2,
+          from: window.from,
+          to: window.to,
+          bookingId: null,
+          bookingAssetId: null,
+        },
+      ]);
+
+      const availability = await getAssetAvailability({
+        assetId: ASSET_ID,
+        organizationId: ORG_ID,
+        window,
+      });
+
+      expect(availability.reserved).toBe(2);
+      expect(availability.bookable).toBe(3);
+    }
+  );
+
+  it("does not double-count a preparation operation after its Shelf booking becomes an active loan", async () => {
+    resetMocks();
+    computeAvailableQuantityMock.mockResolvedValue({ total: 5, inCustody: 0 });
+    computeCheckedOutBreakdownForAssetMock.mockResolvedValue({
+      total: 2,
+      standalone: 2,
+    });
+    const window = {
+      from: new Date("2026-10-11T00:00:00Z"),
+      to: new Date("2026-11-22T23:59:59.999Z"),
+    };
+    // @ts-expect-error mocked
+    db.bookingAsset.findMany.mockResolvedValue([
+      {
+        bookingId: "preparation-booking",
+        quantity: 2,
+        booking: { ...window, status: "ONGOING" },
+      },
+    ]);
+    // The client adapter returns a linked operation despite the SQL where
+    // clause. The aggregation guard must still use its Shelf booking once.
+    // @ts-expect-error mocked
+    db.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        id: "preparation-task",
+        status: "READY_FOR_PICKUP",
+        quantity: 2,
+        from: window.from,
+        to: window.to,
+        bookingId: "preparation-booking",
+        bookingAssetId: "booking-asset",
+      },
+    ]);
+
+    const availability = await getAssetAvailability({
+      assetId: ASSET_ID,
+      organizationId: ORG_ID,
+      window,
+    });
+
+    expect(availability.reserved).toBe(2);
+    expect(availability.bookable).toBe(3);
+    expect(availability.physicalAvailable).toBe(3);
+  });
+
+  it.each(["CANCELLED", "DECLINED", "EXPIRED", "PICKED_UP", "COMPLETED"])(
+    "does not hold inventory for terminal preparation status %s",
+    async (status) => {
+      resetMocks();
+      computeAvailableQuantityMock.mockResolvedValue({
+        total: 5,
+        inCustody: 0,
+      });
+      // @ts-expect-error mocked
+      db.ioioWriteOperation.findMany.mockResolvedValue([
+        {
+          id: "preparation-request",
+          status,
+          quantity: 2,
+          from: new Date("2026-10-11T00:00:00Z"),
+          to: new Date("2026-11-22T23:59:59.999Z"),
+          bookingId: null,
+          bookingAssetId: null,
+        },
+      ]);
+
+      const availability = await getAssetAvailability({
+        assetId: ASSET_ID,
+        organizationId: ORG_ID,
+        window: {
+          from: new Date("2026-10-11T00:00:00Z"),
+          to: new Date("2026-11-22T23:59:59.999Z"),
+        },
+      });
+
+      expect(availability.bookable).toBe(5);
+    }
+  );
+
+  it("restores preparation quantity after the linked Shelf loan is returned", async () => {
+    resetMocks();
+    computeAvailableQuantityMock.mockResolvedValue({ total: 5, inCustody: 0 });
+    // A returned Shelf booking is COMPLETE and therefore absent from the
+    // active BookingAsset query. Its preparation task is also terminal.
+    // @ts-expect-error mocked
+    db.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        id: "preparation-task",
+        status: "PICKED_UP",
+        quantity: 2,
+        from: new Date("2026-10-11T00:00:00Z"),
+        to: new Date("2026-11-22T23:59:59.999Z"),
+        bookingId: "returned-booking",
+        bookingAssetId: "booking-asset",
+      },
+    ]);
+
+    const availability = await getAssetAvailability({
+      assetId: ASSET_ID,
+      organizationId: ORG_ID,
+      window: {
+        from: new Date("2026-10-11T00:00:00Z"),
+        to: new Date("2026-11-22T23:59:59.999Z"),
+      },
+    });
+
+    expect(availability.bookable).toBe(5);
+  });
+
+  it("releases cancelled, declined, expired, and completed rows from the active hold calculation", async () => {
+    resetMocks();
+
+    await getAssetAvailability({
+      assetId: ASSET_ID,
+      organizationId: ORG_ID,
+      window: {
+        from: new Date("2026-10-11T00:00:00Z"),
+        to: new Date("2026-11-22T23:59:59.999Z"),
+      },
+    });
+
+    const call = (
+      db.bookingAsset.findMany as unknown as {
+        mock: {
+          calls: Array<
+            [
+              {
+                where?: {
+                  booking?: { status?: { in?: string[] } };
+                };
+              },
+            ]
+          >;
+        };
+      }
+    ).mock.calls[0];
+    const activeStatuses = call?.[0]?.where?.booking?.status?.in;
+
+    expect(activeStatuses).toEqual(["RESERVED", "ONGOING", "OVERDUE"]);
+    expect(activeStatuses).not.toContain("CANCELLED");
+    expect(activeStatuses).not.toContain("DECLINED");
+    expect(activeStatuses).not.toContain("EXPIRED");
+    expect(activeStatuses).not.toContain("COMPLETE");
   });
 
   it("excludes kit-driven rows from reserved (no double count)", async () => {
@@ -797,6 +1020,7 @@ describe("getAssetAvailabilityBatch", () => {
         findMany: vitest.fn().mockResolvedValue([]),
         groupBy: vitest.fn().mockResolvedValue([]),
       },
+      ioioWriteOperation: { findMany: vitest.fn().mockResolvedValue([]) },
     };
   }
 
@@ -814,6 +1038,8 @@ describe("getAssetAvailabilityBatch", () => {
     db.bookingAsset.findMany.mockResolvedValue([]);
     // @ts-expect-error mocked
     db.consumptionLog.groupBy.mockResolvedValue([]);
+    // @ts-expect-error mocked
+    db.ioioWriteOperation.findMany.mockResolvedValue([]);
   }
 
   it("returns an empty map without querying anything for an empty assetIds array", async () => {
@@ -828,6 +1054,47 @@ describe("getAssetAvailabilityBatch", () => {
     expect(result.size).toBe(0);
     expect(client.asset.findMany).not.toHaveBeenCalled();
     expect(client.bookingAsset.findMany).not.toHaveBeenCalled();
+    expect(client.ioioWriteOperation.findMany).not.toHaveBeenCalled();
+  });
+
+  it("includes active unlinked preparation quantities in the batched availability read", async () => {
+    const client = createMockBatchClient();
+    const window = {
+      from: new Date("2026-10-11T00:00:00Z"),
+      to: new Date("2026-11-22T23:59:59.999Z"),
+    };
+    client.asset.findMany.mockResolvedValue([{ id: "makey", quantity: 5 }]);
+    client.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        id: "prep-request",
+        assetId: "makey",
+        status: "PENDING_PREPARATION",
+        quantity: 2,
+        from: window.from,
+        to: window.to,
+        bookingId: null,
+        bookingAssetId: null,
+      },
+    ]);
+
+    const availability = await getAssetAvailabilityBatch(["makey"], {
+      organizationId: ORG_ID,
+      window,
+      db: client,
+    });
+
+    expect(availability.get("makey")?.bookable).toBe(3);
+    expect(client.ioioWriteOperation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: ORG_ID,
+          assetId: { in: ["makey"] },
+          status: { in: expect.arrayContaining(["PENDING_PREPARATION"]) },
+          bookingId: null,
+          bookingAssetId: null,
+        }),
+      })
+    );
   });
 
   it("requests standalone-only reserved rows (assetKitId: null) — the double-count fix", async () => {
@@ -1553,6 +1820,7 @@ describe("assertAssetQuantitiesAvailable", () => {
         findMany: vitest.fn().mockResolvedValue([]),
         groupBy: vitest.fn().mockResolvedValue([]),
       },
+      ioioWriteOperation: { findMany: vitest.fn().mockResolvedValue([]) },
     };
   }
 
@@ -1682,6 +1950,35 @@ describe("assertAssetQuantitiesAvailable", () => {
         { organizationId: ORG_ID, tx: client, window: null }
       )
     ).resolves.toBeUndefined();
+  });
+
+  it("blocks a second borrower from reserving more than the pool left after preparation", async () => {
+    const client = createMockBatchClient();
+    client.asset.findMany.mockResolvedValue([{ id: "makey", quantity: 5 }]);
+    client.ioioWriteOperation.findMany.mockResolvedValue([
+      {
+        id: "prep-request",
+        assetId: "makey",
+        status: "PENDING_PREPARATION",
+        quantity: 2,
+        from: null,
+        to: null,
+        bookingId: null,
+        bookingAssetId: null,
+      },
+    ]);
+
+    await expect(
+      assertAssetQuantitiesAvailable(
+        [{ assetId: "makey", requestedQuantity: 4, assetTitle: "Makey Kit" }],
+        { organizationId: ORG_ID, tx: client, window: null }
+      )
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining(
+        "requested 4, only 3 of 5 units available"
+      ),
+    });
   });
 
   it("treats an asset id missing from the batch result as zero bookable (conservative, never silently skipped)", async () => {

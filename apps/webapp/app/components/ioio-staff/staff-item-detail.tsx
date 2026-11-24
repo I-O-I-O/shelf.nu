@@ -1,0 +1,122 @@
+import type { ReactNode } from "react";
+import type { AssetDetailField } from "~/components/assets/asset-detail-information";
+import { IoioAssetDetailLayout } from "~/components/ioio-staff/ioio-asset-detail-layout";
+import {
+  PhysicalUnitAvailabilityList,
+  type PhysicalUnitAvailabilityRow,
+} from "~/components/ioio-staff/physical-unit-availability-list";
+
+export type StaffItemDetailProps = {
+  title: string;
+  image: ReactNode;
+  availableToBook?: boolean;
+  availableQuantity: number;
+  totalQuantity?: number;
+  availabilityDetail?: string;
+  unitLabel?: string;
+  categoryName?: string | null;
+  locationPath: string[];
+  description?: string | null;
+  maxBorrowDays?: number | null;
+  tracking?: string | null;
+  status?: string | null;
+  additionalFields?: AssetDetailField[];
+  borrowAction?: ReactNode;
+  actions?: ReactNode;
+  contents?: ReactNode;
+  qrLifecycle?: ReactNode;
+  physicalUnits?: PhysicalUnitAvailabilityRow[];
+  canEditPhysicalUnits?: boolean;
+  physicalUnitsActionUrl?: string;
+};
+
+export function StaffItemDetail({
+  title,
+  image,
+  availableToBook = true,
+  availableQuantity,
+  totalQuantity,
+  availabilityDetail,
+  unitLabel = "items",
+  categoryName,
+  locationPath,
+  description,
+  maxBorrowDays,
+  tracking,
+  status,
+  additionalFields,
+  borrowAction,
+  actions,
+  contents,
+  qrLifecycle,
+  physicalUnits,
+  canEditPhysicalUnits = false,
+  physicalUnitsActionUrl,
+}: StaffItemDetailProps) {
+  const total = totalQuantity ?? physicalUnits?.length ?? availableQuantity;
+  const statusCounts = new Map<string, number>();
+  for (const unit of physicalUnits ?? []) {
+    statusCounts.set(unit.status, (statusCounts.get(unit.status) ?? 0) + 1);
+  }
+  const detail =
+    availabilityDetail ??
+    (physicalUnits
+      ? [
+          `${availableQuantity} available`,
+          ...Array.from(statusCounts)
+            .filter(([status]) => status !== "Available")
+            .map(([status, count]) => `${count} ${status.toLocaleLowerCase()}`),
+        ].join(" · ")
+      : undefined);
+
+  return (
+    <IoioAssetDetailLayout
+      className="max-md:px-0"
+      backTo="/assets"
+      backLabel="Back to inventory"
+      title={title}
+      description={description}
+      image={image}
+      actions={
+        borrowAction || actions ? (
+          <>
+            {borrowAction}
+            {actions}
+          </>
+        ) : null
+      }
+      availableToBook={availableToBook}
+      availableQuantity={availableQuantity}
+      totalQuantity={total}
+      availabilityDetail={detail}
+      unitLabel={unitLabel}
+      categoryName={categoryName}
+      locations={locationPath.length ? [{ path: locationPath }] : []}
+      tracking={tracking}
+      status={status}
+      maxBorrowDays={maxBorrowDays}
+      additionalFields={additionalFields}
+    >
+      <div className="min-w-0 space-y-4 empty:hidden [&:not(:empty)]:mt-5">
+        {qrLifecycle}
+        {contents ? (
+          <section className="min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5">
+            <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500">
+              Contents
+            </h2>
+            <div className="mt-3 text-sm text-gray-800">{contents}</div>
+          </section>
+        ) : null}
+        {physicalUnits?.length && physicalUnitsActionUrl ? (
+          <section className="min-w-0 rounded-2xl border border-gray-200 bg-white p-3 shadow-sm sm:p-5">
+            <PhysicalUnitAvailabilityList
+              units={physicalUnits}
+              actionUrl={physicalUnitsActionUrl}
+              canEdit={canEditPhysicalUnits}
+            />
+          </section>
+        ) : null}
+      </div>
+    </IoioAssetDetailLayout>
+  );
+}

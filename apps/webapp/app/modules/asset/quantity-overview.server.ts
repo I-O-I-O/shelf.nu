@@ -9,10 +9,7 @@
  * overview loader) purely for unit-testability: the loader
  * (`routes/_layout+/assets.$assetId.overview.tsx`) has over a dozen
  * unrelated collaborators (auth, custom fields, reminders, QR/scan lookups)
- * that would need mocking just to reach this ~10-line mapping if it stayed
- * inline. Isolating it lets the #2724 regression test ("Available" must
- * never go negative from all-time reservations) run fast and mock-free
- * beyond its one direct input.
+ * that would need mocking just to reach this mapping if it stayed inline.
  *
  * @see {@link file://./availability.server.ts} - The primitive this module maps from
  * @see {@link file://./../../routes/_layout+/assets.$assetId.overview.tsx} - The loader that calls this
@@ -69,9 +66,8 @@ export type QuantityData = {
   /**
    * Window-agnostic sum of every active (non-kit-driven) reservation's
    * remaining quantity — `AssetAvailability.reservedTotal`. Surfaced on
-   * the "Reserved (bookings)" row alongside an explanatory tooltip (these
-   * units are committed to future dates but still physically on the
-   * shelf, so they do NOT subtract from `available` below — see #2724).
+   * the "Reserved (bookings)" row alongside an explanatory tooltip. Only
+   * reservations that overlap the borrowing window reduce `available` below.
    */
   reserved: number;
   /** Count of distinct bookings contributing to `reserved`, for the tooltip copy. */
@@ -82,16 +78,13 @@ export type QuantityData = {
    */
   checkedOut: number;
   /**
-   * Headline "Available" figure: **current physical stock**
-   * (`AssetAvailability.physicalAvailable` = total − inCustody − inKits −
-   * checkedOut). Deliberately window-agnostic and never reduced by future
-   * reservations — that's the #2724 fix: the old formula also subtracted
-   * every all-time reservation here, which could (and did) go negative.
+   * Headline "Available" figure: units free for the immediate borrowing
+   * window, capped by the quantity physically available.
    */
   available: number;
   /**
    * Cap used for custody assignment / total-quantity adjustments. Now
-   * equal to `available` — both source from `physicalAvailable` — kept as
+   * equal to `available` — both source from the current borrowing window — kept as
    * a distinct field only to avoid touching every existing card/dialog
    * call site that reads `custodyAvailable` specifically.
    */
@@ -100,7 +93,7 @@ export type QuantityData = {
 
 /** Arguments for {@link buildQuantityData}. */
 type BuildQuantityDataArgs = {
-  /** Result of `getAssetAvailability({ assetId, organizationId })`, called with NO window (current-state mode). */
+  /** Result of `getAssetAvailability` for this asset's immediate borrowing window. */
   availability: AssetAvailability;
   /** Sum of `AssetLocation.quantity` for this asset — not returned by the primitive, computed separately by the loader. */
   inLocations: number;
@@ -109,8 +102,8 @@ type BuildQuantityDataArgs = {
 };
 
 /**
- * Maps the shared {@link AssetAvailability} primitive's current-state
- * (unwindowed) result — plus the already-loaded location-placement total —
+ * Maps the shared {@link AssetAvailability} primitive's current borrowing
+ * window result — plus the already-loaded location-placement total —
  * into the {@link QuantityData} shape the asset overview sidebar renders.
  *
  * @param args - See {@link BuildQuantityDataArgs}.
@@ -130,9 +123,15 @@ export function buildQuantityData({
     reserved: availability.reservedTotal,
     reservingBookingCount: availability.reservingBookingCount,
     checkedOut: availability.checkedOut,
-    // Current-state headline — never dragged negative by all-time
-    // reservations. See the #2724 fix note on `QuantityData.available`.
-    available: availability.physicalAvailable,
-    custodyAvailable: availability.physicalAvailable,
+    // Active overlapping holds reduce free stock. Far-future reservations
+    // stay visible in the separate Reserved row.
+    available: Math.max(
+      0,
+      Math.min(availability.bookable, availability.physicalAvailable)
+    ),
+    custodyAvailable: Math.max(
+      0,
+      Math.min(availability.bookable, availability.physicalAvailable)
+    ),
   };
 }

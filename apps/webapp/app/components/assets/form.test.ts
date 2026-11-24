@@ -17,6 +17,18 @@ describe("NewAssetFormSchema", () => {
     }
   });
 
+  it("preserves an IOIO Return section choice when the edit route parses the form", () => {
+    const result = NewAssetFormSchema.safeParse({
+      ...baseValidData,
+      returnHandling: "RETURN_TO_RETURN_ZONE",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.returnHandling).toBe("RETURN_TO_RETURN_ZONE");
+    }
+  });
+
   it("parses a valid QUANTITY_TRACKED asset with all quantity fields", () => {
     const result = NewAssetFormSchema.safeParse({
       ...baseValidData,

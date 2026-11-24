@@ -34,6 +34,7 @@ import {
 import type {
   Booking,
   Prisma,
+  PrismaClient,
   Organization,
   Asset,
   Kit,
@@ -66,16 +67,22 @@ import {
   assertAssetQuantitiesAvailable,
   getAssetAvailability,
 } from "~/modules/asset/availability.server";
-import { ASSET_MODEL_IMAGE_SELECT } from "~/modules/asset/image-select";
+import { assertAssetsBorrowable } from "~/modules/asset/borrowability.server";
 import {
   reconcileManualPlacementsForStockDecrease,
   reportAmbiguousPlacementReconcile,
 } from "~/modules/asset/placement-reconcile.server";
+import { resolveAssetImagesForPresentation } from "~/modules/asset/service.server";
 import {
   isDirectBookingBlockedByKit,
   isQuantityTracked,
 } from "~/modules/asset/utils";
 import { stripMarkdocDelimiters } from "~/modules/audit/note-content.server";
+import { summarizeBookingAssetsForCalendar } from "~/modules/booking/calendar-asset-summary";
+import {
+  formatReturnPhotoNote,
+  prepareBookingReturnPhoto,
+} from "~/modules/booking/return-photo.server";
 import {
   assertModelUnitsNotReservedElsewhere,
   assertOutstandingModelRequestsFit,
@@ -90,6 +97,10 @@ import {
 import { checkAndNotifyLowStock } from "~/modules/consumption-log/low-stock.server";
 import { lockAssetForQuantityUpdate } from "~/modules/consumption-log/quantity-lock.server";
 import { createConsumptionLog } from "~/modules/consumption-log/service.server";
+import {
+  getResolvedEmailTemplate,
+  renderEmailTemplate,
+} from "~/modules/email-templates/service.server";
 import { assetQtyMeta, formatUnitCount } from "~/utils/asset-quantity";
 import {
   bookingWriteScopeClause,
@@ -111,6 +122,7 @@ import {
 } from "~/utils/date-format";
 import { resolveUserFormatPrefsById } from "~/utils/date-format.server";
 import { sendNotification } from "~/utils/emitter/send-notification.server";
+import { SERVER_URL } from "~/utils/env";
 import type { ErrorLabel } from "~/utils/error";
 import { isLikeShelfError, isNotFoundError, ShelfError } from "~/utils/error";
 import { getRedirectUrlFromRequest } from "~/utils/http";
@@ -211,6 +223,10 @@ import {
   createSystemBookingNote,
   createSystemBookingNotes,
 } from "../booking-note/service.server";
+import {
+  shouldSendOptionalEmail,
+  type EmailPreferenceCategory,
+} from "../email-preferences/service.server";
 import { createNotes } from "../note/service.server";
 
 import { TAG_WITH_COLOR_SELECT } from "../tag/constants";
@@ -249,6 +265,7 @@ async function sendBookingEmailToAllRecipients({
   recipients,
   booking,
   subject,
+  templateKey,
   buildText,
   buildHeading,
   hints,
@@ -257,6 +274,7 @@ async function sendBookingEmailToAllRecipients({
   recipients: NotificationRecipient[];
   booking: BookingForEmail;
   subject: string;
+  templateKey?: string;
   /** Built per recipient with their resolved prefs. */
   buildText: (prefs: ResolvedFormatPrefs) => string;
   /** Built per recipient with their resolved prefs. */
@@ -271,29 +289,90 @@ async function sendBookingEmailToAllRecipients({
     modelRequests?: ReservationEmailModelRequest[];
   };
 }) {
+  const preferenceCategory = getBookingEmailPreferenceCategory(templateKey);
+  const customTemplate = templateKey
+    ? await getResolvedEmailTemplate(booking.organizationId, templateKey)
+    : null;
+  if (customTemplate?.enabled === false) return;
+  const activeTemplate = customTemplate?.enabled ? customTemplate : null;
+
   for (const recipient of recipients) {
+    if (
+      preferenceCategory &&
+      !(await shouldSendOptionalEmail(recipient.userId, preferenceCategory))
+    ) {
+      continue;
+    }
     // Recipient prefs resolved from the ALREADY-LOADED row (raw pref fields on
     // NotificationRecipient); hints is the null-field fallback only. Pure —
     // no per-recipient DB fetch (avoids an N+1 in the fan-out).
     const recipientPrefs = resolveFormatPrefs(recipient, hints);
 
-    const html = await bookingUpdatesTemplateString({
-      booking,
-      heading: buildHeading(recipientPrefs),
+    const displayName =
+      [recipient.firstName, recipient.lastName].filter(Boolean).join(" ") ||
+      recipient.email;
+    const values = {
+      displayName,
+      bookingName: booking.name,
       assetCount: booking._count.bookingAssets,
-      prefs: recipientPrefs,
-      recipientReason: recipient.reason,
-      recipientEmail: recipient.email,
-      ...templateProps,
-    });
+      startDate: booking.from?.toLocaleDateString() ?? "",
+      endDate: booking.to?.toLocaleDateString() ?? "",
+      bookingUrl: `${SERVER_URL}/bookings/${booking.id}`,
+      organizationName: booking.organization.name,
+    };
+    const rendered = activeTemplate
+      ? renderEmailTemplate(activeTemplate, values)
+      : null;
+    const html = rendered
+      ? `<div style="white-space:pre-wrap;font-family:Arial,Helvetica,sans-serif">${escapeEmailHtml(
+          rendered.body
+        )}</div>`
+      : await bookingUpdatesTemplateString({
+          booking,
+          heading: buildHeading(recipientPrefs),
+          assetCount: booking._count.bookingAssets,
+          prefs: recipientPrefs,
+          recipientReason: recipient.reason,
+          recipientEmail: recipient.email,
+          ...templateProps,
+        });
 
     sendEmail({
       to: recipient.email,
-      subject,
-      text: buildText(recipientPrefs),
+      subject: rendered?.subject || subject,
+      text: rendered?.body || buildText(recipientPrefs),
       html,
     });
   }
+}
+
+function getBookingEmailPreferenceCategory(
+  templateKey: string | undefined
+): EmailPreferenceCategory | null {
+  switch (templateKey) {
+    case "booking_reservation":
+      return "BORROWING_CONFIRMATION";
+    case "booking_checkin_reminder":
+    case "booking_completed":
+      return "RETURN_REMINDER";
+    case "booking_extended":
+      return "EXTENSION_UPDATE";
+    case "booking_cancelled":
+    case "booking_deleted":
+    case "booking_updated":
+      return "BORROWING_CONFIRMATION";
+    default:
+      return null;
+  }
+}
+
+function escapeEmailHtml(value: string) {
+  return value.replace(
+    /[&<>"]/g,
+    (character) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character] ??
+      character
+  );
 }
 
 async function cancelScheduler(
@@ -1326,10 +1405,11 @@ export async function createBooking({
           );
         }
 
-        const created = await tx.booking.create({
+        const queryOptions: Prisma.BookingCreateArgs = {
           data: dataToCreate,
           include: { ...BOOKING_COMMON_INCLUDE, organization: true },
-        });
+        };
+        const created = await tx.booking.create(queryOptions);
 
         // Activity event for booking creation - must be inside transaction
         await recordEvent(
@@ -2067,6 +2147,8 @@ export async function reserveBooking({
   isSelfServiceOrBase,
   tags,
   userId,
+  ignoreBookingIds = [],
+  allowImmediateStart = false,
 }: Partial<
   Pick<
     Booking,
@@ -2085,9 +2167,15 @@ export async function reserveBooking({
     isSelfServiceOrBase: boolean;
     tags: { id: string }[];
     userId?: User["id"];
+    /** Explicit Staff-approved active-loan conflicts to ignore for this reservation. */
+    ignoreBookingIds?: string[];
+    /** Allows an IOIO borrow to remain reserved while Staff prepares it. */
+    allowImmediateStart?: boolean;
   }) {
+  const normalizedIgnoreBookingIds = [...new Set(ignoreBookingIds)];
   try {
-    const bookingFound = await db.booking
+    const baseDb = db as unknown as PrismaClient;
+    const bookingFound = await baseDb.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
         include: {
@@ -2099,6 +2187,7 @@ export async function reserveBooking({
                   ...BOOKING_INCLUDE_FOR_RESERVATION_EMAIL.bookingAssets.include
                     .asset.select,
                   status: true,
+                  requiresBorrowApproval: true,
                   // why: `availableToBook` is deliberately NOT selected here.
                   // The availability guard reads it through `tx` immediately
                   // before the status write (see the transaction below); this
@@ -2117,6 +2206,7 @@ export async function reserveBooking({
                       currentBookingId: id,
                       fromDate: from,
                       toDate: to,
+                      ignoreBookingIds: normalizedIgnoreBookingIds,
                     }),
                     select: {
                       id: true,
@@ -2208,7 +2298,7 @@ export async function reserveBooking({
     }
 
     /** Make sure that the start date is in future */
-    if (from && isBefore(from, new Date())) {
+    if (from && isBefore(from, new Date()) && !allowImmediateStart) {
       throw new ShelfError({
         cause: null,
         label,
@@ -2246,6 +2336,23 @@ export async function reserveBooking({
         connect: tags,
       },
     };
+
+    if (
+      isSelfServiceOrBase &&
+      bookingFound.bookingAssets.some(
+        (bookingAsset) => bookingAsset.asset.requiresBorrowApproval
+      )
+    ) {
+      throw new ShelfError({
+        cause: null,
+        title: "Staff approval required",
+        message:
+          "This booking includes an item that requires staff approval before it can be borrowed.",
+        label,
+        status: 403,
+        shouldBeCaptured: false,
+      });
+    }
 
     dataToUpdate.from = from;
     dataToUpdate.originalFrom = from;
@@ -2444,6 +2551,7 @@ export async function reserveBooking({
             tx,
             window: from && to ? { from, to } : null,
             excludeBookingId: id,
+            excludeBookingIds: normalizedIgnoreBookingIds,
           }
         );
       }
@@ -2601,6 +2709,7 @@ export async function reserveBooking({
       await sendBookingEmailToAllRecipients({
         recipients,
         booking: bookingFound,
+        templateKey: "booking_reservation",
         subject: `✅ Booking reserved (${bookingFound.name}) - shelf.nu`,
         buildText: (prefs) =>
           assetReservedEmailContent({
@@ -2672,12 +2781,35 @@ export async function reserveBooking({
  * @param organizationId - Booking's organization (for recipient resolution)
  */
 async function scheduleCheckinReminderForBooking(
-  booking: { id: string; to: Date | null },
+  booking: { id: string; to: Date | null; description?: string | null },
   hints: ClientHint,
   organizationId: string
 ) {
   const effectiveTo = booking.to;
   if (!effectiveTo) {
+    return;
+  }
+
+  const description =
+    booking.description ??
+    (
+      await db.booking.findFirst({
+        where: { id: booking.id, organizationId },
+        select: { description: true },
+      })
+    )?.description;
+  const isIoioBorrow = description?.toLocaleLowerCase().includes("ioio");
+  const sevenDaysBeforeDue = new Date(effectiveTo);
+  sevenDaysBeforeDue.setDate(sevenDaysBeforeDue.getDate() - 7);
+  if (isIoioBorrow && sevenDaysBeforeDue > new Date()) {
+    await scheduleNextBookingJob({
+      data: {
+        id: booking.id,
+        hints,
+        eventType: BOOKING_SCHEDULER_EVENTS_ENUM.returnReminder,
+      },
+      when: sevenDaysBeforeDue,
+    });
     return;
   }
 
@@ -2733,6 +2865,20 @@ async function scheduleCheckinReminderForBooking(
       when,
     });
   }
+}
+
+export async function rescheduleCheckinReminderForBooking(
+  booking: {
+    id: string;
+    to: Date | null;
+    activeSchedulerReference: string | null;
+    description?: string | null;
+  },
+  hints: ClientHint,
+  organizationId: string
+) {
+  await cancelScheduler(booking);
+  await scheduleCheckinReminderForBooking(booking, hints, organizationId);
 }
 
 /**
@@ -2916,6 +3062,7 @@ async function checkoutBookingWritesWithinTx(
     hasKits,
     from,
     to,
+    ignoreBookingIds = [],
     checkedOutById,
   }: {
     bookingId: Booking["id"];
@@ -2956,6 +3103,7 @@ async function checkoutBookingWritesWithinTx(
      */
     from: Booking["from"];
     to: Booking["to"];
+    ignoreBookingIds?: string[];
   }
 ) {
   /**
@@ -2974,6 +3122,8 @@ async function checkoutBookingWritesWithinTx(
       additionalData: { bookingId },
     });
   }
+
+  await assertAssetsBorrowable(tx, bookingAssetIds, organizationId);
 
   /**
    * Validate quantity availability for QUANTITY_TRACKED assets.
@@ -3015,6 +3165,7 @@ async function checkoutBookingWritesWithinTx(
         organizationId,
         window: { from, to },
         excludeBookingId: bookingId,
+        excludeBookingIds: ignoreBookingIds,
         db: tx,
       });
 
@@ -3314,7 +3465,11 @@ async function runCheckoutSideEffects({
   // Delegate to the shared scheduler helper so the progressive-checkout path
   // and the full-checkout path use identical scheduling behaviour.
   await scheduleCheckinReminderForBooking(
-    { id: bookingFound.id, to: effectiveTo ?? null },
+    {
+      id: bookingFound.id,
+      to: effectiveTo ?? null,
+      description: bookingFound.description,
+    },
     hints,
     organizationId
   );
@@ -3334,16 +3489,26 @@ export async function checkoutBooking({
   hints,
   from,
   to,
+  activeWindow,
   userId,
+  ignoreBookingIds = [],
 }: Pick<Booking, "id" | "organizationId"> & {
   hints: ClientHint;
   intentChoice?: CheckoutIntentEnum;
   from?: Date | null;
   to?: Date | null;
+  /**
+   * Optional date window to start at the moment of physical pickup. This is
+   * used by IOIO preparation flow; ordinary Shelf checkout callers keep the
+   * existing planned booking window.
+   */
+  activeWindow?: { from: Date; to: Date };
   userId?: string;
+  ignoreBookingIds?: string[];
 }) {
   try {
-    const bookingFound = await db.booking
+    const baseDb = db as unknown as PrismaClient;
+    const bookingFound = await baseDb.booking
       .findUniqueOrThrow({
         where: { id, organizationId },
         include: {
@@ -3354,8 +3519,9 @@ export async function checkoutBooking({
                   bookingAssets: {
                     ...createBookingConflictConditions({
                       currentBookingId: id,
-                      fromDate: from,
-                      toDate: to,
+                      fromDate: activeWindow?.from ?? from,
+                      toDate: activeWindow?.to ?? to,
+                      ignoreBookingIds,
                     }),
                     select: {
                       id: true,
@@ -3509,11 +3675,20 @@ export async function checkoutBooking({
      * We need this because sometimes the user can checkout a booking
      * that is already overdue for check in
      */
-    const isExpired = isBookingExpired({ to: bookingFound.to! });
+    const checkoutFrom = activeWindow?.from ?? bookingFound.from;
+    const checkoutTo = activeWindow?.to ?? bookingFound.to;
+    const isExpired = isBookingExpired({ to: checkoutTo });
 
     const dataToUpdate: Prisma.BookingUpdateInput = {
       status: isExpired ? BookingStatus.OVERDUE : BookingStatus.ONGOING,
     };
+
+    if (activeWindow) {
+      dataToUpdate.originalFrom = plannedStartToPreserve(bookingFound);
+      dataToUpdate.originalTo = bookingFound.originalTo ?? bookingFound.to;
+      dataToUpdate.from = activeWindow.from;
+      dataToUpdate.to = activeWindow.to;
+    }
 
     /**
      * The kits this check-out takes off the shelf, so their status can be
@@ -3633,8 +3808,9 @@ export async function checkoutBooking({
           hasKits,
           // Booking's own committed window — windows the QT availability
           // guard (see the doc comment on `checkoutBookingWritesWithinTx`).
-          from: bookingFound.from,
-          to: bookingFound.to,
+          from: checkoutFrom,
+          to: checkoutTo,
+          ignoreBookingIds,
           checkedOutById: userId ?? null,
         });
 
@@ -3786,7 +3962,8 @@ export async function fulfilModelRequestsAndCheckout({
      * validated inside the tx via the availability + outstanding-request
      * guards (TOCTOU-safe).
      */
-    const bookingFound = await db.booking
+    const baseDb = db as unknown as PrismaClient;
+    const bookingFound = await baseDb.booking
       .findUniqueOrThrow({
         where: { id: bookingId, organizationId },
         include: {
@@ -6158,6 +6335,7 @@ export async function checkinBooking({
       await sendBookingEmailToAllRecipients({
         recipients,
         booking: updatedBooking,
+        templateKey: "booking_completed",
         subject: `🎉 Booking complete (${updatedBooking.name}) - shelf.nu`,
         buildText: (prefs) =>
           completedBookingEmailContent({
@@ -8517,7 +8695,8 @@ export async function partialCheckoutBooking({
     // checkoutBooking's guards, scoped to this scan batch. Post-pivot we
     // look at conflicting BookingAsset rows (the `asset.bookings[]`
     // implicit relation no longer exists).
-    const scannedAssetsWithConflicts = await db.asset.findMany({
+    const baseDb = db as unknown as PrismaClient;
+    const scannedAssetsWithConflicts = await baseDb.asset.findMany({
       where: { id: { in: assetIds }, organizationId },
       include: {
         bookingAssets: {
@@ -9839,7 +10018,11 @@ export async function partialCheckoutBooking({
         : false;
       if (!expired && bookingFound.to) {
         await scheduleCheckinReminderForBooking(
-          { id: bookingFound.id, to: bookingFound.to },
+          {
+            id: bookingFound.id,
+            to: bookingFound.to,
+            description: bookingFound.description,
+          },
           hints,
           organizationId
         );
@@ -10181,14 +10364,18 @@ export async function updateBookingAssets({
             ).map((row) => row.assetId)
           : []
       );
-      const effectiveSlices = slices.filter(
-        (s) => !existingStandaloneIndividualAssetIds.has(s.assetId)
-      );
+      const effectiveSlices = [
+        ...new Map(
+          slices
+            .filter((s) => !existingStandaloneIndividualAssetIds.has(s.assetId))
+            .map((slice) => [slice.assetKitId, slice] as const)
+        ).values(),
+      ];
 
-      // Standalone rows go through an upsert keyed on the
-      // (bookingId, assetId) partial unique. Dedupe the standalone ids
-      // since the upsert can't accept duplicate keys in one statement, and
-      // exclude any INDIVIDUAL asset that is also a kit slice (see invariant
+      // Standalone rows are reconciled by bookingId + assetId + assetKitId
+      // inside the locked booking transaction. Dedupe the standalone ids
+      // before writing, and exclude any INDIVIDUAL asset that is also a kit
+      // slice (see invariant
       // above). `standaloneAssetIds` and `standaloneQuantities` stay
       // index-aligned because both derive from the same filtered array.
       const standaloneAssetIds = [...new Set(assetIds)].filter(
@@ -10198,9 +10385,8 @@ export async function updateBookingAssets({
         (assetId) => quantities?.[assetId] ?? 1
       );
 
-      // Kit-driven rows go through a separate insert keyed on the
-      // (bookingId, assetKitId) partial unique — they use ON CONFLICT
-      // DO NOTHING because adding the same kit twice should be a no-op,
+      // Kit-driven rows go through a separate insert reconciled by
+      // (bookingId, assetKitId). Adding the same kit twice should be a no-op,
       // not an upsert (the picker filters already-added kits out
       // client-side anyway). One row per kit slice, so an asset in two
       // kits yields two rows with distinct assetKitId. Uses `effectiveSlices`
@@ -10367,8 +10553,7 @@ export async function updateBookingAssets({
       /**
        * `AssetKit` ids already represented on this booking. Used only to tell a
        * genuinely new kit slice from a re-submitted one, since the kit insert
-       * below is `ON CONFLICT DO NOTHING` and therefore creates nothing the
-       * second time.
+       * below skips a membership already present on this booking.
        */
       const preExistingAssetKitIds = new Set<string>(
         preExistingRows
@@ -10459,25 +10644,49 @@ export async function updateBookingAssets({
       });
 
       await Promise.all([
-        // Standalone branch: upsert against the manual partial unique
-        // `(bookingId, assetId) WHERE assetKitId IS NULL`. Re-submitting
-        // an existing standalone row updates its quantity.
+        // Update existing standalone rows first, then insert only missing
+        // rows. Do not use ON CONFLICT against the PostgreSQL-only partial
+        // indexes here: long-lived IOIO databases may have the discriminator
+        // columns but not those indexes. `lockBookingForStatusCheck` above
+        // serializes all writes for this booking, so the update/insert pair is
+        // race-safe without requiring those indexes to exist.
         standaloneAssetIds.length > 0
-          ? tx.$executeRaw`
-              INSERT INTO "BookingAsset" ("id", "assetId", "bookingId", "quantity", "assetKitId")
-              SELECT gen_random_uuid()::text, unnest(${standaloneAssetIds}::text[]), ${id}, unnest(${standaloneQuantities}::int[]), NULL
-              ON CONFLICT ("bookingId", "assetId") WHERE "assetKitId" IS NULL DO UPDATE SET quantity = EXCLUDED.quantity
-            `
+          ? (async () => {
+              await tx.$executeRaw`
+                UPDATE "BookingAsset" AS existing
+                SET quantity = requested.quantity
+                FROM unnest(${standaloneAssetIds}::text[], ${standaloneQuantities}::int[]) AS requested("assetId", quantity)
+                WHERE existing."bookingId" = ${id}
+                  AND existing."assetId" = requested."assetId"
+                  AND existing."assetKitId" IS NULL
+              `;
+              await tx.$executeRaw`
+                INSERT INTO "BookingAsset" ("id", "assetId", "bookingId", "quantity", "assetKitId")
+                SELECT gen_random_uuid()::text, requested."assetId", ${id}, requested.quantity, NULL
+                FROM unnest(${standaloneAssetIds}::text[], ${standaloneQuantities}::int[]) AS requested("assetId", quantity)
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM "BookingAsset" AS existing
+                  WHERE existing."bookingId" = ${id}
+                    AND existing."assetId" = requested."assetId"
+                    AND existing."assetKitId" IS NULL
+                )
+              `;
+            })()
           : Promise.resolve(),
-        // Kit-driven branch: insert against the kit partial unique
-        // `(bookingId, assetKitId) WHERE assetKitId IS NOT NULL`. DO
-        // NOTHING on conflict so adding the same kit twice is harmless
-        // (kit qty edits cascade from `updateKitAssets`, not from here).
+        // Kit-driven rows use the same locked update/insert approach. Existing
+        // kit slices are left untouched, matching the previous DO NOTHING
+        // behavior, while missing slices are added without depending on the
+        // database's partial unique index.
         kitAssetIds.length > 0
           ? tx.$executeRaw`
               INSERT INTO "BookingAsset" ("id", "assetId", "bookingId", "quantity", "assetKitId", "sourceKitId")
-              SELECT gen_random_uuid()::text, unnest(${kitAssetIds}::text[]), ${id}, unnest(${kitQuantities}::int[]), unnest(${kitAssetKitIds}::text[]), unnest(${kitSourceKitIds}::text[])
-              ON CONFLICT ("bookingId", "assetKitId") WHERE "assetKitId" IS NOT NULL DO NOTHING
+              SELECT gen_random_uuid()::text, requested."assetId", ${id}, requested.quantity, requested."assetKitId", requested."sourceKitId"
+              FROM unnest(${kitAssetIds}::text[], ${kitQuantities}::int[], ${kitAssetKitIds}::text[], ${kitSourceKitIds}::text[]) AS requested("assetId", quantity, "assetKitId", "sourceKitId")
+              WHERE NOT EXISTS (
+                SELECT 1 FROM "BookingAsset" AS existing
+                WHERE existing."bookingId" = ${id}
+                  AND existing."assetKitId" = requested."assetKitId"
+              )
             `
           : Promise.resolve(),
         // Touch updatedAt since the raw INSERTs don't update the booking row
@@ -10606,8 +10815,8 @@ export async function updateBookingAssets({
          * `newlyStandaloneAssetIds.has(id) || !preExistingStandaloneAssetIds.has(id)`,
          * whose first operand is a strict subset of the second — so it reduced
          * to the second alone and never looked at kit rows at all, despite the
-         * comment claiming it did. Harmless in practice (the kit insert is
-         * `ON CONFLICT DO NOTHING` and the picker filters already-added kits),
+         * comment claiming it did. Harmless in practice (the kit insert only
+         * adds missing rows and the picker filters already-added kits),
          * but code and comment disagreeing is how the next reader gets misled.
          */
         const assetsGainingAKitSlice = new Set<string>(
@@ -10720,6 +10929,19 @@ export async function updateBookingAssets({
 
     return booking;
   } catch (cause) {
+    if (cause instanceof Error) {
+      const databaseError = cause as Error & {
+        code?: string;
+        meta?: { code?: string; message?: string };
+      };
+      Logger.dev("[BOOKING_ASSETS_UPDATE_FAILED]", {
+        errorName: databaseError.name,
+        prismaCode: databaseError.code,
+        sqlState: databaseError.meta?.code,
+        message: databaseError.meta?.message ?? databaseError.message,
+        stack: databaseError.stack,
+      });
+    }
     throw new ShelfError({
       cause,
       label,
@@ -10892,10 +11114,13 @@ export async function cancelBooking({
   hints,
   userId,
   cancellationReason,
+  expectedStatus,
 }: Pick<Booking, "id" | "organizationId"> & {
   hints: ClientHint;
   userId?: string;
   cancellationReason?: string;
+  /** Optional state guard for workflows that may cancel only before pickup. */
+  expectedStatus?: BookingStatus;
 }) {
   try {
     const bookingFound = await db.booking
@@ -10953,6 +11178,16 @@ export async function cancelBooking({
         additionalData: { bookingId: id, status: bookingFound.status },
       });
     }
+    if (expectedStatus && bookingFound.status !== expectedStatus) {
+      throw new ShelfError({
+        cause: null,
+        label,
+        message: "This request can no longer be cancelled.",
+        status: 409,
+        shouldBeCaptured: false,
+        additionalData: { bookingId: id, status: bookingFound.status },
+      });
+    }
 
     /**
      * Kits this booking took out, resolved exactly as the check-out that
@@ -10969,6 +11204,26 @@ export async function cancelBooking({
     const hasKits = kitIds.length > 0;
 
     const booking = await db.$transaction(async (tx) => {
+      if (expectedStatus) {
+        const guarded = await tx.booking.updateMany({
+          where: {
+            id: bookingFound.id,
+            organizationId,
+            status: expectedStatus,
+          },
+          data: { cancellationReason },
+        });
+        if (guarded.count !== 1) {
+          throw new ShelfError({
+            cause: null,
+            label,
+            message: "This request can no longer be cancelled.",
+            status: 409,
+            shouldBeCaptured: false,
+            additionalData: { bookingId: id },
+          });
+        }
+      }
       /**
        * If booking is ONGOING or OVERDUE, the cancelled booking's assets
        * are exiting an active commitment and need terminal-status
@@ -11037,6 +11292,7 @@ export async function cancelBooking({
       await sendBookingEmailToAllRecipients({
         recipients,
         booking,
+        templateKey: "booking_cancelled",
         subject: `❌ Booking cancelled (${booking.name}) - shelf.nu`,
         buildText: (prefs) =>
           cancelledBookingEmailContent({
@@ -11543,6 +11799,7 @@ export async function extendBooking({
       await sendBookingEmailToAllRecipients({
         recipients,
         booking: updatedBooking,
+        templateKey: "booking_extended",
         subject: `Booking extended (${updatedBooking.name}) - shelf.nu`,
         buildText: (prefs) =>
           extendBookingEmailContent({
@@ -11634,8 +11891,8 @@ export async function extendBooking({
  * them. A `findFirst` would silently hide bookings linked via the other rows.
  *
  * Returns `teamMemberIds: []` when the user has no team member — callers that
- * require one (the index, the iCal feed) throw on that; list surfaces simply
- * fall back to matching on the user link alone.
+ * require one (such as the iCal feed) may enforce that separately; list
+ * surfaces can safely fall back to matching on the user link alone.
  *
  * @param params.userId - The user whose bookings the scope restricts to
  * @param params.organizationId - The active workspace
@@ -11661,20 +11918,27 @@ export async function getBookingsFilterData({
   userId,
   canSeeAllBookings,
   organizationId,
+  ignoreStoredFilters = false,
 }: {
   request: Request;
   userId: string;
   canSeeAllBookings: boolean;
   organizationId: Organization["id"];
+  ignoreStoredFilters?: boolean;
 }) {
   const {
     filters,
     redirectNeeded,
     serializedCookie: filtersCookie,
-  } = await getFiltersFromRequest(request, organizationId, {
-    name: "bookingFilter_v2",
-    path: "/", // Use root path so cookie is sent with RR7 single fetch .data requests
-  });
+  } = await getFiltersFromRequest(
+    request,
+    organizationId,
+    {
+      name: "bookingFilter_v2",
+      path: "/", // Use root path so cookie is sent with RR7 single fetch .data requests
+    },
+    { ignoreStoredFilters }
+  );
 
   const searchParams = getCurrentSearchParams(request);
   const { page, perPageParam, search, status, teamMemberIds, tags } =
@@ -11685,7 +11949,7 @@ export async function getBookingsFilterData({
 
   const orderBy = searchParams.get("orderBy") ?? "from";
   const orderDirection = (searchParams.get("orderDirection") ??
-    "asc") as SortingDirection;
+    "desc") as SortingDirection;
 
   /**
    * For self service and base users, we look up their team member so the
@@ -11712,20 +11976,10 @@ export async function getBookingsFilterData({
       organizationId,
     });
 
-    if (!custodianScope.teamMemberIds.length) {
-      throw new ShelfError({
-        cause: null,
-        title: "Team member not found",
-        message:
-          "You are not part of a team in this organization. Please contact your organization admin to resolve this",
-        label: "Booking",
-        shouldBeCaptured: false,
-      });
-    }
-
     // If the user is self service/base without override, we only show bookings
     // that belong to that user — matched via their user link OR any of their
-    // team-member links.
+    // team-member links. An empty teamMemberIds list is valid for a fresh
+    // organization; the user link still scopes results safely.
     selfServiceData = { custodianScope };
   }
 
@@ -11952,8 +12206,12 @@ export async function getBookings(params: {
    */
   writableBy?: { userId: string; role: OrganizationRoles } | null;
   excludeBookingIds?: Booking["id"][] | null;
+  /** Exclude planning-only booking records from a loan-oriented list. */
+  excludeBookingDescriptions?: string[] | null;
   bookingFrom?: Booking["from"] | null;
   bookingTo?: Booking["to"] | null;
+  fromDateStart?: Date | null;
+  fromDateEnd?: Date | null;
   userId: Booking["creatorId"];
   extraInclude?: Prisma.BookingInclude;
   /** Controls whether entries should be paginated or not */
@@ -11995,13 +12253,16 @@ export async function getBookings(params: {
     writableBy,
     assetIds,
     bookingTo,
+    fromDateStart,
+    fromDateEnd,
     excludeBookingIds,
+    excludeBookingDescriptions,
     bookingFrom,
     userId,
     extraInclude,
     takeAll = false,
     orderBy = "from",
-    orderDirection = "asc",
+    orderDirection = "desc",
     kitId,
     tags,
     skipCount = false,
@@ -12130,6 +12391,18 @@ export async function getBookings(params: {
       });
     }
 
+    if (excludeBookingDescriptions?.length) {
+      // Keep bookings with no description while excluding only the supplied
+      // marker values. This is intentionally an AND clause so it cannot
+      // overwrite the caller's search OR clause.
+      andClauses.push({
+        OR: [
+          { description: { notIn: excludeBookingDescriptions } },
+          { description: null },
+        ],
+      });
+    }
+
     where.AND = andClauses;
 
     if (statuses?.length) {
@@ -12176,6 +12449,15 @@ export async function getBookings(params: {
       });
     }
 
+    if (fromDateStart && fromDateEnd) {
+      andClauses.push({
+        from: {
+          gte: fromDateStart,
+          lt: fromDateEnd,
+        },
+      });
+    }
+
     if (kitId) {
       where.bookingAssets = {
         some: { asset: { assetKits: { some: { kitId } } } },
@@ -12190,8 +12472,9 @@ export async function getBookings(params: {
       }
     }
 
+    const baseDb = db as unknown as PrismaClient;
     const [bookings, bookingCount] = await Promise.all([
-      db.booking.findMany({
+      baseDb.booking.findMany({
         ...(!takeAll && {
           skip,
           take: takeCap ?? take,
@@ -12976,7 +13259,8 @@ export async function deleteBooking(
      * atomicity rationale.
      */
     const b = await db.$transaction(async (tx) => {
-      const deleted = await tx.booking.delete({
+      const baseTx = tx as unknown as Prisma.TransactionClient;
+      const deleted = await baseTx.booking.delete({
         where: { id, organizationId },
         include: {
           ...BOOKING_COMMON_INCLUDE,
@@ -13025,6 +13309,7 @@ export async function deleteBooking(
       await sendBookingEmailToAllRecipients({
         recipients,
         booking: b,
+        templateKey: "booking_deleted",
         subject: `🗑️ Booking deleted (${b.name}) - shelf.nu`,
         buildText: (prefs) =>
           deletedBookingEmailContent({
@@ -13188,7 +13473,8 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
       ...extraInclude,
     } as MergeInclude<typeof BOOKING_WITH_ASSETS_INCLUDE, T>;
 
-    const bookingFound = (await db.booking.findFirstOrThrow({
+    const baseDb = db as unknown as PrismaClient;
+    const bookingFound = (await baseDb.booking.findFirstOrThrow({
       where: bookingOrgScopeWhere({ id, organizationId, userOrganizations }),
       include: mergedInclude,
     })) as BookingWithExtraInclude<T>;
@@ -13200,6 +13486,20 @@ export async function getBooking<T extends Prisma.BookingInclude | undefined>(
       userOrganizations,
       request,
     });
+
+    const imageRows = (
+      bookingFound as { bookingAssets?: Array<{ asset: object }> }
+    ).bookingAssets?.filter(
+      (row) => row.asset && typeof row.asset === "object"
+    );
+    if (Array.isArray(imageRows)) {
+      const resolved = await resolveAssetImagesForPresentation(
+        imageRows.map((row) => row.asset)
+      );
+      imageRows.forEach((row, index) => {
+        row.asset = resolved[index];
+      });
+    }
 
     return bookingFound;
   } catch (cause) {
@@ -13388,7 +13688,43 @@ export async function getBookingsForCalendar(params: {
       takeAll: true,
     });
 
-    const events = bookings
+    // Calendar rows intentionally omit the heavy booking asset include. Load
+    // only the canonical names needed for Staff reservation labels in one
+    // narrow, organization-scoped query.
+    const calendarAssetRows = bookings.length
+      ? await db.bookingAsset.findMany({
+          where: {
+            bookingId: { in: bookings.map((booking) => booking.id) },
+            booking: { organizationId },
+          },
+          select: {
+            bookingId: true,
+            quantity: true,
+            asset: {
+              select: {
+                id: true,
+                title: true,
+                assetModel: { select: { id: true, name: true } },
+                assetKits: {
+                  select: {
+                    id: true,
+                    kit: { select: { name: true } },
+                  },
+                },
+              },
+            },
+          },
+        })
+      : [];
+    const calendarAssetNamesByBookingId =
+      summarizeBookingAssetsForCalendar(calendarAssetRows);
+
+    // Booking is the event identity. Its BookingAsset memberships only inform
+    // the compact equipment/quantity summary above; they never create events.
+    const uniqueBookings = [
+      ...new Map(bookings.map((booking) => [booking.id, booking])).values(),
+    ];
+    const events = uniqueBookings
       .filter((booking) => booking.from && booking.to)
       .map((booking) => {
         const custodianName = booking?.custodianUser
@@ -13400,6 +13736,7 @@ export async function getBookingsForCalendar(params: {
           title += ` | ${custodianName}`;
         }
         return {
+          id: booking.id,
           title,
           start: (booking.from as Date).toISOString(),
           end: (booking.to as Date).toISOString(),
@@ -13436,7 +13773,7 @@ export async function getBookingsForCalendar(params: {
             },
             creator: {
               name: booking.creator
-                ? resolveUserDisplayName(booking.creator)
+                ? resolveUserDisplayName(booking.creator) || "Staff member"
                 : "Unknown",
               user: booking.creator
                 ? {
@@ -13448,6 +13785,9 @@ export async function getBookingsForCalendar(params: {
                   }
                 : null,
             },
+            assetNames: [
+              ...(calendarAssetNamesByBookingId.get(booking.id) ?? []),
+            ],
             tags: booking.tags,
           },
         };
@@ -14232,6 +14572,7 @@ export async function bulkDeleteBookings({
         await sendBookingEmailToAllRecipients({
           recipients,
           booking: b,
+          templateKey: "booking_deleted",
           subject: `🗑️ Booking deleted (${b.name}) - shelf.nu`,
           buildText: (prefs) =>
             deletedBookingEmailContent({
@@ -14695,6 +15036,7 @@ export async function bulkCancelBookings({
         await sendBookingEmailToAllRecipients({
           recipients,
           booking: b,
+          templateKey: "booking_cancelled",
           subject: `❌ Booking cancelled (${b.name}) - shelf.nu`,
           buildText: (prefs) =>
             cancelledBookingEmailContent({
@@ -16988,6 +17330,7 @@ export type PartialCheckinDetailsType = Record<
 export async function checkinAssets({
   formData,
   request,
+  returnPhotoRequest,
   bookingId,
   organizationId,
   userId,
@@ -16995,6 +17338,7 @@ export async function checkinAssets({
 }: {
   formData: FormData;
   request: Request;
+  returnPhotoRequest?: Request;
   bookingId: string;
   organizationId: string;
   userId: string;
@@ -17031,6 +17375,18 @@ export async function checkinAssets({
 
   const hints = getClientHint(request);
 
+  const requestedAssetIds = [
+    ...(assetIds ?? []),
+    ...(checkins?.map((checkin) => checkin.assetId) ?? []),
+  ];
+  const returnPhoto = await prepareBookingReturnPhoto({
+    formData,
+    request: returnPhotoRequest ?? request,
+    bookingId,
+    organizationId,
+    assetIds: requestedAssetIds.length ? requestedAssetIds : undefined,
+  });
+
   const result = await partialCheckinBooking({
     id: bookingId,
     organizationId,
@@ -17040,6 +17396,14 @@ export async function checkinAssets({
     hints,
     intentChoice: checkinIntentChoice,
   });
+
+  if (returnPhoto) {
+    await createSystemBookingNote({
+      content: formatReturnPhotoNote(returnPhoto),
+      bookingId,
+      organizationId,
+    });
+  }
 
   /** Effective count of assets touched in this session — for toast messaging. */
   const touchedCount = checkins?.length ?? assetIds?.length ?? 0;

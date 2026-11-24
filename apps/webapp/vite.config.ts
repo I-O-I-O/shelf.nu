@@ -84,6 +84,7 @@ export default defineConfig({
     ],
   },
   server: {
+    allowedHosts: ["server.tail8928b7.ts.net"],
     port: 3000,
     https: httpsConfig,
     warmup: {

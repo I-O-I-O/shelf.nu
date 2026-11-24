@@ -52,8 +52,6 @@ import type {
   DistributionBreakdown,
   ReportPayload,
   TimeframePreset,
-  TopBookedAssetRow,
-  TopBookedKitRow,
 } from "~/modules/reports/types";
 import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import { getClientHint } from "~/utils/client-hints";
@@ -285,6 +283,44 @@ export async function loader({ context, request, params }: LoaderFunctionArgs) {
       });
       break;
 
+    case "asset-usage-distribution": {
+      const [usageReport, distributionReport] = await Promise.all([
+        assetUtilizationReport({
+          organizationId,
+          timeframe,
+          categoryId: url.searchParams.get("category") || undefined,
+          locationId: url.searchParams.get("location") || undefined,
+          page: getIntParam(url.searchParams, "page", 1),
+          pageSize: getIntParam(url.searchParams, "pageSize", 50),
+        }),
+        assetDistributionReport({
+          organizationId,
+          currency: currentOrganization.currency,
+          page: 1,
+          pageSize: 10000,
+        }),
+      ]);
+
+      reportData = {
+        report: {
+          id: reportId,
+          title: "Asset Usage & Distribution",
+          description:
+            "See how equipment is used and where inventory is distributed.",
+        },
+        filters: usageReport.filters,
+        kpis: usageReport.kpis,
+        rows: usageReport.rows,
+        computedMs: usageReport.computedMs + distributionReport.computedMs,
+        totalRows: usageReport.totalRows,
+        page: usageReport.page,
+        pageSize: usageReport.pageSize,
+        distributionKpis: distributionReport.kpis,
+        distributionBreakdown: distributionReport.distributionBreakdown,
+      };
+      break;
+    }
+
     case "asset-activity":
       reportData = await assetActivityReport({
         organizationId,
@@ -334,14 +370,12 @@ export default function ReportPage() {
     page,
     pageSize,
     complianceData,
-    topBookedAsset,
-    topBookedKit,
+    distributionKpis,
     distributionBreakdown,
     chartSeries,
   } = loaderData as typeof loaderData & {
     complianceData?: ComplianceData;
-    topBookedAsset?: TopBookedAssetRow | null;
-    topBookedKit?: TopBookedKitRow | null;
+    distributionKpis?: ReportPayload["kpis"];
     distributionBreakdown?: DistributionBreakdown;
     chartSeries?: ChartSeries[];
   };
@@ -355,7 +389,7 @@ export default function ReportPage() {
 
   return (
     <>
-      <Header>
+      <Header hideQuickFind>
         <ReportExportActions
           reportId={reportId}
           timeframe={filters.timeframe}
@@ -380,8 +414,7 @@ export default function ReportPage() {
             totalRows={totalRows}
             timeframe={filters.timeframe}
             complianceData={complianceData}
-            topBookedAsset={topBookedAsset}
-            topBookedKit={topBookedKit}
+            distributionKpis={distributionKpis}
             distributionBreakdown={distributionBreakdown}
             chartSeries={chartSeries}
             handlers={handlers}

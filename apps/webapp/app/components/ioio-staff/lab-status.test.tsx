@@ -1,0 +1,288 @@
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createLabStatus } from "@factories";
+import type {
+  LabIssue,
+  LabStatus,
+} from "~/modules/ioio-staff/lab-status.server";
+import { LabStatusCard, StaffLabStatusBell } from "./lab-status";
+
+function createStatus(count: number): LabStatus {
+  const issues: LabIssue[] = Array.from({ length: count }, (_, index) => ({
+    id: `issue-${index + 1}`,
+    kind: "general-report",
+    severity: "attention",
+    title: `Wrong location ${index + 1}`,
+    detail: "Shelf B",
+    href: "/operations?view=general",
+  }));
+
+  return createLabStatus({
+    generalReports: issues.length,
+    issues,
+  });
+}
+
+const readStateKey = "test:lab-status-seen";
+
+function renderBell(status: LabStatus | null, mobile = false) {
+  return render(
+    <MemoryRouter>
+      <StaffLabStatusBell
+        status={status}
+        mobile={mobile}
+        readStateKey={readStateKey}
+      />
+    </MemoryRouter>
+  );
+}
+
+describe("LabStatusCard", () => {
+  afterEach(() => cleanup());
+
+  it("counts preparation units in Needs attention with correct grammar", () => {
+    const status = createStatus(0);
+    status.totalIssues = 1;
+    status.preparationTasks = 2;
+    status.issues = [
+      {
+        id: "preparation:pending",
+        kind: "preparation",
+        severity: "attention",
+        title: "2 items to prepare",
+        detail: "Prepare equipment.",
+        href: "/operations?view=to-prepare",
+      },
+    ];
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <LabStatusCard status={status} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("2 items need action.")).toBeInTheDocument();
+
+    rerender(
+      <MemoryRouter>
+        <LabStatusCard status={{ ...status, preparationTasks: 1 }} />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("1 item needs action.")).toBeInTheDocument();
+  });
+});
+
+describe("StaffLabStatusBell", () => {
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => cleanup());
+
+  it("opens a mobile sheet, clears the unread count and restores focus on close", async () => {
+    const user = userEvent.setup();
+    renderBell(createStatus(3), true);
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+    expect(within(bell).getByText("3")).toBeInTheDocument();
+
+    await user.click(bell);
+    const sheet = screen.getByRole("dialog", { name: "Lab status" });
+    expect(sheet).toHaveClass(
+      "inset-x-0",
+      "w-full",
+      "pb-[env(safe-area-inset-bottom)]"
+    );
+    const list = within(sheet).getByRole("list", {
+      name: "Lab status notifications",
+    });
+    expect(list.parentElement).toHaveClass(
+      "overflow-y-auto",
+      "overscroll-contain"
+    );
+    expect(bell).toHaveAttribute("aria-expanded", "true");
+    expect(within(bell).queryByText("3")).toBeNull();
+    expect(
+      within(sheet).getByRole("link", { name: "Open operations" })
+    ).toHaveAttribute("href", "/operations");
+
+    await user.click(within(sheet).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(bell).toHaveFocus();
+
+    await user.click(bell);
+    await user.click(
+      screen.getByRole("link", { name: "Wrong location 1: Shelf B" })
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the desktop notification preview anchored to the bell", async () => {
+    const user = userEvent.setup();
+    renderBell(createStatus(1));
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+    await user.click(bell);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.getByRole("list", { name: "Lab status notifications" })
+        .parentElement
+    ).toHaveClass("absolute", "right-0");
+    await user.keyboard("{Escape}");
+    expect(bell).toHaveAttribute("aria-expanded", "false");
+    expect(bell).toHaveFocus();
+  });
+
+  it("counts newly actionable preparation units in the notification badge", () => {
+    const status = createStatus(0);
+    status.totalIssues = 1;
+    status.preparationTasks = 2;
+    status.issues = [
+      {
+        id: "preparation:pending",
+        kind: "preparation",
+        severity: "attention",
+        title: "2 items to prepare",
+        detail: "Prepare equipment.",
+        href: "/operations?view=to-prepare",
+      },
+    ];
+
+    renderBell(status);
+    expect(screen.getByText("2")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open lab status notifications" })
+    );
+    expect(
+      screen.getByText("2 current actionable items; all have been seen.")
+    ).toBeInTheDocument();
+  });
+
+  it("shows the current Lab status total and updates when loader data changes", () => {
+    const { rerender } = renderBell(createStatus(3));
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+
+    expect(screen.getByText("3")).toBeInTheDocument();
+    fireEvent.click(bell);
+    expect(
+      screen.getByText("3 current actionable items; all have been seen.")
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+
+    rerender(
+      <MemoryRouter>
+        <StaffLabStatusBell
+          status={createStatus(2)}
+          readStateKey={readStateKey}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(screen.queryByText("3")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+
+    rerender(
+      <MemoryRouter>
+        <StaffLabStatusBell
+          status={createStatus(0)}
+          readStateKey={readStateKey}
+        />
+      </MemoryRouter>
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Open lab status notifications",
+      })
+    ).toBeInTheDocument();
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("uses the same total as Lab status when the preview is capped", () => {
+    renderBell(createStatus(12));
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+    expect(screen.getByText("12")).toBeInTheDocument();
+    fireEvent.click(bell);
+
+    expect(bell.querySelector("span")).toBeNull();
+    expect(screen.getAllByRole("listitem")).toHaveLength(5);
+    expect(
+      screen.getByText("Showing 5 of 12 current actionable items.")
+    ).toBeInTheDocument();
+  });
+
+  it("clears the badge when opened and counts only issues that arrive afterward", () => {
+    const { unmount } = renderBell(createStatus(3));
+    const bell = screen.getByRole("button", {
+      name: "Open lab status notifications",
+    });
+
+    expect(screen.getByText("3")).toBeInTheDocument();
+    fireEvent.click(bell);
+
+    expect(screen.queryByText("3")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(
+      screen.getByText("3 current actionable items; all have been seen.")
+    ).toBeInTheDocument();
+
+    unmount();
+    const restoredBell = renderBell(createStatus(3));
+    expect(screen.queryByText("3")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Open lab status notifications",
+      })
+    );
+
+    restoredBell.rerender(
+      <MemoryRouter>
+        <StaffLabStatusBell
+          status={createStatus(4)}
+          readStateKey={readStateKey}
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    expect(
+      screen.getByText("4 current actionable items; 1 new.")
+    ).toBeInTheDocument();
+  });
+
+  it("keeps seen issue IDs separate for each user and organization scope", () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <StaffLabStatusBell
+          status={createStatus(2)}
+          readStateKey="team-a:user-a"
+        />
+      </MemoryRouter>
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open lab status notifications" })
+    );
+
+    rerender(
+      <MemoryRouter>
+        <StaffLabStatusBell
+          status={createStatus(2)}
+          readStateKey="team-b:user-a"
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+  });
+});

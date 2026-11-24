@@ -241,6 +241,71 @@ describe("GET /api/model-filters", () => {
       expect(filters[0].metadata).toMatchObject({ id: "cat-1" });
     });
 
+    it.each([
+      { id: "room-1", name: "Room A" },
+      { id: "section-1", name: "Section 1" },
+      { id: "shelf-1", name: "Shelf 2" },
+      { id: "container-1", name: "Container 3" },
+    ])(
+      "searches the active organization's current $name row",
+      async (location) => {
+        const currentLocation = {
+          ...location,
+          thumbnailUrl: null,
+          parentId: location.id === "room-1" ? null : "parent-location",
+          ...(location.id === "container-1"
+            ? {
+                parent: {
+                  id: "shelf-2",
+                  name: "Shelf 2",
+                  parentId: "section-1",
+                  parent: {
+                    id: "section-1",
+                    name: "Section 1",
+                    parentId: "room-1",
+                    parent: { id: "room-1", name: "Room A", parentId: null },
+                  },
+                },
+              }
+            : {}),
+        };
+        dbMocks.dynamicFindMany.mockResolvedValue([currentLocation]);
+
+        const filters = await readFilters(
+          await callLoader(
+            `name=location&queryKey=name&queryValue=${encodeURIComponent(
+              location.name
+            )}`
+          )
+        );
+
+        expect(lastWhere()).toEqual({
+          organizationId: ORG_ID,
+          OR: [
+            {
+              name: {
+                contains: location.name,
+                mode: "insensitive",
+              },
+            },
+          ],
+        });
+        expect(filters.map((result: { id: string }) => result.id)).toEqual([
+          location.id,
+        ]);
+        expect(
+          dbMocks.dynamicFindMany.mock.calls.at(-1)?.[0]?.select
+        ).toMatchObject({
+          parent: {
+            select: { name: true, parent: { select: { name: true } } },
+          },
+        });
+        if (location.id === "container-1") {
+          expect(filters[0].metadata.parent.parent.parent.name).toBe("Room A");
+        }
+      }
+    );
+
     it("puts the record's own columns at the top level, as route loaders do", async () => {
       dbMocks.dynamicFindMany.mockResolvedValue([
         { id: "tm-1", name: "Ada Lovelace", userId: "user-9" },

@@ -147,9 +147,36 @@ type CodeScannerProps = {
 
   /** Saved camera device ID from user preferences (cookie) */
   savedCameraId?: string;
+
+  /** Optional friendly camera error callback for embedded scanner dialogs. */
+  onCameraError?: (message: string) => void;
 };
 
 type Mode = "camera" | "scanner";
+
+const INSECURE_CAMERA_CONTEXT_MESSAGE =
+  "Camera scanning requires a secure HTTPS connection.";
+const UNSUPPORTED_CAMERA_BROWSER_MESSAGE =
+  "Camera scanning is not supported in this browser. Use a supported browser with camera access.";
+
+function getCameraApiError() {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return null;
+  }
+
+  if (!window.isSecureContext) {
+    return INSECURE_CAMERA_CONTEXT_MESSAGE;
+  }
+
+  if (
+    !navigator.mediaDevices ||
+    typeof navigator.mediaDevices.getUserMedia !== "function"
+  ) {
+    return UNSUPPORTED_CAMERA_BROWSER_MESSAGE;
+  }
+
+  return null;
+}
 
 export const CodeScanner = ({
   onCodeDetectionSuccess,
@@ -172,6 +199,7 @@ export const CodeScanner = ({
   forceMode,
   overlayPosition = "fullscreen",
   savedCameraId,
+  onCameraError,
 }: CodeScannerProps) => {
   const [isLoading, setIsLoading] = useState(false);
   const { isMd } = useViewportHeight();
@@ -327,18 +355,25 @@ export const CodeScanner = ({
             action={action}
           />
         ) : (
-          <CameraMode
+          <CameraAvailabilityGate
             isLoading={isLoading}
             setIsLoading={setIsLoading}
-            paused={paused}
-            setPaused={setPaused}
-            onCodeDetectionSuccess={onCodeDetectionSuccess}
-            allowNonShelfCodes={shouldAllowNonShelfCodes}
-            action={action}
-            onDevicesEnumerated={handleDevicesEnumerated}
-            currentDeviceId={currentDeviceId}
-            savedCameraId={savedCameraId}
-          />
+            onCameraError={onCameraError}
+          >
+            <CameraMode
+              isLoading={isLoading}
+              setIsLoading={setIsLoading}
+              paused={paused}
+              setPaused={setPaused}
+              onCodeDetectionSuccess={onCodeDetectionSuccess}
+              allowNonShelfCodes={shouldAllowNonShelfCodes}
+              action={action}
+              onDevicesEnumerated={handleDevicesEnumerated}
+              currentDeviceId={currentDeviceId}
+              savedCameraId={savedCameraId}
+              onCameraError={onCameraError}
+            />
+          </CameraAvailabilityGate>
         )}
         {paused && (
           <div
@@ -596,6 +631,7 @@ function CameraMode({
   onDevicesEnumerated,
   currentDeviceId,
   savedCameraId,
+  onCameraError,
 }: {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
@@ -611,6 +647,7 @@ function CameraMode({
   currentDeviceId?: string | null;
   /** Saved camera ID from user preferences - used for initial constraint */
   savedCameraId?: string;
+  onCameraError?: (message: string) => void;
 }) {
   const videoRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -760,10 +797,17 @@ function CameraMode({
           ? (cameraError as { message?: string }).message ?? String(cameraError)
           : String(cameraError);
 
-      setError(`Camera error: ${errorMessage}`);
+      const userMessage =
+        errorName === "NotAllowedError" || errorName === "PermissionDeniedError"
+          ? "Camera access is required to scan QR codes. Allow camera access in your browser settings, then scan again."
+          : errorName === "NotFoundError"
+          ? "No camera was found. Connect or enable a camera, then scan again."
+          : `Camera error: ${errorMessage}`;
+      if (onCameraError) onCameraError(userMessage);
+      else setError(userMessage);
       setIsLoading(false);
     },
-    [hasRetriedConstraints, setIsLoading]
+    [hasRetriedConstraints, onCameraError, setIsLoading]
   );
 
   // Synchronizes the animation loop with the `paused` state and the
@@ -888,6 +932,59 @@ function CameraMode({
       />
     </>
   );
+}
+
+function CameraAvailabilityGate({
+  children,
+  isLoading,
+  setIsLoading,
+  onCameraError,
+}: {
+  children: ReactNode;
+  isLoading: boolean;
+  setIsLoading: (loading: boolean) => void;
+  onCameraError?: (message: string) => void;
+}) {
+  const [status, setStatus] = useState<{
+    checked: boolean;
+    error: string | null;
+  }>({ checked: false, error: null });
+  const hasChecked = useRef(false);
+
+  // This gate is only mounted in camera mode. Waiting until after hydration
+  // avoids mounting react-webcam before the browser's camera APIs are checked.
+  useEffect(() => {
+    if (hasChecked.current) return;
+    hasChecked.current = true;
+
+    const error = getCameraApiError();
+    setStatus({ checked: true, error });
+
+    if (error) {
+      setIsLoading(false);
+      onCameraError?.(error);
+    }
+  }, [onCameraError, setIsLoading]);
+
+  if (!status.checked) {
+    return isLoading ? null : (
+      <InfoOverlay>
+        <p>Checking camera support…</p>
+      </InfoOverlay>
+    );
+  }
+
+  if (status.error) {
+    if (onCameraError) return null;
+
+    return (
+      <InfoOverlay>
+        <p>{status.error}</p>
+      </InfoOverlay>
+    );
+  }
+
+  return <>{children}</>;
 }
 
 function InfoOverlay({ children }: { children: ReactNode }) {

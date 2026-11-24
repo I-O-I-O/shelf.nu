@@ -1,6 +1,34 @@
 # AGENTS.md
 
-This repository hosts **Shelf.nu**, an asset management platform built with Remix, React, TypeScript, and PostgreSQL. This is a **pnpm + Turborepo monorepo**. Use `pnpm` instead of `npm`. Follow the instructions below when working anywhere in this repository.
+This repository is the **IOIO Lab customization of Shelf.nu**, an asset management platform built with Remix, React, TypeScript, and PostgreSQL. It is a **pnpm + Turborepo monorepo**. Use `pnpm` instead of `npm`. Follow the instructions below when working anywhere in this repository.
+
+## IOIO Project Rules
+
+### Git architecture
+
+- Official Shelf.nu upstream: `https://github.com/Shelf-nu/shelf.nu.git`; IOIO fork/origin: `https://github.com/I-O-I-O/shelf.nu.git`.
+- The current IOIO development branch is `inventory-full-port`. Preserve the shared Shelf.nu Git history; never replace this repository with copied legacy files or recreate it as an unrelated repository.
+- Never use `--allow-unrelated-histories` or push to `upstream`. Do not merge upstream automatically; integrations must be deliberate and reviewed.
+- Before substantial work, inspect the working tree, current branch, and relevant history. Preserve unrelated work; never use `git reset --hard` or `git clean` unless explicitly authorized.
+- Never commit `.env`, credentials, database dumps, tokens, `node_modules`, or generated caches. Keep commits focused and descriptive.
+
+### Shelf-first development
+
+- Shelf.nu remains the architectural base. Before building, search for existing Shelf components, routes, services, models, permissions, and patterns that can be extended; avoid duplicate functionality, large rewrites, and unnecessary removal of upstream features.
+- Understand existing upstream behavior before editing. Preserve interfaces and conventions where practical, make the smallest coherent change, and keep IOIO behavior identifiable and localized where practical.
+- The old IOIO repository is a behavioral and UI reference only. Port behavior intentionally into the current Shelf architecture; Shelf patterns take precedence for architecture, security, database access, and framework use.
+- If a requirement conflicts with upstream architecture or needs a large structural change, explain the tradeoff before proceeding. For substantial IOIO features, consider future upstream maintenance; call out heavily upstream-owned files and likely merge conflicts. Do not claim changes are future-proof.
+
+### Database safety
+
+- Development and production databases are separate. Never access or modify production unless explicitly instructed; never run destructive database commands automatically.
+- Before adding schema fields, tables, or enums, check whether existing Shelf schema can support the feature. Create migrations only when the feature requires a schema change, explain why, and prefer backward-compatible changes.
+- Do not run migrations, resets, or seeds without explicit instruction for the intended environment. Database schema, migrations, and Prisma client generation belong to `@shelf/database` under `packages/database/`.
+
+### Validation and handoff
+
+- Run relevant formatting, lint, tests, builds, or focused checks available in the repository after changes. Test both staff and student authorization boundaries when relevant.
+- In the final report, state what changed, what was tested, whether database changes were needed, and likely future upstream-merge conflicts.
 
 ## Monorepo Structure
 
