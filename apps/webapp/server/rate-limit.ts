@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import type { Context } from "hono";
 import { rateLimiter } from "hono-rate-limiter";
 import { getSession } from "remix-hono/session";
@@ -21,6 +22,9 @@ const TELEMETRY_WINDOW_MS = 60_000;
  * flood for a memory exhaustion.
  */
 const TELEMETRY_MAX_TRACKED_BUCKETS = 5_000;
+const AUTHENTICATION_RATE_LIMIT_SALT = randomBytes(32);
+const AUTHENTICATION_FORM_BODY_MAX_BYTES = 16 * 1024;
+const authenticationEmailByRequest = new WeakMap<Request, Promise<string>>();
 
 /**
  * Bucket key → epoch ms of the last telemetry entry emitted for it.
@@ -214,11 +218,110 @@ function logRateLimitHit({
  * apart would silently mis-scope the throttle.
  */
 const bucketKeys = {
-  mobileIp: (c: Context) => `mobile:ip:${getClientIp(c)}`,
   appLoader: (c: Context) =>
     `app:${resolveAppLoaderIdentity(c).identity}:${c.req.path}`,
   calendarFeed: (c: Context) => `calendar:${c.req.path}`,
 };
+
+async function authenticationEmailBucketKey(c: Context): Promise<string> {
+  const email = await getAuthenticationEmail(c);
+  const clientIp = getClientIp(c);
+
+  const identity = email
+    ? createHmac("sha256", AUTHENTICATION_RATE_LIMIT_SALT)
+        .update(`${clientIp}\0${email}`)
+        .digest("hex")
+    : clientIp;
+  return `auth-email:${identity}`;
+}
+
+function getAuthenticationEmail(c: Context): Promise<string> {
+  const request = c.req.raw;
+  const existing = authenticationEmailByRequest.get(request);
+  if (existing) return existing;
+  const pending = readAuthenticationEmail(c);
+  authenticationEmailByRequest.set(request, pending);
+  return pending;
+}
+
+async function readAuthenticationEmail(c: Context): Promise<string> {
+  const contentType = c.req.header("content-type")?.split(";", 1)[0].trim();
+  const normalizedContentType = contentType?.toLowerCase();
+  const isUrlEncoded =
+    normalizedContentType === "application/x-www-form-urlencoded";
+  const isMultipart = normalizedContentType === "multipart/form-data";
+  if (!isUrlEncoded && !isMultipart) {
+    return "";
+  }
+
+  const contentLength = c.req.header("content-length");
+  if (contentLength !== undefined) {
+    const declaredBytes = Number(contentLength);
+    if (
+      !Number.isSafeInteger(declaredBytes) ||
+      declaredBytes < 0 ||
+      declaredBytes > AUTHENTICATION_FORM_BODY_MAX_BYTES
+    ) {
+      return "";
+    }
+  }
+
+  const reader = c.req.raw.clone().body?.getReader();
+  if (!reader) return "";
+
+  const decoder = new TextDecoder();
+  let body = "";
+  let bytesRead = 0;
+  try {
+    let result = await reader.read();
+    while (!result.done) {
+      const { value } = result;
+      bytesRead += value.byteLength;
+      if (bytesRead > AUTHENTICATION_FORM_BODY_MAX_BYTES) {
+        void reader.cancel().catch(() => {});
+        return "";
+      }
+      body += decoder.decode(value, { stream: true });
+      result = await reader.read();
+    }
+    body += decoder.decode();
+  } catch {
+    // Malformed or interrupted bodies fall back to the IP bucket.
+    return "";
+  }
+
+  let email: FormDataEntryValue | null;
+  if (isUrlEncoded) {
+    email = new URLSearchParams(body).get("email");
+  } else {
+    try {
+      // Reparse only the bounded clone. The original body remains available to
+      // the downstream React Router action.
+      const formData = await new Request("http://localhost", {
+        method: "POST",
+        headers: { "content-type": c.req.header("content-type") ?? "" },
+        body,
+      }).formData();
+      email = formData.get("email");
+    } catch {
+      return "";
+    }
+  }
+  return typeof email === "string" && email.length <= 320
+    ? email.trim().toLowerCase()
+    : "";
+}
+
+function rateLimitResponse(c: Context) {
+  const response = c.json(
+    { error: { message: "Too many requests. Please try again later." } },
+    429
+  );
+  // Composed limiters short-circuit as middleware; assigning c.res keeps
+  // a short-circuit response finalized while it propagates through both.
+  c.res = response;
+  return response;
+}
 
 /**
  * Resolve the identity half of {@link appLoaderRateLimit}'s bucket key.
@@ -244,43 +347,161 @@ function resolveAppLoaderIdentity(c: Context) {
 }
 
 /**
- * Coarse IP-based rate limit for `/api/mobile/*`.
+ * Mobile API request limits.
  *
- * Every mobile API request invokes Supabase Admin's `auth.getUser` inside
- * `requireMobileAuth`, so anonymous flooders amplify cost on our Supabase
- * quota. This middleware caps that surface per client IP before the route
- * handler runs.
- *
- * Backed by an in-memory MemoryStore. Per-machine counters are acceptable on
- * Fly: even with N machines a 30/min limit stays at ~30N/min worst-case,
- * which still defeats the threat. If we later need cross-machine accuracy,
- * swap the store — the interface is stable.
+ * Each bearer credential keeps the existing 30/min request budget, preventing
+ * students behind the same university gateway from consuming each other's
+ * allowance. A generous 3,600/min aggregate IP budget remains as an abuse
+ * backstop. When the IP is unknown, authenticated users still have separate
+ * credential buckets; unauthenticated requests share the unknown-IP bucket.
  */
-export const mobileIpRateLimit = () =>
-  rateLimiter({
-    windowMs: 60_000,
-    limit: 30,
+export function mobileIpRateLimit({
+  credentialLimit = 30,
+  ipLimit = 3600,
+  windowMs = 60_000,
+}: {
+  credentialLimit?: number;
+  ipLimit?: number;
+  windowMs?: number;
+} = {}) {
+  const ipLimiter = rateLimiter({
+    windowMs,
+    limit: ipLimit,
     standardHeaders: "draft-7",
-    keyGenerator: bucketKeys.mobileIp,
+    keyGenerator: (c) => `mobile:aggregate:${getClientIp(c)}`,
     handler: (c) => {
-      // Pre-auth surface, so there is no user id to attribute this to; the
-      // path is all we can safely record.
       logRateLimitHit({
-        scope: "mobile-ip",
-        bucket: bucketKeys.mobileIp(c),
+        scope: "mobile-ip-aggregate",
+        bucket: `mobile:aggregate:${getClientIp(c)}`,
         detail: c.req.path,
       });
-
-      return c.json(
-        {
-          error: {
-            message: "Too many requests. Please try again later.",
-          },
-        },
-        429
-      );
+      return rateLimitResponse(c);
     },
   });
+
+  const credentialLimiter = rateLimiter({
+    windowMs,
+    limit: credentialLimit,
+    standardHeaders: "draft-7",
+    keyGenerator: mobileCredentialBucketKey,
+    handler: (c) => {
+      logRateLimitHit({
+        scope: "mobile-credential",
+        bucket: mobileCredentialBucketKey(c),
+        detail: c.req.path,
+      });
+      return rateLimitResponse(c);
+    },
+  });
+
+  return async (c: Context, next: () => Promise<void>) =>
+    ipLimiter(c, () => credentialLimiter(c, next));
+}
+
+function mobileCredentialBucketKey(c: Context): string {
+  const authorization = c.req.header("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ")
+    ? authorization.slice(7).trim()
+    : "";
+  const identity = token
+    ? createHmac("sha256", AUTHENTICATION_RATE_LIMIT_SALT)
+        .update(token)
+        .digest("hex")
+    : getClientIp(c);
+  return `mobile:credential:${identity}`;
+}
+
+/**
+ * Authentication POST throttles use a generous shared-IP ceiling for campuses
+ * and a per-email-plus-source ceiling on routes that carry an email. The latter
+ * prevents one student from exhausting another student's account bucket and
+ * reduces remote targeted lockout attempts. Email limits are skipped when the
+ * source IP is unknown because those requests cannot be isolated safely. Email
+ * identifiers are HMACed in memory and never logged. Supabase's own email/code
+ * controls remain an additional layer, not a substitute for this limiter.
+ */
+export function authenticationRateLimit({
+  ipLimit = 6000,
+  emailLimit = 30,
+  windowMs = 15 * 60_000,
+}: {
+  ipLimit?: number;
+  emailLimit?: number;
+  windowMs?: number;
+} = {}) {
+  const ipLimiter = rateLimiter({
+    windowMs,
+    limit: ipLimit,
+    standardHeaders: "draft-7",
+    keyGenerator: (c) => `auth-ip:${getClientIp(c)}`,
+    handler: (c) => {
+      logRateLimitHit({
+        scope: "authentication-ip",
+        bucket: `auth-ip:${getClientIp(c)}`,
+        detail: c.req.path,
+      });
+      return rateLimitResponse(c);
+    },
+  });
+
+  const emailLimiter = rateLimiter({
+    windowMs,
+    limit: emailLimit,
+    standardHeaders: "draft-7",
+    keyGenerator: authenticationEmailBucketKey,
+    skip: async (c) =>
+      getClientIp(c) === "unknown" ||
+      !usesEmailAuthenticationLimit(c.req.path) ||
+      !(await getAuthenticationEmail(c)),
+    handler: async (c) => {
+      logRateLimitHit({
+        scope: "authentication-identity",
+        bucket: await authenticationEmailBucketKey(c),
+        detail: c.req.path,
+      });
+      return rateLimitResponse(c);
+    },
+  });
+
+  return async (c: Context, next: () => Promise<void>) =>
+    ipLimiter(c, () => emailLimiter(c, next));
+}
+
+const AUTHENTICATION_POST_PATHS = new Set([
+  "/join",
+  "/login",
+  "/otp",
+  "/send-otp",
+  "/resend-otp",
+  "/forgot-password",
+  "/sso-login",
+  "/logout",
+  "/oauth/callback",
+  "/oauth/callback/mobile",
+]);
+const AUTHENTICATION_EMAIL_POST_PATHS = new Set([
+  "/join",
+  "/login",
+  "/otp",
+  "/send-otp",
+  "/resend-otp",
+  "/forgot-password",
+]);
+
+/** Match auth actions on both document and React Router single-fetch URLs. */
+export function isAuthenticationPost(method: string, path: string): boolean {
+  if (method.toUpperCase() !== "POST") return false;
+  const routePath = path.endsWith(".data") ? path.slice(0, -5) : path;
+  return (
+    AUTHENTICATION_POST_PATHS.has(routePath) ||
+    /^\/accept-invite\/[^/]+$/.test(routePath)
+  );
+}
+
+function usesEmailAuthenticationLimit(path: string): boolean {
+  const routePath = path.endsWith(".data") ? path.slice(0, -5) : path;
+  return AUTHENTICATION_EMAIL_POST_PATHS.has(routePath);
+}
 
 /**
  * Per-(user, path) rate limit for single-fetch `.data` loader revalidations.

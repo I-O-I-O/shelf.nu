@@ -71,22 +71,23 @@ describe("mobileIpRateLimit", () => {
     expect(res.status).toBe(200);
   });
 
-  it("falls back to x-forwarded-for when fly-client-ip is absent", async () => {
-    // why: XFF is only trusted off Fly; override the beforeEach Fly stub to
-    // simulate a self-hosted deployment behind a trusted proxy.
+  it("uses explicitly configured X-Forwarded-For off Fly", async () => {
+    // why: self-hosted deployments must opt in to a proxy header instead of
+    // trusting caller-supplied forwarding headers by default.
     vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for");
     const app = new Hono();
     app.use("/api/mobile/*", mobileIpRateLimit());
     app.get("/api/mobile/me", (c) => c.json({ ok: true }));
 
     for (let i = 0; i < 30; i++) {
       const res = await app.request("/api/mobile/me", {
-        headers: { "X-Forwarded-For": "9.9.9.9, 10.0.0.5" },
+        headers: { "X-Forwarded-For": "9.9.9.9" },
       });
       expect(res.status).toBe(200);
     }
     const blocked = await app.request("/api/mobile/me", {
-      headers: { "X-Forwarded-For": "9.9.9.9, 10.0.0.5" },
+      headers: { "X-Forwarded-For": "9.9.9.9" },
     });
     expect(blocked.status).toBe(429);
   });

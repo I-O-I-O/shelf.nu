@@ -20,7 +20,9 @@ import {
 } from "./middleware";
 import {
   appLoaderRateLimit,
+  authenticationRateLimit,
   calendarFeedRateLimit,
+  isAuthenticationPost,
   mobileIpRateLimit,
 } from "./rate-limit";
 import { runWithRequestCache } from "./request-cache.server";
@@ -32,6 +34,8 @@ import { serverTiming } from "./timing.server";
 type ServerEnv = {
   Variables: Record<symbol, unknown>;
 };
+
+const authenticationLimiter = authenticationRateLimit();
 
 // Server will not start if the env is not valid
 initEnv();
@@ -129,6 +133,16 @@ export default createHonoServer<ServerEnv>({
      * Add logger middleware
      */
     server.use("*", logger());
+
+    // Authentication throttling runs before React Router and only on auth
+    // form submissions. A high shared-IP ceiling accommodates campus NATs;
+    // the second limiter applies a separate hashed-email budget.
+    server.use("*", (c, next) => {
+      if (!isAuthenticationPost(c.req.method, c.req.path)) {
+        return next();
+      }
+      return authenticationLimiter(c, next);
+    });
 
     /**
      * Mobile API rate limit. Path-scoped so webapp routes are unaffected.

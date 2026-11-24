@@ -19,7 +19,9 @@ import {
   isHandledClientError,
   isLikeShelfError,
 } from "~/utils/error";
+import { redactSensitive } from "~/utils/redact";
 import { maskEmailsInSentryPayload } from "~/utils/sentry-email-mask";
+import { scrubRequestTelemetry } from "./request-telemetry";
 
 /**
  * Resolve the release identifier for this server process. Read from the
@@ -78,15 +80,17 @@ if (SENTRY_DSN) {
      * exception, and that filter drops every event without one.
      */
     beforeSendTransaction(event) {
-      return maskEmailsInSentryPayload(event);
+      return maskEmailsInSentryPayload(scrubRequestTelemetry(event));
     },
     beforeSend(event, hint) {
       const kept = handleBeforeSendError(event, hint);
-      return kept && maskEmailsInSentryPayload(kept);
+      return kept && maskEmailsInSentryPayload(scrubRequestTelemetry(kept));
     },
     /** Structured logs quote `ShelfError` messages, which can name a user. */
     beforeSendLog(log) {
-      return maskEmailsInSentryPayload(log);
+      return maskEmailsInSentryPayload(
+        redactSensitive(scrubRequestTelemetry(log))
+      );
     },
   });
 
