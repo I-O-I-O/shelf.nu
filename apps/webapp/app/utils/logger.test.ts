@@ -2,7 +2,7 @@
 import * as Sentry from "@sentry/react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ShelfError } from "./error";
-import { Logger } from "./logger";
+import { Logger, logMissingFormIntent } from "./logger";
 
 // why: handledClientError emits to Sentry's structured-log API; capture the
 // calls instead of hitting the network. captureException is stubbed too because
@@ -55,5 +55,53 @@ describe("Logger.handledClientError", () => {
       expect.any(String),
       expect.objectContaining({ userId: "real-user-1" })
     );
+  });
+});
+
+describe("logMissingFormIntent", () => {
+  it("redacts credential headers, URL parameters, and form values", () => {
+    const formData = new FormData();
+    formData.set("password", "private-password");
+    formData.set("otp", "private-otp");
+    formData.set("comment", "keep this diagnostic");
+
+    const request = new Request(
+      "https://app.shelf.nu/bookings/booking-1?token=private-query-token",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer private-header-token",
+          cookie: "__authSession=private-cookie",
+          "x-api-key": "private-api-key",
+          "content-type": "application/x-www-form-urlencoded",
+          "user-agent": "private-device-fingerprint",
+          "x-forwarded-for": "203.0.113.44",
+        },
+      }
+    );
+
+    logMissingFormIntent({
+      formData,
+      request,
+      bookingId: "booking-1",
+      userId: "user-1",
+    });
+
+    const logged = JSON.stringify(
+      vi.mocked(Sentry.captureException).mock.calls
+    );
+    expect(logged).not.toMatch(
+      /private-(?:password|otp|query-token|header-token|cookie|api-key)/
+    );
+    expect(logged).not.toContain("keep this diagnostic");
+    expect(logged).not.toContain("private-device-fingerprint");
+    expect(logged).not.toContain("203.0.113.44");
+    expect(logged).not.toContain("private-query-token");
+    expect(logged).toContain("application/x-www-form-urlencoded");
+    expect(logged).toContain('"formKeys":["password","otp","comment"]');
+    const captured = vi.mocked(Sentry.captureException).mock.calls[0]?.[0] as {
+      additionalData?: { requestUrl?: string };
+    };
+    expect(captured.additionalData?.requestUrl).toBe("/bookings/booking-1");
   });
 });

@@ -166,8 +166,8 @@ export class RequestTimeLogger {
 /**
  * Log the full context when a form submission reaches the server without the expected `intent` field.
  *
- * Excludes sensitive headers (cookies/authorization) but preserves all other request metadata and the form payload so we
- * can diagnose client issues after the fact.
+ * Retains request identifiers and field names for debugging, but excludes
+ * arbitrary form values and personal request metadata.
  */
 export function logMissingFormIntent({
   formData,
@@ -185,32 +185,15 @@ export function logMissingFormIntent({
     return;
   }
 
-  const safeHeaders = Object.fromEntries(
-    Array.from(request.headers.entries()).filter(
-      ([key]) => !["cookie", "authorization"].includes(key.toLowerCase())
+  // Only content negotiation and size metadata are needed to debug malformed
+  // submissions; do not retain cookies, IPs, user-agent, referer, or credentials.
+  const safeHeaders = redactSensitive(
+    Object.fromEntries(
+      ["accept", "content-length", "content-type"]
+        .map((name) => [name, request.headers.get(name)])
+        .filter((entry): entry is [string, string] => entry[1] !== null)
     )
   );
-
-  const formSnapshot: Record<string, unknown> = {};
-  for (const [key, value] of formData.entries()) {
-    const isFile = typeof File !== "undefined" && value instanceof File;
-    const serialisedValue = isFile
-      ? {
-          kind: "file" as const,
-          name: value.name,
-          size: value.size,
-          type: value.type,
-        }
-      : value;
-
-    if (formSnapshot[key] === undefined) {
-      formSnapshot[key] = serialisedValue;
-    } else if (Array.isArray(formSnapshot[key])) {
-      (formSnapshot[key] as unknown[]).push(serialisedValue);
-    } else {
-      formSnapshot[key] = [formSnapshot[key], serialisedValue];
-    }
-  }
 
   Logger.error({
     name: "BookingIntentMissing",
@@ -220,11 +203,12 @@ export function logMissingFormIntent({
     additionalData: {
       bookingId,
       userId,
-      requestUrl: request.url,
+      // Query values can hold search terms and personal data in addition to
+      // credentials, so retain only the route path for this diagnostic.
+      requestUrl: new URL(request.url).pathname,
       method: request.method,
       headers: safeHeaders,
       formKeys: Array.from(new Set(Array.from(formData.keys()))),
-      formSnapshot,
     },
   });
 }

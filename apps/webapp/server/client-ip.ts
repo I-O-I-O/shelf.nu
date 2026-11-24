@@ -1,43 +1,59 @@
+import { isIP } from "node:net";
 import type { Context } from "hono";
 
 /**
- * Returns the client IP for a request, for use as a rate-limit bucket key.
+ * Returns a rate-limit identity only from a proxy header the operator has
+ * explicitly configured as trusted.
  *
- * The trusted header depends on where we run, so we branch on the `FLY_APP_NAME`
- * runtime marker FIRST and trust only that environment's header — never the
- * other, which would be client-spoofable:
+ * Fly's edge header is used only when the Fly runtime marker is present. On
+ * other hosts, `TRUSTED_PROXY_HEADER` must be `x-forwarded-for` or
+ * `cf-connecting-ip`. The configured proxy must overwrite the selected header,
+ * and the app origin must not be reachable around that proxy. X-Forwarded-For
+ * must contain exactly one IP; interpreting a proxy chain without a configured
+ * trusted-hop count could select a client-forged value.
  *
- * - **On Fly** (`FLY_APP_NAME` set): trust only `Fly-Client-IP`, which the Fly
- *   edge sets on every request and strips from client input, so it cannot be
- *   forged. `X-Forwarded-For` is ignored entirely.
- * - **Off Fly** (self-hosted behind a trusted reverse proxy — Docker, etc. — or
- *   local dev): there is no Fly edge, so `Fly-Client-IP` would itself be just a
- *   client-supplied header and must NOT be trusted (an attacker could rotate it
- *   to mint a fresh rate-limit bucket per request). Fall back to the leftmost
- *   `X-Forwarded-For`; the operator's proxy is responsible for setting a
- *   trustworthy value.
- *
- * `"unknown"` is the last-resort key; it collapses to a single shared bucket,
- * which fail-closes (misconfigured infra still gets throttled rather than waved
- * through).
- *
- * NOTE: behind Cloudflare, the trusted header is the CF/edge IP rather than the
- * end user's, so IP buckets are coarse. That is acceptable here because the
- * primary rate-limit key is the signed-session `userId` (see `appLoaderRateLimit`
- * in `./rate-limit`); IP is only a fallback. True per-user IP precision would
- * mean trusting `CF-Connecting-IP` gated by a Cloudflare-range check or origin
- * lock — deliberately out of scope.
+ * Missing, malformed, or untrusted input returns `"unknown"`, which fail-closes
+ * the IP-based rate-limit bucket instead of allowing a caller to rotate forged
+ * headers to bypass throttling.
  */
-export function getClientIp(c: Context): string {
-  // On Fly the edge sets (and sanitizes) `Fly-Client-IP`; it is the only trusted
-  // source there, and a client-supplied `X-Forwarded-For` is ignored.
-  const onFly = Boolean(process.env.FLY_APP_NAME);
-  if (onFly) {
-    return c.req.header("fly-client-ip")?.trim() || "unknown";
+export function getClientIp(
+  c: Context,
+  config: NodeJS.ProcessEnv = process.env
+): string {
+  if (config.FLY_APP_NAME) {
+    return trustedIp(c.req.header("fly-client-ip"));
   }
 
-  // Off Fly, `Fly-Client-IP` would be client-spoofable, so it is NOT consulted.
-  // Trust only the proxy-set leftmost `X-Forwarded-For` (self-host/local dev).
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || "unknown";
+  switch (config.TRUSTED_PROXY_HEADER?.toLowerCase()) {
+    case "x-forwarded-for":
+      return trustedIp(c.req.header("x-forwarded-for"), true);
+    case "cf-connecting-ip":
+      return trustedIp(c.req.header("cf-connecting-ip"));
+    default:
+      return "unknown";
+  }
+}
+
+function trustedIp(value: string | undefined, requireSingle = false): string {
+  const ip = value?.trim();
+  const version = ip ? isIP(ip) : 0;
+  if (!ip || (requireSingle && ip.includes(",")) || version === 0) {
+    return "unknown";
+  }
+
+  if (version === 4) return ip;
+
+  // URL's IPv6 parser provides a stable compressed representation, so
+  // equivalent textual forms share the same rate-limit bucket.
+  const normalized = new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+  const mappedIpv4 = normalized.match(
+    /^::ffff:([\da-f]{1,4}):([\da-f]{1,4})$/i
+  );
+  if (mappedIpv4) {
+    const high = Number.parseInt(mappedIpv4[1], 16);
+    const low = Number.parseInt(mappedIpv4[2], 16);
+    return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  }
+
+  return normalized.toLowerCase();
 }

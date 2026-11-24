@@ -1,8 +1,14 @@
 import { Hono } from "hono";
 import { session } from "remix-hono/session";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { appLoaderRateLimit, calendarFeedRateLimit } from "./rate-limit";
+import {
+  appLoaderRateLimit,
+  authenticationRateLimit,
+  calendarFeedRateLimit,
+  isAuthenticationPost,
+  mobileIpRateLimit,
+} from "./rate-limit";
 import { createSessionStorage } from "./session";
 
 const mockHandledClientError = vi.hoisted(() => vi.fn());
@@ -17,6 +23,10 @@ vi.mock("~/utils/logger", () => ({
     log: vi.fn(),
   },
 }));
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("appLoaderRateLimit middleware", () => {
   /**
@@ -57,6 +67,8 @@ describe("appLoaderRateLimit middleware", () => {
    * MemoryStore isolated between tests.
    */
   function request(app: Hono, path: string, ip: string) {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for");
     return app.request(`https://app.shelf.nu${path}`, {
       // why: vary the client IP per test so each test owns a distinct
       // (identity, path) bucket and the shared MemoryStore can't leak counts.
@@ -213,6 +225,187 @@ describe("appLoaderRateLimit middleware", () => {
       expect(logged.message).not.toContain(secret);
       expect(logged.message).toContain("redacted");
     });
+  });
+});
+
+describe("authenticationRateLimit middleware", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function makeAuthApp({ ipLimit = 100, emailLimit = 2 } = {}) {
+    const app = new Hono();
+    app.use(
+      "*",
+      authenticationRateLimit({ ipLimit, emailLimit, windowMs: 60_000 })
+    );
+    app.post("/login", async (c) => {
+      const body = await c.req.parseBody();
+      return c.json({ email: body.email ?? null });
+    });
+    return app;
+  }
+
+  function authRequest(app: Hono, ip: string, email: string) {
+    return app.request("https://app.shelf.nu/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-forwarded-for": ip,
+      },
+      body: new URLSearchParams({ email }),
+    });
+  }
+
+  it("limits one normalized email per source while allowing other campus users", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for");
+    const app = makeAuthApp();
+
+    expect(
+      (await authRequest(app, "10.0.0.1", "Student@university.edu")).status
+    ).toBe(200);
+    expect(
+      (await authRequest(app, "10.0.0.1", " student@university.edu ")).status
+    ).toBe(200);
+    expect(
+      (await authRequest(app, "10.0.0.1", "STUDENT@UNIVERSITY.EDU")).status
+    ).toBe(429);
+    expect(
+      (await authRequest(app, "10.0.0.1", "another@university.edu")).status
+    ).toBe(200);
+    expect(
+      (await authRequest(app, "10.0.0.2", "student@university.edu")).status
+    ).toBe(200);
+  });
+
+  it("enforces an IP backstop while ignoring caller-forged forwarding headers by default", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "");
+    const app = makeAuthApp({ ipLimit: 2, emailLimit: 100 });
+
+    expect(
+      (await authRequest(app, "10.0.0.1", "one@university.edu")).status
+    ).toBe(200);
+    expect(
+      (await authRequest(app, "10.0.0.2", "two@university.edu")).status
+    ).toBe(200);
+    expect(
+      (await authRequest(app, "10.0.0.3", "three@university.edu")).status
+    ).toBe(429);
+  });
+
+  it("bounds cloned form parsing and leaves an oversized body readable downstream", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for");
+    const app = makeAuthApp({ ipLimit: 100, emailLimit: 100 });
+    const form = new URLSearchParams({
+      email: "student@university.edu",
+      extra: "x".repeat(20_000),
+    });
+    const res = await app.request("https://app.shelf.nu/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-forwarded-for": "10.0.0.1",
+      },
+      body: form,
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ email: "student@university.edu" });
+  });
+
+  it("applies the email bucket to bounded multipart login forms", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for");
+    const app = makeAuthApp({ ipLimit: 100, emailLimit: 1 });
+    const request = (email: string) => {
+      const form = new FormData();
+      form.set("email", email);
+      return app.request("https://app.shelf.nu/login", {
+        method: "POST",
+        headers: { "x-forwarded-for": "10.0.0.1" },
+        body: form,
+      });
+    };
+
+    expect((await request("Student@university.edu")).status).toBe(200);
+    expect((await request("student@university.edu")).status).toBe(429);
+  });
+});
+
+describe("authentication action path matching", () => {
+  it.each([
+    "/join",
+    "/login",
+    "/otp",
+    "/send-otp",
+    "/resend-otp",
+    "/forgot-password",
+    "/sso-login",
+    "/logout",
+    "/oauth/callback",
+    "/oauth/callback/mobile",
+  ])("covers POST %s and React Router .data mutations", (path) => {
+    expect(isAuthenticationPost("POST", path)).toBe(true);
+    expect(isAuthenticationPost("POST", `${path}.data`)).toBe(true);
+    expect(isAuthenticationPost("GET", path)).toBe(false);
+  });
+
+  it("leaves SSO routes and unrelated routes outside the password/OTP limiter", () => {
+    expect(isAuthenticationPost("POST", "/sso-login")).toBe(true);
+    expect(isAuthenticationPost("POST", "/assets")).toBe(false);
+    expect(isAuthenticationPost("POST", "/accept-invite/invite-1")).toBe(true);
+    expect(isAuthenticationPost("POST", "/accept-invite/invite-1.data")).toBe(
+      true
+    );
+    expect(isAuthenticationPost("POST", "/accept-invite/a/b")).toBe(false);
+  });
+});
+
+describe("mobileIpRateLimit credential dimensions", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps a 30/min credential budget without collapsing users into unknown-IP", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "");
+    const app = new Hono();
+    app.use(
+      "/api/mobile/*",
+      mobileIpRateLimit({ credentialLimit: 2, ipLimit: 100 })
+    );
+    app.get("/api/mobile/me", (c) => c.json({ ok: true }));
+    const request = (token: string) =>
+      app.request("https://app.shelf.nu/api/mobile/me", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+    expect((await request("token-one")).status).toBe(200);
+    expect((await request("token-one")).status).toBe(200);
+    expect((await request("token-one")).status).toBe(429);
+    expect((await request("token-two")).status).toBe(200);
+  });
+
+  it("keeps the aggregate-IP abuse backstop", async () => {
+    vi.stubEnv("FLY_APP_NAME", "");
+    vi.stubEnv("TRUSTED_PROXY_HEADER", "");
+    const app = new Hono();
+    app.use(
+      "/api/mobile/*",
+      mobileIpRateLimit({ credentialLimit: 100, ipLimit: 2 })
+    );
+    app.get("/api/mobile/me", (c) => c.json({ ok: true }));
+    const request = (token: string) =>
+      app.request("https://app.shelf.nu/api/mobile/me", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+    expect((await request("token-one")).status).toBe(200);
+    expect((await request("token-two")).status).toBe(200);
+    expect((await request("token-three")).status).toBe(429);
   });
 });
 
