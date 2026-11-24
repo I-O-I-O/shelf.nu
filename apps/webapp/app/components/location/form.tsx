@@ -143,7 +143,21 @@ export const LocationForm = ({
   const [, validateAssetImage] = useAtom(assetImageValidateFileAtom);
   const validateFile = ioioMode ? validateAssetImage : validateDefaultFile;
   const [clearImage, setClearImage] = useState(false);
-  const [selectedParentId, setSelectedParentId] = useState(parentId);
+  const [parentSelection, setParentSelection] = useState<{
+    initialParentId: Location["parentId"] | undefined;
+    selectedParentId: Location["parentId"] | undefined;
+  } | null>(null);
+  const selectedParentId =
+    parentSelection && parentSelection.initialParentId === parentId
+      ? parentSelection.selectedParentId
+      : parentId;
+  const setSelectedParentId = (
+    nextParentId: Location["parentId"] | undefined
+  ) =>
+    setParentSelection({
+      initialParentId: parentId,
+      selectedParentId: nextParentId,
+    });
   const [selectedColor, setSelectedColor] = useState<string | undefined>(
     color && IOIO_LOCATION_COLOR_VALUES.includes(color) ? color : undefined
   );
@@ -154,10 +168,6 @@ export const LocationForm = ({
   // the dialog's `data-dialog-initial-focus` handler typically wins;
   // otherwise this provides the intentional initial focus.
   const nameInputRef = useAutoFocus<HTMLInputElement>();
-
-  useEffect(() => {
-    setSelectedParentId(parentId);
-  }, [parentId]);
 
   useEffect(() => {
     if (!hasOnSuccessFunc) return;

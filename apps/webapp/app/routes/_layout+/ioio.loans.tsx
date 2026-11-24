@@ -62,7 +62,6 @@ import {
   cancelReturnItem,
   prepareReturnItem,
   submitReturnItem,
-  type PreparedReturnProposal,
 } from "~/modules/ioio-student/return-item.server";
 import { requireIoioBorrowerAccess } from "~/modules/ioio-student/route.server";
 import { getMyStudentLoans } from "~/modules/ioio-student/service.server";
@@ -799,26 +798,6 @@ export async function action({ context, request }: ActionFunctionArgs) {
   }
 }
 
-type ReturnActionData =
-  | {
-      ok: true;
-      intent: "return-prepared";
-      proposal: PreparedReturnProposal;
-    }
-  | {
-      ok: true;
-      intent: "return-submitted" | "return-cancelled";
-      result?: unknown;
-    }
-  | { ok: true; intent: "pickup-confirmed"; result: unknown }
-  | {
-      ok: true;
-      intent: "pickup-validated";
-      inputValue: string;
-      validation: Awaited<ReturnType<typeof validateStudentPreparationPickup>>;
-    }
-  | { ok: false; error: string };
-
 export default function IoioLoans() {
   const {
     loans,
@@ -859,10 +838,15 @@ export default function IoioLoans() {
       .getElementById(`pickup-panel-${openPickupOperationId}`)
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [openPickupOperationId]);
-  const [selectedBookingAssetIds, setSelectedBookingAssetIds] = useState<
-    string[]
-  >([]);
-  const [returnReviewOpen, setReturnReviewOpen] = useState(false);
+  const [bookingSelection, setBookingSelection] = useState<{
+    view: string;
+    selectableIdKey: string;
+    ids: string[];
+  }>({ view: "current", selectableIdKey: "[]", ids: [] });
+  const [returnReviewState, setReturnReviewState] = useState<{
+    view: string;
+    open: true;
+  } | null>(null);
   const [cancelRequest, setCancelRequest] = useState<{
     id: string;
     title: string;
@@ -901,6 +885,29 @@ export default function IoioLoans() {
   );
   const selectableIds = selectableAssets.map(({ item }) => item.id);
   const selectableIdKey = JSON.stringify(selectableIds);
+  const selectedBookingAssetIds =
+    bookingSelection.view === view &&
+    bookingSelection.selectableIdKey === selectableIdKey
+      ? bookingSelection.ids
+      : [];
+  const setSelectedBookingAssetIds: Dispatch<SetStateAction<string[]>> = (
+    update
+  ) => {
+    setBookingSelection((current) => {
+      const selectedIds =
+        current.view === view && current.selectableIdKey === selectableIdKey
+          ? current.ids
+          : [];
+      return {
+        view,
+        selectableIdKey,
+        ids: typeof update === "function" ? update(selectedIds) : update,
+      };
+    });
+  };
+  const returnReviewOpen = returnReviewState?.view === view;
+  const setReturnReviewOpen = (open: boolean) =>
+    setReturnReviewState(open ? { view, open: true } : null);
   const selectedAssets = selectableAssets.filter(({ item }) =>
     selectedBookingAssetIds.includes(item.id)
   );
@@ -913,18 +920,6 @@ export default function IoioLoans() {
         selectedAssets.length > 0 && !allSelectableSelected;
     }
   }, [selectedAssets.length, allSelectableSelected]);
-  useEffect(() => {
-    const currentSelectableIds = new Set<string>(
-      JSON.parse(selectableIdKey) as string[]
-    );
-    setSelectedBookingAssetIds((current) =>
-      current.filter((id) => currentSelectableIds.has(id))
-    );
-  }, [selectableIdKey]);
-  useEffect(() => {
-    setSelectedBookingAssetIds([]);
-    setReturnReviewOpen(false);
-  }, [view]);
   const toggleLoanAsset = (id: string) =>
     setSelectedBookingAssetIds((current) =>
       current.includes(id)
@@ -2579,119 +2574,6 @@ function ExtensionRequest({
       </DialogPortal>
     </>
   );
-}
-
-function _ReturnLoanAction({
-  bookingId,
-  bookingAssetId,
-  assetId,
-  quantity,
-  pending,
-}: {
-  bookingId: string;
-  bookingAssetId: string;
-  assetId: string;
-  quantity: number;
-  pending: boolean;
-}) {
-  const fetcher = useFetcher<ReturnActionData>();
-  const [proposal, setProposal] = useState<PreparedReturnProposal | null>(null);
-  const [submitted, setSubmitted] = useState(pending);
-
-  useEffect(() => {
-    const result = fetcher.data;
-    if (!result || !result.ok) return;
-    if (result.intent === "return-prepared") setProposal(result.proposal);
-    if (result.intent === "return-submitted") {
-      setProposal(null);
-      setSubmitted(true);
-    }
-    if (result.intent === "return-cancelled") setProposal(null);
-  }, [fetcher.data]);
-
-  if (submitted) {
-    return (
-      <p className="mt-3 rounded-lg bg-blue-50 p-3 text-sm font-semibold text-blue-900">
-        Return submitted. Place the item in the Return section. A TA will check
-        it before it becomes available again.
-      </p>
-    );
-  }
-
-  if (proposal) {
-    return (
-      <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-3">
-        <p className="text-sm font-semibold text-gray-950">
-          Return {proposal.asset.title}
-        </p>
-        <p className="mt-1 text-sm text-gray-700">
-          Confirm the exact physical item, then place it in the Return section.
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <fetcher.Form method="post">
-            <input type="hidden" name="intent" value="submit-return" />
-            <input
-              type="hidden"
-              name="confirmationToken"
-              value={proposal.confirmationToken}
-            />
-            <input type="hidden" name="quantity" value={proposal.quantity} />
-            <button
-              type="submit"
-              disabled={fetcher.state !== "idle"}
-              className="rounded-xl bg-red-700 px-4 py-2 text-sm font-bold text-white hover:bg-red-800 disabled:opacity-50"
-            >
-              I&apos;ve placed it in the Return section
-            </button>
-          </fetcher.Form>
-          <fetcher.Form method="post">
-            <input type="hidden" name="intent" value="cancel-return" />
-            <input
-              type="hidden"
-              name="confirmationToken"
-              value={proposal.confirmationToken}
-            />
-            <button
-              type="submit"
-              disabled={fetcher.state !== "idle"}
-              className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-bold text-gray-700 hover:border-red-200 hover:text-red-800 disabled:opacity-50"
-            >
-              Cancel
-            </button>
-          </fetcher.Form>
-        </div>
-      </div>
-    );
-  }
-
-  return quantity > 0 ? (
-    <div className="mt-3 flex flex-wrap items-center gap-3">
-      <fetcher.Form method="post">
-        <input type="hidden" name="intent" value="prepare-return" />
-        <input type="hidden" name="bookingId" value={bookingId} />
-        <input type="hidden" name="bookingAssetId" value={bookingAssetId} />
-        <input type="hidden" name="assetId" value={assetId} />
-        <input type="hidden" name="quantity" value={quantity} />
-        <button
-          type="submit"
-          disabled={fetcher.state !== "idle"}
-          className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-800 hover:border-red-400 hover:bg-red-100 disabled:opacity-50"
-        >
-          Return item
-        </button>
-      </fetcher.Form>
-      <Link
-        to={`/ioio/report?assetId=${encodeURIComponent(
-          assetId
-        )}&bookingId=${encodeURIComponent(
-          bookingId
-        )}&bookingAssetId=${encodeURIComponent(bookingAssetId)}`}
-        className="text-sm font-semibold text-red-800 underline-offset-4 hover:underline"
-      >
-        Report an issue
-      </Link>
-    </div>
-  ) : null;
 }
 
 function PreparationRequestHelp({ pickupHours }: { pickupHours: string }) {

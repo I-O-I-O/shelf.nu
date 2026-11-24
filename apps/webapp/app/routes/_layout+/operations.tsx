@@ -3085,6 +3085,11 @@ function ReturnTaskActions({ task }: { task: Task }) {
 }
 
 export default function OperationsPage() {
+  const { view } = useLoaderData<typeof loader>();
+  return <OperationsPageContent key={view} />;
+}
+
+function OperationsPageContent() {
   const { view, summary, tasks, annualAccessApprovals } =
     useLoaderData<typeof loader>();
   const actionResult = useActionData<typeof action>();
@@ -3149,23 +3154,6 @@ export default function OperationsPage() {
   const [approvalView, setApprovalView] = useState<"pending" | "access">(
     "pending"
   );
-  useEffect(() => {
-    setSelectedPreparationIds([]);
-    setSelectedReturnIds([]);
-    setSelectedBrokenAssetIds([]);
-    setSelectedCancelledPickupIds([]);
-    setSelectedApprovalIds([]);
-    setSelectedGeneralReportIds([]);
-    setSelectedReturnedIssueIds([]);
-    setSelectedManagementIds([]);
-    setSelectedAllRowKeys([]);
-    setAllConfirmAction(null);
-    setApprovalView("pending");
-    setBulkDisableReturnsOpen(false);
-    setBulkRemoveReturnedIssuesOpen(false);
-    setBulkReturnToServiceOpen(false);
-    setBulkPutBackOpen(false);
-  }, [view]);
   useEffect(() => {
     if (isSuccessfulAction(actionResult)) {
       if (

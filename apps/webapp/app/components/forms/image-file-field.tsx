@@ -26,7 +26,7 @@
  * @see {@link file://../../atoms/file.ts} Validation atoms
  */
 import type { ChangeEvent, ReactNode } from "react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { WritableAtom } from "jotai";
 import { useSetAtom } from "jotai";
 import { defaultValidateFileAtom } from "~/atoms/file";
@@ -115,8 +115,16 @@ export function ImageFileField({
 }: ImageFileFieldProps) {
   const validateFile = useSetAtom(validateFileAtom);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const activePreviewUrl = useRef<string | null>(null);
   const hintId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const replacePreviewUrl = useCallback((nextUrl: string | null) => {
+    if (activePreviewUrl.current && activePreviewUrl.current !== nextUrl) {
+      URL.revokeObjectURL(activePreviewUrl.current);
+    }
+    activePreviewUrl.current = nextUrl;
+    setPreviewUrl(nextUrl);
+  }, []);
   const { uploading, pasteError, clearPasteError } = useImagePaste({
     inputRef,
     name,
@@ -124,16 +132,21 @@ export function ImageFileField({
     pasteUploadUrl,
     disabled,
     validateFile,
-    setPreviewUrl,
+    setPreviewUrl: replacePreviewUrl,
     onFileChange,
   });
 
-  // Each object URL pins its file in memory until revoked: release the old
-  // one when the preview changes, and the last one on unmount.
-  useEffect(() => {
-    if (!previewUrl) return;
-    return () => URL.revokeObjectURL(previewUrl);
-  }, [previewUrl]);
+  // Each object URL pins its file in memory until revoked. Replacement is
+  // synchronous; unmount cleanup releases the last preview.
+  useEffect(
+    () => () => {
+      if (activePreviewUrl.current) {
+        URL.revokeObjectURL(activePreviewUrl.current);
+        activePreviewUrl.current = null;
+      }
+    },
+    []
+  );
 
   /**
    * Validates the picked file, then previews it, or falls back to the saved
@@ -148,7 +161,7 @@ export function ImageFileField({
     // the input, and an accepted one may have been swapped for a copy with a
     // sanitised name.
     const file = event.target.files?.[0] ?? null;
-    setPreviewUrl(file ? URL.createObjectURL(file) : null);
+    replacePreviewUrl(file ? URL.createObjectURL(file) : null);
     onFileChange?.(file);
   }
 

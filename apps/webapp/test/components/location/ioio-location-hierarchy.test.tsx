@@ -410,6 +410,12 @@ describe("IOIO Location Explorer", () => {
     });
     await user.click(result);
 
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Section A" })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
     expect(
       screen.getByRole("button", { name: "IOIO Lab - B477" })
     ).toHaveAttribute("aria-pressed", "true");

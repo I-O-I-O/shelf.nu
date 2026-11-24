@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRoutesStub } from "react-router";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -395,6 +396,7 @@ it("supports quantity changes and removal through the shared borrower checkout",
 });
 
 it("keeps physical availability and quantity controls after acknowledging a course overlap", async () => {
+  const user = userEvent.setup();
   const actions: string[] = [];
   renderBorrowingList(true, {
     loadProposal: true,
@@ -408,13 +410,13 @@ it("keeps physical availability and quantity controls after acknowledging a cour
   const increase = screen.getByRole("button", {
     name: "Increase quantity for makey kit",
   });
-  fireEvent.click(increase);
+  await user.click(increase);
   expect(screen.getByLabelText("quantity for Makey Kit 2")).toBeTruthy();
-  fireEvent.click(
+  await user.click(
     screen.getByRole("button", { name: "Decrease quantity for makey kit" })
   );
 
-  fireEvent.click(
+  await user.click(
     screen.getByRole("button", { name: "I have permission — continue" })
   );
   expect(
@@ -435,7 +437,7 @@ it("keeps physical availability and quantity controls after acknowledging a cour
     )
   ).toBeNull();
   expect(screen.queryByText("Unavailable for selected dates")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Confirm borrowing" }));
+  await user.click(screen.getByRole("button", { name: "Confirm borrowing" }));
   await waitFor(() => expect(actions).toContain("confirm-all"));
 });
 
