@@ -19,15 +19,19 @@
  */
 import { AuthApiError } from "@supabase/supabase-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Logger } from "~/utils/logger";
 import {
   INVALID_CREDENTIALS_MESSAGE,
   INVALID_OTP_MESSAGE,
+  endSessionByRefreshToken,
+  revokeSession,
   revokeAllSessions,
   sendOTP,
   sendResetPasswordLink,
   signUpWithEmailPass,
   signInWithEmail,
   verifyOtpAndSignin,
+  validateSession,
 } from "./service.server";
 import type * as SsoEnforcementModule from "./sso-enforcement.server";
 import {
@@ -47,9 +51,13 @@ vi.mock("./sso-enforcement.server", async (importOriginal) => {
   };
 });
 
-// why: the service module imports the database client at load; no test here
-// reaches a query.
-vi.mock("~/database/db.server", () => ({ db: {} }));
+// why: session validation queries Supabase Auth tables; capture the parameterized
+// SQL without connecting to a database.
+const dbMocks = vi.hoisted(() => ({
+  $executeRaw: vi.fn(),
+  $queryRaw: vi.fn(),
+}));
+vi.mock("~/database/db.server", () => ({ db: dbMocks }));
 
 // why: every guarded path ends in a Supabase Auth network call; the spies let
 // the tests assert whether it was made, and whether a session was revoked.
@@ -131,6 +139,120 @@ beforeEach(() => {
     error: null,
   });
   supabaseMocks.admin.signOut.mockResolvedValue({ data: null, error: null });
+  dbMocks.$executeRaw.mockResolvedValue(1);
+  dbMocks.$queryRaw.mockResolvedValue([]);
+});
+
+describe("validateSession", () => {
+  it("accepts an active refresh token only when it belongs to the cookie user", async () => {
+    dbMocks.$queryRaw.mockResolvedValue([{ id: "session-1", revoked: false }]);
+
+    await expect(validateSession("refresh-token", "user-1")).resolves.toBe(
+      true
+    );
+
+    const [sql, token, userId] = dbMocks.$queryRaw.mock.calls[0];
+    expect((sql as TemplateStringsArray).join("?")).toContain(
+      "user_id::text ="
+    );
+    expect(token).toBe("refresh-token");
+    expect(userId).toBe("user-1");
+  });
+
+  it.each([
+    { scenario: "different user", result: [], userId: "user-2" },
+    { scenario: "revoked token", result: [], userId: "user-1" },
+    { scenario: "missing token", result: [], userId: "user-1" },
+  ])("rejects a $scenario", async ({ result, userId }) => {
+    dbMocks.$queryRaw.mockResolvedValue(result);
+    await expect(validateSession("refresh-token", userId)).resolves.toBe(false);
+  });
+
+  it("fails closed when the database check fails", async () => {
+    dbMocks.$queryRaw.mockRejectedValue(new Error("database unavailable"));
+    await expect(validateSession("refresh-token", "user-1")).resolves.toBe(
+      false
+    );
+  });
+
+  it("fails closed when either identity value is missing", async () => {
+    await expect(validateSession("", "user-1")).resolves.toBe(false);
+    await expect(validateSession("refresh-token", "")).resolves.toBe(false);
+    expect(dbMocks.$queryRaw).not.toHaveBeenCalled();
+  });
+});
+
+describe("revokeSession", () => {
+  it("revokes only the browser session using Supabase local scope", async () => {
+    await revokeSession("access-token");
+    expect(supabaseMocks.admin.signOut).toHaveBeenCalledWith(
+      "access-token",
+      "local"
+    );
+  });
+
+  it("does not throw when server-side revocation fails", async () => {
+    const loggerError = vi.spyOn(Logger, "error").mockImplementation(() => {});
+    supabaseMocks.admin.signOut.mockResolvedValue({
+      data: null,
+      error: new AuthApiError("session not found", 404, "session_not_found"),
+    });
+    await expect(revokeSession("access-token")).resolves.toBeUndefined();
+    expect(loggerError).toHaveBeenCalledOnce();
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain(
+      "access-token"
+    );
+    loggerError.mockRestore();
+  });
+});
+
+describe("endSessionByRefreshToken", () => {
+  it("ends only the session found through this browser's refresh token", async () => {
+    await endSessionByRefreshToken("refresh-token");
+
+    const [sql, refreshToken] = dbMocks.$executeRaw.mock.calls[0];
+    const statement = (sql as TemplateStringsArray).join("?");
+    expect(statement).toContain("DELETE FROM auth.sessions");
+    expect(statement).toContain("SELECT session_id FROM auth.refresh_tokens");
+    expect(statement).toContain("WHERE token = ?");
+    expect(statement).not.toContain("WHERE user_id");
+    expect(refreshToken).toBe("refresh-token");
+  });
+
+  it("rejects the old browser token after session deletion", async () => {
+    dbMocks.$queryRaw
+      .mockResolvedValueOnce([{ id: "session-1", revoked: false }])
+      .mockResolvedValueOnce([]);
+
+    await expect(validateSession("refresh-token", "user-1")).resolves.toBe(
+      true
+    );
+    await endSessionByRefreshToken("refresh-token");
+    await expect(validateSession("refresh-token", "user-1")).resolves.toBe(
+      false
+    );
+
+    expect(dbMocks.$executeRaw).toHaveBeenCalledOnce();
+  });
+
+  it("logs a generic failure without the refresh token and still resolves", async () => {
+    const loggerError = vi.spyOn(Logger, "error").mockImplementation(() => {});
+    dbMocks.$executeRaw.mockRejectedValue(new Error("query failed"));
+
+    await expect(
+      endSessionByRefreshToken("refresh-token-secret")
+    ).resolves.toBeUndefined();
+
+    expect(loggerError).toHaveBeenCalledOnce();
+    expect(JSON.stringify(loggerError.mock.calls)).not.toContain(
+      "refresh-token-secret"
+    );
+    expect(loggerError.mock.calls[0][0]).toMatchObject({
+      message: "Failed to end the current Supabase Auth session on logout.",
+      cause: null,
+    });
+    loggerError.mockRestore();
+  });
 });
 
 describe("signUpWithEmailPass", () => {

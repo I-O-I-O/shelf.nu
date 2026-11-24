@@ -146,7 +146,63 @@ export const env = (
   isBrowser ? PublicEnvSchema.parse(window.env) : EnvSchema.parse(process.env)
 ) as Env;
 
+/** Secret values published in this repository's example configuration/docs. */
+export const PUBLISHED_PLACEHOLDER_SECRETS = [
+  "super-duper-s3cret",
+  "another-super-duper-s3cret",
+  "your-super-secret-session-key",
+  "your-local-session-secret",
+  "test-session-secret",
+  "secret-test-invite",
+  "your-invite-token-secret",
+  "generate-with-openssl-rand-hex-32",
+] as const;
+
+type SigningSecrets = Pick<
+  NodeJS.ProcessEnv,
+  "SESSION_SECRET" | "INVITE_TOKEN_SECRET"
+>;
+
+/** Lists published example values without including any secret value in output. */
+export function findWeakSigningSecrets(
+  source: SigningSecrets,
+  nodeEnv: string | undefined
+): string[] {
+  if (nodeEnv !== "production") return [];
+
+  const problems: string[] = [];
+  const sessionSecret = source.SESSION_SECRET?.trim();
+  const inviteSecret = source.INVITE_TOKEN_SECRET?.trim();
+
+  if (PUBLISHED_PLACEHOLDER_SECRETS.some((value) => value === sessionSecret)) {
+    problems.push("SESSION_SECRET is a published example value");
+  }
+  if (PUBLISHED_PLACEHOLDER_SECRETS.some((value) => value === inviteSecret)) {
+    problems.push("INVITE_TOKEN_SECRET is a published example value");
+  }
+
+  return problems;
+}
+
+/** Refuse production startup when either signing key is a public placeholder. */
+export function assertProductionSigningSecrets(
+  source: SigningSecrets,
+  nodeEnv: string | undefined
+): void {
+  const problems = findWeakSigningSecrets(source, nodeEnv);
+  if (problems.length === 0) return;
+
+  throw new ShelfError({
+    cause: null,
+    message: `Production signing secret configuration rejected: ${problems.join(
+      "; "
+    )}. Set independently generated secrets.`,
+    label: "Environment",
+  });
+}
+
 export function initEnv() {
+  assertProductionSigningSecrets(process.env, process.env.NODE_ENV);
   return env;
 }
 

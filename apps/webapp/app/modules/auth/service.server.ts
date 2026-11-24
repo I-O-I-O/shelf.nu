@@ -64,12 +64,13 @@ function createInvalidOtpError(cause: unknown, email: string): ShelfError {
 
 /**
  * Ends the one session behind `accessToken` (scope `local`), leaving the
- * account's other sessions alone. Use it for a session opened server-side
- * whose flow is then refused or fails, so it does not outlive the request.
+ * account's other sessions alone. Used when an auth flow must revoke a
+ * session for which it has the access token.
  *
- * Best-effort: the caller refuses the request whether or not this succeeds,
- * and the tokens are never handed to the client, so a failure is logged rather
- * than thrown.
+ * Best-effort: callers still clear/refuse the local session if revocation
+ * fails, so a failure is logged rather than thrown. If the provider call fails,
+ * the server may retain the refresh session; the browser cookie is still
+ * cleared. Access-token JWTs remain valid until expiry after revocation.
  *
  * @param accessToken - the access token of the session to end
  */
@@ -86,9 +87,45 @@ export async function revokeSession(accessToken: string): Promise<void> {
     Logger.error(
       new ShelfError({
         cause,
-        message:
-          "Failed to revoke a session opened by a refused or failed sign-in. The tokens were not returned to the client.",
+        message: "Failed to revoke the current Supabase Auth session.",
         label,
+      })
+    );
+  }
+}
+
+/**
+ * Ends the Supabase session that owns the refresh token in one browser cookie.
+ * Looking up the session by refresh token works even after its access-token
+ * JWT expires; deleting the session cascades to its refresh tokens, while
+ * leaving the user's other sessions alone.
+ *
+ * Best-effort: logout clears the cookie even if Supabase Auth storage cannot be
+ * updated. The failure log deliberately omits the raw database error because
+ * it could include query details; it never includes the refresh token.
+ *
+ * @param refreshToken - The refresh token stored in the browser session cookie
+ */
+export async function endSessionByRefreshToken(
+  refreshToken: string
+): Promise<void> {
+  if (!refreshToken) return;
+
+  try {
+    await db.$executeRaw`
+      DELETE FROM auth.sessions
+      WHERE id IN (
+        SELECT session_id FROM auth.refresh_tokens
+        WHERE token = ${refreshToken}
+      )
+    `;
+  } catch {
+    Logger.error(
+      new ShelfError({
+        cause: null,
+        message: "Failed to end the current Supabase Auth session on logout.",
+        label,
+        shouldBeCaptured: true,
       })
     );
   }
@@ -879,12 +916,15 @@ export async function getAuthResponseByAccessToken(accessToken: string) {
   }
 }
 
-export async function validateSession(token: string) {
+export async function validateSession(token: string, userId: string) {
+  if (!token || !userId) return false;
+
   try {
     // const t0 = performance.now();
     const result = await db.$queryRaw<{ id: string; revoked: boolean }[]>`
-      SELECT id, revoked FROM auth.refresh_tokens 
+      SELECT id, revoked FROM auth.refresh_tokens
       WHERE token = ${token} 
+      AND user_id::text = ${userId}
       AND revoked = false
       LIMIT 1 
     `;
