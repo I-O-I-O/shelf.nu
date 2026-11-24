@@ -8,11 +8,11 @@ import { shouldSendOptionalEmail } from "~/modules/email-preferences/service.ser
 import { ShelfError } from "~/utils/error";
 import { Logger } from "~/utils/logger";
 import { resolveUserDisplayName } from "~/utils/user";
-import { withIoioStudentLoadStage } from "./load-diagnostics.server";
 import {
   ACCESS_APPROVAL_RENEWAL_MODE,
   formatApprovalDate,
 } from "./annual-access";
+import { withIoioStudentLoadStage } from "./load-diagnostics.server";
 
 export {
   ACCESS_APPROVAL_RENEWAL_MODE,

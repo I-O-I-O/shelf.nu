@@ -142,6 +142,7 @@ describe("Handbook PDF import route", () => {
     expect(mocks.listCategories).toHaveBeenCalledWith("org-1");
     expect(mocks.listArticleTitles).toHaveBeenCalledWith({
       organizationId: "org-1",
+      canReadStaffOnly: true,
     });
   });
 

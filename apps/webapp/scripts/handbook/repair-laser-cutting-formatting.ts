@@ -4,6 +4,7 @@
  * serializer escaped those breaks. Supply Markdown directly to Handbook services
  * with actual newlines instead of setting a rich editor's accessibility value.
  * Dry run by default; --apply publishes new revisions and retains history.
+ * Pass --organization-id=<id> to keep every lookup within the intended tenant.
  */
 import { db } from "../../app/database/db.server";
 import {
@@ -19,6 +20,14 @@ const ids = [
   "cmw9fea2y0027xm02rp5s9jcu",
 ];
 async function main() {
+  const organizationId = process.argv
+    .find((argument) => argument.startsWith("--organization-id="))
+    ?.slice("--organization-id=".length)
+    .trim();
+  if (!organizationId) {
+    throw new Error("Pass --organization-id=<id> for the local repair.");
+  }
+
   if (
     !["localhost", "127.0.0.1", "::1"].includes(
       new URL(process.env.DATABASE_URL!).hostname
@@ -26,7 +35,11 @@ async function main() {
   )
     throw new Error("Local development database required");
   const articles = await db.handbookArticle.findMany({
-    where: { id: { in: ids }, handbookCategory: { name: "Laser Cutting" } },
+    where: {
+      organizationId,
+      id: { in: ids },
+      handbookCategory: { name: "Laser Cutting" },
+    },
     include: { publishedVersion: true },
     orderBy: { position: "asc" },
   });
@@ -63,8 +76,8 @@ async function main() {
       userId: article.updatedByUserId,
       articleId: article.id,
     });
-    const after = await db.handbookArticle.findUniqueOrThrow({
-      where: { id: article.id },
+    const after = await db.handbookArticle.findFirstOrThrow({
+      where: { id: article.id, organizationId },
       include: { publishedVersion: true },
     });
     if (
@@ -77,4 +90,4 @@ async function main() {
       throw new Error(`Verification failed: ${article.slug}`);
   }
 }
-main().finally(() => db.$disconnect());
+await main().finally(() => db.$disconnect());

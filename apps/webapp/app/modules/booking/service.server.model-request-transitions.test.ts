@@ -75,6 +75,8 @@ vitest.mock("~/database/db.server", () => ({
     // why: `assertAssetsBelongToOrg` compares the row count against the ids it
     // asked for, so the stub echoes them back and the guard passes.
     asset: {
+      // why: checkout fixtures model all assets as borrowable for this guard.
+      findFirst: vitest.fn().mockResolvedValue(null),
       findMany: vitest
         .fn()
         .mockImplementation((args: { where?: { id?: { in?: string[] } } }) =>

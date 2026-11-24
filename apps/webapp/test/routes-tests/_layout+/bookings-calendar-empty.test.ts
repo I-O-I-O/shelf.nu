@@ -344,7 +344,7 @@ describe("empty booking and calendar route loaders", () => {
       events: [
         {
           id: "reservation-1",
-          title: "Microscope - Lab setup - Taylor",
+          title: "Microscope · Lab setup",
           extendedProps: {
             isIoioReservation: true,
             url: "/calendar/new-reservation?bookingId=reservation-1",

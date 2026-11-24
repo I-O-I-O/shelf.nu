@@ -55,6 +55,7 @@ describe("new Handbook article route", () => {
     });
     expect(mocks.listArticleTitles).toHaveBeenCalledWith({
       organizationId: "org-1",
+      canReadStaffOnly: false,
     });
   });
 

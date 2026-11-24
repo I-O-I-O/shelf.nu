@@ -1,21 +1,21 @@
-import { readBarcodes } from "zxing-wasm/reader";
-import { prepareZXingModule } from "zxing-wasm/reader";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import QRCode from "qrcode-generator";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readBarcodes } from "zxing-wasm/reader";
+import { prepareZXingModule } from "zxing-wasm/reader";
 import {
   createIoioQrMatrix,
   renderIoioBrandedQrSvgMarkup,
 } from "./ioio-branded-qr";
+import { IOIO_ITEM_PRINT_PRESETS } from "./ioio-label-sizing";
 import {
   getIoioLabelQrError,
   renderIoioLabelSvgMarkup,
   type IoioLabelData,
 } from "./ioio-labels";
-import { IOIO_ITEM_PRINT_PRESETS } from "./ioio-label-sizing";
 
 const sourceLogoBytes = await readFile(
   resolve(process.cwd(), "public/static/images/ioio-logo-white.png")

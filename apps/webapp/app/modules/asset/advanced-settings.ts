@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { optionalNumberFromString } from "~/utils/zod-numeric";
 
 export const ASSET_RETURN_HANDLING = {
   RETURN_TO_STORAGE: "RETURN_TO_STORAGE",
@@ -7,17 +8,16 @@ export const ASSET_RETURN_HANDLING = {
 
 /** The same form validation for Inventory and Kit member settings. */
 export const assetAdvancedSettingsSchema = z.object({
-  minQuantity: z
-    .string()
-    .optional()
-    .transform((val) => (val === "" || val === undefined ? null : +val))
-    .pipe(
-      z
-        .number({ invalid_type_error: "Min quantity must be a number" })
-        .int("Min quantity must be a whole number")
-        .positive("Min quantity must be at least 1")
-        .nullable()
-    ),
+  minQuantity: optionalNumberFromString({
+    blank: null,
+    fieldName: "Min quantity",
+  }).pipe(
+    z
+      .number({ invalid_type_error: "Min quantity must be a number" })
+      .int("Min quantity must be a whole number")
+      .positive("Min quantity must be at least 1")
+      .nullable()
+  ),
   unitOfMeasure: z
     .string()
     .optional()

@@ -37,7 +37,7 @@ export function asksForPhysicalUnits(question: string) {
 export function requestsStudentAssistantAssetCards(question: string) {
   return (
     asksForPhysicalUnits(question) ||
-    /\b(?:recommend|suggest|what\s+(?:should|could|can)\s+i\s+use)\b/i.test(
+    /\b(?:recommend|suggest|what\s+(?:should|could)\s+i\s+use)\b/i.test(
       question
     ) ||
     /\b(?:show me|list|browse|find|locate)\b/i.test(question) ||

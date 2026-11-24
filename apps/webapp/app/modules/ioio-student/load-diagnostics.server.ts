@@ -1,3 +1,5 @@
+import { Logger } from "~/utils/logger";
+
 type DiagnosticError = {
   name?: unknown;
   message?: unknown;
@@ -80,7 +82,7 @@ export function logIoioStudentLoadStage(
   enabled: boolean
 ) {
   if (!enabled || process.env.NODE_ENV !== "development") return;
-  console.info(`[IOIO STUDENT LOAD] ${stage}: ${status}`);
+  Logger.dev(`[IOIO STUDENT LOAD] ${stage}: ${status}`);
 }
 
 const reportedErrors = new WeakSet<object>();
@@ -95,7 +97,7 @@ export function logIoioStudentLoadFailure(
     if (reportedErrors.has(error)) return;
     reportedErrors.add(error);
   }
-  console.error("[IOIO STUDENT LOAD FAILED]", {
+  Logger.dev("[IOIO STUDENT LOAD FAILED]", {
     stage,
     ...safeErrorDetails(error),
   });

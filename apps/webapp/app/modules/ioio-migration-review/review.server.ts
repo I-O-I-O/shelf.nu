@@ -4,9 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Location } from "@prisma/client";
 import { db } from "~/database/db.server";
 import type {
-  ReviewCandidate,
   ReviewDecision,
-  ReviewLocation,
   ReviewRecord,
   ReviewState,
   ReviewDiagnostics,

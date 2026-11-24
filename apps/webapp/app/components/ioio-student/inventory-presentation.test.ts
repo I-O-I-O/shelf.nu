@@ -159,6 +159,9 @@ describe("student inventory presentation", () => {
       )
     ).toBe(false);
     expect(
+      requestsStudentAssistantAssetCards("What could I use for robotics?")
+    ).toBe(true);
+    expect(
       requestsStudentAssistantAssetCards("Where are the Makey Kits?")
     ).toBe(true);
     expect(

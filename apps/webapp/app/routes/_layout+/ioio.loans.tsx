@@ -900,7 +900,7 @@ export default function IoioLoans() {
       : []
   );
   const selectableIds = selectableAssets.map(({ item }) => item.id);
-  const selectableIdKey = selectableIds.join("|");
+  const selectableIdKey = JSON.stringify(selectableIds);
   const selectedAssets = selectableAssets.filter(({ item }) =>
     selectedBookingAssetIds.includes(item.id)
   );
@@ -914,8 +914,11 @@ export default function IoioLoans() {
     }
   }, [selectedAssets.length, allSelectableSelected]);
   useEffect(() => {
+    const currentSelectableIds = new Set<string>(
+      JSON.parse(selectableIdKey) as string[]
+    );
     setSelectedBookingAssetIds((current) =>
-      current.filter((id) => selectableIds.includes(id))
+      current.filter((id) => currentSelectableIds.has(id))
     );
   }, [selectableIdKey]);
   useEffect(() => {

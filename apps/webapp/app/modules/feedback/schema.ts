@@ -60,17 +60,12 @@ export const FEEDBACK_ERROR_CONTEXT_FIELDS = [
   "errorMessage",
 ] as const;
 
-const feedbackErrorContextSchema = feedbackSchema.pick({
-  traceId: true,
-  sentryEventId: true,
-  errorStatus: true,
-  errorTitle: true,
-  errorMessage: true,
-});
-
 /**
  * Error details attached automatically when a report is started from an
  * error page. Derived from {@link feedbackSchema} so the type can never
  * drift from the validation.
  */
-export type FeedbackErrorContext = z.infer<typeof feedbackErrorContextSchema>;
+export type FeedbackErrorContext = Pick<
+  z.infer<typeof feedbackSchema>,
+  (typeof FEEDBACK_ERROR_CONTEXT_FIELDS)[number]
+>;

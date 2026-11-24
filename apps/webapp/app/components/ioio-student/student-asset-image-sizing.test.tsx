@@ -12,11 +12,9 @@ describe("student asset image sizing", () => {
 
     const detail = render(<StudentAssetPlaceholder variant="detail" />);
     expect(detail.container.firstElementChild?.className).toContain(
-      "max-w-[600px]"
+      "max-w-[440px]"
     );
-    expect(detail.container.firstElementChild?.className).toContain(
-      "lg:h-[27.5rem]"
-    );
+    expect(detail.container.firstElementChild?.className).toContain("sm:h-64");
   });
 
   it("renders the resolved Shelf image URL in a student inventory card", () => {

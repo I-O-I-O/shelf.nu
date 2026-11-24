@@ -1,10 +1,16 @@
 import { Outlet, useLocation, useRouteLoaderData } from "react-router";
+import type { MetaFunction } from "react-router";
 import StudentShell from "~/components/ioio-student/student-shell";
 import type { loader as layoutLoader } from "~/routes/_layout+/_layout";
+import { appendToMetaTitle } from "~/utils/append-to-meta-title";
 import {
   isIoioPersonalBorrowerRoute,
   resolveIoioAccountSurface,
 } from "~/utils/ioio-role-routing";
+
+export const meta: MetaFunction = () => [
+  { title: appendToMetaTitle("IOIO Lab") },
+];
 
 export default function IoioStudentLayout() {
   const location = useLocation();

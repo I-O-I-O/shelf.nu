@@ -1,5 +1,5 @@
 import type { Asset, User } from "@prisma/client";
-import { AssetStatus, OrganizationRoles } from "@prisma/client";
+import { OrganizationRoles } from "@prisma/client";
 import { db } from "~/database/db.server";
 import { recordEvent } from "~/modules/activity-event/service.server";
 import { ShelfError } from "~/utils/error";

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { OrganizationRoles } from "@prisma/client";
 import { useAtom, useSetAtom } from "jotai";
 import type {
   LinksFunction,

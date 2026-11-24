@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import LocationQuickActions from "~/components/location/location-quick-actions";
@@ -18,7 +19,8 @@ vi.mock("~/components/location/delete-location", () => ({
 }));
 
 describe("Location quick actions", () => {
-  it("shows only Edit, Print label, and Delete for a location card", () => {
+  it("shows Edit, Print label, and Delete in the location action menu", async () => {
+    const user = userEvent.setup();
     render(
       <MemoryRouter>
         <LocationQuickActions
@@ -28,16 +30,17 @@ describe("Location quick actions", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByRole("link", { name: "Edit location" })).toHaveAttribute(
+    await user.click(
+      screen.getByRole("button", { name: "Actions for IOIO Lab" })
+    );
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toHaveAttribute(
       "href",
       "/locations/room-1/edit"
     );
     expect(
-      screen.getByRole("link", { name: "Print location label" })
+      screen.getByRole("menuitem", { name: "Print label" })
     ).toHaveAttribute("href", "/labels?locationId=room-1");
-    expect(
-      screen.getByRole("button", { name: "Delete location" })
-    ).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeVisible();
     expect(
       screen.queryByRole("link", { name: "Manage location assets" })
     ).not.toBeInTheDocument();

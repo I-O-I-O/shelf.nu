@@ -35,6 +35,8 @@ import {
 // why: storage.server calls Supabase over HTTP; mock so delete tests stay offline
 vi.mock("~/utils/storage.server", () => ({
   removePublicFile: vi.fn(),
+  // why: audit deletion removes resolved bucket objects by storage path.
+  removeStorageImageObject: vi.fn(),
   // why: the expected-asset photo re-sign signs through Supabase Storage; the
   // getAuditSessionDetails tests count these calls.
   createSignedUrl: vi.fn(),
@@ -1163,29 +1165,34 @@ describe("audit service", () => {
         ]);
 
         // why: import inside the test so the mocked module is bound correctly
-        const { removePublicFile } = await import("~/utils/storage.server");
+        const { removeStorageImageObject } = await import(
+          "~/utils/storage.server"
+        );
 
         await deleteAuditSession(baseInput);
 
-        expect(removePublicFile).toHaveBeenCalledWith({
-          publicUrl: "https://s.example.com/i1.jpg",
+        expect(removeStorageImageObject).toHaveBeenCalledWith({
+          bucketName: "files",
+          objectPath: "i1.jpg",
         });
-        expect(removePublicFile).toHaveBeenCalledWith({
-          publicUrl: "https://s.example.com/i1-thumb.jpg",
+        expect(removeStorageImageObject).toHaveBeenCalledWith({
+          bucketName: "files",
+          objectPath: "i1-thumb.jpg",
         });
-        expect(removePublicFile).toHaveBeenCalledWith({
-          publicUrl: "https://s.example.com/i2.jpg",
+        expect(removeStorageImageObject).toHaveBeenCalledWith({
+          bucketName: "files",
+          objectPath: "i2.jpg",
         });
         // thumbnailUrl was null on img-2; only the main URL should be attempted
-        expect(removePublicFile).toHaveBeenCalledTimes(3);
+        expect(removeStorageImageObject).toHaveBeenCalledTimes(3);
 
         // Ordering matters: the DB delete must have happened before the
         // first storage call. A zombie DB row pointing at deleted files is
         // strictly worse than a stale file pointing at a deleted row.
         const deleteOrder =
           mockDb.auditSession.deleteMany.mock.invocationCallOrder[0];
-        const firstStorageOrder =
-          vi.mocked(removePublicFile).mock.invocationCallOrder[0];
+        const firstStorageOrder = vi.mocked(removeStorageImageObject).mock
+          .invocationCallOrder[0];
         expect(deleteOrder).toBeLessThan(firstStorageOrder);
       });
 
@@ -1198,8 +1205,12 @@ describe("audit service", () => {
           },
         ]);
 
-        const { removePublicFile } = await import("~/utils/storage.server");
-        vi.mocked(removePublicFile).mockRejectedValueOnce(new Error("s3 down"));
+        const { removeStorageImageObject } = await import(
+          "~/utils/storage.server"
+        );
+        vi.mocked(removeStorageImageObject).mockRejectedValueOnce(
+          new Error("storage unavailable")
+        );
 
         await expect(deleteAuditSession(baseInput)).resolves.toBeUndefined();
 
@@ -1267,13 +1278,15 @@ describe("audit service", () => {
         ]);
         mockDb.auditSession.deleteMany.mockResolvedValue({ count: 0 });
 
-        const { removePublicFile } = await import("~/utils/storage.server");
+        const { removeStorageImageObject } = await import(
+          "~/utils/storage.server"
+        );
 
         await expect(deleteAuditSession(baseInput)).rejects.toMatchObject({
           status: 409,
         });
 
-        expect(removePublicFile).not.toHaveBeenCalled();
+        expect(removeStorageImageObject).not.toHaveBeenCalled();
       });
 
       it("wraps unknown causes in a 500 ShelfError", async () => {
@@ -1411,7 +1424,7 @@ describe("audit service", () => {
         expect(whereArg.assignments).toBeUndefined();
       });
 
-      it("calls removePublicFile for every image AFTER the DB transaction commits", async () => {
+      it("removes each image from storage AFTER the DB transaction commits", async () => {
         mockDb.auditImage.findMany.mockResolvedValue([
           {
             id: "img-1",
@@ -1425,7 +1438,9 @@ describe("audit service", () => {
           },
         ]);
 
-        const { removePublicFile } = await import("~/utils/storage.server");
+        const { removeStorageImageObject } = await import(
+          "~/utils/storage.server"
+        );
 
         await bulkDeleteAudits({
           auditIds: ["a1", "a2"],
@@ -1433,13 +1448,13 @@ describe("audit service", () => {
           userId: "user-1",
         });
 
-        expect(removePublicFile).toHaveBeenCalledTimes(3);
+        expect(removeStorageImageObject).toHaveBeenCalledTimes(3);
 
         // Cleanup must happen after the $transaction has resolved — never
         // before, and never during a rollback.
         const txOrder = mockDb.$transaction.mock.invocationCallOrder[0];
-        const firstStorageOrder =
-          vi.mocked(removePublicFile).mock.invocationCallOrder[0];
+        const firstStorageOrder = vi.mocked(removeStorageImageObject).mock
+          .invocationCallOrder[0];
         expect(txOrder).toBeLessThan(firstStorageOrder);
       });
 
@@ -1460,7 +1475,9 @@ describe("audit service", () => {
           },
         ]);
 
-        const { removePublicFile } = await import("~/utils/storage.server");
+        const { removeStorageImageObject } = await import(
+          "~/utils/storage.server"
+        );
 
         await expect(
           bulkDeleteAudits({
@@ -1474,7 +1491,7 @@ describe("audit service", () => {
         });
 
         // Transaction threw — no storage side-effect is allowed.
-        expect(removePublicFile).not.toHaveBeenCalled();
+        expect(removeStorageImageObject).not.toHaveBeenCalled();
       });
 
       it("wraps unknown causes in a 500 ShelfError", async () => {

@@ -293,7 +293,7 @@ async function loadReturnTarget({
         }),
       ]);
       const custodianTeamMemberId = candidateBooking?.custodianTeamMemberId;
-      console.error("[IOIO RETURN TARGET MISMATCH]", {
+      Logger.dev("[IOIO RETURN TARGET MISMATCH]", {
         bookingFoundInOrganization: Boolean(candidateBooking),
         bookingStatus: candidateBooking?.status ?? null,
         bookingIsActive: Boolean(

@@ -7,9 +7,9 @@ import {
 import type { ActionFunctionArgs } from "react-router";
 import { data, redirect } from "react-router";
 import { z } from "zod";
-import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "./article-limits";
 import { db } from "~/database/db.server";
 import { requireIoioHandbookRead } from "~/modules/ioio-handbook/access.server";
+import { HANDBOOK_ARTICLE_MAX_CONTENT_LENGTH } from "./article-limits";
 import {
   HANDBOOK_ATTACHMENT_MAX_BYTES,
   HANDBOOK_ATTACHMENT_MAX_FILES,

@@ -86,6 +86,7 @@ describe("Handbook draft edit route", () => {
     });
     expect(mocks.listArticleTitles).toHaveBeenCalledWith({
       organizationId: "org-1",
+      canReadStaffOnly: false,
     });
     expect(mocks.getEditData).toHaveBeenCalledWith({
       organizationId: "org-1",
@@ -93,6 +94,7 @@ describe("Handbook draft edit route", () => {
       ownerUserId: "student-1",
       userId: "student-1",
       revisionMode: false,
+      canReadStaffOnly: false,
     });
   });
 
@@ -142,6 +144,7 @@ describe("Handbook draft edit route", () => {
       ownerUserId: undefined,
       userId: "student-1",
       revisionMode: true,
+      canReadStaffOnly: false,
     });
   });
 });

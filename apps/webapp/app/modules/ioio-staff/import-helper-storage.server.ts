@@ -1,5 +1,5 @@
-import { isAbsolute } from "node:path";
 import { realpath, stat, statfs } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 
 const MAX_CONFIGURED_STORAGE_ROOTS = 32;
 

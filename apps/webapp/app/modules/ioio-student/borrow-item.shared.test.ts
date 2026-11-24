@@ -6,6 +6,7 @@ describe("extractBorrowSearch", () => {
     ["I want to borrow one Arduino Nano", "Arduino Nano"],
     ["Borrow 2 units of USB-C Cable", "USB-C Cable"],
     ["Take Makey Kit #003", "Makey Kit #003"],
+    ["Borrow 3D printer nozzle", "3D printer nozzle"],
     ["Borrow one Motor until 2026-10-15", "Motor"],
   ])(
     "preserves item identity while removing action/quantity copy",

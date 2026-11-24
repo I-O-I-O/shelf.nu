@@ -90,7 +90,7 @@ export function extractBorrowSearch(question: string) {
       " "
     )
     .replace(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b/gi, " ")
-    .replace(/(?<!#)\b\d+\b/g, " ")
+    .replace(/(^|[^#])\b\d+\b/g, "$1 ")
     .replace(/\b(?:units?|items?)\s+of\b/gi, " ")
     .replace(/\bof\b/gi, " ")
     .replace(/\b(?:the|a|an)\b/gi, " ")
