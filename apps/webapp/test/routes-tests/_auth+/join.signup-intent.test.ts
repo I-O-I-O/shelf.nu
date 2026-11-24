@@ -12,6 +12,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { signUpWithEmailPass } from "~/modules/auth/service.server";
+import { config } from "~/config/shelf.config";
 import {
   readSignupIntent,
   serializeSignupIntent,
@@ -191,6 +192,7 @@ describe("join loader — reading the signup link", () => {
 describe("join action — password signup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    config.disableSignup = false;
     vi.mocked(findUserByEmail).mockResolvedValue(null);
     vi.mocked(signUpWithEmailPass).mockResolvedValue({} as never);
     vi.mocked(validateNonSSOSignup).mockResolvedValue(undefined);
@@ -214,6 +216,17 @@ describe("join action — password signup", () => {
     await expect(signupIntentSetBy(response)).resolves.toEqual(
       TEAM_TRIAL_INTENT
     );
+  });
+
+  it("rejects direct POST requests when signup is disabled before side effects", async () => {
+    config.disableSignup = true;
+
+    const response = (await action(signupActionArgs())) as Response;
+
+    expect(response.status).toBe(403);
+    expect(validateNonSSOSignup).not.toHaveBeenCalled();
+    expect(findUserByEmail).not.toHaveBeenCalled();
+    expect(signUpWithEmailPass).not.toHaveBeenCalled();
   });
 
   it("redirects exactly as before when no intent is being carried", async () => {

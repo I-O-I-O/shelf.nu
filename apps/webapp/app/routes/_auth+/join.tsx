@@ -132,6 +132,18 @@ export async function action({ request }: ActionFunctionArgs) {
 
     switch (getActionMethod(request)) {
       case "POST": {
+        if (config.disableSignup) {
+          throw new ShelfError({
+            cause: null,
+            title: "Signup is disabled",
+            message:
+              "For more information, please contact your workspace administrator.",
+            label: "User onboarding",
+            status: 403,
+            shouldBeCaptured: false,
+          });
+        }
+
         const { firstName, lastName, email, password } = parseData(
           await request.formData(),
           JoinFormSchema,
