@@ -17,34 +17,38 @@ type RequestTelemetryFields = {
  * redacted by name, all cookie values and request bodies are hidden because
  * they can contain credentials under arbitrary field names.
  */
-export function scrubRequestTelemetry<E extends { request?: object }>(
-  event: E
-): E {
+export function scrubRequestTelemetry<E extends object>(event: E): E {
   const extra = (event as E & { extra?: unknown }).extra;
   const safeExtra = extra === undefined ? undefined : redactSensitive(extra);
-  if (!event.request) {
+  const request = (event as E & { request?: object }).request;
+  if (!request) {
     return (
       safeExtra === undefined ? event : { ...event, extra: safeExtra }
     ) as E;
   }
 
-  const request = event.request as RequestTelemetryFields;
+  const requestFields = request as RequestTelemetryFields;
   const scrubbedRequest: RequestTelemetryFields = {
-    ...request,
-    ...(request.headers ? { headers: redactSensitive(request.headers) } : {}),
-    ...(request.cookies
+    ...requestFields,
+    ...(requestFields.headers
+      ? { headers: redactSensitive(requestFields.headers) }
+      : {}),
+    ...(requestFields.cookies
       ? {
           cookies: Object.fromEntries(
-            Object.keys(request.cookies).map((name) => [name, "[REDACTED]"])
+            Object.keys(requestFields.cookies).map((name) => [
+              name,
+              "[REDACTED]",
+            ])
           ),
         }
       : {}),
-    ...(request.data === undefined ? {} : { data: "[REDACTED]" }),
-    ...(typeof request.url === "string"
-      ? { url: redactSensitive(request.url) }
+    ...(requestFields.data === undefined ? {} : { data: "[REDACTED]" }),
+    ...(typeof requestFields.url === "string"
+      ? { url: redactSensitive(requestFields.url) }
       : {}),
-    ...(typeof request.query_string === "string"
-      ? { query_string: scrubQueryString(request.query_string) }
+    ...(typeof requestFields.query_string === "string"
+      ? { query_string: scrubQueryString(requestFields.query_string) }
       : {}),
   };
 

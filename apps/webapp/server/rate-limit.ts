@@ -394,8 +394,11 @@ export function mobileIpRateLimit({
     },
   });
 
-  return async (c: Context, next: () => Promise<void>) =>
-    ipLimiter(c, () => credentialLimiter(c, next));
+  return async (c: Context, next: () => Promise<void>) => {
+    await ipLimiter(c, async () => {
+      await credentialLimiter(c, next);
+    });
+  };
 }
 
 function mobileCredentialBucketKey(c: Context): string {
@@ -463,8 +466,11 @@ export function authenticationRateLimit({
     },
   });
 
-  return async (c: Context, next: () => Promise<void>) =>
-    ipLimiter(c, () => emailLimiter(c, next));
+  return async (c: Context, next: () => Promise<void>) => {
+    await ipLimiter(c, async () => {
+      await emailLimiter(c, next);
+    });
+  };
 }
 
 const AUTHENTICATION_POST_PATHS = new Set([
