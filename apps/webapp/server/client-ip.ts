@@ -18,10 +18,7 @@ import type { Context } from "hono";
  */
 export function getClientIp(
   c: Context,
-  config: {
-    FLY_APP_NAME?: string;
-    TRUSTED_PROXY_HEADER?: string;
-  } = process.env
+  config: NodeJS.ProcessEnv = process.env
 ): string {
   if (config.FLY_APP_NAME) {
     return trustedIp(c.req.header("fly-client-ip"));
