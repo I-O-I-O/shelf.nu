@@ -223,6 +223,14 @@ async function renderExplorer(
   };
 }
 
+async function selectHierarchyLocation(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string
+) {
+  await user.click(screen.getByRole("button", { name }));
+  await screen.findByRole("button", { name, pressed: true });
+}
+
 describe("IOIO Location Explorer", () => {
   it("shows all Section containers grouped by Shelf without selecting a Shelf", async () => {
     const user = userEvent.setup();
@@ -243,7 +251,7 @@ describe("IOIO Location Explorer", () => {
       )
     ).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Section A" }));
+    await selectHierarchyLocation(user, "Section A");
     expect(screen.getAllByRole("button", { name: /^Shelf / })).toHaveLength(2);
     const containers = screen.getByRole("region", { name: "containers" });
     expect(
@@ -265,7 +273,7 @@ describe("IOIO Location Explorer", () => {
   it("asks for a Shelf before creating a Container when a Section has multiple Shelves", async () => {
     const user = userEvent.setup();
     const { createCalls } = await renderExplorer("/locations");
-    await user.click(screen.getByRole("button", { name: "Section A" }));
+    await selectHierarchyLocation(user, "Section A");
     await user.click(screen.getByRole("button", { name: "Add container" }));
 
     const chooser = screen.getByLabelText("Choose a shelf");
@@ -284,7 +292,7 @@ describe("IOIO Location Explorer", () => {
   it("uses the only Shelf in a Section as the Container creation parent", async () => {
     const user = userEvent.setup();
     const { createCalls } = await renderExplorer("/locations");
-    await user.click(screen.getByRole("button", { name: "Section B" }));
+    await selectHierarchyLocation(user, "Section B");
     await user.click(screen.getByRole("button", { name: "Add container" }));
     const input = screen.getByRole("textbox", { name: "Container name" });
     await user.type(input, "Container B1-02");
@@ -317,7 +325,7 @@ describe("IOIO Location Explorer", () => {
     const user = userEvent.setup();
     await renderExplorer("/locations");
 
-    await user.click(screen.getByRole("button", { name: "IOIO Lab - B478" }));
+    await selectHierarchyLocation(user, "IOIO Lab - B478");
     expect(screen.getAllByRole("button", { name: /^Section / })).toHaveLength(
       1
     );
@@ -326,13 +334,13 @@ describe("IOIO Location Explorer", () => {
       screen.queryByRole("button", { name: "Section A" })
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Section B" }));
+    await selectHierarchyLocation(user, "Section B");
     expect(screen.getByRole("button", { name: "Shelf B1" })).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "Shelf A1" })
     ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Shelf B1" }));
+    await selectHierarchyLocation(user, "Shelf B1");
     expect(screen.getByText("3 assets")).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "Container A1-13" })
@@ -410,10 +418,10 @@ describe("IOIO Location Explorer", () => {
     });
     await user.click(result);
 
+    await screen.findByRole("button", { name: "Section A", pressed: true });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Section A" })).toHaveAttribute(
-        "aria-pressed",
-        "true"
+      expect(screen.getByLabelText("Selected path")).toHaveTextContent(
+        "IOIO Lab - B477 / Section A / Shelf A1 / Container A1-13"
       )
     );
     expect(
@@ -654,7 +662,7 @@ describe("IOIO Location Explorer", () => {
       screen.getByRole("button", { name: "IOIO Lab - B477" })
     ).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Add shelf" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Section D" }));
+    await selectHierarchyLocation(user, "Section D");
     expect(screen.getByRole("button", { name: "Add shelf" })).toBeEnabled();
   });
 
